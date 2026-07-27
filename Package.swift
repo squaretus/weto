@@ -17,7 +17,11 @@ let package = Package(
             dependencies: ["WetoCore"],
             path: "Sources/WetoSystem"
         ),
-        .target(name: "WetoDesign", path: "Sources/WetoDesign"),
+        .target(
+            name: "WetoDesign",
+            path: "Sources/WetoDesign",
+            resources: [.process("Resources")]
+        ),
         .executableTarget(
             name: "WetoMenuBar",
             dependencies: [

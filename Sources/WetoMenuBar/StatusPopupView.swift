@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import WetoCore
 import WetoShared
 import WetoDesign
 
@@ -23,9 +24,53 @@ struct StatusPopupView: View {
                         .foregroundStyle(WetoTokens.red.resolve(scheme))
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                if coordinator.settings.guardConfig.hasTargets {
+                    WetoDivider()
+                    processes
+                }
             }
         }
         .environment(\.colorScheme, scheme)
+        .onAppear { coordinator.guardVM.refreshRunningTargets() }
+    }
+
+    @ViewBuilder
+    private var processes: some View {
+        let running = coordinator.guardVM.runningTargets
+
+        if running.isEmpty {
+            HStack(spacing: WetoTokens.space2) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(WetoTokens.green.resolve(scheme))
+
+                Text("Цели не запущены")
+                    .font(WetoTokens.caption)
+                    .foregroundStyle(WetoTokens.green.resolve(scheme))
+
+                Text("— VPN можно выключать")
+                    .font(WetoTokens.caption)
+                    .foregroundStyle(WetoTokens.faint.resolve(scheme))
+            }
+        } else {
+            VStack(spacing: WetoTokens.space2) {
+                ForEach(running) { target in
+                    WetoProcessPill(
+                        icon: TargetIconStore.shared.icon(for: iconKind(for: target), size: 32),
+                        title: target.displayName,
+                        childCount: target.childCount
+                    )
+                }
+            }
+        }
+    }
+
+    private func iconKind(for target: RunningTarget) -> TargetIconKind {
+        switch target.kind {
+        case .appBundle: return .appBundle(path: target.path)
+        case .binary, .script: return .commandLine(name: target.displayName)
+        }
     }
 
     private var tone: StatusTone {

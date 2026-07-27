@@ -31,6 +31,7 @@ public final class GuardVM {
 
     public private(set) var permissionFailure: String?
     public private(set) var availableVPNNames: [String] = []
+    public private(set) var runningTargets: [RunningTarget] = []
 
     @ObservationIgnored private let settings: SettingsStore
     @ObservationIgnored private let eventLog: EventLogStore
@@ -81,6 +82,7 @@ public final class GuardVM {
 
     public func start() {
         refreshVPNNames()
+        refreshRunningTargets()
         events.start { [weak self] trigger in
             Task { @MainActor [weak self] in self?.handle(trigger) }
         }
@@ -120,6 +122,20 @@ public final class GuardVM {
         availableVPNNames = snapshotReader.snapshot().vpnCandidateNames
     }
 
+    public func refreshRunningTargets() {
+        let rules = settings.targets.compactMap(resolver.resolve)
+        guard !rules.isEmpty else {
+            runningTargets = []
+            return
+        }
+
+        let needsArguments = rules.contains { $0.kind == .script }
+        runningTargets = ProcessMatcher.runningTargets(
+            in: locator.allProcesses(includeArguments: needsArguments),
+            rules: rules
+        )
+    }
+
     public func runningProcessCount(forTarget entry: String) -> Int {
         guard let rule = resolver.resolve(entry) else { return 0 }
         return ProcessMatcher.pids(
@@ -142,6 +158,8 @@ public final class GuardVM {
     }
 
     public func handle(_ trigger: GuardTrigger) {
+        refreshRunningTargets()
+
         if case .appLaunched(let bundleID) = trigger {
 
             guard settings.targets.contains(bundleID) else { return }
@@ -235,6 +253,7 @@ public final class GuardVM {
         guard !matched.isEmpty else { return }
 
         let results = killer.kill(pids: matched.map(\.pid))
+        refreshRunningTargets()
         let refused = results.filter { !$0.isTerminated }
         permissionFailure = refused.isEmpty
             ? nil

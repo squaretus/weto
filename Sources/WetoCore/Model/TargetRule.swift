@@ -23,6 +23,35 @@ public struct TargetRule: Equatable, Sendable {
     }
 }
 
+public struct RunningTarget: Equatable, Sendable, Identifiable {
+
+    public let entry: String
+    public let displayName: String
+    public let kind: TargetKind
+    public let path: String
+
+    public let pid: Int32
+    public let childCount: Int
+
+    public var id: Int32 { pid }
+
+    public init(
+        entry: String,
+        displayName: String,
+        kind: TargetKind,
+        path: String,
+        pid: Int32,
+        childCount: Int
+    ) {
+        self.entry = entry
+        self.displayName = displayName
+        self.kind = kind
+        self.path = path
+        self.pid = pid
+        self.childCount = childCount
+    }
+}
+
 public struct MatchedProcess: Equatable, Sendable {
     public let pid: Int32
 

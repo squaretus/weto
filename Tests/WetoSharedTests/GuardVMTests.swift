@@ -204,6 +204,33 @@ final class GuardVMTests: XCTestCase {
                        events: events, settings: settings, log: log)
     }
 
+    func test_running_targets_list_parents_of_the_guarded_app() {
+        let h = makeHarness(
+            snapshot: healthySnapshot(),
+            geo: geoOutcome(),
+            processes: [
+                .init(pid: 500, parentPID: 1, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+                .init(pid: 501, parentPID: 500, executablePath: "\(targetPath)/Contents/MacOS/Renderer"),
+                .init(pid: 900, parentPID: 1, executablePath: "/Applications/Other.app/Contents/MacOS/Other"),
+            ]
+        )
+
+        h.vm.refreshRunningTargets()
+
+        XCTAssertEqual(h.vm.runningTargets.map(\.pid), [500], "чужое приложение в список не попадает")
+        XCTAssertEqual(h.vm.runningTargets.first?.childCount, 1)
+        XCTAssertEqual(h.vm.runningTargets.first?.kind, .appBundle)
+    }
+
+    func test_running_targets_are_empty_without_configured_targets() {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.settings.targets = []
+
+        h.vm.refreshRunningTargets()
+
+        XCTAssertTrue(h.vm.runningTargets.isEmpty)
+    }
+
     func test_vpn_down_kills_targets_without_probing_network() async {
         let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome())
 

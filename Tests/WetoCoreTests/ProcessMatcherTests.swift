@@ -150,4 +150,70 @@ final class ProcessMatcherTests: XCTestCase {
         let pids = ProcessMatcher.pids(in: tree, rules: [binary("/usr/bin/pico", name: "nano")])
         XCTAssertEqual(pids, [100])
     }
+
+    func test_running_targets_report_one_row_per_parent_with_child_count() {
+
+        let tree: [ProcessSnapshot] = [
+            .init(pid: 100, parentPID: 1, executablePath: "/Applications/Target.app/Contents/MacOS/Target"),
+            .init(pid: 200, parentPID: 100, executablePath: "/usr/bin/curl"),
+            .init(pid: 300, parentPID: 200, executablePath: "/usr/bin/grep"),
+            .init(pid: 400, parentPID: 1, executablePath: "/usr/bin/pico"),
+        ]
+
+        let running = ProcessMatcher.runningTargets(
+            in: tree,
+            rules: [
+                app("/Applications/Target.app", name: "Target"),
+                binary("/usr/bin/pico", name: "nano"),
+            ]
+        )
+
+        XCTAssertEqual(running.map(\.displayName), ["Target", "nano"])
+        XCTAssertEqual(running.map(\.pid), [100, 400])
+        XCTAssertEqual(
+            running.map(\.childCount), [2, 0],
+            "у приложения два потомка, включая внука; у nano — ни одного"
+        )
+    }
+
+    func test_running_targets_hide_matching_children_of_a_matching_parent() {
+
+        let tree: [ProcessSnapshot] = [
+            .init(pid: 100, parentPID: 1, executablePath: "/Applications/Target.app/Contents/MacOS/Target"),
+            .init(pid: 200, parentPID: 100, executablePath: "/Applications/Target.app/Contents/MacOS/Helper"),
+        ]
+
+        let running = ProcessMatcher.runningTargets(
+            in: tree, rules: [app("/Applications/Target.app", name: "Target")]
+        )
+
+        XCTAssertEqual(
+            running.map(\.pid), [100],
+            "хелпер приложения — потомок, а не отдельная строка виджета"
+        )
+        XCTAssertEqual(running.first?.childCount, 1)
+    }
+
+    func test_running_targets_are_empty_without_matching_processes() {
+        XCTAssertTrue(
+            ProcessMatcher.runningTargets(
+                in: [.init(pid: 100, parentPID: 1, executablePath: "/usr/bin/vim")],
+                rules: [binary("/usr/bin/pico", name: "nano")]
+            ).isEmpty
+        )
+    }
+
+    func test_running_targets_survive_a_cycle_in_the_tree() {
+
+        let tree: [ProcessSnapshot] = [
+            .init(pid: 100, parentPID: 200, executablePath: "/usr/bin/pico"),
+            .init(pid: 200, parentPID: 100, executablePath: "/bin/sh"),
+        ]
+
+        let running = ProcessMatcher.runningTargets(
+            in: tree, rules: [binary("/usr/bin/pico", name: "nano")]
+        )
+        XCTAssertEqual(running.map(\.pid), [100])
+        XCTAssertEqual(running.first?.childCount, 2, "цикл обходится один раз и не зацикливается")
+    }
 }

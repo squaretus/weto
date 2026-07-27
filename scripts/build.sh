@@ -27,6 +27,10 @@ cp Resources/Weto-Info.plist "$APP/Info.plist"
 cp Resources/uninstall-weto.sh "$APP/Resources/"
 chmod +x "$APP/Resources/uninstall-weto.sh"
 
+for bundle in .build/release/*.bundle; do
+    [ -e "$bundle" ] && cp -R "$bundle" "$APP/Resources/"
+done
+
 codesign --force --sign - "$OUT/_app/Weto.app" 2>/dev/null || true
 
 ROOT="$OUT/_pkg-root"

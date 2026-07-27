@@ -10,17 +10,21 @@ APP="$OUT/Weto.app/Contents"
 
 if [ "$CONFIG" = "release" ]; then
     swift build -c release --product WetoMenuBar
-    BIN=".build/release/WetoMenuBar"
+    BUILD_DIR=".build/release"
 else
     swift build --product WetoMenuBar
-    BIN=".build/debug/WetoMenuBar"
+    BUILD_DIR=".build/debug"
 fi
 
 rm -rf "$OUT"
 mkdir -p "$APP/MacOS" "$APP/Resources"
 
-cp "$BIN" "$APP/MacOS/WetoMenuBar"
+cp "$BUILD_DIR/WetoMenuBar" "$APP/MacOS/WetoMenuBar"
 cp Resources/Weto-Info.plist "$APP/Info.plist"
+
+for bundle in "$BUILD_DIR"/*.bundle; do
+    [ -e "$bundle" ] && cp -R "$bundle" "$APP/Resources/"
+done
 
 codesign --force --sign - "$OUT/Weto.app" 2>/dev/null || true
 
