@@ -23,6 +23,8 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
     public let reasonText: String
     public let ip: String?
     public let country: String?
+    public let confirmedCountry: String?
+    public let confirmSource: String?
     public let killedPIDs: [Int32]
 
     public init(
@@ -33,6 +35,8 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         reasonText: String,
         ip: String?,
         country: String?,
+        confirmedCountry: String? = nil,
+        confirmSource: String? = nil,
         killedPIDs: [Int32]
     ) {
         self.id = id
@@ -42,6 +46,8 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         self.reasonText = reasonText
         self.ip = ip
         self.country = country
+        self.confirmedCountry = confirmedCountry
+        self.confirmSource = confirmSource
         self.killedPIDs = killedPIDs
     }
 
@@ -50,7 +56,14 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var summaryText: String {
-        "\(kind.displayText) — \(reasonText)"
+        "\(kind.displayText) — \(Self.lowercasingFirstWord(reasonText))"
+    }
+
+    private static func lowercasingFirstWord(_ text: String) -> String {
+        let scalars = Array(text)
+        guard scalars.count >= 2 else { return text.lowercased() }
+        if scalars[0].isUppercase && scalars[1].isUppercase { return text }
+        return scalars[0].lowercased() + String(scalars.dropFirst())
     }
 }
 

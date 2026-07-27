@@ -289,6 +289,8 @@ struct SettingsWindow: View {
             } else {
                 ForEach(coordinator.eventLog.events) { event in
                     JournalRow(event: event)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 3, leading: 0, bottom: 3, trailing: 0))
                 }
                 Button("Очистить журнал", role: .destructive) {
                     coordinator.eventLog.clear()
@@ -303,25 +305,3 @@ struct SettingsWindow: View {
     }
 }
 
-struct JournalRow: View {
-    let event: KillEvent
-
-    static func detail(for event: KillEvent) -> String {
-        var parts = [event.date.formatted(date: .numeric, time: .shortened)]
-        parts.append(event.ip ?? "адрес неизвестен")
-        if let country = event.country { parts.append(country) }
-        parts.append("процессов: \(event.killedPIDs.count)")
-        return parts.joined(separator: " · ")
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(event.targetsText)
-                .font(DesignTokens.fontPrimaryMedium)
-            Text(event.summaryText)
-            Text(verbatim: JournalRow.detail(for: event))
-                .font(DesignTokens.fontSecondary)
-                .foregroundStyle(.secondary)
-        }
-    }
-}

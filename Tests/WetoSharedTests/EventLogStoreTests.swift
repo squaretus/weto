@@ -88,6 +88,38 @@ final class EventLogStoreTests: XCTestCase {
         XCTAssertEqual(blocked.summaryText, "запуск запрещён — VPN не поднят")
     }
 
+    func test_acronym_at_start_of_reason_is_not_lowercased() {
+        // "VPN не поднят" не должно превращаться в "vPN не поднят":
+        // первое слово из заглавных — аббревиатура, её регистр трогать нельзя.
+        let event = KillEvent(
+            date: Date(), targetNames: ["nano"], kind: .terminated,
+            reasonText: "VPN не поднят", ip: nil, country: nil, killedPIDs: [1]
+        )
+        XCTAssertEqual(event.summaryText, "завершено — VPN не поднят")
+    }
+
+    func test_ordinary_reason_starts_lowercase_after_action() {
+        let event = KillEvent(
+            date: Date(), targetNames: ["nano"], kind: .launchBlocked,
+            reasonText: "Обнаружена страна KZ по данным ipinfo",
+            ip: nil, country: nil, killedPIDs: [1]
+        )
+        XCTAssertEqual(
+            event.summaryText,
+            "запуск запрещён — обнаружена страна KZ по данным ipinfo"
+        )
+    }
+
+    func test_confirmation_source_is_carried_into_the_record() {
+        let event = KillEvent(
+            date: Date(), targetNames: ["nano"], kind: .terminated,
+            reasonText: "причина", ip: "1.2.3.4", country: "KZ",
+            confirmedCountry: "KZ", confirmSource: "ipwhois", killedPIDs: [1]
+        )
+        XCTAssertEqual(event.confirmedCountry, "KZ")
+        XCTAssertEqual(event.confirmSource, "ipwhois")
+    }
+
     func test_event_without_names_still_renders() {
         let event = KillEvent(
             date: Date(), targetNames: [], kind: .terminated,

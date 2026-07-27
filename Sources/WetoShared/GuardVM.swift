@@ -257,6 +257,8 @@ public final class GuardVM {
             reasonText: reason.displayText,
             ip: lastReading?.ip,
             country: lastReading?.primaryCountry,
+            confirmedCountry: lastReading?.confirmedCountry,
+            confirmSource: lastReading?.confirmSource?.rawValue,
             killedPIDs: fresh.map(\.pid)
         ))
         notifier.notify(

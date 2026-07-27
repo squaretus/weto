@@ -77,14 +77,9 @@ struct StatusPopupView: View {
                 .font(DesignTokens.fontSecondary)
                 .foregroundStyle(DesignTokens.textTertiary.resolve(colorScheme))
         } else {
-            ForEach(coordinator.eventLog.preview) { event in
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(event.date, format: .dateTime.hour().minute().second())
-                        .font(DesignTokens.fontSecondary)
-                        .foregroundStyle(DesignTokens.textTertiary.resolve(colorScheme))
-                    Text(event.reasonText)
-                        .font(DesignTokens.fontSecondary)
-                        .lineLimit(1)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(coordinator.eventLog.preview) { event in
+                    JournalRow(event: event)
                 }
             }
         }
