@@ -14,8 +14,6 @@ public final class AppCoordinator {
 
     public init() {
 
-        LegacyMigration.run()
-
         let settings = SettingsStore()
         let eventLog = EventLogStore()
         self.settings = settings

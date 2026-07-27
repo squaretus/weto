@@ -54,13 +54,23 @@ final class SettingsStoreTests: XCTestCase {
         )
     }
 
-    func test_remaining_defaults_are_empty() {
+    func test_nothing_is_preconfigured_out_of_the_box() {
         let store = makeStore()
         XCTAssertNil(store.vpnServiceName)
         XCTAssertTrue(store.targets.isEmpty)
 
-        XCTAssertEqual(store.blockedCountryCodes, ["RU"])
+        XCTAssertTrue(store.blockedCountryCodes.isEmpty)
         XCTAssertEqual(store.pollIntervalSeconds, 5)
+    }
+
+    func test_no_preconfigured_data_of_any_kind() {
+        let store = makeStore()
+        XCTAssertTrue(store.targets.isEmpty)
+        XCTAssertTrue(store.blockedCountryCodes.isEmpty)
+        XCTAssertTrue(store.blockedIPRangeTexts.isEmpty)
+        XCTAssertTrue(store.ipinfoToken.isEmpty)
+        XCTAssertNil(store.vpnServiceName)
+        XCTAssertNil(store.tokenBox.value)
     }
 
     func test_explicitly_disabled_guard_survives_reload() {

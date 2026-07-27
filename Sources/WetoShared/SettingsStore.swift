@@ -33,8 +33,7 @@ public final class SettingsStore {
         self._isEnabled = defaults.object(forKey: Key.isEnabled) as? Bool ?? true
         self._vpnServiceName = defaults.string(forKey: Key.vpnServiceName)
         self._targets = Self.loadTargets(from: defaults)
-        self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes)
-            ?? Constants.defaultBlockedCountries.sorted()
+        self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
         self._blockedIPRangeTexts = defaults.stringArray(forKey: Key.blockedIPRangeTexts) ?? []
         let interval = defaults.double(forKey: Key.pollIntervalSeconds)
         self._pollIntervalSeconds = interval > 0 ? interval : Constants.defaultPollIntervalSeconds

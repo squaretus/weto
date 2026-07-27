@@ -166,6 +166,7 @@ final class GuardVMTests: XCTestCase {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = enabled
         settings.vpnServiceName = "Happ"
+        settings.blockedCountryCodes = ["RU"]
         settings.targets = [targetBundleID]
         settings.targets += executables
 

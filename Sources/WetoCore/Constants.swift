@@ -22,8 +22,6 @@ public enum Constants {
         "https://get.geojs.io/v1/ip/country/\(ip).json"
     }
 
-    public static let defaultBlockedCountries: Set<String> = ["RU"]
-
     public static let eventLogCapacity = 10
 
     public static let eventLogPreviewCount = 5
