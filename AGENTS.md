@@ -17,6 +17,7 @@ scripts/build.sh 0.1.0         # PKG-установщик → .build/release_bui
 ## Документация
 
 - Карта проекта: `.claude/rules/ARCHITECTURE.md`
+- Дизайн-система: `docs/design-system.md` — канон визуального языка, следовать без отступлений
 
 @.claude/rules/ARCHITECTURE.md
 
