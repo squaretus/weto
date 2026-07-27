@@ -49,9 +49,6 @@ struct SettingsWindow: View {
             }
         } header: {
             Text("VPN")
-        } footer: {
-            Text("Безопасно, когда туннель поднят и держит default route.")
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -141,9 +138,6 @@ struct SettingsWindow: View {
             }
         } header: {
             Text("Чёрный список")
-        } footer: {
-            Text("Совпадение по адресу проверяется раньше страны — причина в журнале будет точнее.")
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -202,14 +196,13 @@ struct SettingsWindow: View {
 
             updateRow
 
-            HStack(spacing: 8) {
-                Button("Выгрузить полностью…") { confirmUnload() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(DesignTokens.red)
-                Button("Удалить приложение…") { confirmUninstall() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(DesignTokens.red)
-            }
+            Button("Выгрузить полностью…") { confirmUnload() }
+                .buttonStyle(.borderedProminent)
+                .tint(DesignTokens.red)
+
+            Button("Удалить приложение…") { confirmUninstall() }
+                .buttonStyle(.borderedProminent)
+                .tint(DesignTokens.red)
         } header: {
             Text("Обслуживание")
         } footer: {
@@ -298,9 +291,6 @@ struct SettingsWindow: View {
             }
         } header: {
             Text("Журнал")
-        } footer: {
-            Text(verbatim: "Хранятся последние \(Constants.eventLogCapacity) записей.")
-                .foregroundStyle(.secondary)
         }
     }
 }
