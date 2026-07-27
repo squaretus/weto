@@ -44,7 +44,6 @@ struct WetoMenuBarApp: App {
         MenuBarExtra {
             StatusPopupView()
                 .environment(delegate.coordinator)
-                .frame(width: 340)
         } label: {
             MenuBarLabel()
                 .environment(delegate.coordinator)
@@ -55,6 +54,7 @@ struct WetoMenuBarApp: App {
             SettingsWindow()
                 .environment(delegate.coordinator)
         }
-        .defaultSize(width: 560, height: 620)
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
     }
 }

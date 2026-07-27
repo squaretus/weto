@@ -62,6 +62,11 @@ public enum LaunchAgentController {
     }
 
     @discardableResult
+    public static func bootout() -> Bool {
+        runLaunchctl(["bootout", "gui/\(getuid())/\(serviceName)"])
+    }
+
+    @discardableResult
     private static func runLaunchctl(_ arguments: [String]) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")

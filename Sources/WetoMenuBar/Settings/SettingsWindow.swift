@@ -4,195 +4,319 @@ import WetoCore
 import WetoShared
 import WetoDesign
 
+enum SettingsTab: String, Hashable, CaseIterable {
+    case settings
+    case journal
+
+    var title: String {
+        switch self {
+        case .settings: return "Настройки"
+        case .journal: return "Журнал"
+        }
+    }
+}
+
 struct SettingsWindow: View {
     static let identifier = "settings"
 
     @Environment(AppCoordinator.self) private var coordinator
 
+    private var scheme: ColorScheme {
+        coordinator.settings.appTheme.colorScheme
+    }
+
+    @State private var tab: SettingsTab = .settings
     @State private var newBlockEntry = ""
     @State private var launchAtLogin = LaunchAgentController.isInstalled
-    @State private var isEditingToken = false
-
-    private var maskedToken: String {
-        let token = coordinator.settings.ipinfoToken
-        guard !token.isEmpty else { return "не задан" }
-        guard token.count > 5 else { return String(repeating: "•", count: token.count) }
-        return String(repeating: "•", count: token.count - 5) + token.suffix(5)
-    }
+    @State private var tokenDraft = ""
 
     var body: some View {
-        TabView {
-            guardTab
-                .tabItem { Label("Охрана", systemImage: "shield") }
+        VStack(alignment: .leading, spacing: WetoTokens.space3) {
+            header
 
-            journalTab
-                .tabItem { Label("Журнал", systemImage: "list.bullet.rectangle") }
+            WetoSegmentedControl(
+                selection: $tab,
+                options: SettingsTab.allCases.map { ($0, $0.title) }
+            )
 
-            maintenanceTab
-                .tabItem { Label("Обслуживание", systemImage: "wrench.and.screwdriver") }
-        }
-        .frame(width: 580, height: 620)
-        .onAppear { coordinator.guardVM.refreshVPNNames() }
-    }
-
-    private var guardTab: some View {
-        Form {
-            statusSection
-            TargetsSection()
-            vpnSection
-            geoSection
-            blacklistSection
-        }
-        .formStyle(.grouped)
-    }
-
-    private var journalTab: some View {
-        Form { journalSection }
-            .formStyle(.grouped)
-    }
-
-    private var maintenanceTab: some View {
-        Form { maintenanceSection }
-            .formStyle(.grouped)
-    }
-
-    private var statusSection: some View {
-        Section {
-            Toggle(isOn: Binding(
-                get: { coordinator.settings.isEnabled },
-                set: { newValue in
-                    coordinator.settings.isEnabled = newValue
-                    coordinator.guardVM.handle(.tick)
-                }
-            )) {
-                Text("Охрана включена")
-                Text(StatusPresentation.headline(for: coordinator.guardVM.state))
-            }
-            .toggleStyle(.switch)
-
-            if let detail = StatusPresentation.detail(
-                for: coordinator.guardVM.state,
-                reading: coordinator.guardVM.lastReading
-            ) {
-                LabeledContent("Сейчас") {
-                    Text(detail)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-            }
-
-            if let failure = coordinator.guardVM.permissionFailure {
-                WetoBanner(tone: .error, systemImage: "lock.slash", text: failure)
-            }
-        } header: {
-            Text("Состояние")
-        }
-    }
-
-    private var vpnSection: some View {
-        Section {
-            Picker("Сервис", selection: Binding(
-                get: { coordinator.settings.vpnServiceName ?? "" },
-                set: { coordinator.settings.vpnServiceName = $0.isEmpty ? nil : $0 }
-            )) {
-                Text("Не выбран").tag("")
-                ForEach(coordinator.guardVM.availableVPNNames, id: \.self) { name in
-                    Text(name).tag(name)
-                }
-            }
-        } header: {
-            Text("VPN")
-        }
-    }
-
-    private var geoSection: some View {
-        Section {
-            LabeledContent("Токен ipinfo") {
-                if isEditingToken {
-                    HStack(spacing: 8) {
-                        SecureField("", text: Binding(
-                            get: { coordinator.settings.ipinfoToken },
-                            set: { coordinator.settings.ipinfoToken = $0 }
-                        ))
-                        .labelsHidden()
-                        .onSubmit { isEditingToken = false }
-                        Button("Готово") { isEditingToken = false }
-                    }
-                } else {
-                    HStack(spacing: 8) {
-                        Text(maskedToken)
-                            .monospaced()
-                            .foregroundStyle(
-                                coordinator.settings.ipinfoToken.isEmpty ? .secondary : .primary
-                            )
-                        Button("Изменить") { isEditingToken = true }
+            ScrollView {
+                VStack(spacing: WetoTokens.space3) {
+                    switch tab {
+                    case .settings:
+                        TargetsCard()
+                        networkCard
+                        blacklistCard
+                        appearanceCard
+                        maintenanceCard
+                    case .journal:
+                        journalCard
                     }
                 }
+                .padding(.bottom, WetoTokens.space4)
             }
-
-            Picker("Интервал опроса", selection: Binding(
-                get: { coordinator.settings.pollIntervalSeconds },
-                set: { coordinator.settings.pollIntervalSeconds = $0 }
-            )) {
-                ForEach(Constants.pollIntervalOptions, id: \.self) { value in
-                    Text(verbatim: "\(Int(value)) с").tag(value)
-                }
-            }
-            .pickerStyle(.segmented)
-        } header: {
-            Text("Гео")
+            .scrollIndicators(.never)
+        }
+        .padding(WetoTokens.space4)
+        .frame(width: WetoTokens.windowWidth, height: WetoTokens.windowHeight, alignment: .top)
+        .background(WetoTokens.shell.resolve(scheme))
+        .environment(\.colorScheme, scheme)
+        .preferredColorScheme(scheme)
+        .background(SettingsWindowConfigurator())
+        .onAppear {
+            coordinator.guardVM.refreshVPNNames()
+            tokenDraft = coordinator.settings.ipinfoToken
         }
     }
 
-    private var blacklistSection: some View {
-        Section {
-            if blacklistEntries.isEmpty {
-                Text("Список пуст")
-                    .foregroundStyle(.secondary)
-            }
+    private var header: some View {
+        HStack(spacing: WetoTokens.space3) {
+            Spacer(minLength: 0)
 
-            ForEach(blacklistEntries, id: \.self) { entry in
-                HStack(spacing: 12) {
-                    Text(entry)
+            Text(verbatim: "версия \(Constants.appVersion)")
+                .font(WetoTokens.caption)
+                .foregroundStyle(WetoTokens.faint.resolve(scheme))
+
+            Button {
+                coordinator.update.checkForUpdate()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 15, weight: .medium))
+            }
+            .buttonStyle(WetoTileButtonStyle())
+            .disabled(coordinator.update.state == .checking)
+            .accessibilityLabel("Проверить обновления")
+            .help(updateHelp)
+        }
+        .padding(.leading, 72)
+        .frame(height: 30)
+    }
+
+    private var updateHelp: String {
+        switch coordinator.update.state {
+        case .idle, .checking:
+            return "Проверить обновления"
+        case .upToDate(let version):
+            return "\(version) — последняя версия"
+        case .available(let info):
+            return "Доступна \(info.latestVersion) — нажмите, чтобы открыть релиз"
+        case .noReleases:
+            return "Релизов пока нет"
+        case .failed(let message):
+            return message
+        }
+    }
+
+    private var networkCard: some View {
+        WetoCard("Сеть и гео") {
+            VStack(spacing: 0) {
+                WetoRow {
+                    Text("VPN-сервис")
+                        .font(WetoTokens.label)
+                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
 
                     Spacer(minLength: 0)
 
-                    if isCountry(entry) {
-                        Text("страна")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else if IPRange(entry) == nil {
-                        Label("не разобран", systemImage: "exclamationmark.triangle")
-                            .font(.subheadline)
-                            .foregroundStyle(.orange)
-                    } else {
-                        Text("адрес")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { coordinator.settings.vpnServiceName ?? "" },
+                        set: { coordinator.settings.vpnServiceName = $0.isEmpty ? nil : $0 }
+                    )) {
+                        Text("Не выбран").tag("")
+                        ForEach(coordinator.guardVM.availableVPNNames, id: \.self) { name in
+                            Text(name).tag(name)
+                        }
                     }
-
-                    Button(role: .destructive) {
-                        remove(entry)
-                    } label: {
-                        Image(systemName: "trash")
-                    }
+                    .labelsHidden()
                     .buttonStyle(.borderless)
-                    .accessibilityLabel("Удалить \(entry) из чёрного списка")
-                    .help("Удалить из списка")
+                    .font(WetoTokens.value)
+                    .fixedSize()
                 }
-            }
 
-            LabeledContent("Новая запись") {
-                HStack(spacing: 8) {
-                    TextField("", text: $newBlockEntry, prompt: Text("Код страны (RU), IP или CIDR"))
+                WetoDivider()
+
+                WetoRow {
+                    Text("Токен ipinfo")
+                        .font(WetoTokens.label)
+                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
+                        .fixedSize()
+                        .padding(.trailing, WetoTokens.space5 - WetoTokens.space3)
+
+                    SecureField("", text: $tokenDraft, prompt: Text("Ключ ipinfo.io"))
+                        .textFieldStyle(WetoFieldStyle())
                         .labelsHidden()
-                        .onSubmit { addBlockEntry() }
+                        .onSubmit { coordinator.settings.ipinfoToken = tokenDraft }
+                        .onChange(of: tokenDraft) { _, value in
+                            coordinator.settings.ipinfoToken = value
+                        }
+                }
+
+                WetoDivider()
+
+                VStack(alignment: .leading, spacing: WetoTokens.space2) {
+                    Text("Интервал опроса")
+                        .font(WetoTokens.label)
+                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
+
+                    WetoSegmentedControl(
+                        selection: Binding(
+                            get: { coordinator.settings.pollIntervalSeconds },
+                            set: { coordinator.settings.pollIntervalSeconds = $0 }
+                        ),
+                        options: Constants.pollIntervalOptions.map { ($0, "\(Int($0)) с") }
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, WetoTokens.space2)
+            }
+        }
+    }
+
+    private var blacklistCard: some View {
+        WetoCard("Чёрный список") {
+            VStack(spacing: 0) {
+                if blacklistEntries.isEmpty {
+                    WetoRow {
+                        Text("Список пуст")
+                            .font(WetoTokens.caption)
+                            .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                    }
+                }
+
+                ForEach(Array(blacklistEntries.enumerated()), id: \.element) { index, entry in
+                    VStack(spacing: 0) {
+                        if index > 0 { WetoDivider() }
+
+                        WetoRow {
+                            Text(entry)
+                                .font(WetoTokens.label)
+                                .foregroundStyle(WetoTokens.ink.resolve(scheme))
+
+                            if !isCountry(entry) && IPRange(entry) == nil {
+                                Text("не разобран")
+                                    .font(WetoTokens.caption)
+                                    .foregroundStyle(WetoTokens.amber.resolve(scheme))
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Button {
+                                remove(entry)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 15))
+                            }
+                            .buttonStyle(WetoIconButtonStyle())
+                            .accessibilityLabel("Удалить \(entry) из чёрного списка")
+                            .help("Удалить из списка")
+                        }
+                    }
+                }
+
+                if !blacklistEntries.isEmpty { WetoDivider() }
+
+                WetoRow {
+                    TextField(
+                        "",
+                        text: $newBlockEntry,
+                        prompt: Text("Код страны (RU), IP или CIDR")
+                    )
+                    .textFieldStyle(WetoFieldStyle())
+                    .labelsHidden()
+                    .onSubmit { addBlockEntry() }
+
                     Button("Добавить") { addBlockEntry() }
+                        .buttonStyle(WetoPillButtonStyle(.primary))
                         .disabled(newBlockEntry.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-        } header: {
-            Text("Чёрный список")
+        }
+    }
+
+    private var appearanceCard: some View {
+        WetoCard("Внешний вид") {
+            VStack(alignment: .leading, spacing: WetoTokens.space2) {
+                Text("Тема")
+                    .font(WetoTokens.label)
+                    .foregroundStyle(WetoTokens.ink.resolve(scheme))
+
+                WetoSegmentedControl(
+                    selection: Binding(
+                        get: { coordinator.settings.appTheme },
+                        set: { coordinator.settings.appTheme = $0 }
+                    ),
+                    options: AppTheme.allCases.map { ($0, $0.title) }
+                )
+            }
+            .padding(.vertical, WetoTokens.space2)
+        }
+    }
+
+    private var maintenanceCard: some View {
+        WetoCard("Обслуживание") {
+            VStack(spacing: 0) {
+                WetoRow {
+                    Text("Запускать при входе в систему")
+                        .font(WetoTokens.label)
+                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
+
+                    Spacer(minLength: 0)
+
+                    Toggle("", isOn: $launchAtLogin)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .tint(WetoTokens.violet.resolve(scheme))
+                        .onChange(of: launchAtLogin) { _, isOn in
+                            if isOn {
+                                LaunchAgentController.enable()
+                            } else {
+                                LaunchAgentController.disable()
+                            }
+                            launchAtLogin = LaunchAgentController.isInstalled
+                        }
+                }
+
+                if LaunchAgentController.isInstalled && !LaunchAgentController.pointsAtCurrentBundle {
+                    WetoRow {
+                        Text("Автозапуск указывает на другую копию приложения. Переключите тумблер, чтобы обновить путь.")
+                            .font(WetoTokens.caption)
+                            .foregroundStyle(WetoTokens.amber.resolve(scheme))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                HStack(spacing: WetoTokens.space2) {
+                    Button("Закрыть приложение") { confirmClose() }
+                        .buttonStyle(WetoPillButtonStyle(.danger, expands: true))
+
+                    Button("Удалить приложение…") { confirmUninstall() }
+                        .buttonStyle(WetoPillButtonStyle(.danger, expands: true))
+                }
+                .padding(.top, WetoTokens.space3)
+            }
+        }
+    }
+
+    private var journalCard: some View {
+        WetoCard("Журнал") {
+            VStack(spacing: 0) {
+                if coordinator.eventLog.events.isEmpty {
+                    WetoRow {
+                        Text("Срабатываний не было")
+                            .font(WetoTokens.caption)
+                            .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                    }
+                } else {
+                    ForEach(Array(coordinator.eventLog.events.enumerated()), id: \.element.id) { index, event in
+                        VStack(spacing: 0) {
+                            if index > 0 { WetoDivider() }
+                            JournalRow(event: event)
+                        }
+                    }
+
+                    Button("Очистить журнал") { coordinator.eventLog.clear() }
+                        .buttonStyle(WetoPillButtonStyle(.danger, expands: true))
+                        .padding(.top, WetoTokens.space3)
+                }
+            }
         }
     }
 
@@ -227,83 +351,20 @@ struct SettingsWindow: View {
             coordinator.settings.blockedIPRangeTexts.filter { $0 != entry }
     }
 
-    private var maintenanceSection: some View {
-        Section {
-            Toggle("Запускать при входе в систему", isOn: $launchAtLogin)
-                .toggleStyle(.switch)
-                .onChange(of: launchAtLogin) { _, isOn in
-                    if isOn {
-                        LaunchAgentController.enable()
-                    } else {
-                        LaunchAgentController.disable()
-                    }
-                    launchAtLogin = LaunchAgentController.isInstalled
-                }
-
-            if LaunchAgentController.isInstalled && !LaunchAgentController.pointsAtCurrentBundle {
-                WetoBanner(
-                    tone: .warn,
-                    systemImage: "exclamationmark.triangle",
-                    text: "Автозапуск указывает на другую копию приложения. Переключите тумблер, чтобы обновить путь."
-                )
-            }
-
-            updateRow
-
-            Button("Выгрузить полностью…", role: .destructive) { confirmUnload() }
-
-            Button("Удалить приложение…", role: .destructive) { confirmUninstall() }
-        } header: {
-            Text("Обслуживание")
-        } footer: {
-            Text("Выгрузка снимает автозапуск и завершает процесс, настройки остаются. Удаление стирает всё: приложение, настройки, журнал и токен.")
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    @ViewBuilder
-    private var updateRow: some View {
-        LabeledContent("Версия") {
-            HStack(spacing: 8) {
-                switch coordinator.update.state {
-                case .idle:
-                    Text(verbatim: Constants.appVersion)
-                case .checking:
-                    ProgressView().controlSize(.small)
-                case .upToDate(let version):
-                    Text(verbatim: "\(version) — последняя")
-                case .available(let info):
-                    Text(verbatim: "\(info.currentVersion) → \(info.latestVersion)")
-                        .foregroundStyle(.orange)
-                    Button("Открыть релиз") { coordinator.update.openReleasePage() }
-                case .noReleases:
-                    Text(verbatim: "\(Constants.appVersion) — релизов пока нет")
-                        .foregroundStyle(.secondary)
-                case .failed(let message):
-                    Text(message)
-                        .foregroundStyle(.red)
-                        .lineLimit(1)
-                }
-                Button("Проверить") { coordinator.update.checkForUpdate() }
-                    .disabled(coordinator.update.state == .checking)
-            }
-        }
-    }
-
-    private func confirmUnload() {
+    private func confirmClose() {
         let alert = NSAlert()
-        alert.messageText = "Выгрузить Weto полностью?"
+        alert.messageText = "Закрыть Weto?"
         alert.informativeText = """
-            Автозапуск будет снят, приложение завершится и перестанет охранять цели. \
-            Настройки и журнал сохранятся.
+            Приложение завершится и перестанет охранять цели до следующего входа в систему. \
+            Настройки, журнал и автозапуск сохранятся.
             """
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Выгрузить")
+        alert.addButton(withTitle: "Закрыть")
         alert.addButton(withTitle: "Отмена")
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         coordinator.guardVM.stop()
-        Maintenance.unload()
+        Maintenance.closeApp()
         NSApplication.shared.terminate(nil)
     }
 
@@ -323,24 +384,25 @@ struct SettingsWindow: View {
         Maintenance.uninstall()
         NSApplication.shared.terminate(nil)
     }
+}
 
-    private var journalSection: some View {
-        Section {
-            if coordinator.eventLog.events.isEmpty {
-                Text("Срабатываний не было")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(coordinator.eventLog.events) { event in
-                    JournalRow(event: event)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 3, leading: 0, bottom: 3, trailing: 0))
-                }
-                Button("Очистить журнал", role: .destructive) {
-                    coordinator.eventLog.clear()
-                }
-            }
-        } header: {
-            Text("Журнал")
-        }
+private struct SettingsWindowConfigurator: NSViewRepresentable {
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { configure(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { configure(nsView.window) }
+    }
+
+    private func configure(_ window: NSWindow?) {
+        guard let window else { return }
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.standardWindowButton(.miniaturizeButton)?.isEnabled = false
+        window.standardWindowButton(.zoomButton)?.isEnabled = false
     }
 }

@@ -6,7 +6,7 @@ public enum Constants {
 
     public static let defaultPollIntervalSeconds: TimeInterval = 5
 
-    public static let pollIntervalOptions: [TimeInterval] = [5, 10, 15, 30]
+    public static let pollIntervalOptions: [TimeInterval] = [5, 10, 15]
 
     public static let networkEventDebounceSeconds: TimeInterval = 0.3
 

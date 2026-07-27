@@ -91,7 +91,20 @@ extension UnsafeReason {
     }
 
     public var isDegradedRatherThanBlocked: Bool {
-        if case .confirmationUnavailable = self { return true }
-        return false
+        switch self {
+        case .confirmationUnavailable, .geoUnavailable: return true
+        default: return false
+        }
+    }
+
+    public var statusTitle: String {
+        switch self {
+        case .geoUnavailable:
+            return "Ipinfo недоступен"
+        case .confirmationUnavailable:
+            return "Ipwhois недоступен"
+        default:
+            return "Цели завершены"
+        }
     }
 }

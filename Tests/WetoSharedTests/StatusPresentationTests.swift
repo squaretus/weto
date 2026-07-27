@@ -12,36 +12,69 @@ final class StatusPresentationTests: XCTestCase {
     )
 
     func test_disabled_state_says_guard_is_off() {
-        XCTAssertEqual(StatusPresentation.headline(for: .disabled), "Охрана выключена")
+        XCTAssertEqual(StatusPresentation.title(for: .disabled), "Охрана выключена")
     }
 
-    func test_safe_state_says_everything_is_fine() {
-        XCTAssertEqual(StatusPresentation.headline(for: .safe(reading)), "Всё в порядке")
+    func test_safe_state_says_on_watch() {
+        XCTAssertEqual(StatusPresentation.title(for: .safe(reading)), "На страже")
     }
 
-    func test_unsafe_headline_uses_reason_text() {
-        XCTAssertEqual(StatusPresentation.headline(for: .unsafe(.vpnDown)), "VPN не поднят")
+    func test_degraded_titles_name_the_failing_service() {
         XCTAssertEqual(
-            StatusPresentation.headline(for: .unsafe(.confirmationUnavailable)),
-            "Подтверждающие сервисы недоступны"
+            StatusPresentation.title(for: .unsafe(.geoUnavailable("таймаут"))),
+            "Ipinfo недоступен"
+        )
+        XCTAssertEqual(
+            StatusPresentation.title(for: .unsafe(.confirmationUnavailable)),
+            "Ipwhois недоступен"
         )
     }
 
-    func test_detail_shows_ip_and_both_countries() {
+    func test_every_blocking_reason_reports_targets_terminated() {
+        XCTAssertEqual(StatusPresentation.title(for: .unsafe(.vpnDown)), "Цели завершены")
         XCTAssertEqual(
-            StatusPresentation.detail(for: .safe(reading), reading: reading),
-            "203.0.113.28 · ipinfo: KZ · ipwhois: KZ"
+            StatusPresentation.title(for: .unsafe(.blockedCountry(code: "RU", source: "ipinfo"))),
+            "Цели завершены"
         )
     }
 
-    func test_detail_marks_missing_confirmation() {
+    func test_lines_are_ip_and_both_sources() {
+        XCTAssertEqual(
+            StatusPresentation.lines(for: .safe(reading), reading: reading),
+            [
+                StatusLine(key: "IP", value: "203.0.113.28"),
+                StatusLine(key: "ipinfo", value: "KZ"),
+                StatusLine(key: "ipwhois", value: "KZ"),
+            ]
+        )
+    }
+
+    func test_missing_confirmation_shows_a_dash() {
         let degraded = GeoReading(
             ip: "203.0.113.28", primaryCountry: "KZ",
             confirmedCountry: nil, confirmSource: nil
         )
         XCTAssertEqual(
-            StatusPresentation.detail(for: .unsafe(.confirmationUnavailable), reading: degraded),
-            "203.0.113.28 · ipinfo: KZ · подтверждение: нет"
+            StatusPresentation.lines(for: .unsafe(.confirmationUnavailable), reading: degraded),
+            [
+                StatusLine(key: "IP", value: "203.0.113.28"),
+                StatusLine(key: "ipinfo", value: "KZ"),
+                StatusLine(key: "ipwhois", value: "—"),
+            ]
+        )
+    }
+
+    func test_unreachable_ipinfo_hides_stale_reading() {
+        let lines = StatusPresentation.lines(
+            for: .unsafe(.geoUnavailable("таймаут")), reading: reading
+        )
+        XCTAssertEqual(lines.map(\.value), ["неизвестен", "—", "—"])
+    }
+
+    func test_detail_joins_lines_for_notifications() {
+        XCTAssertEqual(
+            StatusPresentation.detail(for: .safe(reading), reading: reading),
+            "IP: 203.0.113.28 · ipinfo: KZ · ipwhois: KZ"
         )
     }
 
@@ -49,10 +82,10 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertNil(StatusPresentation.detail(for: .unsafe(.vpnDown), reading: nil))
     }
 
-    func test_banner_tone_matches_status_color() {
-        XCTAssertEqual(StatusPresentation.bannerTone(for: .disabled), .info)
-        XCTAssertEqual(StatusPresentation.bannerTone(for: .safe(reading)), .success)
-        XCTAssertEqual(StatusPresentation.bannerTone(for: .unsafe(.confirmationUnavailable)), .warn)
-        XCTAssertEqual(StatusPresentation.bannerTone(for: .unsafe(.vpnDown)), .error)
+    func test_status_color_marks_geo_outage_as_degraded() {
+        XCTAssertEqual(GuardState.safe(reading).statusColor, .green)
+        XCTAssertEqual(GuardState.unsafe(.geoUnavailable("таймаут")).statusColor, .yellow)
+        XCTAssertEqual(GuardState.unsafe(.confirmationUnavailable).statusColor, .yellow)
+        XCTAssertEqual(GuardState.unsafe(.vpnDown).statusColor, .red)
     }
 }

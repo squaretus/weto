@@ -3,12 +3,25 @@ import Observation
 import WetoCore
 import WetoSystem
 
+public enum AppTheme: String, CaseIterable, Sendable {
+    case dark
+    case light
+
+    public var title: String {
+        switch self {
+        case .dark: return "Тёмная"
+        case .light: return "Светлая"
+        }
+    }
+}
+
 @Observable
 @MainActor
 public final class SettingsStore {
 
     private enum Key {
         static let isEnabled = "isEnabled"
+        static let appTheme = "appTheme"
         static let vpnServiceName = "vpnServiceName"
         static let targets = "targets"
 
@@ -31,6 +44,8 @@ public final class SettingsStore {
         self.secrets = secrets
 
         self._isEnabled = defaults.object(forKey: Key.isEnabled) as? Bool ?? true
+        self._appTheme = defaults.string(forKey: Key.appTheme)
+            .flatMap(AppTheme.init(rawValue:)) ?? .dark
         self._vpnServiceName = defaults.string(forKey: Key.vpnServiceName)
         self._targets = Self.loadTargets(from: defaults)
         self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
@@ -52,6 +67,12 @@ public final class SettingsStore {
     public var isEnabled: Bool {
         get { _isEnabled }
         set { _isEnabled = newValue; defaults.set(newValue, forKey: Key.isEnabled) }
+    }
+
+    private var _appTheme: AppTheme
+    public var appTheme: AppTheme {
+        get { _appTheme }
+        set { _appTheme = newValue; defaults.set(newValue.rawValue, forKey: Key.appTheme) }
     }
 
     private var _vpnServiceName: String?

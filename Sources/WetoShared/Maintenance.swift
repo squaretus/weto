@@ -5,8 +5,8 @@ import WetoSystem
 
 public enum Maintenance {
 
-    public static func unload() {
-        LaunchAgentController.disable()
+    public static func closeApp() {
+        LaunchAgentController.bootout()
     }
 
     public static func uninstall() {

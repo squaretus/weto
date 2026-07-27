@@ -282,14 +282,18 @@ final class GuardVMTests: XCTestCase {
         XCTAssertFalse(h.killer.killedBatches.isEmpty, "жёлтый — тоже убийство")
     }
 
-    func test_geo_unavailable_kills_and_shows_red_without_flag() async {
+    func test_geo_unavailable_kills_and_shows_yellow_without_flag() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: .unavailable("timeout"))
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("timeout")))
-        XCTAssertEqual(h.vm.state.statusColor, .red)
+        XCTAssertEqual(
+            h.vm.state.statusColor, .yellow,
+            "отказ ipinfo — деградация сервиса, а не блокировка: цели всё равно завершены"
+        )
+        XCTAssertFalse(h.killer.killedBatches.isEmpty, "жёлтый — тоже убийство")
         XCTAssertNil(h.vm.currentCountryCode)
     }
 

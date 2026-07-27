@@ -44,6 +44,19 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(makeStore().isEnabled)
     }
 
+    func test_theme_is_dark_by_default_and_survives_restart() {
+        XCTAssertEqual(makeStore().appTheme, .dark)
+
+        let first = makeStore()
+        first.appTheme = .light
+        XCTAssertEqual(makeStore().appTheme, .light)
+    }
+
+    func test_poll_interval_options_start_at_five_seconds() {
+        XCTAssertEqual(Constants.pollIntervalOptions, [5, 10, 15])
+        XCTAssertTrue(Constants.pollIntervalOptions.contains(makeStore().pollIntervalSeconds))
+    }
+
     func test_enabled_guard_without_targets_is_harmless() {
 
         let store = makeStore()

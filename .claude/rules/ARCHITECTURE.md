@@ -40,9 +40,11 @@ Sources/
 │      FlagImageStore
 ├── WetoShared/   [library] VM-слой
 │   └── AppCoordinator, GuardVM, SettingsStore, EventLogStore, UpdateVM,
-│      StatusPresentation, LaunchAgentController, Maintenance, LegacyMigration, KillNotifying
-├── WetoDesign/   [library] DesignTokens, WetoBanner, WetoPageContainer, MenuBarImageRenderer
-└── WetoMenuBar/  [executable] WetoMenuBarApp, MenuBarLabel, StatusPopupView, Settings/
+│      StatusPresentation, LaunchAgentController, Maintenance, KillNotifying
+├── WetoDesign/   [library] WetoTokens (+ WetoColor, StatusTone), WetoCard/Row/Panel,
+│      WetoSegmentedControl, стили кнопок и поля, StatusShield, MenuBarImageRenderer
+└── WetoMenuBar/  [executable] WetoMenuBarApp, MenuBarLabel, StatusPopupView, JournalRow,
+       Settings/ (SettingsWindow, TargetsCard)
 Tests/            WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTests
 ```
 
@@ -52,10 +54,13 @@ Tests/            WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTes
   гео-сервисов и GitHub Releases. Не импортирует системные фреймворки — инвариант проекта.
 - **WetoSystem** — адаптеры к macOS. Каждый за протоколом, чтобы подменяться в тестах
   только на границе.
-- **WetoShared** — `GuardVM` (цикл охраны), хранилища настроек и журнала, обслуживание
-  и миграция с прежнего имени `killswitch`.
-- **WetoDesign** — токены и компоненты; `MenuBarImageRenderer` рисует лейбл менюбара.
-- **WetoMenuBar** — UI и точка входа.
+- **WetoShared** — `GuardVM` (цикл охраны), хранилища настроек и журнала, обслуживание.
+  `Maintenance.closeApp` выгружает агент из launchd, но оставляет plist: приложение
+  вернётся при следующем входе в систему. `uninstall` стирает всё.
+- **WetoDesign** — токены и компоненты дизайн-системы (`docs/design-system.md`);
+  `MenuBarImageRenderer` рисует лейбл менюбара. Компоненты не знают о состоянии приложения.
+- **WetoMenuBar** — UI и точка входа. Попап показывает только статус и данные гео,
+  всё управление — в окне с двумя вкладками.
 
 ## Ключевые контракты
 - **Порядок проверок политики** (важен и для приоритета причины, и для экономии запросов):
