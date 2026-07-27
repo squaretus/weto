@@ -31,9 +31,11 @@ public struct RunningTarget: Equatable, Sendable, Identifiable {
     public let path: String
 
     public let pid: Int32
-    public let childCount: Int
+    public let processCount: Int
 
-    public var id: Int32 { pid }
+    public var id: String { entry }
+
+    public var extraProcessCount: Int { max(0, processCount - 1) }
 
     public init(
         entry: String,
@@ -41,14 +43,14 @@ public struct RunningTarget: Equatable, Sendable, Identifiable {
         kind: TargetKind,
         path: String,
         pid: Int32,
-        childCount: Int
+        processCount: Int
     ) {
         self.entry = entry
         self.displayName = displayName
         self.kind = kind
         self.path = path
         self.pid = pid
-        self.childCount = childCount
+        self.processCount = processCount
     }
 }
 

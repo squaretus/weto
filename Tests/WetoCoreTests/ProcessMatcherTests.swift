@@ -151,7 +151,7 @@ final class ProcessMatcherTests: XCTestCase {
         XCTAssertEqual(pids, [100])
     }
 
-    func test_running_targets_report_one_row_per_parent_with_child_count() {
+    func test_running_targets_report_one_row_per_target_with_process_count() {
 
         let tree: [ProcessSnapshot] = [
             .init(pid: 100, parentPID: 1, executablePath: "/Applications/Target.app/Contents/MacOS/Target"),
@@ -171,12 +171,33 @@ final class ProcessMatcherTests: XCTestCase {
         XCTAssertEqual(running.map(\.displayName), ["Target", "nano"])
         XCTAssertEqual(running.map(\.pid), [100, 400])
         XCTAssertEqual(
-            running.map(\.childCount), [2, 0],
-            "у приложения два потомка, включая внука; у nano — ни одного"
+            running.map(\.processCount), [3, 1],
+            "у приложения три процесса вместе с потомками; у nano — один"
         )
+        XCTAssertEqual(running.map(\.extraProcessCount), [2, 0])
     }
 
-    func test_running_targets_hide_matching_children_of_a_matching_parent() {
+    func test_target_with_several_root_processes_collapses_into_one_row() {
+
+        let tree: [ProcessSnapshot] = [
+            .init(pid: 100, parentPID: 1, executablePath: "/Applications/Target.app/Contents/MacOS/Target"),
+            .init(pid: 200, parentPID: 1, executablePath: "/Applications/Target.app/Contents/MacOS/Helper (GPU)"),
+            .init(pid: 300, parentPID: 1, executablePath: "/Applications/Target.app/Contents/MacOS/Helper (Renderer)"),
+        ]
+
+        let running = ProcessMatcher.runningTargets(
+            in: tree, rules: [app("/Applications/Target.app", name: "Target")]
+        )
+
+        XCTAssertEqual(
+            running.count, 1,
+            "хелперы, запущенные launchd, — та же цель, а не три строки виджета"
+        )
+        XCTAssertEqual(running.first?.processCount, 3)
+        XCTAssertEqual(running.first?.pid, 100, "представителем становится младший pid")
+    }
+
+    func test_running_targets_count_matching_children_once() {
 
         let tree: [ProcessSnapshot] = [
             .init(pid: 100, parentPID: 1, executablePath: "/Applications/Target.app/Contents/MacOS/Target"),
@@ -187,11 +208,8 @@ final class ProcessMatcherTests: XCTestCase {
             in: tree, rules: [app("/Applications/Target.app", name: "Target")]
         )
 
-        XCTAssertEqual(
-            running.map(\.pid), [100],
-            "хелпер приложения — потомок, а не отдельная строка виджета"
-        )
-        XCTAssertEqual(running.first?.childCount, 1)
+        XCTAssertEqual(running.count, 1)
+        XCTAssertEqual(running.first?.processCount, 2)
     }
 
     func test_running_targets_are_empty_without_matching_processes() {
@@ -214,6 +232,6 @@ final class ProcessMatcherTests: XCTestCase {
             in: tree, rules: [binary("/usr/bin/pico", name: "nano")]
         )
         XCTAssertEqual(running.map(\.pid), [100])
-        XCTAssertEqual(running.first?.childCount, 2, "цикл обходится один раз и не зацикливается")
+        XCTAssertEqual(running.first?.processCount, 2, "цикл обходится один раз и не зацикливается")
     }
 }

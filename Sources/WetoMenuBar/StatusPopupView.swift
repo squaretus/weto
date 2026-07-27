@@ -59,7 +59,8 @@ struct StatusPopupView: View {
                     WetoProcessPill(
                         icon: TargetIconStore.shared.icon(for: iconKind(for: target), size: 32),
                         title: target.displayName,
-                        childCount: target.childCount
+                        isCommandLine: target.kind != .appBundle,
+                        childCount: target.extraProcessCount
                     )
                 }
             }

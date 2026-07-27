@@ -218,7 +218,7 @@ final class GuardVMTests: XCTestCase {
         h.vm.refreshRunningTargets()
 
         XCTAssertEqual(h.vm.runningTargets.map(\.pid), [500], "чужое приложение в список не попадает")
-        XCTAssertEqual(h.vm.runningTargets.first?.childCount, 1)
+        XCTAssertEqual(h.vm.runningTargets.first?.processCount, 2)
         XCTAssertEqual(h.vm.runningTargets.first?.kind, .appBundle)
     }
 

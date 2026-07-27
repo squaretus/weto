@@ -5,13 +5,15 @@ public struct WetoProcessPill: View {
 
     private let icon: NSImage?
     private let title: String
+    private let isCommandLine: Bool
     private let childCount: Int
 
     @Environment(\.colorScheme) private var scheme
 
-    public init(icon: NSImage?, title: String, childCount: Int) {
+    public init(icon: NSImage?, title: String, isCommandLine: Bool, childCount: Int) {
         self.icon = icon
         self.title = title
+        self.isCommandLine = isCommandLine
         self.childCount = childCount
     }
 
@@ -24,6 +26,12 @@ public struct WetoProcessPill: View {
                 .foregroundStyle(WetoTokens.ink.resolve(scheme))
                 .lineLimit(1)
                 .truncationMode(.middle)
+
+            if isCommandLine {
+                Text(verbatim: "terminal")
+                    .font(WetoTokens.data)
+                    .foregroundStyle(WetoTokens.faint.resolve(scheme))
+            }
 
             Spacer(minLength: WetoTokens.space2)
 

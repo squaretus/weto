@@ -35,75 +35,59 @@ public enum ProcessMatcher {
     ) -> [RunningTarget] {
         guard !rules.isEmpty else { return [] }
 
+        var pidsByRule: [Int: [Int32]] = [:]
+        var seen = Set<Int32>()
+        var roots: [(pid: Int32, ruleIndex: Int)] = []
+
+        for process in processes {
+            guard let index = rules.firstIndex(where: { matches(process, rule: $0) }) else { continue }
+            guard seen.insert(process.pid).inserted else { continue }
+            pidsByRule[index, default: []].append(process.pid)
+            roots.append((process.pid, index))
+        }
+
+        for descendant in descendants(of: roots, in: processes, seen: &seen) {
+            pidsByRule[descendant.ruleIndex, default: []].append(descendant.pid)
+        }
+
+        return rules.indices.compactMap { index in
+            guard let pids = pidsByRule[index], let first = pids.min() else { return nil }
+            let rule = rules[index]
+            return RunningTarget(
+                entry: rule.entry,
+                displayName: rule.displayName,
+                kind: rule.kind,
+                path: rule.path,
+                pid: first,
+                processCount: pids.count
+            )
+        }
+    }
+
+    private static func descendants(
+        of roots: [(pid: Int32, ruleIndex: Int)],
+        in processes: [ProcessSnapshot],
+        seen: inout Set<Int32>
+    ) -> [(pid: Int32, ruleIndex: Int)] {
         var childrenByParent: [Int32: [Int32]] = [:]
-        var parentByPID: [Int32: Int32] = [:]
-        for process in processes {
-            parentByPID[process.pid] = process.parentPID
-            if process.parentPID > 0 {
-                childrenByParent[process.parentPID, default: []].append(process.pid)
-            }
+        for process in processes where process.parentPID > 0 {
+            childrenByParent[process.parentPID, default: []].append(process.pid)
         }
+        guard !childrenByParent.isEmpty else { return [] }
 
-        var roots: [(process: ProcessSnapshot, rule: TargetRule)] = []
-        var rootPIDs = Set<Int32>()
-
-        for process in processes {
-            guard let rule = rules.first(where: { matches(process, rule: $0) }) else { continue }
-            guard rootPIDs.insert(process.pid).inserted else { continue }
-            roots.append((process, rule))
-        }
-
-        // Процесс, чей предок уже цель, — это потомок, а не отдельная строка виджета.
-        let nested = Set(
-            roots
-                .map(\.process)
-                .filter { hasAncestor(in: rootPIDs, of: $0, parentByPID: parentByPID) }
-                .map(\.pid)
-        )
-
-        return roots
-            .filter { !nested.contains($0.process.pid) }
-            .map { root in
-                RunningTarget(
-                    entry: root.rule.entry,
-                    displayName: root.rule.displayName,
-                    kind: root.rule.kind,
-                    path: root.rule.path,
-                    pid: root.process.pid,
-                    childCount: descendantCount(of: root.process.pid, childrenByParent: childrenByParent)
-                )
-            }
-    }
-
-    private static func hasAncestor(
-        in pids: Set<Int32>,
-        of process: ProcessSnapshot,
-        parentByPID: [Int32: Int32]
-    ) -> Bool {
-        var current = process.parentPID
+        var result: [(pid: Int32, ruleIndex: Int)] = []
+        var queue = roots
         var steps = 0
-        while current > 0, current != process.pid, steps < parentByPID.count {
-            if pids.contains(current) { return true }
-            current = parentByPID[current] ?? 0
+
+        while let parent = queue.popLast(), steps < processes.count * 2 {
             steps += 1
+            for child in childrenByParent[parent.pid] ?? [] where seen.insert(child).inserted {
+                let matched = (pid: child, ruleIndex: parent.ruleIndex)
+                result.append(matched)
+                queue.append(matched)
+            }
         }
-        return false
-    }
-
-    private static func descendantCount(
-        of pid: Int32,
-        childrenByParent: [Int32: [Int32]]
-    ) -> Int {
-        var count = 0
-        var queue = childrenByParent[pid] ?? []
-        var visited = Set<Int32>()
-
-        while let next = queue.popLast() {
-            guard visited.insert(next).inserted else { continue }
-            count += 1
-            queue.append(contentsOf: childrenByParent[next] ?? [])
-        }
-        return count
+        return result
     }
 
     private static func matches(_ process: ProcessSnapshot, rule: TargetRule) -> Bool {
