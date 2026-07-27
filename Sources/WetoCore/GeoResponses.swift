@@ -2,17 +2,11 @@ import Foundation
 
 public struct IPInfoLiteResponse: Decodable, Equatable, Sendable {
     public let ip: String
-    public let asn: String?
-    public let asName: String?
     public let countryCode: String
-    public let country: String?
 
     enum CodingKeys: String, CodingKey {
         case ip
-        case asn
-        case asName = "as_name"
         case countryCode = "country_code"
-        case country
     }
 }
 
@@ -28,7 +22,6 @@ public struct IPWhoIsResponse: Decodable, Equatable, Sendable {
 
 public struct GeoJSCountryResponse: Decodable, Equatable, Sendable {
     public let country: String
-    public let ip: String
 }
 
 public enum GeoResponses {
@@ -56,7 +49,6 @@ public enum GeoResponses {
     ) -> GeoReading {
         GeoReading(
             ip: ipinfo.ip,
-            asn: ipinfo.asn,
             primaryCountry: ipinfo.countryCode,
             confirmedCountry: confirmedCountry,
             confirmSource: source

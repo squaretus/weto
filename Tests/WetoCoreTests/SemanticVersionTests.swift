@@ -31,13 +31,9 @@ final class SemanticVersionTests: XCTestCase {
 
 final class ReleaseParserTests: XCTestCase {
 
-    private func releaseJSON(tag: String, asset: String? = "Weto-1.1.0.pkg") -> Data {
-        let assets = asset.map {
-            #"[{"name":"\#($0)","browser_download_url":"https://example.com/\#($0)"}]"#
-        } ?? "[]"
-        return Data("""
-        {"tag_name":"\(tag)","body":"Исправлены ошибки",
-         "html_url":"https://github.com/o/r/releases/tag/\(tag)","assets":\(assets)}
+    private func releaseJSON(tag: String) -> Data {
+        Data("""
+        {"tag_name":"\(tag)","html_url":"https://github.com/o/r/releases/tag/\(tag)"}
         """.utf8)
     }
 
@@ -45,7 +41,6 @@ final class ReleaseParserTests: XCTestCase {
         let info = try ReleaseParser.parse(releaseJSON(tag: "v1.1.0"), currentVersion: "1.0.0").get()
         XCTAssertTrue(info.isNewer)
         XCTAssertEqual(info.latestVersion, "1.1.0")
-        XCTAssertEqual(info.downloadURL, "https://example.com/Weto-1.1.0.pkg")
         XCTAssertEqual(info.releaseURL, "https://github.com/o/r/releases/tag/v1.1.0")
     }
 
@@ -59,16 +54,6 @@ final class ReleaseParserTests: XCTestCase {
         XCTAssertFalse(same.isNewer)
         let older = try ReleaseParser.parse(releaseJSON(tag: "v0.9.0"), currentVersion: "1.0.0").get()
         XCTAssertFalse(older.isNewer)
-    }
-
-    func test_release_without_installer_still_parses() throws {
-
-        let info = try ReleaseParser.parse(
-            releaseJSON(tag: "v1.1.0", asset: nil), currentVersion: "1.0.0"
-        ).get()
-        XCTAssertTrue(info.isNewer)
-        XCTAssertTrue(info.downloadURL.isEmpty)
-        XCTAssertFalse(info.releaseURL.isEmpty)
     }
 
     func test_malformed_tag_fails() {

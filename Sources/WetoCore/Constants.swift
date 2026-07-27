@@ -38,7 +38,4 @@ public enum Constants {
 
     public static let updateCheckInterval: TimeInterval = 21_600
 
-    public static let updateCheckInitialDelay: TimeInterval = 10
-
-    public static let updatesDirectory = "/var/db/weto/updates"
 }

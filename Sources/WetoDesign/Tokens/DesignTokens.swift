@@ -58,7 +58,6 @@ public enum DesignTokens {
         light: Color.black.opacity(0.45)
     )
 
-    public static let fontPrimary: Font = .system(size: 13, weight: .regular)
     public static let fontPrimaryMedium: Font = .system(size: 13, weight: .medium)
     public static let fontSecondary: Font = .system(size: 11, weight: .regular)
 }

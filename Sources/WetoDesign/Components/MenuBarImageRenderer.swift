@@ -7,6 +7,12 @@ public enum MenuBarImageRenderer {
     private static var cache: [String: NSImage] = [:]
     private static var order: [String] = []
 
+    private static let canvas: CGFloat = 22
+    private static let flagDiameter: CGFloat = 16
+    private static let ringWidth: CGFloat = 1
+    private static let dotDiameter: CGFloat = 7
+    private static let dotCutout: CGFloat = 2
+
     public static func image(flag: String, flagImage: NSImage?, color: NSColor) -> NSImage {
         let key = "\(flagImage == nil ? flag : "img:\(flag)")|\(color.description)"
 
@@ -30,63 +36,34 @@ public enum MenuBarImageRenderer {
         return image
     }
 
-    public static func image(flag: String, color: NSColor) -> NSImage {
-        let key = "\(flag)|\(color.description)"
-
-        lock.lock()
-        if let hit = cache[key] {
-            lock.unlock()
-            return hit
-        }
-        lock.unlock()
-
-        let image = render(flag: flag, color: color)
-
-        lock.lock()
-        cache[key] = image
-        order.append(key)
-        if order.count > cacheLimit {
-            cache.removeValue(forKey: order.removeFirst())
-        }
-        lock.unlock()
-
-        return image
-    }
-
-    private static func render(flag: String, color: NSColor) -> NSImage {
-        render(flag: flag, flagImage: nil, color: color)
-    }
-
     private static func render(flag: String, flagImage: NSImage?, color: NSColor) -> NSImage {
+        let center = NSPoint(x: canvas / 2, y: canvas / 2)
+        let radius = flagDiameter / 2
+        let flagRect = NSRect(
+            x: center.x - radius,
+            y: center.y - radius,
+            width: flagDiameter,
+            height: flagDiameter
+        )
 
-        let height: CGFloat = 22
-        let diameter: CGFloat = 16
-        let dotDiameter: CGFloat = 6
-        let gap: CGFloat = 3
+        let dotAngle = -CGFloat.pi / 4
+        let dotCenter = NSPoint(
+            x: center.x + radius * cos(dotAngle),
+            y: center.y + radius * sin(dotAngle)
+        )
+        let dotRect = NSRect(
+            x: dotCenter.x - dotDiameter / 2,
+            y: dotCenter.y - dotDiameter / 2,
+            width: dotDiameter,
+            height: dotDiameter
+        )
 
-        let font = NSFont.systemFont(ofSize: 16)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let image = NSImage(size: NSSize(width: canvas, height: canvas), flipped: false) { _ in
+            guard let context = NSGraphicsContext.current else { return true }
+            context.imageInterpolation = .high
+            context.shouldAntialias = true
 
-        let flagRect: NSRect
-        if let flagImage, flagImage.size.height > 0 {
-            flagRect = NSRect(x: 0, y: (height - diameter) / 2, width: diameter, height: diameter)
-        } else {
-            let size = (flag as NSString).size(withAttributes: attributes)
-            flagRect = NSRect(
-                x: 0,
-                y: (height - size.height) / 2,
-                width: size.width,
-                height: size.height
-            )
-        }
-
-        let width = flagRect.width + gap + dotDiameter + 2
-
-        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
-            NSGraphicsContext.current?.imageInterpolation = .high
-            NSGraphicsContext.current?.shouldAntialias = true
-
-            if let flagImage {
+            if let flagImage, flagImage.size.height > 0 {
                 flagImage.draw(
                     in: flagRect,
                     from: .zero,
@@ -95,21 +72,26 @@ public enum MenuBarImageRenderer {
                     respectFlipped: true,
                     hints: [.interpolation: NSImageInterpolation.high.rawValue]
                 )
-
-                NSColor.labelColor.withAlphaComponent(0.2).setStroke()
-                let border = NSBezierPath(ovalIn: flagRect.insetBy(dx: 0.25, dy: 0.25))
-                border.lineWidth = 0.5
-                border.stroke()
             } else {
-                (flag as NSString).draw(at: flagRect.origin, withAttributes: attributes)
+                let font = NSFont.systemFont(ofSize: 15)
+                let attributes: [NSAttributedString.Key: Any] = [.font: font]
+                let size = (flag as NSString).size(withAttributes: attributes)
+                (flag as NSString).draw(
+                    at: NSPoint(x: center.x - size.width / 2, y: center.y - size.height / 2),
+                    withAttributes: attributes
+                )
             }
 
-            let dotRect = NSRect(
-                x: flagRect.width + gap,
-                y: (height - dotDiameter) / 2,
-                width: dotDiameter,
-                height: dotDiameter
-            )
+            NSColor.labelColor.withAlphaComponent(0.55).setStroke()
+            let ring = NSBezierPath(ovalIn: flagRect.insetBy(dx: ringWidth / 2, dy: ringWidth / 2))
+            ring.lineWidth = ringWidth
+            ring.stroke()
+
+            context.compositingOperation = .destinationOut
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: dotRect.insetBy(dx: -dotCutout, dy: -dotCutout)).fill()
+
+            context.compositingOperation = .sourceOver
             color.setFill()
             NSBezierPath(ovalIn: dotRect).fill()
 

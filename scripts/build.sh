@@ -26,7 +26,6 @@ cp .build/release/WetoMenuBar "$APP/MacOS/"
 cp Resources/Weto-Info.plist "$APP/Info.plist"
 cp Resources/uninstall-weto.sh "$APP/Resources/"
 chmod +x "$APP/Resources/uninstall-weto.sh"
-cp Resources/AppIcon.icns "$APP/Resources/" 2>/dev/null || true
 
 codesign --force --sign - "$OUT/_app/Weto.app" 2>/dev/null || true
 

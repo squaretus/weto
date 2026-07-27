@@ -59,27 +59,3 @@ public struct WetoBanner<Trailing: View>: View {
         }
     }
 }
-
-public enum WetoPageMetrics {
-    public static let horizontalPadding: CGFloat = 24
-    public static let rowInsets = EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0)
-}
-
-public struct WetoPageContainer<Content: View>: View {
-    private let content: Content
-    @Environment(\.colorScheme) private var colorScheme
-
-    public init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    public var body: some View {
-        content
-            .scrollContentBackground(.hidden)
-            .listStyle(.plain)
-
-            .contentMargins(.horizontal, WetoPageMetrics.horizontalPadding, for: .scrollContent)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(WetoPalette.bg.resolve(colorScheme))
-    }
-}

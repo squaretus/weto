@@ -20,8 +20,7 @@ final class GuardPolicyLocalTests: XCTestCase {
             isEnabled: true,
             vpn: vpn,
             geo: .resolved(GeoReading(
-                ip: "203.0.113.28", asn: "AS49791",
-                primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .ipwhois
+                ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .ipwhois
             )),
             config: configuration
         )

@@ -6,31 +6,31 @@ import SwiftUI
 final class MenuBarImageRendererTests: XCTestCase {
 
     func test_image_has_menu_bar_height() {
-        let image = MenuBarImageRenderer.image(flag: "🇰🇿", color: .systemGreen)
+        let image = MenuBarImageRenderer.image(flag: "🇰🇿", flagImage: nil, color: .systemGreen)
         XCTAssertEqual(image.size.height, 22)
         XCTAssertGreaterThan(image.size.width, 0)
     }
 
     func test_image_is_not_a_template() {
 
-        XCTAssertFalse(MenuBarImageRenderer.image(flag: "🇰🇿", color: .systemGreen).isTemplate)
+        XCTAssertFalse(MenuBarImageRenderer.image(flag: "🇰🇿", flagImage: nil, color: .systemGreen).isTemplate)
     }
 
     func test_identical_input_returns_cached_instance() {
-        let first = MenuBarImageRenderer.image(flag: "🇰🇿", color: .systemGreen)
-        let second = MenuBarImageRenderer.image(flag: "🇰🇿", color: .systemGreen)
+        let first = MenuBarImageRenderer.image(flag: "🇰🇿", flagImage: nil, color: .systemGreen)
+        let second = MenuBarImageRenderer.image(flag: "🇰🇿", flagImage: nil, color: .systemGreen)
         XCTAssertTrue(first === second)
     }
 
     func test_different_color_produces_different_instance() {
-        let green = MenuBarImageRenderer.image(flag: "🇰🇿", color: .systemGreen)
-        let red = MenuBarImageRenderer.image(flag: "🇰🇿", color: .systemRed)
+        let green = MenuBarImageRenderer.image(flag: "🇰🇿", flagImage: nil, color: .systemGreen)
+        let red = MenuBarImageRenderer.image(flag: "🇰🇿", flagImage: nil, color: .systemRed)
         XCTAssertFalse(green === red)
     }
 
     func test_white_flag_is_rendered_without_crashing() {
         XCTAssertGreaterThan(
-            MenuBarImageRenderer.image(flag: "🏳️", color: .systemGray).size.width,
+            MenuBarImageRenderer.image(flag: "🏳️", flagImage: nil, color: .systemGray).size.width,
             0
         )
     }

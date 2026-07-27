@@ -5,50 +5,29 @@ import WetoSystem
 
 public enum Maintenance {
 
-    public struct Report: Equatable, Sendable {
-        public var removed: [String] = []
-        public var failed: [String] = []
-    }
-
     public static func unload() {
         LaunchAgentController.disable()
     }
 
-    @discardableResult
-    public static func uninstall() -> Report {
-        var report = Report()
-
+    public static func uninstall() {
         LaunchAgentController.disable()
-        report.removed.append("автозапуск")
 
         let defaults = UserDefaults(suiteName: Constants.userDefaultsSuite)
         defaults?.removePersistentDomain(forName: Constants.userDefaultsSuite)
         UserDefaults.standard.removePersistentDomain(forName: Constants.userDefaultsSuite)
-        report.removed.append("настройки и журнал")
 
-        if KeychainStore(service: Constants.keychainService).write(nil, account: "token") {
-            report.removed.append("токен ipinfo")
-        } else {
-            report.failed.append("токен ipinfo")
-        }
+        KeychainStore(service: Constants.keychainService).write(nil, account: "token")
 
         let caches = FileManager.default
             .urls(for: .cachesDirectory, in: .userDomainMask).first?
             .appendingPathComponent("com.weto.app", isDirectory: true)
         if let caches, FileManager.default.fileExists(atPath: caches.path) {
-            if (try? FileManager.default.removeItem(at: caches)) != nil {
-                report.removed.append("кэш флагов")
-            } else {
-                report.failed.append("кэш флагов")
-            }
+            try? FileManager.default.removeItem(at: caches)
         }
 
         if let bundlePath = bundlePathToRemove() {
             scheduleBundleRemoval(at: bundlePath)
-            report.removed.append("приложение (\(bundlePath))")
         }
-
-        return report
     }
 
     private static func bundlePathToRemove() -> String? {

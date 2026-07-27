@@ -43,7 +43,6 @@ public final class GuardVM {
 
     public private(set) var state: GuardState = .disabled
     public private(set) var lastReading: GeoReading?
-    public private(set) var lastEvaluation: Date?
 
     public private(set) var permissionFailure: String?
     public private(set) var availableVPNNames: [String] = []
@@ -223,8 +222,6 @@ public final class GuardVM {
     }
 
     private func apply(_ decision: GuardDecision) {
-        lastEvaluation = Date()
-
         switch decision {
         case .safe:
             watchdogTask?.cancel(); watchdogTask = nil

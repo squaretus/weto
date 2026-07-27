@@ -104,7 +104,7 @@ struct SettingsWindow: View {
             ForEach(blacklistEntries, id: \.self) { entry in
                 HStack {
                     if isCountry(entry) {
-                        Text(verbatim: "\(CountryFlag.emoji(for: entry))  \(entry)")
+                        Text(entry)
                         Text("страна")
                             .font(DesignTokens.fontSecondary)
                             .foregroundStyle(.secondary)
@@ -184,7 +184,11 @@ struct SettingsWindow: View {
                 .toggleStyle(.switch)
                 .tint(DesignTokens.accent.resolve(colorScheme))
                 .onChange(of: launchAtLogin) { _, isOn in
-                    isOn ? LaunchAgentController.enable() : LaunchAgentController.disable()
+                    if isOn {
+                        LaunchAgentController.enable()
+                    } else {
+                        LaunchAgentController.disable()
+                    }
                     launchAtLogin = LaunchAgentController.isInstalled
                 }
 
@@ -302,12 +306,20 @@ struct SettingsWindow: View {
 struct JournalRow: View {
     let event: KillEvent
 
+    static func detail(for event: KillEvent) -> String {
+        var parts = [event.date.formatted(date: .numeric, time: .shortened)]
+        parts.append(event.ip ?? "адрес неизвестен")
+        if let country = event.country { parts.append(country) }
+        parts.append("процессов: \(event.killedPIDs.count)")
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(event.targetsText)
                 .font(DesignTokens.fontPrimaryMedium)
             Text(event.summaryText)
-            Text(verbatim: "\(event.date.formatted(date: .numeric, time: .shortened)) · \(event.ip ?? "адрес неизвестен") · процессов: \(event.killedPIDs.count)")
+            Text(verbatim: JournalRow.detail(for: event))
                 .font(DesignTokens.fontSecondary)
                 .foregroundStyle(.secondary)
         }

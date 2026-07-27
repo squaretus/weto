@@ -140,7 +140,6 @@ final class GuardVMTests: XCTestCase {
     private func geoOutcome(primary: String = "KZ", confirmed: String? = "KZ") -> GeoOutcome {
         .resolved(GeoReading(
             ip: "203.0.113.28",
-            asn: "AS49791",
             primaryCountry: primary,
             confirmedCountry: confirmed,
             confirmSource: confirmed == nil ? nil : .ipwhois

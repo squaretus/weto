@@ -6,7 +6,6 @@ final class StatusPresentationTests: XCTestCase {
 
     private let reading = GeoReading(
         ip: "203.0.113.28",
-        asn: "AS49791",
         primaryCountry: "KZ",
         confirmedCountry: "KZ",
         confirmSource: .ipwhois
@@ -28,7 +27,7 @@ final class StatusPresentationTests: XCTestCase {
         )
     }
 
-    func test_detail_shows_ip_asn_and_both_countries() {
+    func test_detail_shows_ip_and_both_countries() {
         XCTAssertEqual(
             StatusPresentation.detail(for: .safe(reading), reading: reading),
             "203.0.113.28 · ipinfo: KZ · ipwhois: KZ"
@@ -37,7 +36,7 @@ final class StatusPresentationTests: XCTestCase {
 
     func test_detail_marks_missing_confirmation() {
         let degraded = GeoReading(
-            ip: "203.0.113.28", asn: "AS49791", primaryCountry: "KZ",
+            ip: "203.0.113.28", primaryCountry: "KZ",
             confirmedCountry: nil, confirmSource: nil
         )
         XCTAssertEqual(

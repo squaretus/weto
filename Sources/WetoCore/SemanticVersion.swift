@@ -32,24 +32,18 @@ public struct SemanticVersion: Equatable, Comparable, Sendable {
 public struct UpdateInfo: Codable, Equatable, Sendable {
     public let currentVersion: String
     public let latestVersion: String
-    public let downloadURL: String
     public let releaseURL: String
-    public let releaseNotes: String?
     public let isNewer: Bool
 
     public init(
         currentVersion: String,
         latestVersion: String,
-        downloadURL: String,
         releaseURL: String,
-        releaseNotes: String?,
         isNewer: Bool
     ) {
         self.currentVersion = currentVersion
         self.latestVersion = latestVersion
-        self.downloadURL = downloadURL
         self.releaseURL = releaseURL
-        self.releaseNotes = releaseNotes
         self.isNewer = isNewer
     }
 }
@@ -68,14 +62,7 @@ public enum ReleaseParser {
 
     private struct Release: Decodable {
         let tag_name: String
-        let body: String?
         let html_url: String?
-        let assets: [Asset]
-    }
-
-    private struct Asset: Decodable {
-        let name: String
-        let browser_download_url: String
     }
 
     public static var latestReleaseURL: String {
@@ -101,16 +88,12 @@ public enum ReleaseParser {
             return .failure(ParseError.invalidVersion(currentVersion))
         }
 
-        let installer = release.assets.first { $0.name.hasSuffix(".pkg") }
-            ?? release.assets.first { $0.name.hasSuffix(".zip") }
 
         return .success(UpdateInfo(
             currentVersion: currentVersion,
             latestVersion: versionString,
-            downloadURL: installer?.browser_download_url ?? "",
             releaseURL: release.html_url
                 ?? "https://github.com/\(Constants.githubOwner)/\(Constants.githubRepo)/releases/latest",
-            releaseNotes: release.body,
             isNewer: current < latest
         ))
     }

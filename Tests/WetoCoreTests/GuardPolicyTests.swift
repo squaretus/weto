@@ -25,7 +25,6 @@ final class GuardPolicyTests: XCTestCase {
     ) -> GeoOutcome {
         .resolved(GeoReading(
             ip: ip,
-            asn: "AS49791",
             primaryCountry: primary,
             confirmedCountry: confirmed,
             confirmSource: source

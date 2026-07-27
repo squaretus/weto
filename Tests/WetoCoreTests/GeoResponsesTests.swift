@@ -25,7 +25,6 @@ final class GeoResponsesTests: XCTestCase {
         let response = try GeoResponses.decodeIPInfo(ipinfoJSON)
         XCTAssertEqual(response.ip, "203.0.113.28")
         XCTAssertEqual(response.countryCode, "KZ")
-        XCTAssertEqual(response.asn, "AS49791")
     }
 
     func test_ipwhois_response_yields_country_code() throws {
@@ -50,7 +49,6 @@ final class GeoResponsesTests: XCTestCase {
             source: .ipwhois
         )
         XCTAssertEqual(reading.ip, "203.0.113.28")
-        XCTAssertEqual(reading.asn, "AS49791")
         XCTAssertEqual(reading.primaryCountry, "KZ")
         XCTAssertEqual(reading.confirmedCountry, "KZ")
         XCTAssertEqual(reading.confirmSource, .ipwhois)
@@ -76,6 +74,5 @@ final class GeoResponsesTests: XCTestCase {
         let response = try GeoResponses.decodeIPInfo(minimal)
         XCTAssertEqual(response.ip, "1.2.3.4")
         XCTAssertEqual(response.countryCode, "DE")
-        XCTAssertNil(response.asn)
     }
 }
