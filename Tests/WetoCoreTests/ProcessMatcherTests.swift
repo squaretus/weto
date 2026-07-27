@@ -202,6 +202,44 @@ final class ProcessMatcherTests: XCTestCase {
         XCTAssertEqual(running.map(\.extraProcessCount), [2, 0])
     }
 
+    func test_two_terminal_sessions_stay_two_rows() {
+
+        let tree: [ProcessSnapshot] = [
+            .init(pid: 100, parentPID: 1, executablePath: "/usr/bin/pico"),
+            .init(pid: 110, parentPID: 100, executablePath: "/bin/sh"),
+            .init(pid: 200, parentPID: 1, executablePath: "/usr/bin/pico"),
+        ]
+
+        let running = ProcessMatcher.runningTargets(
+            in: tree, rules: [binary("/usr/bin/pico", name: "nano")]
+        )
+
+        XCTAssertEqual(
+            running.map(\.pid), [100, 200],
+            "два сеанса в разных вкладках терминала — две строки"
+        )
+        XCTAssertEqual(running.map(\.processCount), [2, 1])
+    }
+
+    func test_nested_session_of_the_same_tool_joins_its_parent() {
+
+        let tree: [ProcessSnapshot] = [
+            .init(pid: 100, parentPID: 1, executablePath: "/usr/bin/pico"),
+            .init(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico"),
+            .init(pid: 300, parentPID: 200, executablePath: "/usr/bin/curl"),
+        ]
+
+        let running = ProcessMatcher.runningTargets(
+            in: tree, rules: [binary("/usr/bin/pico", name: "nano")]
+        )
+
+        XCTAssertEqual(
+            running.map(\.pid), [100],
+            "дочерний процесс того же инструмента — часть сеанса родителя"
+        )
+        XCTAssertEqual(running.first?.processCount, 3)
+    }
+
     func test_target_with_several_root_processes_collapses_into_one_row() {
 
         let tree: [ProcessSnapshot] = [

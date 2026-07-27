@@ -35,56 +35,113 @@ public enum ProcessMatcher {
     ) -> [RunningTarget] {
         guard !rules.isEmpty else { return [] }
 
-        var pidsByRule: [Int: [Int32]] = [:]
         var seen = Set<Int32>()
         var roots: [(pid: Int32, ruleIndex: Int)] = []
+        var pidsByRoot: [Int32: [Int32]] = [:]
+        var parentByPID: [Int32: Int32] = [:]
+
+        for process in processes { parentByPID[process.pid] = process.parentPID }
 
         for process in processes {
             guard let index = rules.firstIndex(where: { matches(process, rule: $0) }) else { continue }
             guard seen.insert(process.pid).inserted else { continue }
-            pidsByRule[index, default: []].append(process.pid)
             roots.append((process.pid, index))
+            pidsByRoot[process.pid] = [process.pid]
         }
+
+        // Совпавший процесс под совпавшим родителем — часть того же сеанса, а не новый.
+        let rootPIDs = Set(roots.map(\.pid))
+        var ownerByPID: [Int32: Int32] = [:]
+        for root in roots {
+            let owner = topmostMatch(of: root.pid, among: rootPIDs, parentByPID: parentByPID)
+            ownerByPID[root.pid] = owner
+            if owner != root.pid {
+                pidsByRoot[owner, default: []].append(root.pid)
+                pidsByRoot[root.pid] = nil
+            }
+        }
+
+        let owners = roots.filter { ownerByPID[$0.pid] == $0.pid }
 
         for descendant in descendants(of: roots, in: processes, seen: &seen) {
-            pidsByRule[descendant.ruleIndex, default: []].append(descendant.pid)
+            let owner = ownerByPID[descendant.parent] ?? descendant.parent
+            pidsByRoot[owner, default: []].append(descendant.pid)
         }
 
-        return rules.indices.compactMap { index in
-            guard let pids = pidsByRule[index], let first = pids.min() else { return nil }
-            let rule = rules[index]
-            return RunningTarget(
-                entry: rule.entry,
-                displayName: rule.displayName,
-                kind: rule.kind,
-                path: rule.path,
-                pid: first,
-                processCount: pids.count
-            )
+        return owners.flatMap { owner -> [RunningTarget] in
+            let rule = rules[owner.ruleIndex]
+            let pids = pidsByRoot[owner.pid] ?? [owner.pid]
+            return [
+                RunningTarget(
+                    entry: rule.entry,
+                    displayName: rule.displayName,
+                    kind: rule.kind,
+                    path: rule.path,
+                    pid: owner.pid,
+                    processCount: pids.count
+                )
+            ]
         }
+        .reduce(into: [RunningTarget]()) { result, target in
+            // Приложение живёт одной строкой: его хелперы стартуют от launchd
+            // и выглядят как самостоятельные корни.
+            guard target.kind == .appBundle else {
+                result.append(target)
+                return
+            }
+            if let existing = result.firstIndex(where: { $0.entry == target.entry }) {
+                let merged = result[existing]
+                result[existing] = RunningTarget(
+                    entry: merged.entry,
+                    displayName: merged.displayName,
+                    kind: merged.kind,
+                    path: merged.path,
+                    pid: min(merged.pid, target.pid),
+                    processCount: merged.processCount + target.processCount
+                )
+            } else {
+                result.append(target)
+            }
+        }
+    }
+
+    private static func topmostMatch(
+        of pid: Int32,
+        among matched: Set<Int32>,
+        parentByPID: [Int32: Int32]
+    ) -> Int32 {
+        var owner = pid
+        var current = parentByPID[pid] ?? 0
+        var steps = 0
+
+        while current > 0, current != pid, steps < parentByPID.count {
+            if matched.contains(current) { owner = current }
+            current = parentByPID[current] ?? 0
+            steps += 1
+        }
+        return owner
     }
 
     private static func descendants(
         of roots: [(pid: Int32, ruleIndex: Int)],
         in processes: [ProcessSnapshot],
         seen: inout Set<Int32>
-    ) -> [(pid: Int32, ruleIndex: Int)] {
+    ) -> [(pid: Int32, ruleIndex: Int, parent: Int32)] {
         var childrenByParent: [Int32: [Int32]] = [:]
         for process in processes where process.parentPID > 0 {
             childrenByParent[process.parentPID, default: []].append(process.pid)
         }
         guard !childrenByParent.isEmpty else { return [] }
 
-        var result: [(pid: Int32, ruleIndex: Int)] = []
-        var queue = roots
+        var result: [(pid: Int32, ruleIndex: Int, parent: Int32)] = []
+        var queue = roots.map { (pid: $0.pid, ruleIndex: $0.ruleIndex, owner: $0.pid) }
         var steps = 0
 
         while let parent = queue.popLast(), steps < processes.count * 2 {
             steps += 1
             for child in childrenByParent[parent.pid] ?? [] where seen.insert(child).inserted {
-                let matched = (pid: child, ruleIndex: parent.ruleIndex)
-                result.append(matched)
-                queue.append(matched)
+                result.append((pid: child, ruleIndex: parent.ruleIndex, parent: parent.owner))
+                queue.append((pid: child, ruleIndex: parent.ruleIndex, owner: parent.owner))
             }
         }
         return result

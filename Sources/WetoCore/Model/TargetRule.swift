@@ -49,7 +49,7 @@ public struct RunningTarget: Equatable, Sendable, Identifiable {
     public let pid: Int32
     public let processCount: Int
 
-    public var id: String { entry }
+    public var id: Int32 { pid }
 
     public var extraProcessCount: Int { max(0, processCount - 1) }
 
