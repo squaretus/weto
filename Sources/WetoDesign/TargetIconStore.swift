@@ -12,9 +12,16 @@ public final class TargetIconStore {
 
     private static let terminalPath = "/System/Applications/Utilities/Terminal.app"
 
-    private static let brands: [String: (asset: String, background: NSColor)] = [
-        "claude": ("cli-claude", NSColor(srgbRed: 0.85, green: 0.47, blue: 0.34, alpha: 1)),
-        "codex": ("cli-codex", .white),
+    private enum BrandArt: Equatable {
+        /// Ассет уже содержит собственный фон — рисуем его целиком, обрезая по скруглению.
+        case artwork
+        /// Ассет — прозрачный глиф, ему нужна подложка фирменного цвета.
+        case glyph(background: NSColor)
+    }
+
+    private static let brands: [String: (asset: String, art: BrandArt)] = [
+        "claude": ("cli-claude", .glyph(background: NSColor(srgbRed: 0.85, green: 0.47, blue: 0.34, alpha: 1))),
+        "codex": ("cli-codex", .artwork),
     ]
 
     private var cache: [String: NSImage] = [:]
@@ -41,10 +48,30 @@ public final class TargetIconStore {
         guard let brand = Self.brands[name.lowercased()],
               let url = Bundle.module.url(forResource: brand.asset, withExtension: nil)
                   ?? Bundle.module.urlForImageResource(brand.asset),
-              let glyph = NSImage(contentsOf: url)
+              let artwork = NSImage(contentsOf: url)
         else { return nil }
 
-        return tile(glyph: glyph, background: brand.background, size: size)
+        switch brand.art {
+        case .artwork:
+            return tile(artwork: artwork, size: size)
+        case .glyph(let background):
+            return tile(glyph: artwork, background: background, size: size)
+        }
+    }
+
+    private func tile(artwork: NSImage, size: CGFloat) -> NSImage {
+        NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            NSBezierPath(roundedRect: rect, xRadius: size * 0.25, yRadius: size * 0.25).addClip()
+            artwork.draw(
+                in: rect,
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1,
+                respectFlipped: true,
+                hints: [.interpolation: NSImageInterpolation.high.rawValue]
+            )
+            return true
+        }
     }
 
     private func terminalIcon(size: CGFloat) -> NSImage? {
