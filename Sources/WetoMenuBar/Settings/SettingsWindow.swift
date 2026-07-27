@@ -250,6 +250,9 @@ struct SettingsWindow: View {
                     Text(verbatim: "\(info.currentVersion) → \(info.latestVersion)")
                         .foregroundStyle(DesignTokens.amber)
                     Button("Открыть релиз") { coordinator.update.openReleasePage() }
+                case .noReleases:
+                    Text(verbatim: "\(Constants.appVersion) — релизов пока нет")
+                        .foregroundStyle(.secondary)
                 case .failed(let message):
                     Text(message)
                         .foregroundStyle(DesignTokens.red)

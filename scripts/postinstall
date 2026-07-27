@@ -1,0 +1,22 @@
+#!/bin/bash
+set -e
+
+chown root:wheel /Library/LaunchAgents/com.weto.app.plist
+chmod 644 /Library/LaunchAgents/com.weto.app.plist
+
+CONSOLE_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || echo "")
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+    CURRENT_UID=$(id -u "$CONSOLE_USER")
+else
+    CURRENT_UID=$(id -u "$USER")
+fi
+
+launchctl bootstrap gui/"$CURRENT_UID" /Library/LaunchAgents/com.weto.app.plist 2>/dev/null || true
+
+# Fallback: если служба уже была зарегистрирована, bootstrap не запустит процесс.
+sleep 1
+if ! pgrep -x WetoMenuBar > /dev/null 2>&1; then
+    sudo -u "$CONSOLE_USER" open /Applications/Weto.app 2>/dev/null || true
+fi
+
+exit 0

@@ -20,6 +20,11 @@ public final class UpdateVM {
         case checking
         case upToDate(String)
         case available(UpdateInfo)
+        /// В репозитории ещё нет ни одного релиза. Отдельно от `failed`,
+        /// потому что это нормальное состояние свежего проекта, а не поломка:
+        /// GitHub отвечает на такой запрос 404, и без разбора кода
+        /// пользователь видел бы красную ошибку на ровном месте.
+        case noReleases
         case failed(String)
     }
 
@@ -77,6 +82,8 @@ public final class UpdateVM {
             )
             let info = try ReleaseParser.parse(data, currentVersion: Constants.appVersion).get()
             return info.isNewer ? .available(info) : .upToDate(info.currentVersion)
+        } catch HTTPFetchError.badStatus(404) {
+            return .noReleases
         } catch {
             return .failed(error.localizedDescription)
         }
