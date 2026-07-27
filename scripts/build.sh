@@ -27,11 +27,23 @@ cp Resources/Weto-Info.plist "$APP/Info.plist"
 cp Resources/uninstall-weto.sh "$APP/Resources/"
 chmod +x "$APP/Resources/uninstall-weto.sh"
 
+# Сгенерированный SPM аксессор Bundle.module ищет ресурсный бандл в Bundle.main.bundleURL,
+# то есть в КОРНЕ Weto.app, а вторым кандидатом берёт абсолютный путь .build машины сборки
+# (в CI это /Users/runner/...). Без копии в корне приложение падает с fatalError при первой же
+# иконке, и на машине сборки это незаметно — там fallback-путь существует.
+# Копия в Contents/Resources остаётся для кода, ищущего ресурсы через Bundle.main.
 for bundle in .build/release/*.bundle; do
-    [ -e "$bundle" ] && cp -R "$bundle" "$APP/Resources/"
+    [ -e "$bundle" ] || continue
+    cp -R "$bundle" "$APP/Resources/"
+    cp -R "$bundle" "$OUT/_app/Weto.app/"
 done
 
-codesign --force --sign - "$OUT/_app/Weto.app" 2>/dev/null || true
+if grep -q "resources:" Package.swift && ! ls -d "$OUT/_app/Weto.app"/*.bundle >/dev/null 2>&1; then
+    echo "✗ Package.swift объявляет ресурсы, но в корне Weto.app нет ни одного .bundle" >&2
+    exit 1
+fi
+
+codesign --force --sign - --deep "$OUT/_app/Weto.app" 2>/dev/null || true
 
 ROOT="$OUT/_pkg-root"
 SCRIPTS="$OUT/_pkg-scripts"
@@ -70,13 +82,22 @@ pkgbuild --root "$ROOT" --scripts "$SCRIPTS" --identifier "$PKG_ID" \
          --version "$VERSION" --install-location "/" \
          --component-plist "$OUT/_component.plist" "$OUT/_component.pkg"
 
-# Страховка: если релокация когда-нибудь вернётся, сборка падает здесь, а не у пользователя.
+# Страховки: обе прошлые поломки установки ловятся здесь, а не у пользователя.
 pkgutil --expand "$OUT/_component.pkg" "$OUT/_verify"
 if grep -q "<relocate>" "$OUT/_verify/PackageInfo"; then
     echo "✗ Weto.app помечен relocatable — установщик положит его не в /Applications" >&2
     exit 1
 fi
 rm -rf "$OUT/_verify"
+
+for bundle in .build/release/*.bundle; do
+    [ -e "$bundle" ] || continue
+    name="$(basename "$bundle")"
+    if ! pkgutil --payload-files "$OUT/_component.pkg" | grep -qx "./Applications/Weto.app/$name"; then
+        echo "✗ $name отсутствует в корне Weto.app внутри пакета — Bundle.module упадёт" >&2
+        exit 1
+    fi
+done
 
 cat > "$OUT/_distribution.xml" << DIST
 <?xml version="1.0" encoding="utf-8"?>
