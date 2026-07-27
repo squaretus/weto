@@ -28,9 +28,6 @@ struct StatusPopupView: View {
                 WetoBanner(tone: .error, systemImage: "lock.slash", text: failure)
             }
 
-            Divider()
-            journal
-            Divider()
             footer
         }
         .padding(12)
@@ -70,34 +67,20 @@ struct StatusPopupView: View {
         }
     }
 
-    @ViewBuilder
-    private var journal: some View {
-        if coordinator.eventLog.preview.isEmpty {
-            Text("Срабатываний не было")
-                .font(DesignTokens.fontSecondary)
-                .foregroundStyle(DesignTokens.textTertiary.resolve(colorScheme))
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(coordinator.eventLog.preview) { event in
-                    JournalRow(event: event)
-                }
-            }
-        }
-    }
-
     private var footer: some View {
-        HStack(spacing: 6) {
-            Button("Настройки") {
-                openWindow(id: SettingsWindow.identifier)
-                NSApplication.shared.activate(ignoringOtherApps: true)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(DesignTokens.accent.resolve(colorScheme))
-
+        HStack {
             Spacer()
 
-            Button("Выход") { NSApplication.shared.terminate(nil) }
-                .foregroundStyle(DesignTokens.textSecondary.resolve(colorScheme))
+            Button {
+                openWindow(id: SettingsWindow.identifier)
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(DesignTokens.textSecondary.resolve(colorScheme))
+            }
+            .buttonStyle(.plain)
+            .help("Настройки")
         }
     }
 }

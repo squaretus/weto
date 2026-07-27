@@ -55,13 +55,6 @@ final class EventLogStoreTests: XCTestCase {
         XCTAssertEqual(store.events.last?.reasonText, "событие 10")
     }
 
-    func test_preview_returns_at_most_configured_count() {
-        let store = EventLogStore(defaults: defaults)
-        for index in 0..<20 { store.record(event("событие \(index)")) }
-        XCTAssertEqual(store.preview.count, Constants.eventLogPreviewCount)
-        XCTAssertEqual(store.preview.first?.reasonText, "событие 19")
-    }
-
     func test_capacity_is_ten_records() {
 
         XCTAssertEqual(Constants.eventLogCapacity, 10)

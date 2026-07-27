@@ -24,10 +24,6 @@ public final class EventLogStore {
         self.init(defaults: UserDefaults(suiteName: Constants.userDefaultsSuite) ?? .standard)
     }
 
-    public var preview: [KillEvent] {
-        Array(events.prefix(Constants.eventLogPreviewCount))
-    }
-
     public func record(_ event: KillEvent) {
         events.insert(event, at: 0)
         if events.count > Constants.eventLogCapacity {

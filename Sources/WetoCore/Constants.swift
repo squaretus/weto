@@ -24,8 +24,6 @@ public enum Constants {
 
     public static let eventLogCapacity = 10
 
-    public static let eventLogPreviewCount = 5
-
     public static let userDefaultsSuite = "com.weto.shared"
 
     public static let keychainService = "com.weto.ipinfo"
