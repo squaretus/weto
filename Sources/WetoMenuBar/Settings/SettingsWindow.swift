@@ -8,7 +8,6 @@ struct SettingsWindow: View {
     static let identifier = "settings"
 
     @Environment(AppCoordinator.self) private var coordinator
-    @Environment(\.colorScheme) private var colorScheme
 
     @State private var newBlockEntry = ""
     @State private var launchAtLogin = LaunchAgentController.isInstalled
@@ -22,18 +21,72 @@ struct SettingsWindow: View {
     }
 
     var body: some View {
+        TabView {
+            guardTab
+                .tabItem { Label("Охрана", systemImage: "shield") }
 
+            journalTab
+                .tabItem { Label("Журнал", systemImage: "list.bullet.rectangle") }
+
+            maintenanceTab
+                .tabItem { Label("Обслуживание", systemImage: "wrench.and.screwdriver") }
+        }
+        .frame(width: 580, height: 620)
+        .onAppear { coordinator.guardVM.refreshVPNNames() }
+    }
+
+    private var guardTab: some View {
         Form {
+            statusSection
             TargetsSection()
             vpnSection
             geoSection
             blacklistSection
-            journalSection
-            maintenanceSection
         }
         .formStyle(.grouped)
-        .frame(minWidth: 540, minHeight: 600)
-        .onAppear { coordinator.guardVM.refreshVPNNames() }
+    }
+
+    private var journalTab: some View {
+        Form { journalSection }
+            .formStyle(.grouped)
+    }
+
+    private var maintenanceTab: some View {
+        Form { maintenanceSection }
+            .formStyle(.grouped)
+    }
+
+    private var statusSection: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { coordinator.settings.isEnabled },
+                set: { newValue in
+                    coordinator.settings.isEnabled = newValue
+                    coordinator.guardVM.handle(.tick)
+                }
+            )) {
+                Text("Охрана включена")
+                Text(StatusPresentation.headline(for: coordinator.guardVM.state))
+            }
+            .toggleStyle(.switch)
+
+            if let detail = StatusPresentation.detail(
+                for: coordinator.guardVM.state,
+                reading: coordinator.guardVM.lastReading
+            ) {
+                LabeledContent("Сейчас") {
+                    Text(detail)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+
+            if let failure = coordinator.guardVM.permissionFailure {
+                WetoBanner(tone: .error, systemImage: "lock.slash", text: failure)
+            }
+        } header: {
+            Text("Состояние")
+        }
     }
 
     private var vpnSection: some View {
@@ -61,14 +114,14 @@ struct SettingsWindow: View {
                             get: { coordinator.settings.ipinfoToken },
                             set: { coordinator.settings.ipinfoToken = $0 }
                         ))
-                        .textFieldStyle(.roundedBorder)
                         .labelsHidden()
+                        .onSubmit { isEditingToken = false }
                         Button("Готово") { isEditingToken = false }
                     }
                 } else {
                     HStack(spacing: 8) {
                         Text(maskedToken)
-                            .font(.system(.body, design: .monospaced))
+                            .monospaced()
                             .foregroundStyle(
                                 coordinator.settings.ipinfoToken.isEmpty ? .secondary : .primary
                             )
@@ -99,42 +152,44 @@ struct SettingsWindow: View {
             }
 
             ForEach(blacklistEntries, id: \.self) { entry in
-                HStack {
+                HStack(spacing: 12) {
+                    Text(entry)
+
+                    Spacer(minLength: 0)
+
                     if isCountry(entry) {
-                        Text(entry)
                         Text("страна")
-                            .font(DesignTokens.fontSecondary)
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
+                    } else if IPRange(entry) == nil {
+                        Label("не разобран", systemImage: "exclamationmark.triangle")
+                            .font(.subheadline)
+                            .foregroundStyle(.orange)
                     } else {
-                        Text(entry)
-                        if IPRange(entry) == nil {
-                            Label("не разобран", systemImage: "exclamationmark.triangle")
-                                .font(DesignTokens.fontSecondary)
-                                .foregroundStyle(DesignTokens.red)
-                        } else {
-                            Text("адрес")
-                                .font(DesignTokens.fontSecondary)
-                                .foregroundStyle(.secondary)
-                        }
+                        Text("адрес")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    Button {
+
+                    Button(role: .destructive) {
                         remove(entry)
                     } label: {
-                        Image(systemName: "minus.circle.fill")
+                        Image(systemName: "trash")
                     }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(DesignTokens.red)
+                    .accessibilityLabel("Удалить \(entry) из чёрного списка")
+                    .help("Удалить из списка")
                 }
             }
 
-            HStack(spacing: 8) {
-                TextField("", text: $newBlockEntry, prompt: Text("Код страны(RU), IP, CIDR"))
-                    .textFieldStyle(.roundedBorder)
-                    .labelsHidden()
-                    .onSubmit { addBlockEntry() }
-                Button("Добавить") { addBlockEntry() }
-                    .disabled(newBlockEntry.trimmingCharacters(in: .whitespaces).isEmpty)
+            LabeledContent("Новая запись") {
+                HStack(spacing: 8) {
+                    TextField("", text: $newBlockEntry, prompt: Text("Код страны (RU), IP или CIDR"))
+                        .labelsHidden()
+                        .onSubmit { addBlockEntry() }
+                    Button("Добавить") { addBlockEntry() }
+                        .disabled(newBlockEntry.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
             }
         } header: {
             Text("Чёрный список")
@@ -176,7 +231,6 @@ struct SettingsWindow: View {
         Section {
             Toggle("Запускать при входе в систему", isOn: $launchAtLogin)
                 .toggleStyle(.switch)
-                .tint(DesignTokens.accent.resolve(colorScheme))
                 .onChange(of: launchAtLogin) { _, isOn in
                     if isOn {
                         LaunchAgentController.enable()
@@ -196,13 +250,9 @@ struct SettingsWindow: View {
 
             updateRow
 
-            Button("Выгрузить полностью…") { confirmUnload() }
-                .buttonStyle(.borderedProminent)
-                .tint(DesignTokens.red)
+            Button("Выгрузить полностью…", role: .destructive) { confirmUnload() }
 
-            Button("Удалить приложение…") { confirmUninstall() }
-                .buttonStyle(.borderedProminent)
-                .tint(DesignTokens.red)
+            Button("Удалить приложение…", role: .destructive) { confirmUninstall() }
         } header: {
             Text("Обслуживание")
         } footer: {
@@ -224,14 +274,14 @@ struct SettingsWindow: View {
                     Text(verbatim: "\(version) — последняя")
                 case .available(let info):
                     Text(verbatim: "\(info.currentVersion) → \(info.latestVersion)")
-                        .foregroundStyle(DesignTokens.amber)
+                        .foregroundStyle(.orange)
                     Button("Открыть релиз") { coordinator.update.openReleasePage() }
                 case .noReleases:
                     Text(verbatim: "\(Constants.appVersion) — релизов пока нет")
                         .foregroundStyle(.secondary)
                 case .failed(let message):
                     Text(message)
-                        .foregroundStyle(DesignTokens.red)
+                        .foregroundStyle(.red)
                         .lineLimit(1)
                 }
                 Button("Проверить") { coordinator.update.checkForUpdate() }
@@ -294,4 +344,3 @@ struct SettingsWindow: View {
         }
     }
 }
-

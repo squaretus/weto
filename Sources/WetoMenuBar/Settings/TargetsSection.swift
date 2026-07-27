@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import WetoShared
-import WetoDesign
 
 struct TargetsSection: View {
     @Environment(AppCoordinator.self) private var coordinator
@@ -17,36 +16,42 @@ struct TargetsSection: View {
             }
 
             ForEach(coordinator.settings.targets, id: \.self) { entry in
-                HStack(alignment: .firstTextBaseline) {
+                HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(coordinator.guardVM.displayName(forTarget: entry))
                         Text(coordinator.guardVM.resolvedDescription(forTarget: entry))
-                            .font(DesignTokens.fontSecondary)
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
-                    Spacer()
+
+                    Spacer(minLength: 0)
+
                     Text(verbatim: "процессов: \(coordinator.guardVM.runningProcessCount(forTarget: entry))")
-                        .font(DesignTokens.fontSecondary)
+                        .font(.subheadline)
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
-                    Button {
+
+                    Button(role: .destructive) {
                         remove(entry)
                     } label: {
-                        Image(systemName: "minus.circle.fill")
+                        Image(systemName: "trash")
                     }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(DesignTokens.red)
+                    .accessibilityLabel("Удалить цель \(entry)")
+                    .help("Удалить цель")
                 }
             }
 
-            HStack(spacing: 8) {
-                TextField("", text: $newTarget, prompt: Text("Приложение, бинарник, команда"))
-                    .textFieldStyle(.roundedBorder)
-                    .labelsHidden()
-                    .onSubmit { add() }
-                Button("Добавить") { add() }
-                    .disabled(newTarget.trimmingCharacters(in: .whitespaces).isEmpty)
-                Button("Выбрать…") { pickFromDisk() }
+            LabeledContent("Новая цель") {
+                HStack(spacing: 8) {
+                    TextField("", text: $newTarget, prompt: Text("nano, /usr/bin/curl, com.openai.chat"))
+                        .labelsHidden()
+                        .onSubmit { add() }
+                    Button("Добавить") { add() }
+                        .disabled(newTarget.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("Выбрать…") { pickFromDisk() }
+                }
             }
         } header: {
             Text("Цели")

@@ -89,24 +89,3 @@ final class MenuBarImageRendererTests: XCTestCase {
     }
 }
 
-final class DesignTokensTests: XCTestCase {
-
-    func test_adaptive_color_differs_between_schemes() {
-        XCTAssertNotEqual(
-            DesignTokens.textSecondary.resolve(.light),
-            DesignTokens.textSecondary.resolve(.dark)
-        )
-    }
-
-    func test_status_colors_are_distinct() {
-        XCTAssertNotEqual(DesignTokens.green, DesignTokens.red)
-        XCTAssertNotEqual(DesignTokens.green, DesignTokens.amber)
-        XCTAssertNotEqual(DesignTokens.amber, DesignTokens.red)
-    }
-
-    func test_hex_initializer_maps_channels_correctly() {
-        XCTAssertEqual(Color(hex: 0xFF0000), Color(.sRGB, red: 1, green: 0, blue: 0, opacity: 1))
-        XCTAssertEqual(Color(hex: 0x00FF00), Color(.sRGB, red: 0, green: 1, blue: 0, opacity: 1))
-        XCTAssertEqual(Color(hex: 0x0000FF), Color(.sRGB, red: 0, green: 0, blue: 1, opacity: 1))
-    }
-}

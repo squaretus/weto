@@ -1,31 +1,25 @@
 import SwiftUI
 import WetoCore
-import WetoDesign
 
 struct JournalRow: View {
     let event: KillEvent
 
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(event.targetsText)
-                .font(DesignTokens.fontPrimaryMedium)
+                .font(.headline)
 
             Text(event.summaryText)
 
             Text(verbatim: Self.diagnostics(for: event))
-                .font(DesignTokens.fontSecondary)
-                .foregroundStyle(DesignTokens.textTertiary.resolve(colorScheme))
+                .font(.subheadline)
+                .foregroundStyle(.tertiary)
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(
-            DesignTokens.pillBackground.resolve(colorScheme),
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-        )
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
     static func diagnostics(for event: KillEvent) -> String {

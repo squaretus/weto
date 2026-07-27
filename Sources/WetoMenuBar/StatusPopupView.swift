@@ -7,7 +7,6 @@ import WetoDesign
 struct StatusPopupView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -19,8 +18,8 @@ struct StatusPopupView: View {
                 reading: coordinator.guardVM.lastReading
             ) {
                 Text(detail)
-                    .font(DesignTokens.fontSecondary)
-                    .foregroundStyle(DesignTokens.textSecondary.resolve(colorScheme))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
 
@@ -37,7 +36,7 @@ struct StatusPopupView: View {
         HStack {
             Text("Weto").font(.headline)
             Spacer()
-            Toggle("", isOn: Binding(
+            Toggle("Охрана", isOn: Binding(
                 get: { coordinator.settings.isEnabled },
                 set: { newValue in
                     coordinator.settings.isEnabled = newValue
@@ -46,7 +45,6 @@ struct StatusPopupView: View {
             ))
             .toggleStyle(.switch)
             .labelsHidden()
-            .tint(DesignTokens.accent.resolve(colorScheme))
         }
     }
 
@@ -76,10 +74,9 @@ struct StatusPopupView: View {
                 NSApplication.shared.activate(ignoringOtherApps: true)
             } label: {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(DesignTokens.textSecondary.resolve(colorScheme))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Настройки")
             .help("Настройки")
         }
     }
