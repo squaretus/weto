@@ -20,21 +20,6 @@ public enum GuardState: Equatable, Sendable {
         }
     }
 
-    public func flag(lastReading: GeoReading?) -> String {
-        switch self {
-        case .disabled:
-            return CountryFlag.unknown
-        case .safe(let reading):
-            return CountryFlag.emoji(for: reading?.primaryCountry ?? "")
-        case .unsafe(let reason):
-            switch reason {
-            case .vpnNotConfigured, .vpnDown, .vpnNotPrimary, .geoUnavailable:
-                return CountryFlag.unknown
-            default:
-                return CountryFlag.emoji(for: lastReading?.primaryCountry ?? "")
-            }
-        }
-    }
 }
 
 @Observable

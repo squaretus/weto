@@ -249,7 +249,7 @@ final class GuardVMTests: XCTestCase {
         XCTAssertTrue(h.killer.killedBatches.isEmpty)
         XCTAssertEqual(h.vm.lastReading?.ip, "203.0.113.28")
         XCTAssertEqual(h.vm.state.statusColor, .green)
-        XCTAssertEqual(h.vm.state.flag(lastReading: h.vm.lastReading), "🇰🇿")
+        XCTAssertEqual(h.vm.currentCountryCode, "KZ")
     }
 
     func test_blocked_country_kills_and_records_event() async {
@@ -290,7 +290,7 @@ final class GuardVMTests: XCTestCase {
 
         XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("timeout")))
         XCTAssertEqual(h.vm.state.statusColor, .red)
-        XCTAssertEqual(h.vm.state.flag(lastReading: nil), CountryFlag.unknown)
+        XCTAssertNil(h.vm.currentCountryCode)
     }
 
     func test_burst_of_events_collapses_into_single_probe() async {

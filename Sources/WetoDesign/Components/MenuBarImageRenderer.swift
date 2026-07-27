@@ -13,8 +13,8 @@ public enum MenuBarImageRenderer {
     private static let dotDiameter: CGFloat = 7
     private static let dotCutout: CGFloat = 2
 
-    public static func image(flag: String, flagImage: NSImage?, color: NSColor) -> NSImage {
-        let key = "\(flagImage == nil ? flag : "img:\(flag)")|\(color.description)"
+    public static func image(countryCode: String?, flagImage: NSImage?, color: NSColor) -> NSImage {
+        let key = "\(flagImage == nil ? "none" : countryCode ?? "?")|\(color.description)"
 
         lock.lock()
         if let hit = cache[key] {
@@ -23,7 +23,7 @@ public enum MenuBarImageRenderer {
         }
         lock.unlock()
 
-        let image = render(flag: flag, flagImage: flagImage, color: color)
+        let image = render(flagImage: flagImage, color: color)
 
         lock.lock()
         cache[key] = image
@@ -36,7 +36,7 @@ public enum MenuBarImageRenderer {
         return image
     }
 
-    private static func render(flag: String, flagImage: NSImage?, color: NSColor) -> NSImage {
+    private static func render(flagImage: NSImage?, color: NSColor) -> NSImage {
         let center = NSPoint(x: canvas / 2, y: canvas / 2)
         let radius = flagDiameter / 2
         let flagRect = NSRect(
@@ -73,13 +73,8 @@ public enum MenuBarImageRenderer {
                     hints: [.interpolation: NSImageInterpolation.high.rawValue]
                 )
             } else {
-                let font = NSFont.systemFont(ofSize: 15)
-                let attributes: [NSAttributedString.Key: Any] = [.font: font]
-                let size = (flag as NSString).size(withAttributes: attributes)
-                (flag as NSString).draw(
-                    at: NSPoint(x: center.x - size.width / 2, y: center.y - size.height / 2),
-                    withAttributes: attributes
-                )
+                NSColor.tertiaryLabelColor.setFill()
+                NSBezierPath(ovalIn: flagRect).fill()
             }
 
             NSColor.labelColor.withAlphaComponent(0.55).setStroke()
