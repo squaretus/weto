@@ -32,6 +32,10 @@ public enum Constants {
 
     public static let githubRepo = "weto"
 
+    public static var githubRepoURL: String {
+        "https://github.com/\(githubOwner)/\(githubRepo)"
+    }
+
     public static let updateCheckInterval: TimeInterval = 21_600
 
 }

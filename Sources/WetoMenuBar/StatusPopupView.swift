@@ -23,8 +23,6 @@ struct StatusPopupView: View {
                         .foregroundStyle(WetoTokens.red.resolve(scheme))
                         .fixedSize(horizontal: false, vertical: true)
                 }
-
-                footer
             }
         }
         .environment(\.colorScheme, scheme)
@@ -37,10 +35,23 @@ struct StatusPopupView: View {
     private var header: some View {
         HStack(spacing: WetoTokens.space3) {
             StatusShield(tone: tone)
+
             Text(StatusPresentation.title(for: coordinator.guardVM.state))
                 .font(WetoTokens.status)
                 .foregroundStyle(tone.color.resolve(scheme))
+
             Spacer(minLength: 0)
+
+            Button {
+                openWindow(id: SettingsWindow.identifier)
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 16))
+            }
+            .buttonStyle(WetoIconButtonStyle())
+            .accessibilityLabel("Настройки")
+            .help("Настройки")
         }
     }
 
@@ -64,21 +75,6 @@ struct StatusPopupView: View {
         .textSelection(.enabled)
     }
 
-    private var footer: some View {
-        HStack {
-            Spacer()
-            Button {
-                openWindow(id: SettingsWindow.identifier)
-                NSApplication.shared.activate(ignoringOtherApps: true)
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 16))
-            }
-            .buttonStyle(WetoIconButtonStyle())
-            .accessibilityLabel("Настройки")
-            .help("Настройки")
-        }
-    }
 }
 
 extension StatusTone {

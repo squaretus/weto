@@ -10,6 +10,18 @@ struct TargetsCard: View {
     @State private var newTarget = ""
 
     var body: some View {
+        VStack(alignment: .leading, spacing: WetoTokens.space2) {
+            card
+
+            Text("Имя команды (nano), путь (/usr/bin/curl) или бандл (com.openai.chat). Дочерние процессы завершаются вместе с родителем.")
+                .font(WetoTokens.diagnostics)
+                .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, WetoTokens.space2)
+        }
+    }
+
+    private var card: some View {
         WetoCard("Цели") {
             VStack(spacing: 0) {
                 if coordinator.settings.targets.isEmpty {
@@ -32,7 +44,7 @@ struct TargetsCard: View {
                     TextField(
                         "",
                         text: $newTarget,
-                        prompt: Text("nano, /usr/bin/curl, com.openai.chat")
+                        prompt: Text("Новая цель")
                     )
                     .textFieldStyle(WetoFieldStyle())
                     .labelsHidden()

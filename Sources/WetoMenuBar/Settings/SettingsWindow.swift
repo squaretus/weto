@@ -29,11 +29,10 @@ struct SettingsWindow: View {
     @State private var newBlockEntry = ""
     @State private var launchAtLogin = LaunchAgentController.isInstalled
     @State private var tokenDraft = ""
+    @State private var isHoveringGithub = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: WetoTokens.space3) {
-            header
-
             WetoSegmentedControl(
                 selection: $tab,
                 options: SettingsTab.allCases.map { ($0, $0.title) }
@@ -51,12 +50,16 @@ struct SettingsWindow: View {
                     case .journal:
                         journalCard
                     }
+
+                    footer
                 }
-                .padding(.bottom, WetoTokens.space4)
+                .padding(.bottom, WetoTokens.space2)
             }
             .scrollIndicators(.never)
         }
-        .padding(WetoTokens.space4)
+        .padding(.horizontal, WetoTokens.space4)
+        .padding(.top, WetoTokens.space2)
+        .padding(.bottom, WetoTokens.space4)
         .frame(width: WetoTokens.windowWidth, height: WetoTokens.windowHeight, alignment: .top)
         .background(WetoTokens.shell.resolve(scheme))
         .environment(\.colorScheme, scheme)
@@ -68,8 +71,25 @@ struct SettingsWindow: View {
         }
     }
 
-    private var header: some View {
+    private var footer: some View {
         HStack(spacing: WetoTokens.space3) {
+            Button {
+                guard let url = URL(string: Constants.githubRepoURL) else { return }
+                NSWorkspace.shared.open(url)
+            } label: {
+                Text(verbatim: "github")
+                    .font(WetoTokens.caption)
+                    .foregroundStyle(
+                        isHoveringGithub
+                            ? WetoTokens.dim.resolve(scheme)
+                            : WetoTokens.faint.resolve(scheme)
+                    )
+                    .underline(isHoveringGithub)
+            }
+            .buttonStyle(.plain)
+            .onHover { isHoveringGithub = $0 }
+            .help(Constants.githubRepoURL)
+
             Spacer(minLength: 0)
 
             Text(verbatim: "версия \(Constants.appVersion)")
@@ -87,7 +107,6 @@ struct SettingsWindow: View {
             .accessibilityLabel("Проверить обновления")
             .help(updateHelp)
         }
-        .padding(.leading, 72)
         .frame(height: 30)
     }
 
