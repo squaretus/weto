@@ -1,22 +1,10 @@
 import Foundation
 import WetoCore
 
-/// Граница системы: получение вердикта о внешнем положении машины.
 public protocol GeoProbing: Sendable {
     func probe() async -> GeoOutcome
 }
 
-/// Опрос гео-сервисов.
-///
-/// `ipinfo` — единственный источник IP: при split-routing остальные сервисы,
-/// отвечая на вопрос «какой у меня адрес», возвращают посторонний IPv6
-/// (проверено на машине владельца). Подтверждающий сервис спрашивается про уже
-/// известный IP и потому кэшируется: страна фиксированного адреса между
-/// опросами не меняется. Это укладывает нас в лимит ipwho.is в 1000 запросов
-/// в сутки при опросе раз в 5 секунд.
-///
-/// Актор, потому что кэш мутируется из фонового цикла и из обработчиков
-/// сетевых событий одновременно.
 public actor GeoProbe: GeoProbing {
 
     private let fetcher: HTTPFetching
@@ -61,11 +49,6 @@ public actor GeoProbe: GeoProbing {
         ))
     }
 
-    // MARK: - Private
-
-    /// Основной подтверждающий — ipwho.is, резервный — geojs.
-    /// geojs именно резервный: его лимит нигде не задокументирован,
-    /// а неизвестное ограничение хуже известного.
     private func confirm(ip: String) async -> (country: String, source: ConfirmSource)? {
         if let country = await fetchCountry(
             urlString: Constants.ipwhoisURL(ip: ip),

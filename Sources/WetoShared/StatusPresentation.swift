@@ -1,16 +1,10 @@
 import Foundation
 import WetoCore
 
-/// Тон плашки в попапе. Совпадает по смыслу с `GuardStatusColor`,
-/// но живёт отдельно, чтобы `WetoShared` не зависел от дизайн-модуля.
 public enum BannerTone: Equatable, Sendable {
     case info, success, warn, error
 }
 
-/// Тексты состояния для попапа менюбара.
-///
-/// Вынесено из вьюх: это то, что пользователь читает в момент инцидента,
-/// и оно должно быть под тестом.
 public enum StatusPresentation {
 
     public static func headline(for state: GuardState) -> String {
@@ -21,13 +15,9 @@ public enum StatusPresentation {
         }
     }
 
-    /// Строка с деталями показания. `nil`, когда показания ещё нет —
-    /// например, при падении VPN сетевая проба не выполняется вовсе.
     public static func detail(for state: GuardState, reading: GeoReading?) -> String? {
         guard let reading else { return nil }
 
-        // ASN намеренно не показываем: в попапе он занимал место,
-        // ничего не добавляя к решению — страну и адрес видно и без него.
         var parts = [reading.ip]
         parts.append("ipinfo: \(reading.primaryCountry)")
 

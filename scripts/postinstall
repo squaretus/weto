@@ -13,7 +13,6 @@ fi
 
 launchctl bootstrap gui/"$CURRENT_UID" /Library/LaunchAgents/com.weto.app.plist 2>/dev/null || true
 
-# Fallback: если служба уже была зарегистрирована, bootstrap не запустит процесс.
 sleep 1
 if ! pgrep -x WetoMenuBar > /dev/null 2>&1; then
     sudo -u "$CONSOLE_USER" open /Applications/Weto.app 2>/dev/null || true

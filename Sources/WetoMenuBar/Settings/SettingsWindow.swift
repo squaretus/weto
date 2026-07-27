@@ -14,8 +14,6 @@ struct SettingsWindow: View {
     @State private var launchAtLogin = LaunchAgentController.isInstalled
     @State private var isEditingToken = false
 
-    /// Токен скрыт, но последние пять символов видны — их достаточно, чтобы
-    /// узнать свой ключ, и мало, чтобы им воспользоваться с чужого экрана.
     private var maskedToken: String {
         let token = coordinator.settings.ipinfoToken
         guard !token.isEmpty else { return "не задан" }
@@ -24,8 +22,7 @@ struct SettingsWindow: View {
     }
 
     var body: some View {
-        // Form со сгруппированным стилем — родной для настроек macOS:
-        // сам расставляет отступы, выравнивает подписи и отделяет секции.
+
         Form {
             TargetsSection()
             vpnSection
@@ -38,8 +35,6 @@ struct SettingsWindow: View {
         .frame(minWidth: 540, minHeight: 600)
         .onAppear { coordinator.guardVM.refreshVPNNames() }
     }
-
-    // MARK: - VPN
 
     private var vpnSection: some View {
         Section {
@@ -59,8 +54,6 @@ struct SettingsWindow: View {
                 .foregroundStyle(.secondary)
         }
     }
-
-    // MARK: - Гео
 
     private var geoSection: some View {
         Section {
@@ -101,11 +94,6 @@ struct SettingsWindow: View {
         }
     }
 
-    // MARK: - Чёрный список
-
-    /// Страны и адреса живут в одном списке: для пользователя это одно правило
-    /// «отсюда работать нельзя», а разделение на две секции было искусственным.
-    /// Тип записи определяется по содержимому.
     private var blacklistSection: some View {
         Section {
             if blacklistEntries.isEmpty {
@@ -143,9 +131,6 @@ struct SettingsWindow: View {
                 }
             }
 
-            // Поле добавления стоит под списком: сначала видно, что уже есть.
-            // Заголовок пустой — иначе `Form` уводит его в колонку подписей
-            // и строка разъезжается.
             HStack(spacing: 8) {
                 TextField("", text: $newBlockEntry, prompt: Text("Код страны(RU), IP, CIDR"))
                     .textFieldStyle(.roundedBorder)
@@ -162,7 +147,6 @@ struct SettingsWindow: View {
         }
     }
 
-    /// Страны идут первыми, адреса следом — так список читается ровнее.
     private var blacklistEntries: [String] {
         coordinator.settings.blockedCountryCodes + coordinator.settings.blockedIPRangeTexts
     }
@@ -171,7 +155,6 @@ struct SettingsWindow: View {
         coordinator.settings.blockedCountryCodes.contains(entry)
     }
 
-    /// Две буквы — код страны, всё остальное — адрес или диапазон.
     private func addBlockEntry() {
         let entry = newBlockEntry.trimmingCharacters(in: .whitespaces)
         guard !entry.isEmpty else { return }
@@ -195,8 +178,6 @@ struct SettingsWindow: View {
             coordinator.settings.blockedIPRangeTexts.filter { $0 != entry }
     }
 
-    // MARK: - Обслуживание
-
     private var maintenanceSection: some View {
         Section {
             Toggle("Запускать при входе в систему", isOn: $launchAtLogin)
@@ -217,8 +198,6 @@ struct SettingsWindow: View {
 
             updateRow
 
-            // `role: .destructive` в macOS-форме не красит кнопку — цвет
-            // приходится задавать явно.
             HStack(spacing: 8) {
                 Button("Выгрузить полностью…") { confirmUnload() }
                     .buttonStyle(.borderedProminent)
@@ -264,8 +243,6 @@ struct SettingsWindow: View {
         }
     }
 
-    /// NSAlert, а не SwiftUI `.alert`: в приложении с `MenuBarExtra`
-    /// SwiftUI-алерт закрывает popover.
     private func confirmUnload() {
         let alert = NSAlert()
         alert.messageText = "Выгрузить Weto полностью?"
@@ -300,8 +277,6 @@ struct SettingsWindow: View {
         NSApplication.shared.terminate(nil)
     }
 
-    // MARK: - Журнал
-
     private var journalSection: some View {
         Section {
             if coordinator.eventLog.events.isEmpty {
@@ -324,7 +299,6 @@ struct SettingsWindow: View {
     }
 }
 
-/// Строка журнала: по кому сработало, что сделали и почему, когда и с какого адреса.
 struct JournalRow: View {
     let event: KillEvent
 

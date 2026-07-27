@@ -1,7 +1,5 @@
 import Foundation
 
-/// Версия вида `major.minor.patch`. Недостающие компоненты считаются нулями,
-/// чтобы тег `v2` сравнивался корректно.
 public struct SemanticVersion: Equatable, Comparable, Sendable {
     public let major: Int
     public let minor: Int
@@ -56,7 +54,6 @@ public struct UpdateInfo: Codable, Equatable, Sendable {
     }
 }
 
-/// Разбор ответа GitHub Releases API.
 public enum ReleaseParser {
 
     public enum ParseError: LocalizedError, Equatable {
@@ -104,8 +101,6 @@ public enum ReleaseParser {
             return .failure(ParseError.invalidVersion(currentVersion))
         }
 
-        // Установщик может отсутствовать: релиз бывает и без бинарного ассета.
-        // Это не ошибка — тогда ведём пользователя на страницу релиза.
         let installer = release.assets.first { $0.name.hasSuffix(".pkg") }
             ?? release.assets.first { $0.name.hasSuffix(".zip") }
 

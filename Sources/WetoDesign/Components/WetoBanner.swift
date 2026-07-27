@@ -1,7 +1,5 @@
 import SwiftUI
 
-/// Универсальный баннер для info/warn/error/success сообщений.
-/// Цветной акцент даёт иконка, фон — нативный материал.
 public struct WetoBanner<Trailing: View>: View {
 
     public enum Tone: Equatable, Sendable {
@@ -62,14 +60,11 @@ public struct WetoBanner<Trailing: View>: View {
     }
 }
 
-/// Метрики единого каркаса страницы настроек.
 public enum WetoPageMetrics {
     public static let horizontalPadding: CGFloat = 24
     public static let rowInsets = EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0)
 }
 
-/// Каркас содержимого окна настроек: убирает системный фон списка
-/// и задаёт единые горизонтальные отступы.
 public struct WetoPageContainer<Content: View>: View {
     private let content: Content
     @Environment(\.colorScheme) private var colorScheme
@@ -82,8 +77,7 @@ public struct WetoPageContainer<Content: View>: View {
         content
             .scrollContentBackground(.hidden)
             .listStyle(.plain)
-            // Горизонталь через contentMargins, а не padding: padding сузил бы
-            // сам scroll-примитив и увёл скроллбар от края окна.
+
             .contentMargins(.horizontal, WetoPageMetrics.horizontalPadding, for: .scrollContent)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(WetoPalette.bg.resolve(colorScheme))

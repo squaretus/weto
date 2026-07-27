@@ -32,7 +32,7 @@ final class ProcessRegistryTests: XCTestCase {
     }
 
     func test_bundle_path_resolves_for_a_system_application() {
-        // Finder присутствует на любой машине и на CI-раннере.
+
         let path = ProcessRegistry().bundlePath(forBundleID: "com.apple.finder")
         XCTAssertNotNil(path)
         XCTAssertTrue(path?.hasSuffix(".app") == true, "получено: \(path ?? "nil")")
@@ -62,7 +62,7 @@ final class ProcessKillerTests: XCTestCase {
     }
 
     func test_kill_of_nonexistent_pid_reports_esrch() {
-        // PID заведомо не существует: ядро не выдаёт настолько большие значения.
+
         let results = ProcessKiller().kill(pids: [Int32.max - 1])
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results[0].errorCode, ESRCH)
@@ -70,8 +70,7 @@ final class ProcessKillerTests: XCTestCase {
     }
 
     func test_kill_of_launchd_reports_eperm() {
-        // PID 1 принадлежит root — ровно тот случай, который UI обязан показать
-        // пользователю, а не проглотить.
+
         let results = ProcessKiller().kill(pids: [1])
         XCTAssertEqual(results[0].errorCode, EPERM)
         XCTAssertFalse(results[0].isTerminated)

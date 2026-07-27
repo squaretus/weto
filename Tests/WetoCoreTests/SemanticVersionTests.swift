@@ -62,7 +62,7 @@ final class ReleaseParserTests: XCTestCase {
     }
 
     func test_release_without_installer_still_parses() throws {
-        // Релиз без бинарного ассета — не ошибка: ведём на страницу релиза.
+
         let info = try ReleaseParser.parse(
             releaseJSON(tag: "v1.1.0", asset: nil), currentVersion: "1.0.0"
         ).get()

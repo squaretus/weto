@@ -5,8 +5,7 @@ import AppKit
 final class NetworkEventSourceTests: XCTestCase {
 
     func test_start_delivers_initial_network_path_event() {
-        // NWPathMonitor всегда отдаёт текущий путь сразу после старта —
-        // на этом строится проверка первичного состояния при запуске приложения.
+
         let source = NetworkEventSource()
         let received = expectation(description: "получено событие о сетевом пути")
         received.assertForOverFulfill = false
@@ -37,9 +36,7 @@ final class NetworkEventSourceTests: XCTestCase {
     }
 
     func test_app_launch_notification_carries_bundle_id() throws {
-        // Раннер xctest не имеет bundle ID, поэтому в качестве полезной нагрузки
-        // берём любое реально запущенное приложение с идентификатором.
-        // Проверяется маппинг уведомления в триггер, а не сам факт запуска.
+
         guard let sample = NSWorkspace.shared.runningApplications
             .first(where: { $0.bundleIdentifier != nil }),
               let expectedID = sample.bundleIdentifier

@@ -8,8 +8,6 @@
     <string>/Applications/Weto.app/Contents/MacOS/WetoMenuBar</string>
     <key>RunAtLoad</key>
     <true/>
-    <!-- Падение сторожевого приложения означает потерю защиты,
-         поэтому launchd обязан поднимать его обратно. -->
     <key>KeepAlive</key>
     <true/>
 </dict>

@@ -2,24 +2,12 @@ import Foundation
 import AppKit
 import WetoCore
 
-/// Граница системы: превращение записи из настроек в правило поиска процессов.
 public protocol TargetResolving: Sendable {
     func resolve(_ entry: String) -> TargetRule?
 }
 
-/// Единый разрешатель целей: приложение, бинарник или скрипт.
-///
-/// Три ловушки, ради которых это существует:
-///   * `/usr/bin/nano` — симлинк на `pico`, и ядро сообщает `pico`.
-///     Без раскрытия симлинка цель молча не находилась бы;
-///   * `qwen` — Node-скрипт, ядро показывает его как `node`. Матчинг по пути
-///     выкосил бы все Node-процессы системы, поэтому скрипты ищутся по argv;
-///   * приложение может быть задано и bundle ID, и путём к `.app`.
 public struct TargetResolver: TargetResolving {
 
-    /// Каталоги поиска для целей, заданных голым именем.
-    /// Homebrew раньше системных: пользователь, набравший `nano` в терминале,
-    /// получит ту же версию, что и мы.
     private static let searchPaths = [
         "/opt/homebrew/bin", "/opt/homebrew/sbin",
         "/usr/local/bin", "/usr/local/sbin",
@@ -36,10 +24,8 @@ public struct TargetResolver: TargetResolving {
         return resolveExecutable(trimmed)
     }
 
-    // MARK: - Приложения
-
     private func resolveApplication(_ entry: String) -> TargetRule? {
-        // Путь к бандлу.
+
         if entry.hasSuffix(".app") || entry.hasSuffix(".app/") {
             var path = entry
             while path.hasSuffix("/") { path.removeLast() }
@@ -52,7 +38,6 @@ public struct TargetResolver: TargetResolving {
             )
         }
 
-        // Bundle ID: без слэшей и с точкой — иначе это команда вроде `nano`.
         guard !entry.contains("/"), entry.contains("."),
               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: entry)
         else { return nil }
@@ -64,8 +49,6 @@ public struct TargetResolver: TargetResolving {
             path: url.path
         )
     }
-
-    // MARK: - Бинарники и скрипты
 
     private func resolveExecutable(_ entry: String) -> TargetRule? {
         let candidates = entry.contains("/")
@@ -86,7 +69,6 @@ public struct TargetResolver: TargetResolving {
         return nil
     }
 
-    /// Скрипты начинаются с `#!`; машинный код — с magic-числа Mach-O.
     private static func hasShebang(atPath path: String) -> Bool {
         guard let handle = FileHandle(forReadingAtPath: path) else { return false }
         defer { try? handle.close() }

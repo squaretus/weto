@@ -1,7 +1,7 @@
 import SwiftUI
 
 extension Color {
-    /// Инициализация из 0xRRGGBB.
+
     init(hex: UInt32) {
         self.init(
             .sRGB,
@@ -13,8 +13,6 @@ extension Color {
     }
 }
 
-/// Цвет, зависящий от темы. Резолвится явно, а не через `Color(nsColor:)`,
-/// чтобы одно и то же значение работало и в SwiftUI, и при отрисовке в NSImage.
 public struct AdaptiveColor: Equatable, Sendable {
     public let dark: Color
     public let light: Color
@@ -29,7 +27,6 @@ public struct AdaptiveColor: Equatable, Sendable {
     }
 }
 
-/// Палитра, унаследованная от проекта blik — приложения должны выглядеть роднёй.
 public enum WetoPalette {
     public static let accentDark = Color(hex: 0x2FB3B8)
     public static let accentLight = Color(hex: 0x007479)
@@ -45,11 +42,7 @@ public enum WetoPalette {
     public static let accent = AdaptiveColor(dark: accentDark, light: accentLight)
 }
 
-/// Дизайн-токены приложения. Цвета — тонкие алиасы на `WetoPalette`,
-/// чтобы палитра конфигурировалась из одного места.
 public enum DesignTokens {
-
-    // MARK: - Цвета
 
     public static let accent = WetoPalette.accent
     public static let green = WetoPalette.statusSuccess
@@ -65,9 +58,6 @@ public enum DesignTokens {
         light: Color.black.opacity(0.45)
     )
 
-    // MARK: - Типографика
-
-    /// Единый primary-шрифт: метки, тело, кнопки.
     public static let fontPrimary: Font = .system(size: 13, weight: .regular)
     public static let fontPrimaryMedium: Font = .system(size: 13, weight: .medium)
     public static let fontSecondary: Font = .system(size: 11, weight: .regular)

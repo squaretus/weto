@@ -1,6 +1,4 @@
 #!/bin/bash
-# Сборка .app-бандла для локального запуска без PKG-установщика.
-# Полноценная релизная сборка с демоном и PKG появится в scripts/build.sh.
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,7 +22,6 @@ mkdir -p "$APP/MacOS" "$APP/Resources"
 cp "$BIN" "$APP/MacOS/WetoMenuBar"
 cp Resources/Weto-Info.plist "$APP/Info.plist"
 
-# Ad-hoc подпись: без неё macOS не отдаёт приложению Keychain и уведомления.
 codesign --force --sign - "$OUT/Weto.app" 2>/dev/null || true
 
 echo "✓ Готово: $OUT/Weto.app"

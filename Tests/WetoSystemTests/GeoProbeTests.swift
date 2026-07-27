@@ -4,8 +4,6 @@ import WetoCore
 
 private struct FetchFailure: Error {}
 
-/// Фейк на границе системы. Отдаёт заготовленные ответы по подстроке URL
-/// и считает вызовы, чтобы проверить кэширование.
 private actor FakeFetcher: HTTPFetching {
     private var responses: [String: Result<Data, Error>]
     private var callCounts: [String: Int] = [:]

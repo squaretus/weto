@@ -1,6 +1,5 @@
 import Foundation
 
-/// Ответ `https://v4.api.ipinfo.io/lite/me` — единственный источник внешнего IP.
 public struct IPInfoLiteResponse: Decodable, Equatable, Sendable {
     public let ip: String
     public let asn: String?
@@ -17,8 +16,6 @@ public struct IPInfoLiteResponse: Decodable, Equatable, Sendable {
     }
 }
 
-/// Ответ `https://ipwho.is/{ip}`. При ошибке сервис отвечает 200 с `success: false`,
-/// поэтому статус-кода недостаточно и флаг надо разбирать явно.
 public struct IPWhoIsResponse: Decodable, Equatable, Sendable {
     public let success: Bool
     public let countryCode: String?
@@ -29,13 +26,11 @@ public struct IPWhoIsResponse: Decodable, Equatable, Sendable {
     }
 }
 
-/// Ответ `https://get.geojs.io/v1/ip/country/{ip}.json`.
 public struct GeoJSCountryResponse: Decodable, Equatable, Sendable {
     public let country: String
     public let ip: String
 }
 
-/// Разбор ответов гео-сервисов и сборка показания.
 public enum GeoResponses {
 
     private static let decoder = JSONDecoder()
@@ -44,7 +39,6 @@ public enum GeoResponses {
         try decoder.decode(IPInfoLiteResponse.self, from: data)
     }
 
-    /// Возвращает код страны либо `nil`, если сервис сообщил о неуспехе.
     public static func decodeIPWhoIs(_ data: Data) throws -> String? {
         let response = try decoder.decode(IPWhoIsResponse.self, from: data)
         guard response.success else { return nil }

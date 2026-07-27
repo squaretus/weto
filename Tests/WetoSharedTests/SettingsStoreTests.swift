@@ -3,7 +3,6 @@ import XCTest
 import WetoCore
 import WetoSystem
 
-/// Фейк секретного хранилища — Keychain не трогаем в тестах настроек.
 final class InMemorySecretStore: SecretStoring, @unchecked Sendable {
     private var storage: [String: String] = [:]
     private let lock = NSLock()
@@ -41,13 +40,12 @@ final class SettingsStoreTests: XCTestCase {
     }
 
     func test_guard_is_enabled_out_of_the_box() {
-        // Сторожевое приложение, которое надо не забыть включить, бесполезно.
+
         XCTAssertTrue(makeStore().isEnabled)
     }
 
     func test_enabled_guard_without_targets_is_harmless() {
-        // Включённая охрана без целей не должна ничего завершать —
-        // именно это делает безопасным умолчание «включено».
+
         let store = makeStore()
         XCTAssertFalse(store.guardConfig.hasTargets)
         XCTAssertEqual(
@@ -60,13 +58,13 @@ final class SettingsStoreTests: XCTestCase {
         let store = makeStore()
         XCTAssertNil(store.vpnServiceName)
         XCTAssertTrue(store.targets.isEmpty)
-        
+
         XCTAssertEqual(store.blockedCountryCodes, ["RU"])
         XCTAssertEqual(store.pollIntervalSeconds, 5)
     }
 
     func test_explicitly_disabled_guard_survives_reload() {
-        // Явное «выключено» не должно перетираться умолчанием при перезапуске.
+
         let first = makeStore()
         first.isEnabled = false
         XCTAssertFalse(SettingsStore(defaults: defaults, secrets: InMemorySecretStore()).isEnabled)
@@ -134,8 +132,7 @@ final class SettingsStoreTests: XCTestCase {
     }
 
     func test_token_box_mirrors_current_token() {
-        // Коробку читает GeoProbe вне главного актора — она обязана быть
-        // синхронизирована и при загрузке, и при изменении.
+
         let secrets = InMemorySecretStore()
         secrets.write("saved", account: "token")
 

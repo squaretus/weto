@@ -3,29 +3,17 @@ import AppKit
 import WetoCore
 import WetoSystem
 
-/// Выгрузка и полное удаление приложения.
-///
-/// Обе операции завершают процесс, поэтому убирать за собой надо до выхода.
-/// Порядок важен: сначала снимается LaunchAgent, иначе launchd поднимет
-/// приложение обратно раньше, чем закончится удаление файлов.
 public enum Maintenance {
 
-    /// Что удалять при полном сносе. Порядок отражает порядок выполнения.
     public struct Report: Equatable, Sendable {
         public var removed: [String] = []
         public var failed: [String] = []
     }
 
-    /// Снимает автозапуск, оставляя файлы и настройки нетронутыми.
     public static func unload() {
         LaunchAgentController.disable()
     }
 
-    /// Полное удаление: автозапуск, бандл, настройки, токен, кэши, журнал.
-    ///
-    /// Бандл сносится последним и через отложенный шелл: процесс не может
-    /// удалить собственный исполняемый файл и остаться работоспособным,
-    /// поэтому удаление происходит уже после выхода.
     @discardableResult
     public static func uninstall() -> Report {
         var report = Report()
@@ -63,17 +51,11 @@ public enum Maintenance {
         return report
     }
 
-    // MARK: - Private
-
-    /// Путь к `.app`, если приложение действительно запущено из бандла.
-    /// При запуске голого бинарника (`swift run`) удалять нечего.
     private static func bundlePathToRemove() -> String? {
         let path = Bundle.main.bundlePath
         return path.hasSuffix(".app") ? path : nil
     }
 
-    /// Удаление бандла после выхода: отсоединённый процесс ждёт исчезновения
-    /// родителя и только затем сносит каталог.
     private static func scheduleBundleRemoval(at path: String) {
         let pid = ProcessInfo.processInfo.processIdentifier
         let script = """

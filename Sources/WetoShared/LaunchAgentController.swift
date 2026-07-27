@@ -2,14 +2,6 @@ import Foundation
 import Darwin
 import AppKit
 
-/// Автозапуск через пользовательский LaunchAgent.
-///
-/// Агент ставится в `~/Library/LaunchAgents` и потому не требует root —
-/// в отличие от системного `/Library/LaunchAgents`, который появится
-/// вместе с PKG-установщиком.
-///
-/// `KeepAlive = true` осознанно: падение сторожевого приложения означает
-/// потерю защиты, поэтому launchd обязан поднимать его обратно.
 public enum LaunchAgentController {
 
     public static let serviceName = "com.weto.app"
@@ -19,7 +11,6 @@ public enum LaunchAgentController {
             .appendingPathComponent("Library/LaunchAgents/\(serviceName).plist")
     }
 
-    /// Путь к исполняемому файлу внутри текущего бандла.
     private static var executablePath: String? {
         Bundle.main.executablePath
     }
@@ -28,8 +19,6 @@ public enum LaunchAgentController {
         FileManager.default.fileExists(atPath: plistPath)
     }
 
-    /// Установлен ли агент и указывает ли он на *этот* бандл.
-    /// Расхождение возможно после переноса приложения в другую папку.
     public static var pointsAtCurrentBundle: Bool {
         guard let executablePath,
               let data = FileManager.default.contents(atPath: plistPath),
@@ -61,8 +50,6 @@ public enum LaunchAgentController {
         ), (try? data.write(to: URL(fileURLWithPath: plistPath))) != nil
         else { return false }
 
-        // bootout перед bootstrap: launchd отказывается перезагружать
-        // уже зарегистрированную службу и возвращает ошибку 5.
         runLaunchctl(["bootout", "gui/\(getuid())/\(serviceName)"])
         return runLaunchctl(["bootstrap", "gui/\(getuid())", plistPath])
     }
@@ -73,8 +60,6 @@ public enum LaunchAgentController {
         try? FileManager.default.removeItem(atPath: plistPath)
         return true
     }
-
-    // MARK: - Private
 
     @discardableResult
     private static func runLaunchctl(_ arguments: [String]) -> Bool {

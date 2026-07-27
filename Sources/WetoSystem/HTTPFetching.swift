@@ -1,7 +1,6 @@
 import Foundation
 import WetoCore
 
-/// Граница системы: единственный способ, которым проект ходит в сеть.
 public protocol HTTPFetching: Sendable {
     func data(from url: URL, headers: [String: String]) async throws -> Data
 }
@@ -16,8 +15,6 @@ public enum HTTPFetchError: LocalizedError {
     }
 }
 
-/// Реальная реализация. Кэш URLSession отключён намеренно: устаревший ответ
-/// гео-сервиса — это ровно та ситуация, от которой защищает всё приложение.
 public struct URLSessionHTTPFetcher: HTTPFetching {
 
     private let session: URLSession

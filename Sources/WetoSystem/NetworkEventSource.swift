@@ -4,30 +4,24 @@ import SystemConfiguration
 import AppKit
 import WetoCore
 
-/// Что заставило пересчитать состояние охраны.
 public enum GuardTrigger: Equatable, Sendable {
-    /// Сменился сетевой путь: Wi-Fi, кабель, сотовый.
+
     case networkPath
-    /// Изменилась сетевая конфигурация: подъём или падение VPN, смена default route.
+
     case dynamicStore
-    /// Пробуждение из сна.
+
     case wake
-    /// Запустилось приложение — возможно, одна из целей.
+
     case appLaunched(bundleID: String)
-    /// Фоновый такт по таймеру.
+
     case tick
 }
 
-/// Граница системы: источник триггеров пересчёта.
 public protocol NetworkEventSourcing: AnyObject {
     func start(handler: @escaping @Sendable (GuardTrigger) -> Void)
     func stop()
 }
 
-/// Слушает `NWPathMonitor`, `SCDynamicStore` и `NSWorkspace`.
-///
-/// Наблюдатели `NSWorkspace` подписываются через `addObserver` со stored token,
-/// а не через async sequence: `Notification` не `Sendable` под Swift 6.
 public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.weto.events")
@@ -74,8 +68,6 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
         observerTokens.removeAll()
     }
 
-    // MARK: - Private
-
     fileprivate func emit(_ trigger: GuardTrigger) {
         lock.lock()
         let current = handler
@@ -112,8 +104,6 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
             nil, "com.weto.events" as CFString, callback, &context
         ) else { return }
 
-        // Глобальный IPv4 ловит смену default route (подъём и падение VPN),
-        // ключи сервисов — появление и пропажу адреса, Link — кабель.
         let patterns = [
             "State:/Network/Global/IPv4",
             "State:/Network/Service/[^/]+/IPv4",

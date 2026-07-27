@@ -4,13 +4,6 @@ import AppKit
 import WetoCore
 import WetoSystem
 
-/// Проверка обновлений через GitHub Releases.
-///
-/// Установка пока не автоматическая: тихий `installer -pkg` требует root,
-/// то есть привилегированного демона и PKG-установщика. Пока приложение
-/// ставится копированием бандла, честнее показать, что версия устарела,
-/// и открыть страницу релиза, чем делать вид, что обновление умеет само себя
-/// поставить.
 @Observable
 @MainActor
 public final class UpdateVM {
@@ -20,10 +13,7 @@ public final class UpdateVM {
         case checking
         case upToDate(String)
         case available(UpdateInfo)
-        /// В репозитории ещё нет ни одного релиза. Отдельно от `failed`,
-        /// потому что это нормальное состояние свежего проекта, а не поломка:
-        /// GitHub отвечает на такой запрос 404, и без разбора кода
-        /// пользователь видел бы красную ошибку на ровном месте.
+
         case noReleases
         case failed(String)
     }
@@ -68,8 +58,6 @@ public final class UpdateVM {
         else { return }
         NSWorkspace.shared.open(url)
     }
-
-    // MARK: - Private
 
     private func fetchLatest() async -> State {
         guard let url = URL(string: ReleaseParser.latestReleaseURL) else {

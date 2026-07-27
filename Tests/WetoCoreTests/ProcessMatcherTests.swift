@@ -23,8 +23,6 @@ final class ProcessMatcherTests: XCTestCase {
         .init(pid: 104, parentPID: 1, executablePath: "/Applications/TargetExtra.app/Contents/MacOS/TargetExtra"),
     ]
 
-    // MARK: - Приложения
-
     func test_matches_main_binary_and_nested_helpers() {
         let pids = ProcessMatcher.pids(
             in: processes, rules: [app("/Applications/Target.app", name: "Target")]
@@ -33,8 +31,7 @@ final class ProcessMatcherTests: XCTestCase {
     }
 
     func test_does_not_match_sibling_bundle_with_shared_prefix() {
-        // "/Applications/TargetExtra.app" начинается с "/Applications/Target",
-        // но целью не является — сравнение обязано учитывать границу пути.
+
         let pids = ProcessMatcher.pids(
             in: processes, rules: [app("/Applications/Target.app", name: "Target")]
         )
@@ -60,8 +57,6 @@ final class ProcessMatcherTests: XCTestCase {
         XCTAssertTrue(ProcessMatcher.pids(in: processes, rules: []).isEmpty)
     }
 
-    // MARK: - Имена целей в результате
-
     func test_matched_processes_carry_target_name() {
         let matched = ProcessMatcher.matches(
             in: processes, rules: [app("/Applications/Target.app", name: "Target")]
@@ -77,11 +72,8 @@ final class ProcessMatcherTests: XCTestCase {
         XCTAssertEqual(matched.first?.targetName, "Первая")
     }
 
-    // MARK: - Бинарники и скрипты
-
     func test_binary_is_matched_by_exact_resolved_path() {
-        // Пользователь пишет "nano", но ядро сообщает "/usr/bin/pico":
-        // правило хранит уже разрешённый путь.
+
         let tree: [ProcessSnapshot] = [
             .init(pid: 700, parentPID: 1, executablePath: "/usr/bin/pico"),
             .init(pid: 701, parentPID: 1, executablePath: "/usr/bin/vim"),
@@ -94,8 +86,7 @@ final class ProcessMatcherTests: XCTestCase {
     }
 
     func test_script_is_matched_by_command_line_not_by_interpreter() {
-        // У Node-скрипта executablePath указывает на node: матчинг по пути
-        // выкосил бы все Node-процессы разом.
+
         let tree: [ProcessSnapshot] = [
             .init(pid: 800, parentPID: 1, executablePath: "/opt/homebrew/bin/node",
                   arguments: "node /opt/homebrew/lib/qwen/cli.js chat"),
@@ -116,8 +107,6 @@ final class ProcessMatcherTests: XCTestCase {
             in: tree, rules: [script("/opt/homebrew/lib/qwen/cli.js", name: "qwen")]
         ).isEmpty)
     }
-
-    // MARK: - Дочерние процессы
 
     func test_children_of_a_matched_process_are_included_with_parent_name() {
         let tree: [ProcessSnapshot] = [
@@ -143,8 +132,7 @@ final class ProcessMatcherTests: XCTestCase {
     }
 
     func test_cycle_in_process_tree_does_not_hang() {
-        // Гонка между перечислением и переиспользованием pid теоретически
-        // способна дать самоссылающегося родителя — обход обязан завершиться.
+
         let tree: [ProcessSnapshot] = [
             .init(pid: 100, parentPID: 200, executablePath: "/usr/bin/pico"),
             .init(pid: 200, parentPID: 100, executablePath: "/bin/sh"),
@@ -154,8 +142,7 @@ final class ProcessMatcherTests: XCTestCase {
     }
 
     func test_zero_parent_pid_does_not_create_a_phantom_root() {
-        // parentPID == 0 означает «не удалось получить»; такие процессы
-        // не должны склеиваться в общее поддерево.
+
         let tree: [ProcessSnapshot] = [
             .init(pid: 100, parentPID: 0, executablePath: "/usr/bin/pico"),
             .init(pid: 200, parentPID: 0, executablePath: "/usr/bin/vim"),

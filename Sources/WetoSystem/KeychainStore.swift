@@ -1,19 +1,12 @@
 import Foundation
 import Security
 
-/// Граница системы: хранение секретов.
 public protocol SecretStoring: Sendable {
     func read(account: String) -> String?
     @discardableResult
     func write(_ value: String?, account: String) -> Bool
 }
 
-/// Потокобезопасная коробка для токена.
-///
-/// `SettingsStore` изолирован главным актором, а `GeoProbe` — актор со своим
-/// исполнительным контекстом. Читать `@MainActor`-свойство из него нельзя,
-/// а `MainActor.assumeIsolated` в этой точке уронил бы процесс. Коробка —
-/// самый дешёвый корректный способ передать значение через границу акторов.
 public final class TokenBox: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: String?
@@ -26,10 +19,6 @@ public final class TokenBox: @unchecked Sendable {
     }
 }
 
-/// Обёртка над `kSecClassGenericPassword`.
-///
-/// Токен ipinfo лежит здесь, а не в `UserDefaults`: plist настроек читается
-/// любым процессом пользователя и попадает в бэкапы открытым текстом.
 public struct KeychainStore: SecretStoring {
 
     private let service: String
@@ -71,8 +60,6 @@ public struct KeychainStore: SecretStoring {
         insert[kSecValueData as String] = data
         return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
     }
-
-    // MARK: - Private
 
     private func baseQuery(account: String) -> [String: Any] {
         [

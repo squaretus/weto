@@ -1,7 +1,7 @@
 # weto
 
 Приложение в менюбаре macOS: завершает процессы выбранных приложений, бинарников и команд,
-как только компьютер перестаёт выходить в сеть через корпоративный VPN. Swift 5.9, SwiftUI,
+как только компьютер перестаёт выходить в сеть через заданный VPN. Swift 5.9, SwiftUI,
 Swift Package Manager, macOS 26+.
 
 ## Запуск
@@ -17,8 +17,6 @@ scripts/build.sh 0.1.0         # PKG-установщик → .build/release_bui
 ## Документация
 
 - Карта проекта: `.claude/rules/ARCHITECTURE.md`
-- Дизайн и обоснования решений: `docs/superpowers/specs/2026-07-27-weto-design.md`
-- План реализации: `docs/superpowers/plans/2026-07-27-weto.md`
 
 @.claude/rules/ARCHITECTURE.md
 

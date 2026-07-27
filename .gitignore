@@ -14,3 +14,6 @@ DerivedData/
 
 # Локальные настройки инструментов
 .claude/settings.local.json
+
+# Планы и спеки для агентов — не часть репозитория
+docs/superpowers/

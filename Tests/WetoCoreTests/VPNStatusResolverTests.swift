@@ -3,7 +3,6 @@ import XCTest
 
 final class VPNStatusResolverTests: XCTestCase {
 
-    /// Снимок снят с машины владельца 2026-07-27, см. раздел 13 спеки.
     private let snapshot = NetworkSnapshot(
         services: [
             .init(uuid: "108E2488", name: "Wi-Fi", activeInterface: "en0"),
@@ -21,7 +20,7 @@ final class VPNStatusResolverTests: XCTestCase {
     }
 
     func test_unknown_service_name_is_down() {
-        // Сервис удалили из системных настроек, а в наших настройках он остался.
+
         XCTAssertEqual(VPNStatusResolver.status(serviceName: "Ghost", in: snapshot), .down)
     }
 
@@ -37,8 +36,7 @@ final class VPNStatusResolverTests: XCTestCase {
     }
 
     func test_active_service_not_holding_default_route_is_up_but_not_primary() {
-        // Tailscale поднят, но default route держит Happ — ровно тот случай,
-        // ради которого проверяется PrimaryService.
+
         XCTAssertEqual(
             VPNStatusResolver.status(serviceName: "Tailscale", in: snapshot),
             .up(isPrimary: false)
@@ -54,8 +52,7 @@ final class VPNStatusResolverTests: XCTestCase {
     }
 
     func test_candidate_names_are_sorted_case_insensitively_and_unique() {
-        // Регистр не должен влиять на порядок: "iPhone" стоит между "Happ" и "KARO",
-        // а не в конце списка, как было бы при сортировке по скалярам Unicode.
+
         XCTAssertEqual(
             snapshot.vpnCandidateNames,
             ["Happ", "iPhone", "KARO", "Tailscale", "Thunderbolt Bridge", "Wi-Fi"]

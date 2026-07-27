@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import WetoShared
 
-/// Гейт от повторного запуска бинарника напрямую из терминала или отладчика.
 private final class SingleInstanceGuard {
     static let portName = "com.weto.app.singleton" as CFString
     private var port: CFMessagePort?
@@ -15,13 +14,6 @@ private final class SingleInstanceGuard {
     }
 }
 
-/// Владелец жизненного цикла охраны.
-///
-/// Старт живёт здесь, а НЕ на `.task` у содержимого `MenuBarExtra`: при стиле
-/// `.window` SwiftUI создаёт содержимое попапа лениво, только при первом клике
-/// по иконке. Для сторожевого приложения это означало бы, что защиты нет, пока
-/// пользователь не заглянул в меню. Проверено экспериментально: цель выживала
-/// при заблокированной стране до открытия попапа.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -33,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
-        // Приложение живёт только в менюбаре, иконки в Dock у него нет.
+
         NSApplication.shared.setActivationPolicy(.accessory)
         coordinator.start()
     }

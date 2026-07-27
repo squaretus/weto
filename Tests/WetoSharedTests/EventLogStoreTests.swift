@@ -63,7 +63,7 @@ final class EventLogStoreTests: XCTestCase {
     }
 
     func test_capacity_is_ten_records() {
-        // Требование владельца: журнал держит ровно десять последних записей.
+
         XCTAssertEqual(Constants.eventLogCapacity, 10)
 
         let store = EventLogStore(defaults: defaults)

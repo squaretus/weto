@@ -2,9 +2,6 @@ import XCTest
 @testable import WetoSystem
 import WetoCore
 
-/// Тест работает с живым SCDynamicStore, поэтому проверяет структурные
-/// инварианты, а не конкретные сервисы: на машине разработчика и на CI-раннере
-/// набор интерфейсов разный.
 final class NetworkSnapshotReaderTests: XCTestCase {
 
     func test_every_service_has_non_empty_uuid_and_name() {
@@ -41,8 +38,7 @@ final class NetworkSnapshotReaderTests: XCTestCase {
     }
 
     func test_resolver_consumes_reader_output_end_to_end() {
-        // Сквозная проверка связки: резолвер должен уметь работать с тем,
-        // что реально отдаёт система, а не только с рукописным снимком.
+
         let snapshot = NetworkSnapshotReader().snapshot()
         for name in snapshot.vpnCandidateNames {
             let status = VPNStatusResolver.status(serviceName: name, in: snapshot)

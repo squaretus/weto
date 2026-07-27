@@ -3,8 +3,6 @@ import XCTest
 import WetoCore
 import WetoSystem
 
-// MARK: - Фейки границ
-
 private struct StubSnapshotReader: NetworkSnapshotReading {
     let snapshotValue: NetworkSnapshot
     func snapshot() -> NetworkSnapshot { snapshotValue }
@@ -32,7 +30,6 @@ private struct StubLocator: ProcessLocating {
     func allProcesses(includeArguments: Bool) -> [ProcessSnapshot] { processes }
 }
 
-/// Локатор с изменяемым списком процессов — для проверки перезапуска цели.
 private final class MutableLocator: ProcessLocating, @unchecked Sendable {
     let bundlePaths: [String: String]
     var processes: [ProcessSnapshot]
@@ -46,8 +43,6 @@ private final class MutableLocator: ProcessLocating, @unchecked Sendable {
     func allProcesses(includeArguments: Bool) -> [ProcessSnapshot] { processes }
 }
 
-/// Разрешает записи по таблице: `.app` — приложение, `.js` — скрипт,
-/// остальное — бинарник. Повторяет поведение настоящего резолвера без диска.
 private struct StubResolver: TargetResolving {
     let mapping: [String: String]
 
@@ -104,8 +99,6 @@ private final class ManualEventSource: NetworkEventSourcing, @unchecked Sendable
     var isListening: Bool { handler != nil }
 }
 
-// MARK: - Тесты
-
 @MainActor
 final class GuardVMTests: XCTestCase {
 
@@ -124,7 +117,6 @@ final class GuardVMTests: XCTestCase {
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
     }
 
-    /// Снимок, где Happ поднят и держит default route.
     private func healthySnapshot() -> NetworkSnapshot {
         NetworkSnapshot(
             services: [
@@ -135,7 +127,6 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
-    /// Снимок, где Happ есть в системе, но туннель не поднят.
     private func vpnDownSnapshot() -> NetworkSnapshot {
         NetworkSnapshot(
             services: [
@@ -213,8 +204,6 @@ final class GuardVMTests: XCTestCase {
                        events: events, settings: settings, log: log)
     }
 
-    // MARK: - Локальный путь: сеть не трогаем
-
     func test_vpn_down_kills_targets_without_probing_network() async {
         let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome())
 
@@ -249,8 +238,6 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.state, .disabled)
         XCTAssertTrue(h.killer.killedBatches.isEmpty)
     }
-
-    // MARK: - Сетевой путь
 
     func test_healthy_network_leads_to_safe_state_without_killing() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
@@ -316,8 +303,6 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(calls, 1, "пачка событий должна схлопнуться в одну пробу")
     }
 
-    // MARK: - Добивание перезапусков
-
     func test_target_relaunch_while_unsafe_is_killed_again() async {
         let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
@@ -330,8 +315,7 @@ final class GuardVMTests: XCTestCase {
     }
 
     func test_newly_launched_target_is_recorded_even_while_already_unsafe() async {
-        // Попытка поднять цель через час после падения VPN обязана оставить след:
-        // журнал — это форензика, а не просто индикатор первого события.
+
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
         settings.vpnServiceName = "Happ"
@@ -360,7 +344,6 @@ final class GuardVMTests: XCTestCase {
         vm.handle(.networkPath)
         XCTAssertEqual(log.events.count, 1)
 
-        // Цель перезапустилась под новым pid.
         locator.processes = [.init(pid: 777, executablePath: "\(targetPath)/Contents/MacOS/Target")]
         vm.handle(.tick)
 
@@ -376,8 +359,6 @@ final class GuardVMTests: XCTestCase {
 
         XCTAssertEqual(h.killer.killedBatches.count, 1)
     }
-
-    // MARK: - Отказ прав
 
     func test_eperm_is_surfaced_instead_of_being_swallowed() async {
         let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome())
@@ -403,11 +384,8 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.state, .unsafe(.vpnDown), "состояние всё равно небезопасное")
     }
 
-    // MARK: - Терминальные цели
-
     func test_symlinked_command_is_matched_by_resolved_path() async {
-        // Пользователь пишет "nano", а ядро сообщает "/usr/bin/pico":
-        // без разворачивания симлинка цель не нашлась бы.
+
         let h = makeHarness(
             snapshot: vpnDownSnapshot(),
             geo: geoOutcome(),
@@ -424,8 +402,7 @@ final class GuardVMTests: XCTestCase {
     }
 
     func test_script_target_is_matched_by_command_line_not_by_interpreter() async {
-        // qwen — Node-скрипт: executablePath у него указывает на node.
-        // Матчинг по пути выкосил бы все Node-процессы разом.
+
         let h = makeHarness(
             snapshot: vpnDownSnapshot(),
             geo: geoOutcome(),
@@ -457,7 +434,7 @@ final class GuardVMTests: XCTestCase {
     }
 
     func test_executable_only_targets_still_arm_the_guard() async {
-        // Целей-приложений нет, но команда задана — охрана обязана работать.
+
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
         settings.vpnServiceName = "Happ"
@@ -470,8 +447,6 @@ final class GuardVMTests: XCTestCase {
             .kill(.vpnDown)
         )
     }
-
-    // MARK: - Вид записи журнала
 
     func test_first_episode_event_is_termination_second_is_launch_block() async {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
@@ -497,18 +472,14 @@ final class GuardVMTests: XCTestCase {
             debounceInterval: 0.01
         )
 
-        // Цель работала в момент падения VPN.
         vm.handle(.networkPath)
         XCTAssertEqual(log.events.first?.kind, .terminated)
         XCTAssertEqual(log.events.first?.targetNames, [targetBundleID])
 
-        // Цель попыталась подняться, когда состояние уже небезопасное.
         locator.processes = [.init(pid: 777, executablePath: "\(targetPath)/Contents/MacOS/Target")]
         vm.handle(.tick)
         XCTAssertEqual(log.events.first?.kind, .launchBlocked)
     }
-
-    // MARK: - Служебное
 
     func test_available_vpn_names_come_from_snapshot() {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())

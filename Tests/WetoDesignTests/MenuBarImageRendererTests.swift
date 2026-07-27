@@ -12,8 +12,7 @@ final class MenuBarImageRendererTests: XCTestCase {
     }
 
     func test_image_is_not_a_template() {
-        // Шаблонные изображения перекрашиваются системой в монохром,
-        // а нам нужны и цвет флага, и цвет кружка статуса.
+
         XCTAssertFalse(MenuBarImageRenderer.image(flag: "🇰🇿", color: .systemGreen).isTemplate)
     }
 

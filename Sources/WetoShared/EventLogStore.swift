@@ -2,10 +2,6 @@ import Foundation
 import Observation
 import WetoCore
 
-/// Кольцевой журнал срабатываний в `UserDefaults`.
-///
-/// Базы данных в проекте нет: 200 записей — это единицы килобайт JSON,
-/// SQLite ради такого объёма не нужен.
 @Observable
 @MainActor
 public final class EventLogStore {
@@ -28,12 +24,10 @@ public final class EventLogStore {
         self.init(defaults: UserDefaults(suiteName: Constants.userDefaultsSuite) ?? .standard)
     }
 
-    /// Последние события для попапа менюбара.
     public var preview: [KillEvent] {
         Array(events.prefix(Constants.eventLogPreviewCount))
     }
 
-    /// Новое событие встаёт первым; хвост за пределами ёмкости отбрасывается.
     public func record(_ event: KillEvent) {
         events.insert(event, at: 0)
         if events.count > Constants.eventLogCapacity {
@@ -46,8 +40,6 @@ public final class EventLogStore {
         events.removeAll()
         persist()
     }
-
-    // MARK: - Private
 
     private func persist() {
         guard let data = try? JSONEncoder().encode(events) else { return }

@@ -61,8 +61,6 @@ struct StatusPopupView: View {
         )
     }
 
-    /// `BannerTone` живёт в `WetoShared`, тон компонента — в `WetoDesign`.
-    /// Слой VM намеренно не зависит от дизайн-модуля, поэтому маппинг здесь.
     private static func bannerTone(_ tone: BannerTone) -> WetoBanner<EmptyView>.Tone {
         switch tone {
         case .info:    return .info

@@ -4,9 +4,6 @@ import UniformTypeIdentifiers
 import WetoShared
 import WetoDesign
 
-/// Цели охраны одним списком: приложения, бинарники и команды терминала.
-/// Различие между ними — деталь реализации, пользователю про неё знать незачем;
-/// под каждой строкой видно, во что цель развернулась.
 struct TargetsSection: View {
     @Environment(AppCoordinator.self) private var coordinator
 
@@ -42,9 +39,6 @@ struct TargetsSection: View {
                 }
             }
 
-            // Поле без заголовка: в `Form` первый аргумент `TextField` уезжает
-            // в колонку подписей и ломает выравнивание строки. Подсказка
-            // задаётся через `prompt`, а колонка подписей выключается.
             HStack(spacing: 8) {
                 TextField("", text: $newTarget, prompt: Text("Приложение, бинарник, команда"))
                     .textFieldStyle(.roundedBorder)
@@ -66,8 +60,6 @@ struct TargetsSection: View {
         }
     }
 
-    // MARK: - Действия
-
     private func remove(_ entry: String) {
         coordinator.settings.targets = coordinator.settings.targets.filter { $0 != entry }
     }
@@ -79,8 +71,6 @@ struct TargetsSection: View {
         newTarget = ""
     }
 
-    /// Одна панель на оба случая: `.app` записывается bundle ID, обычный файл — путём.
-    /// Скрытые файлы включены, иначе до `/usr/bin` не добраться.
     private func pickFromDisk() {
         let panel = NSOpenPanel()
         panel.directoryURL = URL(fileURLWithPath: "/Applications")

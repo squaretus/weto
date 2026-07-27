@@ -3,8 +3,6 @@ import XCTest
 
 final class GuardPolicyTests: XCTestCase {
 
-    // MARK: - Хелперы
-
     private func config(
         vpn: String? = "Happ",
         blocked: Set<String> = ["RU"],
@@ -48,13 +46,9 @@ final class GuardPolicyTests: XCTestCase {
         )
     }
 
-    // MARK: - Безопасный путь
-
     func test_everything_aligned_is_safe() {
         XCTAssertEqual(GuardPolicy.decide(signals()), .safe)
     }
-
-    // MARK: - Шаг 0: охрана не работает
 
     func test_disabled_guard_is_always_safe_even_with_blocked_country() {
         let s = signals(enabled: false, vpn: .down, geo: geo(primary: "RU", confirmed: "RU"))
@@ -65,8 +59,6 @@ final class GuardPolicyTests: XCTestCase {
         let s = signals(vpn: .down, config: config(targets: []))
         XCTAssertEqual(GuardPolicy.decide(s), .safe)
     }
-
-    // MARK: - Шаги 1–3: локальные проверки VPN
 
     func test_vpn_not_configured_kills() {
         let s = signals(config: config(vpn: nil))
@@ -83,20 +75,15 @@ final class GuardPolicyTests: XCTestCase {
     }
 
     func test_vpn_check_precedes_geo_check() {
-        // VPN упал и гео тоже плохое — причина должна быть про VPN,
-        // потому что сетевая проба в этом случае не выполняется вовсе.
+
         let s = signals(vpn: .down, geo: .unavailable("timeout"))
         XCTAssertEqual(GuardPolicy.decide(s), .kill(.vpnDown))
     }
-
-    // MARK: - Шаг 4: ipinfo молчит
 
     func test_geo_unavailable_kills_with_reason_text() {
         let s = signals(geo: .unavailable("timeout"))
         XCTAssertEqual(GuardPolicy.decide(s), .kill(.geoUnavailable("timeout")))
     }
-
-    // MARK: - Шаг 5: чёрный список IP
 
     func test_blacklisted_ip_kills_even_when_country_is_allowed() {
         let s = signals(
@@ -107,8 +94,7 @@ final class GuardPolicyTests: XCTestCase {
     }
 
     func test_blacklist_precedes_country_check() {
-        // IP в чёрном списке И страна заблокирована — причина должна быть про IP,
-        // она точнее.
+
         let s = signals(
             geo: geo(ip: "198.51.100.231", primary: "RU", confirmed: "RU"),
             config: config(ranges: [IPRange("198.51.100.231")!])
@@ -120,8 +106,6 @@ final class GuardPolicyTests: XCTestCase {
         let s = signals(config: config(ranges: [IPRange("10.0.0.0/8")!]))
         XCTAssertEqual(GuardPolicy.decide(s), .safe)
     }
-
-    // MARK: - Шаги 6 и 8: заблокированная страна
 
     func test_blocked_primary_country_kills() {
         let s = signals(geo: geo(primary: "RU", confirmed: "RU"))
@@ -150,11 +134,8 @@ final class GuardPolicyTests: XCTestCase {
         )
     }
 
-    // MARK: - Шаг 7: строгий fail-closed на подтверждении
-
     func test_missing_confirmation_kills_even_when_ipinfo_says_allowed_country() {
-        // Осознанное решение владельца: одновременное падение ipwho.is и geojs
-        // убивает цели, хотя ipinfo уверенно сообщил безопасную страну.
+
         let s = signals(geo: geo(primary: "KZ", confirmed: nil, source: nil))
         XCTAssertEqual(GuardPolicy.decide(s), .kill(.confirmationUnavailable))
     }
@@ -166,8 +147,6 @@ final class GuardPolicyTests: XCTestCase {
             .kill(.blockedCountry(code: "RU", source: "ipinfo"))
         )
     }
-
-    // MARK: - Шаг 9: расхождение
 
     func test_country_conflict_kills() {
         let s = signals(geo: geo(primary: "KZ", confirmed: "DE"))

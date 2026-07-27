@@ -1,17 +1,6 @@
 import Foundation
 import AppKit
 
-/// Круглые флаги стран вместо эмодзи.
-///
-/// Источник — проект `HatScripts/circle-flags` через jsDelivr. Флаги приходят
-/// в SVG с уже вписанной круглой маской, поэтому обрезать ничего не нужно
-/// и края остаются гладкими на любом масштабе. `NSImage` разбирает SVG
-/// нативно — проверено на macOS 26.
-///
-/// Кэш двухуровневый: память для отрисовки без блокировок и диск, чтобы
-/// пережить перезапуск. Скачивание асинхронное и никогда не блокирует UI:
-/// пока картинки нет, лейбл показывает эмодзи. Это важно ещё и потому, что
-/// самый частый момент смены флага — падение VPN, когда сети может не быть вовсе.
 public final class FlagImageStore: @unchecked Sendable {
 
     public static let shared = FlagImageStore()
@@ -24,8 +13,7 @@ public final class FlagImageStore: @unchecked Sendable {
     private lazy var cacheDirectory: URL = {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        // Отдельный каталог от прежних прямоугольных PNG: формат сменился,
-        // и смешивать их в одной папке значило бы тянуть мёртвые файлы.
+
         let directory = base
             .appendingPathComponent("com.weto.app", isDirectory: true)
             .appendingPathComponent("flags-circle", isDirectory: true)
@@ -39,8 +27,6 @@ public final class FlagImageStore: @unchecked Sendable {
         self.session = session
     }
 
-    /// Картинка флага, если она уже есть в памяти или на диске.
-    /// `nil` означает «показывай эмодзи», а не ошибку.
     public func image(for countryCode: String) -> NSImage? {
         let code = countryCode.lowercased()
         guard code.count == 2 else { return nil }
@@ -61,8 +47,6 @@ public final class FlagImageStore: @unchecked Sendable {
         return image
     }
 
-    /// Ставит флаг в очередь на скачивание, если его ещё нет.
-    /// Повторные вызовы для одного кода схлопываются.
     public func prefetch(_ countryCode: String) {
         let code = countryCode.lowercased()
         guard code.count == 2, image(for: code) == nil else { return }
@@ -74,7 +58,6 @@ public final class FlagImageStore: @unchecked Sendable {
         }
         lock.unlock()
 
-        // Ветка gh-pages — та, что проект отдаёт как готовый набор флагов.
         let address = "https://cdn.jsdelivr.net/gh/HatScripts/circle-flags@gh-pages/flags/\(code).svg"
         guard let url = URL(string: address) else { return }
 

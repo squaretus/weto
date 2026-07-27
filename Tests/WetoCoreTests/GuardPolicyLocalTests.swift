@@ -1,7 +1,6 @@
 import XCTest
 @testable import WetoCore
 
-/// Проверка `decideLocal` — решения без обращения к сети.
 final class GuardPolicyLocalTests: XCTestCase {
 
     private func config(
@@ -70,9 +69,7 @@ final class GuardPolicyLocalTests: XCTestCase {
     }
 
     func test_local_and_full_decisions_agree_on_local_reasons() {
-        // Инвариант: если локальная проверка вынесла вердикт, полная обязана
-        // вынести тот же самый. Иначе цикл вёл бы себя по-разному в зависимости
-        // от того, дошли ли мы до сети.
+
         let cases: [(VPNStatus, GuardConfig)] = [
             (.down, config()),
             (.up(isPrimary: false), config()),

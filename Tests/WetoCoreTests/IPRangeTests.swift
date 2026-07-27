@@ -33,7 +33,7 @@ final class IPRangeTests: XCTestCase {
     }
 
     func test_host_bits_outside_prefix_are_ignored() {
-        // 10.5.5.5/8 и 10.0.0.0/8 — одна и та же сеть.
+
         XCTAssertEqual(IPRange("10.5.5.5/8")?.networkBytes, IPRange("10.0.0.0/8")?.networkBytes)
         XCTAssertEqual(IPRange("10.5.5.5/8")?.prefixLength, IPRange("10.0.0.0/8")?.prefixLength)
     }

@@ -3,9 +3,6 @@ import Observation
 import WetoCore
 import WetoSystem
 
-/// Цвет индикатора в менюбаре.
-///
-/// Жёлтый и красный оба означают, что цели убиты; цвет различает причину.
 public enum GuardStatusColor: Equatable, Sendable {
     case green, yellow, red, grey
 }
@@ -23,8 +20,6 @@ public enum GuardState: Equatable, Sendable {
         }
     }
 
-    /// Флаг показывается только когда страна известна. При падении VPN сетевая
-    /// проба не выполняется вовсе, показывать нечего.
     public func flag(lastReading: GeoReading?) -> String {
         switch self {
         case .disabled:
@@ -42,27 +37,16 @@ public enum GuardState: Equatable, Sendable {
     }
 }
 
-/// Цикл охраны.
-///
-/// Ключевое разделение: `handle` сначала пробует принять решение локально
-/// (`GuardPolicy.decideLocal`) — это бесплатно и мгновенно. В сеть идём только
-/// когда локальных оснований нет, и с коалесценцией событий, потому что при
-/// переключении Wi-Fi система выдаёт пачку уведомлений за секунду.
 @Observable
 @MainActor
 public final class GuardVM {
 
-    // MARK: - Наблюдаемое состояние
-
     public private(set) var state: GuardState = .disabled
     public private(set) var lastReading: GeoReading?
     public private(set) var lastEvaluation: Date?
-    /// Заполняется, когда `kill` вернул EPERM: процесс принадлежит другому
-    /// пользователю или root. Это не проглатывается, а показывается в UI.
+
     public private(set) var permissionFailure: String?
     public private(set) var availableVPNNames: [String] = []
-
-    // MARK: - Зависимости
 
     @ObservationIgnored private let settings: SettingsStore
     @ObservationIgnored private let eventLog: EventLogStore
@@ -75,9 +59,6 @@ public final class GuardVM {
     @ObservationIgnored private let events: NetworkEventSourcing
     @ObservationIgnored private let debounceInterval: TimeInterval
 
-    /// Процессы, уже отражённые в журнале в текущем небезопасном эпизоде.
-    /// Нужны, чтобы повторные добивания тех же pid не спамили журнал,
-    /// но запуск новой цели фиксировался обязательно.
     @ObservationIgnored private var recordedPIDs: Set<Int32> = []
 
     @ObservationIgnored private var probeTask: Task<Void, Never>?
@@ -114,8 +95,6 @@ public final class GuardVM {
         watchdogTask?.cancel()
     }
 
-    // MARK: - Жизненный цикл
-
     public func start() {
         refreshVPNNames()
         events.start { [weak self] trigger in
@@ -132,8 +111,6 @@ public final class GuardVM {
         watchdogTask?.cancel(); watchdogTask = nil
     }
 
-    /// Код страны, который сейчас имеет смысл показывать в менюбаре.
-    /// `nil` — страна неизвестна: при падении VPN сетевая проба не выполняется.
     public var currentCountryCode: String? {
         switch state {
         case .disabled:
@@ -150,20 +127,15 @@ public final class GuardVM {
         }
     }
 
-    /// Полная выгрузка: снимает автозапуск и завершает само приложение.
-    /// Без снятия агента launchd поднял бы процесс обратно через секунду.
     public func unloadCompletely() {
         stop()
         LaunchAgentController.disable()
     }
 
-    /// Список имён сервисов для выпадающего списка в настройках.
     public func refreshVPNNames() {
         availableVPNNames = snapshotReader.snapshot().vpnCandidateNames
     }
 
-    /// Сколько процессов цели найдено прямо сейчас — показывается в настройках,
-    /// чтобы было видно, что охрана действительно видит цель.
     public func runningProcessCount(forTarget entry: String) -> Int {
         guard let rule = resolver.resolve(entry) else { return 0 }
         return ProcessMatcher.pids(
@@ -172,8 +144,6 @@ public final class GuardVM {
         ).count
     }
 
-    /// Во что развернулась цель — показывается в настройках, чтобы ловушки
-    /// с симлинками и скриптами были видны глазами.
     public func resolvedDescription(forTarget entry: String) -> String {
         guard let rule = resolver.resolve(entry) else { return "не найдено в системе" }
         switch rule.kind {
@@ -183,18 +153,15 @@ public final class GuardVM {
         }
     }
 
-    /// Человекочитаемое имя цели для списка настроек.
     public func displayName(forTarget entry: String) -> String {
         resolver.resolve(entry)?.displayName ?? entry
     }
 
-    // MARK: - Обработка триггеров
-
     public func handle(_ trigger: GuardTrigger) {
         if case .appLaunched(let bundleID) = trigger {
-            // Запуск постороннего приложения нас не касается.
+
             guard settings.targets.contains(bundleID) else { return }
-            // Цель поднялась при небезопасном состоянии — добиваем немедленно.
+
             if case .unsafe(let reason) = state {
                 enforce(reason: reason)
                 return
@@ -219,12 +186,9 @@ public final class GuardVM {
         scheduleProbe()
     }
 
-    /// Тестовый и служебный крючок: дождаться отложенной сетевой пробы.
     public func awaitPendingProbe() async {
         await probeTask?.value
     }
-
-    // MARK: - Сетевая проба
 
     private func scheduleProbe() {
         let interval = debounceInterval
@@ -246,8 +210,7 @@ public final class GuardVM {
 
         if case .resolved(let reading) = geo {
             lastReading = reading
-            // Картинка флага подтягивается заранее и асинхронно: к моменту,
-            // когда она понадобится в менюбаре, сети может уже не быть.
+
             FlagImageStore.shared.prefetch(reading.primaryCountry)
         }
 
@@ -258,8 +221,6 @@ public final class GuardVM {
             config: config
         )))
     }
-
-    // MARK: - Применение решения
 
     private func apply(_ decision: GuardDecision) {
         lastEvaluation = Date()
@@ -280,18 +241,10 @@ public final class GuardVM {
         }
     }
 
-    /// Находит и убивает процессы всех целей.
-    ///
-    /// В журнал попадают только процессы, которых там ещё не было в текущем
-    /// небезопасном эпизоде: повторные добивания одних и тех же pid молчат,
-    /// а запуск новой цели фиксируется обязательно — иначе попытка поднять
-    /// цель через полчаса после падения VPN не оставила бы следа.
     private func enforce(reason: UnsafeReason) {
         let rules = settings.targets.compactMap(resolver.resolve)
         guard !rules.isEmpty else { return }
 
-        // Командные строки читаем только когда среди целей есть скрипты:
-        // без них хватает путей, а чтение argv стоит на порядок дороже.
         let needsArguments = rules.contains { $0.kind == .script }
         let matched = ProcessMatcher.matches(
             in: locator.allProcesses(includeArguments: needsArguments),
@@ -309,13 +262,9 @@ public final class GuardVM {
         let fresh = matched.filter { terminated.contains($0.pid) && !recordedPIDs.contains($0.pid) }
         guard !fresh.isEmpty else { return }
 
-        // Первое срабатывание эпизода — цели работали и были завершены.
-        // Всё последующее — попытка запуститься при уже небезопасном состоянии.
         let kind: KillEventKind = recordedPIDs.isEmpty ? .terminated : .launchBlocked
         recordedPIDs.formUnion(fresh.map(\.pid))
 
-        // Порядок имён сохраняем как у целей в настройках, дубли убираем:
-        // потомки наследуют имя предка и иначе повторялись бы.
         var names: [String] = []
         for name in fresh.map(\.targetName) where !names.contains(name) { names.append(name) }
 
@@ -333,8 +282,6 @@ public final class GuardVM {
             killedCount: fresh.count
         )
     }
-
-    // MARK: - Таймеры
 
     private func startWatchdog() {
         guard watchdogTask == nil else { return }

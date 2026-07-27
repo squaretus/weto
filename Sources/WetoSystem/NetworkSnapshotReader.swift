@@ -2,17 +2,10 @@ import Foundation
 import SystemConfiguration
 import WetoCore
 
-/// Граница системы: чтение сетевой конфигурации.
 public protocol NetworkSnapshotReading: Sendable {
     func snapshot() -> NetworkSnapshot
 }
 
-/// Чтение сетевых сервисов из SCDynamicStore.
-///
-/// Три группы ключей, проверены на машине владельца:
-///   `Setup:/Network/Service/<uuid>`       → `UserDefinedName` (человекочитаемое имя)
-///   `State:/Network/Service/<uuid>/IPv4`  → `InterfaceName` (ключа нет = туннель не поднят)
-///   `State:/Network/Global/IPv4`          → `PrimaryService` (кто держит default route)
 public struct NetworkSnapshotReader: NetworkSnapshotReading {
 
     private static let servicePattern = "Setup:/Network/Service/[^/]+/IPv4"
@@ -36,13 +29,10 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
         return NetworkSnapshot(services: services, primaryServiceUUID: primaryService(store: store))
     }
 
-    // MARK: - Private
-
     private func serviceUUIDs(store: SCDynamicStore) -> [String] {
         guard let keys = SCDynamicStoreCopyKeyList(store, Self.servicePattern as CFString) as? [String]
         else { return [] }
 
-        // "Setup:/Network/Service/<uuid>/IPv4" → "<uuid>"
         var seen = Set<String>()
         var result: [String] = []
         for key in keys {

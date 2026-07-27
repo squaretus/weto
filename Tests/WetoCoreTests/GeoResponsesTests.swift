@@ -3,8 +3,6 @@ import XCTest
 
 final class GeoResponsesTests: XCTestCase {
 
-    // Ответы сняты с машины владельца 2026-07-27.
-
     private let ipinfoJSON = Data("""
     {"ip":"203.0.113.28","asn":"AS49791","as_name":"Newserverlife LLC",
      "as_domain":"3hcloud.com","country_code":"KZ","country":"Kazakhstan",
@@ -35,7 +33,7 @@ final class GeoResponsesTests: XCTestCase {
     }
 
     func test_ipwhois_failure_response_yields_nil() throws {
-        // Сервис отвечает 200 с success:false — статус-кода недостаточно.
+
         let failure = Data(#"{"ip":"1.1.1.1","success":false,"message":"Invalid IP"}"#.utf8)
         XCTAssertNil(try GeoResponses.decodeIPWhoIs(failure))
     }

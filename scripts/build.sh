@@ -1,6 +1,4 @@
 #!/bin/bash
-# Релизная сборка: .app + PKG-установщик.
-# Для локального запуска без установки есть scripts/make-app.sh.
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -12,7 +10,6 @@ OUT=".build/release_build"
 
 echo "=== weto $VERSION — сборка ==="
 
-# Подстановка версии в исходники и Info.plist.
 sed -i '' "s/public static let appVersion = \".*\"/public static let appVersion = \"$VERSION\"/" \
     Sources/WetoCore/Constants.swift
 sed -i '' "s|<string>[0-9]*\.[0-9]*\.[0-9]*</string>|<string>$VERSION</string>|g" \
@@ -23,7 +20,6 @@ swift build -c release --product WetoMenuBar
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
-# ── .app ────────────────────────────────────────────────
 APP="$OUT/_app/Weto.app/Contents"
 mkdir -p "$APP/MacOS" "$APP/Resources"
 cp .build/release/WetoMenuBar "$APP/MacOS/"
@@ -32,10 +28,8 @@ cp Resources/uninstall-weto.sh "$APP/Resources/"
 chmod +x "$APP/Resources/uninstall-weto.sh"
 cp Resources/AppIcon.icns "$APP/Resources/" 2>/dev/null || true
 
-# Ad-hoc подпись: без неё macOS не отдаёт приложению Keychain и уведомления.
 codesign --force --sign - "$OUT/_app/Weto.app" 2>/dev/null || true
 
-# ── payload PKG ─────────────────────────────────────────
 ROOT="$OUT/_pkg-root"
 SCRIPTS="$OUT/_pkg-scripts"
 mkdir -p "$ROOT/Applications" "$ROOT/Library/LaunchAgents" "$SCRIPTS"
