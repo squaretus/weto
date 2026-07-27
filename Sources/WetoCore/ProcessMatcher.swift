@@ -98,9 +98,10 @@ public enum ProcessMatcher {
             while prefix.hasSuffix("/") { prefix.removeLast() }
             return process.executablePath.hasPrefix(prefix + "/")
         case .binary:
-            return process.executablePath == rule.path
+            return rule.launchPaths.contains(process.executablePath)
         case .script:
-            return process.arguments?.contains(rule.path) ?? false
+            guard let arguments = process.arguments else { return false }
+            return rule.launchPaths.contains { arguments.contains($0) }
         }
     }
 

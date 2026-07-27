@@ -210,6 +210,10 @@ public final class GuardVM {
         )
         let geo = await geoProbe.probe()
 
+        // Проба, отменённая следующим сетевым событием, не означает, что гео недоступно:
+        // решение примет тот запрос, который её вытеснил.
+        guard !Task.isCancelled else { return }
+
         if case .resolved(let reading) = geo {
             lastReading = reading
 

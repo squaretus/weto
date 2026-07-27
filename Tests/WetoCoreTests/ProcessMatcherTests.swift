@@ -11,8 +11,11 @@ final class ProcessMatcherTests: XCTestCase {
         TargetRule(entry: name, displayName: name, kind: .binary, path: path)
     }
 
-    private func script(_ path: String, name: String) -> TargetRule {
-        TargetRule(entry: name, displayName: name, kind: .script, path: path)
+    private func script(_ path: String, name: String, launchPaths: [String] = []) -> TargetRule {
+        TargetRule(
+            entry: name, displayName: name, kind: .script,
+            path: path, launchPaths: launchPaths
+        )
     }
 
     private let processes: [ProcessSnapshot] = [
@@ -149,6 +152,28 @@ final class ProcessMatcherTests: XCTestCase {
         ]
         let pids = ProcessMatcher.pids(in: tree, rules: [binary("/usr/bin/pico", name: "nano")])
         XCTAssertEqual(pids, [100])
+    }
+
+    func test_script_is_matched_by_the_symlink_it_was_launched_with() {
+
+        let tree: [ProcessSnapshot] = [
+            .init(
+                pid: 100, parentPID: 1,
+                executablePath: "/opt/homebrew/opt/node/bin/node",
+                arguments: "/opt/homebrew/opt/node/bin/node /opt/homebrew/bin/qwen"
+            )
+        ]
+
+        let rule = script(
+            "/opt/homebrew/Cellar/qwen-code/0.14.0/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js",
+            name: "qwen",
+            launchPaths: ["/opt/homebrew/bin/qwen"]
+        )
+
+        XCTAssertEqual(
+            ProcessMatcher.pids(in: tree, rules: [rule]), [100],
+            "в argv стоит симлинк из PATH, а не то, во что он разворачивается"
+        )
     }
 
     func test_running_targets_report_one_row_per_target_with_process_count() {

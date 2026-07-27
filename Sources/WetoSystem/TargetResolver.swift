@@ -63,7 +63,8 @@ public struct TargetResolver: TargetResolving {
                 entry: entry,
                 displayName: entry.contains("/") ? (entry as NSString).lastPathComponent : entry,
                 kind: isScript ? .script : .binary,
-                path: real
+                path: real,
+                launchPaths: [candidate]
             )
         }
         return nil

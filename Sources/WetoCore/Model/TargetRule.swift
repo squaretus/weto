@@ -15,11 +15,27 @@ public struct TargetRule: Equatable, Sendable {
 
     public let path: String
 
-    public init(entry: String, displayName: String, kind: TargetKind, path: String) {
+    /// Пути, по которым цель может встретиться в аргументах процесса: сам путь запуска
+    /// (обычно симлинк в PATH) и всё, во что он разворачивается.
+    public let launchPaths: [String]
+
+    public init(
+        entry: String,
+        displayName: String,
+        kind: TargetKind,
+        path: String,
+        launchPaths: [String] = []
+    ) {
         self.entry = entry
         self.displayName = displayName
         self.kind = kind
         self.path = path
+
+        var paths = [path]
+        for candidate in launchPaths where !paths.contains(candidate) {
+            paths.append(candidate)
+        }
+        self.launchPaths = paths
     }
 }
 

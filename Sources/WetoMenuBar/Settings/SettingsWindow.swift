@@ -30,6 +30,13 @@ struct SettingsWindow: View {
     @State private var launchAtLogin = LaunchAgentController.isInstalled
     @State private var tokenDraft = ""
     @State private var isHoveringGithub = false
+    @FocusState private var isTokenFocused: Bool
+
+    private var maskedToken: String {
+        let token = coordinator.settings.ipinfoToken
+        guard token.count > 4 else { return String(repeating: "•", count: token.count) }
+        return String(repeating: "•", count: token.count - 4) + token.suffix(4)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: WetoTokens.space3) {
@@ -67,7 +74,7 @@ struct SettingsWindow: View {
         .background(SettingsWindowConfigurator())
         .onAppear {
             coordinator.guardVM.refreshVPNNames()
-            tokenDraft = coordinator.settings.ipinfoToken
+            tokenDraft = maskedToken
         }
     }
 
@@ -159,13 +166,18 @@ struct SettingsWindow: View {
                         .fixedSize()
                         .padding(.trailing, WetoTokens.space5 - WetoTokens.space3)
 
-                    SecureField("", text: $tokenDraft, prompt: Text("Ключ ipinfo.io"))
+                    TextField("", text: $tokenDraft, prompt: Text("Ключ ipinfo.io"))
                         .textFieldStyle(WetoFieldStyle())
                         .labelsHidden()
                         .onSubmit { coordinator.settings.ipinfoToken = tokenDraft }
                         .onChange(of: tokenDraft) { _, value in
+                            guard value != maskedToken else { return }
                             coordinator.settings.ipinfoToken = value
                         }
+                        .onChange(of: isTokenFocused) { _, focused in
+                            tokenDraft = focused ? coordinator.settings.ipinfoToken : maskedToken
+                        }
+                        .focused($isTokenFocused)
                 }
 
                 WetoDivider()
