@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Установщик мог «переехать» на другой бандл com.weto.app: тогда LaunchAgent указывает
+# в пустоту и охраны нет. Молча это пропускать нельзя — установка обязана упасть.
+if [ ! -x "/Applications/Weto.app/Contents/MacOS/WetoMenuBar" ]; then
+    echo "Weto.app не оказался в /Applications — установка прервана" >&2
+    exit 1
+fi
+
 chown root:wheel /Library/LaunchAgents/com.weto.app.plist
 chmod 644 /Library/LaunchAgents/com.weto.app.plist
 
