@@ -2,7 +2,12 @@ import Foundation
 
 public enum Constants {
 
-    public static let appVersion = "0.1.0"
+    /// Версия берётся из Info.plist собранного бандла, а не хранится в исходнике:
+    /// релизный скрипт больше не правит отслеживаемые файлы через sed. При запуске
+    /// без бандла (`swift run`) версии нет — там честнее показать «dev».
+    public static let appVersion: String = {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    }()
 
     public static let defaultPollIntervalSeconds: TimeInterval = 5
 
