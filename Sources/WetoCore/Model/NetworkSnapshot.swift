@@ -30,6 +30,17 @@ public struct NetworkSnapshot: Equatable, Sendable {
         self.primaryServiceUUID = primaryServiceUUID
     }
 
+    /// Отпечаток снимка: меняется, как только меняется состав сервисов, их активность,
+    /// квалификация или владелец маршрута по умолчанию. По нему видно, устарел ли
+    /// прежний сетевой вердикт, — сравнивать сами снимки на равенство недостаточно
+    /// дёшево для горячего пути.
+    public var fingerprint: String {
+        let parts = services
+            .sorted { $0.uuid < $1.uuid }
+            .map { "\($0.uuid):\($0.activeInterface ?? "-"):\($0.isVPN ? "vpn" : "net")" }
+        return (parts + ["primary=\(primaryServiceUUID ?? "-")"]).joined(separator: "|")
+    }
+
     /// Одинаковые имена не склеиваются: выбор хранится по UUID, и два «Happ» — разные цели.
     public var vpnCandidates: [NetworkServiceSnapshot] {
         services.filter(\.isVPN).sorted {

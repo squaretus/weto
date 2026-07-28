@@ -15,6 +15,25 @@ public enum AppTheme: String, CaseIterable, Sendable {
     }
 }
 
+/// Изменение настройки, от которой зависит решение охраны. Публикуется синхронно
+/// на главном акторе: цель, добавленная при небезопасном состоянии, обязана быть
+/// завершена сразу, а не через тик поллинга.
+public struct GuardConfigurationChange: Equatable, Sendable {
+    public enum Field: Equatable, Sendable {
+        case guardEnabled
+        case targets
+        case vpnService
+        case ipinfoToken
+        case blacklist
+    }
+
+    public let field: Field
+
+    public init(field: Field) {
+        self.field = field
+    }
+}
+
 @Observable
 @MainActor
 public final class SettingsStore {
@@ -39,6 +58,9 @@ public final class SettingsStore {
     @ObservationIgnored private let secrets: SecretStoring
 
     @ObservationIgnored public let tokenBox = TokenBox()
+
+    @ObservationIgnored
+    private var guardChangeHandlers: [(GuardConfigurationChange) -> Void] = []
 
     public init(defaults: UserDefaults, secrets: SecretStoring) {
         self.defaults = defaults
@@ -67,7 +89,11 @@ public final class SettingsStore {
     private var _isEnabled: Bool
     public var isEnabled: Bool {
         get { _isEnabled }
-        set { _isEnabled = newValue; defaults.set(newValue, forKey: Key.isEnabled) }
+        set {
+            _isEnabled = newValue
+            defaults.set(newValue, forKey: Key.isEnabled)
+            emit(.guardEnabled)
+        }
     }
 
     private var _appTheme: AppTheme
@@ -79,7 +105,11 @@ public final class SettingsStore {
     private var _vpnServiceID: String?
     public var vpnServiceID: String? {
         get { _vpnServiceID }
-        set { _vpnServiceID = newValue; defaults.set(newValue, forKey: Key.vpnServiceID) }
+        set {
+            _vpnServiceID = newValue
+            defaults.set(newValue, forKey: Key.vpnServiceID)
+            emit(.vpnService)
+        }
     }
 
     /// Переносит выбор, сделанный прежней версией по имени сервиса, на устойчивый UUID.
@@ -101,7 +131,11 @@ public final class SettingsStore {
 
     public var targets: [String] {
         get { _targets }
-        set { _targets = newValue; defaults.set(newValue, forKey: Key.targets) }
+        set {
+            _targets = newValue
+            defaults.set(newValue, forKey: Key.targets)
+            emit(.targets)
+        }
     }
 
     private static func loadTargets(from defaults: UserDefaults) -> [String] {
@@ -121,13 +155,18 @@ public final class SettingsStore {
             let normalized = Array(Set(newValue.map { $0.uppercased() })).sorted()
             _blockedCountryCodes = normalized
             defaults.set(normalized, forKey: Key.blockedCountryCodes)
+            emit(.blacklist)
         }
     }
 
     private var _blockedIPRangeTexts: [String]
     public var blockedIPRangeTexts: [String] {
         get { _blockedIPRangeTexts }
-        set { _blockedIPRangeTexts = newValue; defaults.set(newValue, forKey: Key.blockedIPRangeTexts) }
+        set {
+            _blockedIPRangeTexts = newValue
+            defaults.set(newValue, forKey: Key.blockedIPRangeTexts)
+            emit(.blacklist)
+        }
     }
 
     private var _pollIntervalSeconds: TimeInterval
@@ -143,7 +182,19 @@ public final class SettingsStore {
             _ipinfoToken = newValue
             secrets.write(newValue.isEmpty ? nil : newValue, account: Self.tokenAccount)
             tokenBox.value = newValue.isEmpty ? nil : newValue
+            emit(.ipinfoToken)
         }
+    }
+
+    public func onGuardConfigurationChange(
+        _ handler: @escaping (GuardConfigurationChange) -> Void
+    ) {
+        guardChangeHandlers.append(handler)
+    }
+
+    private func emit(_ field: GuardConfigurationChange.Field) {
+        let change = GuardConfigurationChange(field: field)
+        for handler in guardChangeHandlers { handler(change) }
     }
 
     public var guardConfig: GuardConfig {
