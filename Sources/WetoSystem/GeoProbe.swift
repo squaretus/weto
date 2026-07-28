@@ -8,14 +8,16 @@ public protocol GeoProbing: Sendable {
 public actor GeoProbe: GeoProbing {
 
     private let fetcher: HTTPFetching
+    private let confirmationFetcher: HTTPFetching
     private let token: @Sendable () -> String?
 
-    private var cachedIP: String?
-    private var cachedCountry: String?
-    private var cachedSource: ConfirmSource?
-
-    public init(fetcher: HTTPFetching, token: @escaping @Sendable () -> String?) {
+    public init(
+        fetcher: HTTPFetching,
+        confirmationFetcher: HTTPFetching? = nil,
+        token: @escaping @Sendable () -> String?
+    ) {
         self.fetcher = fetcher
+        self.confirmationFetcher = confirmationFetcher ?? fetcher
         self.token = token
     }
 
@@ -35,26 +37,28 @@ public actor GeoProbe: GeoProbing {
             return .unavailable(error.localizedDescription)
         }
 
-        if ipinfo.ip != cachedIP {
-            let confirmation = await confirm(ip: ipinfo.ip)
-            cachedIP = ipinfo.ip
-            cachedCountry = confirmation?.country
-            cachedSource = confirmation?.source
+        // Адрес идёт в URL подтверждающих сервисов, поэтому проверяется до запроса.
+        guard IPAddress.isValid(ipinfo.ip) else {
+            return .unavailable("ipinfo вернул некорректный адрес")
         }
+
+        // Ни адрес, ни страна, ни подтверждение не кэшируются: решение о завершении
+        // целей принимается только по данным, полученным в этой пробе.
+        let confirmation = await confirm(ip: ipinfo.ip)
 
         return .resolved(GeoResponses.makeReading(
             ipinfo: ipinfo,
-            confirmedCountry: cachedCountry,
-            source: cachedSource
+            confirmedCountry: confirmation?.country,
+            source: confirmation?.source
         ))
     }
 
     private func confirm(ip: String) async -> (country: String, source: ConfirmSource)? {
         if let country = await fetchCountry(
-            urlString: Constants.ipwhoisURL(ip: ip),
-            decode: GeoResponses.decodeIPWhoIs
+            urlString: Constants.freeipapiURL(ip: ip),
+            decode: GeoResponses.decodeFreeIPAPI
         ) {
-            return (country, .ipwhois)
+            return (country, .freeipapi)
         }
         if let country = await fetchCountry(
             urlString: Constants.geojsURL(ip: ip),
@@ -71,7 +75,7 @@ public actor GeoProbe: GeoProbing {
     ) async -> String? {
         guard let url = URL(string: urlString) else { return nil }
         do {
-            return try decode(try await fetcher.data(from: url, headers: [:]))
+            return try decode(try await confirmationFetcher.data(from: url, headers: [:]))
         } catch {
             return nil
         }

@@ -9,12 +9,11 @@ final class GeoResponsesTests: XCTestCase {
      "continent_code":"AS","continent":"Asia"}
     """.utf8)
 
-    private let ipwhoisJSON = Data("""
-    {"ip":"203.0.113.28","success":true,"type":"IPv4","continent":"Asia",
-     "continent_code":"AS","country":"Kazakhstan","country_code":"KZ",
-     "region":"Almaty","city":"Almaty","is_eu":false,
-     "connection":{"asn":49791,"org":"3hcloud LLC","isp":"Newserverlife LLC",
-     "domain":"3hcloud.com"}}
+    // Форма ответа снята с живого free.freeipapi.com: ключи в camelCase.
+    private let freeipapiJSON = Data("""
+    {"ipVersion":4,"ipAddress":"203.0.113.28","latitude":43.238,"longitude":76.8829,
+     "countryName":"Kazakhstan","countryCode":"KZ","capital":"Astana",
+     "timeZones":["Asia/Almaty"],"zipCode":"050000","cityName":"Almaty"}
     """.utf8)
 
     private let geojsJSON = Data("""
@@ -27,14 +26,17 @@ final class GeoResponsesTests: XCTestCase {
         XCTAssertEqual(response.countryCode, "KZ")
     }
 
-    func test_ipwhois_response_yields_country_code() throws {
-        XCTAssertEqual(try GeoResponses.decodeIPWhoIs(ipwhoisJSON), "KZ")
+    func test_freeipapi_response_yields_country_code() throws {
+        XCTAssertEqual(try GeoResponses.decodeFreeIPAPI(freeipapiJSON), "KZ")
     }
 
-    func test_ipwhois_failure_response_yields_nil() throws {
+    func test_freeipapi_response_without_country_yields_nil() throws {
 
-        let failure = Data(#"{"ip":"1.1.1.1","success":false,"message":"Invalid IP"}"#.utf8)
-        XCTAssertNil(try GeoResponses.decodeIPWhoIs(failure))
+        let empty = Data(#"{"ipVersion":4,"ipAddress":"1.1.1.1","countryCode":""}"#.utf8)
+        XCTAssertNil(try GeoResponses.decodeFreeIPAPI(empty))
+
+        let missing = Data(#"{"ipVersion":4,"ipAddress":"1.1.1.1"}"#.utf8)
+        XCTAssertNil(try GeoResponses.decodeFreeIPAPI(missing))
     }
 
     func test_geojs_response_yields_country_code() throws {
@@ -46,12 +48,12 @@ final class GeoResponsesTests: XCTestCase {
         let reading = GeoResponses.makeReading(
             ipinfo: response,
             confirmedCountry: "KZ",
-            source: .ipwhois
+            source: .freeipapi
         )
         XCTAssertEqual(reading.ip, "203.0.113.28")
         XCTAssertEqual(reading.primaryCountry, "KZ")
         XCTAssertEqual(reading.confirmedCountry, "KZ")
-        XCTAssertEqual(reading.confirmSource, .ipwhois)
+        XCTAssertEqual(reading.confirmSource, .freeipapi)
     }
 
     func test_reading_without_confirmation_keeps_nil_source() throws {

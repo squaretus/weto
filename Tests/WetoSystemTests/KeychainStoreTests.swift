@@ -1,5 +1,6 @@
 import XCTest
 @testable import WetoSystem
+import WetoCore
 
 final class KeychainStoreTests: XCTestCase {
 
@@ -9,39 +10,39 @@ final class KeychainStoreTests: XCTestCase {
     private var store: KeychainStore { KeychainStore(service: service) }
 
     override func tearDown() {
-        store.write(nil, account: account)
+        _ = store.write(nil, account: account)
         super.tearDown()
     }
 
     func test_reading_absent_secret_returns_nil() {
-        store.write(nil, account: account)
+        _ = store.write(nil, account: account)
         XCTAssertNil(store.read(account: account))
     }
 
     func test_written_secret_is_read_back() {
-        XCTAssertTrue(store.write("s3cret", account: account))
+        XCTAssertTrue(store.write("s3cret", account: account).isSuccess)
         XCTAssertEqual(store.read(account: account), "s3cret")
     }
 
     func test_writing_twice_overwrites_previous_value() {
-        store.write("first", account: account)
-        store.write("second", account: account)
+        _ = store.write("first", account: account)
+        _ = store.write("second", account: account)
         XCTAssertEqual(store.read(account: account), "second")
     }
 
     func test_writing_nil_deletes_secret() {
-        store.write("to be removed", account: account)
-        XCTAssertTrue(store.write(nil, account: account))
+        _ = store.write("to be removed", account: account)
+        XCTAssertTrue(store.write(nil, account: account).isSuccess)
         XCTAssertNil(store.read(account: account))
     }
 
     func test_accounts_are_isolated() {
-        store.write("a", account: "first")
-        store.write("b", account: "second")
+        _ = store.write("a", account: "first")
+        _ = store.write("b", account: "second")
         XCTAssertEqual(store.read(account: "first"), "a")
         XCTAssertEqual(store.read(account: "second"), "b")
-        store.write(nil, account: "first")
-        store.write(nil, account: "second")
+        _ = store.write(nil, account: "first")
+        _ = store.write(nil, account: "second")
     }
 }
 

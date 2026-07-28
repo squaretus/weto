@@ -40,9 +40,26 @@ final class NetworkSnapshotReaderTests: XCTestCase {
     func test_resolver_consumes_reader_output_end_to_end() {
 
         let snapshot = NetworkSnapshotReader().snapshot()
-        for name in snapshot.vpnCandidateNames {
-            let status = VPNStatusResolver.status(serviceName: name, in: snapshot)
-            XCTAssertNotEqual(status, .notConfigured, "имя \(name) не должно давать notConfigured")
+        for candidate in snapshot.vpnCandidates {
+            let status = VPNStatusResolver.status(serviceID: candidate.uuid, in: snapshot)
+            XCTAssertNotEqual(status, .notConfigured, "\(candidate.name) не должен давать notConfigured")
         }
+    }
+
+    func test_every_candidate_is_qualified_as_vpn() {
+
+        for candidate in NetworkSnapshotReader().snapshot().vpnCandidates {
+            XCTAssertTrue(candidate.isVPN, "\(candidate.name) попал в кандидаты без квалификации")
+        }
+    }
+
+    func test_wifi_service_is_not_classified_as_vpn() throws {
+
+        let snapshot = NetworkSnapshotReader().snapshot()
+        guard let wifi = snapshot.services.first(where: { $0.name == "Wi-Fi" }) else {
+            throw XCTSkip("на машине нет сервиса с именем Wi-Fi")
+        }
+        XCTAssertFalse(wifi.isVPN)
+        XCTAssertFalse(snapshot.vpnCandidates.contains { $0.uuid == wifi.uuid })
     }
 }

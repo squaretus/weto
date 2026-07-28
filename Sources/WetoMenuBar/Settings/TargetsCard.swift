@@ -83,15 +83,12 @@ struct TargetsCard: View {
                     .font(WetoTokens.data)
                     .foregroundStyle(WetoTokens.dim.resolve(scheme))
 
-                Button {
+                WetoDeleteRowAction(
+                    label: "Удалить цель \(entry)",
+                    hint: "Удалить цель"
+                ) {
                     remove(entry)
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 15))
                 }
-                .buttonStyle(WetoIconButtonStyle())
-                .accessibilityLabel("Удалить цель \(entry)")
-                .help("Удалить цель")
             }
         }
     }

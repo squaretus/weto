@@ -107,10 +107,10 @@ final class EventLogStoreTests: XCTestCase {
         let event = KillEvent(
             date: Date(), targetNames: ["nano"], kind: .terminated,
             reasonText: "причина", ip: "1.2.3.4", country: "KZ",
-            confirmedCountry: "KZ", confirmSource: "ipwhois", killedPIDs: [1]
+            confirmedCountry: "KZ", confirmSource: "freeipapi", killedPIDs: [1]
         )
         XCTAssertEqual(event.confirmedCountry, "KZ")
-        XCTAssertEqual(event.confirmSource, "ipwhois")
+        XCTAssertEqual(event.confirmSource, "freeipapi")
     }
 
     func test_event_without_names_still_renders() {

@@ -22,15 +22,15 @@ mkdir -p "$APP/MacOS" "$APP/Resources"
 cp "$BUILD_DIR/WetoMenuBar" "$APP/MacOS/WetoMenuBar"
 cp Resources/Weto-Info.plist "$APP/Info.plist"
 
-# Копия в корне .app обязательна: там Bundle.module ищет ресурсы (см. scripts/build.sh).
-# Раскладка держится такой же, как в PKG, иначе dev-сборка прячет падение —
-# у неё срабатывает fallback на абсолютный путь .build, которого нет у пользователя.
+# Раскладка ресурсов та же, что в PKG: Contents/Resources и ничего в корне бандла.
 for bundle in "$BUILD_DIR"/*.bundle; do
     [ -e "$bundle" ] || continue
     cp -R "$bundle" "$APP/Resources/"
-    cp -R "$bundle" "$OUT/Weto.app/"
 done
 
-codesign --force --sign - --deep "$OUT/Weto.app" 2>/dev/null || true
+if ! codesign --force --sign - --deep "$OUT/Weto.app"; then
+    echo "✗ ad-hoc подпись Weto.app не удалась" >&2
+    exit 1
+fi
 
 echo "✓ Готово: $OUT/Weto.app"

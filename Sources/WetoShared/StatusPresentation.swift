@@ -17,6 +17,7 @@ public enum StatusPresentation {
 
     public static let unknownIP = "неизвестен"
     public static let missingValue = "—"
+    public static let confirmationLabel = "подтверждение"
 
     public static func title(for state: GuardState) -> String {
         switch state {
@@ -29,10 +30,15 @@ public enum StatusPresentation {
     public static func lines(for state: GuardState, reading: GeoReading?) -> [StatusLine] {
         let known = knownReading(for: state, reading: reading)
 
+        // Подпись строки — имя сервиса, который реально ответил: подтверждающих
+        // два, и показывать чужое имя было бы ложью.
         return [
             StatusLine(key: "IP", value: known?.ip ?? unknownIP),
             StatusLine(key: "ipinfo", value: known?.primaryCountry ?? missingValue),
-            StatusLine(key: "ipwhois", value: known?.confirmedCountry ?? missingValue),
+            StatusLine(
+                key: known?.confirmSource?.rawValue ?? confirmationLabel,
+                value: known?.confirmedCountry ?? missingValue
+            ),
         ]
     }
 

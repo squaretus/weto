@@ -8,7 +8,7 @@ final class GuardPolicyLocalTests: XCTestCase {
         targets: [String] = ["com.example.target"]
     ) -> GuardConfig {
         GuardConfig(
-            vpnServiceName: vpn,
+            vpnServiceID: vpn,
             blockedCountries: ["RU"],
             blockedIPRanges: [],
             targets: targets
@@ -20,7 +20,7 @@ final class GuardPolicyLocalTests: XCTestCase {
             isEnabled: true,
             vpn: vpn,
             geo: .resolved(GeoReading(
-                ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .ipwhois
+                ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .freeipapi
             )),
             config: configuration
         )

@@ -4,13 +4,13 @@ import XCTest
 final class GuardPolicyTests: XCTestCase {
 
     private func config(
-        vpn: String? = "Happ",
+        vpn: String? = "BC2D1D42",
         blocked: Set<String> = ["RU"],
         ranges: [IPRange] = [],
         targets: [String] = ["com.example.target"]
     ) -> GuardConfig {
         GuardConfig(
-            vpnServiceName: vpn,
+            vpnServiceID: vpn,
             blockedCountries: blocked,
             blockedIPRanges: ranges,
             targets: targets
@@ -21,7 +21,7 @@ final class GuardPolicyTests: XCTestCase {
         ip: String = "203.0.113.28",
         primary: String = "KZ",
         confirmed: String? = "KZ",
-        source: ConfirmSource? = .ipwhois
+        source: ConfirmSource? = .freeipapi
     ) -> GeoOutcome {
         .resolved(GeoReading(
             ip: ip,
@@ -115,10 +115,10 @@ final class GuardPolicyTests: XCTestCase {
     }
 
     func test_blocked_confirmed_country_kills_even_when_primary_is_allowed() {
-        let s = signals(geo: geo(primary: "KZ", confirmed: "RU", source: .ipwhois))
+        let s = signals(geo: geo(primary: "KZ", confirmed: "RU", source: .freeipapi))
         XCTAssertEqual(
             GuardPolicy.decide(s),
-            .kill(.blockedCountry(code: "RU", source: "ipwhois"))
+            .kill(.blockedCountry(code: "RU", source: "freeipapi"))
         )
     }
 
@@ -158,5 +158,23 @@ final class GuardPolicyTests: XCTestCase {
     func test_matching_countries_in_different_case_are_not_a_conflict() {
         let s = signals(geo: geo(primary: "KZ", confirmed: "kz"))
         XCTAssertEqual(GuardPolicy.decide(s), .safe)
+    }
+
+    func test_pending_verification_kills_when_guard_is_armed() {
+        XCTAssertEqual(
+            GuardPolicy.pendingVerification(isEnabled: true, config: config()),
+            .kill(.verificationPending)
+        )
+    }
+
+    func test_pending_verification_is_harmless_when_disabled_or_targetless() {
+        XCTAssertEqual(
+            GuardPolicy.pendingVerification(isEnabled: false, config: config()),
+            .safe
+        )
+        XCTAssertEqual(
+            GuardPolicy.pendingVerification(isEnabled: true, config: config(targets: [])),
+            .safe
+        )
     }
 }

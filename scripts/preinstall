@@ -1,15 +1,28 @@
 #!/bin/bash
+set -u
+
+LABEL="com.weto.app"
+LEGACY_PLIST="/Library/LaunchAgents/$LABEL.plist"
 
 CONSOLE_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || echo "")
+
 if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
-    CURRENT_UID=$(id -u "$CONSOLE_USER")
-else
-    CURRENT_UID=$(id -u "$USER")
+    USER_UID=$(id -u "$CONSOLE_USER")
+
+    # Домашний каталог спрашиваем у системы, а не собираем из /Users/<имя>:
+    # он может быть где угодно, включая сетевые и переименованные каталоги.
+    HOME_DIR=$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
+
+    /bin/launchctl asuser "$USER_UID" /bin/launchctl bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
+
+    if [ -n "$HOME_DIR" ]; then
+        /bin/rm -f "$HOME_DIR/Library/LaunchAgents/$LABEL.plist"
+    fi
 fi
 
-launchctl bootout gui/"$CURRENT_UID"/com.weto.app 2>/dev/null || true
-killall WetoMenuBar 2>/dev/null || true
+# Агент прежних версий лежал в системном каталоге и приложением не управлялся.
+/bin/rm -f "$LEGACY_PLIST"
 
-rm -f "/Users/$CONSOLE_USER/Library/LaunchAgents/com.weto.app.plist" 2>/dev/null || true
+/usr/bin/killall WetoMenuBar 2>/dev/null || true
 
 exit 0

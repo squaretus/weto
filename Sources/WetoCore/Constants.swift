@@ -2,7 +2,18 @@ import Foundation
 
 public enum Constants {
 
-    public static let appVersion = "0.1.0"
+    public static let appBundleIdentifier = "com.weto.app"
+
+    /// Версия берётся из Info.plist собранного бандла, а не хранится в исходнике:
+    /// релизный скрипт больше не правит отслеживаемые файлы через sed.
+    /// Идентификатор бандла проверяется намеренно: при запуске через `swift run`
+    /// или из тестов `Bundle.main` — чужой бандл, и его версия к нам не относится.
+    public static let appVersion: String = {
+        guard Bundle.main.bundleIdentifier == appBundleIdentifier,
+              let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        else { return "dev" }
+        return version
+    }()
 
     public static let defaultPollIntervalSeconds: TimeInterval = 5
 
@@ -14,9 +25,18 @@ public enum Constants {
 
     public static let geoRequestTimeoutSeconds: TimeInterval = 5
 
+    /// Подтверждение спрашивается уже после ipinfo и удлиняет окно fail-closed,
+    /// поэтому ждём его заметно меньше, чем основной источник.
+    public static let geoConfirmationTimeoutSeconds: TimeInterval = 2.5
+
     public static let ipinfoLiteURL = "https://v4.api.ipinfo.io/lite/me"
 
-    public static func ipwhoisURL(ip: String) -> String { "https://ipwho.is/\(ip)" }
+    /// Канонический адрес без редиректа: freeipapi.com отвечает 302 на free.freeipapi.com.
+    /// Лимит — 60 запросов в минуту, а мы при опросе раз в 5 секунд тратим 12:
+    /// подтверждение спрашивается на каждой пробе, без кэша.
+    public static func freeipapiURL(ip: String) -> String {
+        "https://free.freeipapi.com/api/json/\(ip)"
+    }
 
     public static func geojsURL(ip: String) -> String {
         "https://get.geojs.io/v1/ip/country/\(ip).json"

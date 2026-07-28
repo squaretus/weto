@@ -2,7 +2,7 @@ import Foundation
 
 public struct GuardConfig: Equatable, Sendable {
 
-    public let vpnServiceName: String?
+    public let vpnServiceID: String?
 
     public let blockedCountries: Set<String>
     public let blockedIPRanges: [IPRange]
@@ -12,12 +12,12 @@ public struct GuardConfig: Equatable, Sendable {
     public var hasTargets: Bool { !targets.isEmpty }
 
     public init(
-        vpnServiceName: String?,
+        vpnServiceID: String?,
         blockedCountries: Set<String>,
         blockedIPRanges: [IPRange],
         targets: [String]
     ) {
-        self.vpnServiceName = vpnServiceName
+        self.vpnServiceID = vpnServiceID
         self.blockedCountries = blockedCountries
         self.blockedIPRanges = blockedIPRanges
         self.targets = targets
@@ -39,6 +39,7 @@ public struct GuardSignals: Equatable, Sendable {
 }
 
 public enum UnsafeReason: Equatable, Sendable {
+    case verificationPending
     case vpnNotConfigured
     case vpnDown
     case vpnNotPrimary
@@ -56,13 +57,24 @@ public enum GuardDecision: Equatable, Sendable {
 
 public enum GuardPolicy {
 
+    /// Решение на время, пока локальные основания исчерпаны, а свежего гео-вердикта ещё нет.
+    /// Это окно обязано быть fail-closed: иначе цели живут все секунды, что идёт запрос
+    /// к ipinfo и подтверждающим сервисам.
+    public static func pendingVerification(
+        isEnabled: Bool,
+        config: GuardConfig
+    ) -> GuardDecision {
+        guard isEnabled, config.hasTargets else { return .safe }
+        return .kill(.verificationPending)
+    }
+
     public static func decideLocal(
         isEnabled: Bool,
         vpn: VPNStatus,
         config: GuardConfig
     ) -> GuardDecision? {
         guard isEnabled, config.hasTargets else { return .safe }
-        guard config.vpnServiceName != nil else { return .kill(.vpnNotConfigured) }
+        guard config.vpnServiceID != nil else { return .kill(.vpnNotConfigured) }
 
         switch vpn {
         case .notConfigured:

@@ -22,7 +22,8 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
             return NetworkServiceSnapshot(
                 uuid: uuid,
                 name: name,
-                activeInterface: activeInterface(store: store, uuid: uuid)
+                activeInterface: activeInterface(store: store, uuid: uuid),
+                isVPN: isVPN(store: store, uuid: uuid)
             )
         }
 
@@ -48,6 +49,29 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
         let key = "Setup:/Network/Service/\(uuid)" as CFString
         guard let dict = SCDynamicStoreCopyValue(store, key) as? [String: Any] else { return nil }
         return dict["UserDefinedName"] as? String
+    }
+
+    /// Типы туннелей, объявленные в конфигурации сети. Проверено на живой машине:
+    /// у app-based VPN `Interface` даёт `Type: VPN` c `SubType` вида `su.ffg.happ`,
+    /// у L2TP — `Type: PPP` с `SubType: L2TP`, а у Wi-Fi и Ethernet-адаптеров — `Type: Ethernet`.
+    /// Имя сервиса в классификации не участвует: его пользователь меняет как угодно.
+    private static let pppVPNSubTypes: Set<String> = ["L2TP", "PPTP"]
+
+    private func isVPN(store: SCDynamicStore, uuid: String) -> Bool {
+        let key = "Setup:/Network/Service/\(uuid)/Interface" as CFString
+        guard let dict = SCDynamicStoreCopyValue(store, key) as? [String: Any],
+              let type = dict["Type"] as? String
+        else { return false }
+
+        switch type {
+        case "VPN", "IPSec":
+            return true
+        case "PPP":
+            guard let subType = dict["SubType"] as? String else { return false }
+            return Self.pppVPNSubTypes.contains(subType)
+        default:
+            return false
+        }
     }
 
     private func activeInterface(store: SCDynamicStore, uuid: String) -> String? {

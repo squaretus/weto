@@ -39,15 +39,7 @@ public struct IPRange: Equatable, Hashable, Codable, Sendable {
     }
 
     private static func parseAddress(_ string: String) -> ([UInt8], Bool)? {
-        var v4 = in_addr()
-        if inet_pton(AF_INET, string, &v4) == 1 {
-            return (withUnsafeBytes(of: v4.s_addr) { Array($0) }, false)
-        }
-        var v6 = in6_addr()
-        if inet_pton(AF_INET6, string, &v6) == 1 {
-            return (withUnsafeBytes(of: v6) { Array($0) }, true)
-        }
-        return nil
+        IPAddress.parse(string).map { ($0.bytes, $0.isIPv6) }
     }
 
     private static func masked(_ bytes: [UInt8], prefixLength: Int) -> [UInt8] {

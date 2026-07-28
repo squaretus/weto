@@ -10,15 +10,21 @@ public enum ProcessMatcher {
 
         var seen = Set<Int32>()
         var result: [MatchedProcess] = []
+        var nameByRoot: [Int32: String] = [:]
 
         for process in processes {
             guard let rule = rules.first(where: { matches(process, rule: $0) }) else { continue }
             if seen.insert(process.pid).inserted {
                 result.append(MatchedProcess(pid: process.pid, targetName: rule.displayName))
+                nameByRoot[process.pid] = rule.displayName
             }
         }
 
-        result.append(contentsOf: descendants(of: result, in: processes, seen: &seen))
+        let tree = ProcessTree(processes: processes)
+        for descendant in tree.descendants(of: result.map(\.pid), skipping: &seen) {
+            guard let name = nameByRoot[descendant.root] else { continue }
+            result.append(MatchedProcess(pid: descendant.pid, targetName: name))
+        }
         return result
     }
 
@@ -38,9 +44,7 @@ public enum ProcessMatcher {
         var seen = Set<Int32>()
         var roots: [(pid: Int32, ruleIndex: Int)] = []
         var pidsByRoot: [Int32: [Int32]] = [:]
-        var parentByPID: [Int32: Int32] = [:]
-
-        for process in processes { parentByPID[process.pid] = process.parentPID }
+        let tree = ProcessTree(processes: processes)
 
         for process in processes {
             guard let index = rules.firstIndex(where: { matches(process, rule: $0) }) else { continue }
@@ -53,7 +57,7 @@ public enum ProcessMatcher {
         let rootPIDs = Set(roots.map(\.pid))
         var ownerByPID: [Int32: Int32] = [:]
         for root in roots {
-            let owner = topmostMatch(of: root.pid, among: rootPIDs, parentByPID: parentByPID)
+            let owner = tree.topmostMatch(of: root.pid, among: rootPIDs)
             ownerByPID[root.pid] = owner
             if owner != root.pid {
                 pidsByRoot[owner, default: []].append(root.pid)
@@ -63,8 +67,8 @@ public enum ProcessMatcher {
 
         let owners = roots.filter { ownerByPID[$0.pid] == $0.pid }
 
-        for descendant in descendants(of: roots, in: processes, seen: &seen) {
-            let owner = ownerByPID[descendant.parent] ?? descendant.parent
+        for descendant in tree.descendants(of: roots.map(\.pid), skipping: &seen) {
+            let owner = ownerByPID[descendant.root] ?? descendant.root
             pidsByRoot[owner, default: []].append(descendant.pid)
         }
 
@@ -105,48 +109,6 @@ public enum ProcessMatcher {
         }
     }
 
-    private static func topmostMatch(
-        of pid: Int32,
-        among matched: Set<Int32>,
-        parentByPID: [Int32: Int32]
-    ) -> Int32 {
-        var owner = pid
-        var current = parentByPID[pid] ?? 0
-        var steps = 0
-
-        while current > 0, current != pid, steps < parentByPID.count {
-            if matched.contains(current) { owner = current }
-            current = parentByPID[current] ?? 0
-            steps += 1
-        }
-        return owner
-    }
-
-    private static func descendants(
-        of roots: [(pid: Int32, ruleIndex: Int)],
-        in processes: [ProcessSnapshot],
-        seen: inout Set<Int32>
-    ) -> [(pid: Int32, ruleIndex: Int, parent: Int32)] {
-        var childrenByParent: [Int32: [Int32]] = [:]
-        for process in processes where process.parentPID > 0 {
-            childrenByParent[process.parentPID, default: []].append(process.pid)
-        }
-        guard !childrenByParent.isEmpty else { return [] }
-
-        var result: [(pid: Int32, ruleIndex: Int, parent: Int32)] = []
-        var queue = roots.map { (pid: $0.pid, ruleIndex: $0.ruleIndex, owner: $0.pid) }
-        var steps = 0
-
-        while let parent = queue.popLast(), steps < processes.count * 2 {
-            steps += 1
-            for child in childrenByParent[parent.pid] ?? [] where seen.insert(child).inserted {
-                result.append((pid: child, ruleIndex: parent.ruleIndex, parent: parent.owner))
-                queue.append((pid: child, ruleIndex: parent.ruleIndex, owner: parent.owner))
-            }
-        }
-        return result
-    }
-
     private static func matches(_ process: ProcessSnapshot, rule: TargetRule) -> Bool {
         switch rule.kind {
         case .appBundle:
@@ -158,33 +120,8 @@ public enum ProcessMatcher {
             return rule.launchPaths.contains(process.executablePath)
         case .script:
             guard let arguments = process.arguments else { return false }
-            return rule.launchPaths.contains { arguments.contains($0) }
+            return !Set(arguments).isDisjoint(with: rule.launchPaths)
         }
     }
 
-    private static func descendants(
-        of roots: [MatchedProcess],
-        in processes: [ProcessSnapshot],
-        seen: inout Set<Int32>
-    ) -> [MatchedProcess] {
-        var childrenByParent: [Int32: [ProcessSnapshot]] = [:]
-        for process in processes where process.parentPID > 0 {
-            childrenByParent[process.parentPID, default: []].append(process)
-        }
-        guard !childrenByParent.isEmpty else { return [] }
-
-        var result: [MatchedProcess] = []
-        var queue = roots
-
-        var steps = 0
-        while let parent = queue.popLast(), steps < processes.count * 2 {
-            steps += 1
-            for child in childrenByParent[parent.pid] ?? [] where seen.insert(child.pid).inserted {
-                let matched = MatchedProcess(pid: child.pid, targetName: parent.targetName)
-                result.append(matched)
-                queue.append(matched)
-            }
-        }
-        return result
-    }
 }

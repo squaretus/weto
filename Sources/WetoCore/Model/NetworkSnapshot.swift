@@ -1,15 +1,22 @@
 import Foundation
 
-public struct NetworkServiceSnapshot: Equatable, Sendable {
+public struct NetworkServiceSnapshot: Equatable, Sendable, Identifiable {
     public let uuid: String
     public let name: String
 
     public let activeInterface: String?
 
-    public init(uuid: String, name: String, activeInterface: String?) {
+    /// Квалификация с границы системы: сервис объявлен туннелем в конфигурации сети.
+    /// Выводить это из имени нельзя — «Happ» или «Wi-Fi» пользователь переименует как угодно.
+    public let isVPN: Bool
+
+    public var id: String { uuid }
+
+    public init(uuid: String, name: String, activeInterface: String?, isVPN: Bool) {
         self.uuid = uuid
         self.name = name
         self.activeInterface = activeInterface
+        self.isVPN = isVPN
     }
 }
 
@@ -23,8 +30,21 @@ public struct NetworkSnapshot: Equatable, Sendable {
         self.primaryServiceUUID = primaryServiceUUID
     }
 
-    public var vpnCandidateNames: [String] {
-        Array(Set(services.map(\.name)))
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    /// Отпечаток снимка: меняется, как только меняется состав сервисов, их активность,
+    /// квалификация или владелец маршрута по умолчанию. По нему видно, устарел ли
+    /// прежний сетевой вердикт, — сравнивать сами снимки на равенство недостаточно
+    /// дёшево для горячего пути.
+    public var fingerprint: String {
+        let parts = services
+            .sorted { $0.uuid < $1.uuid }
+            .map { "\($0.uuid):\($0.activeInterface ?? "-"):\($0.isVPN ? "vpn" : "net")" }
+        return (parts + ["primary=\(primaryServiceUUID ?? "-")"]).joined(separator: "|")
+    }
+
+    /// Одинаковые имена не склеиваются: выбор хранится по UUID, и два «Happ» — разные цели.
+    public var vpnCandidates: [NetworkServiceSnapshot] {
+        services.filter(\.isVPN).sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
     }
 }
