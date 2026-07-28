@@ -26,6 +26,21 @@ fi
 [ -x "$STAGE/Applications/Weto.app/Contents/MacOS/WetoMenuBar" ] \
     || fail "в payload нет исполняемого $STAGE/Applications/Weto.app/Contents/MacOS/WetoMenuBar"
 
+# 2б. Демон обновления, наоборот, системный: без него автообновление невозможно.
+[ -x "$STAGE/Library/PrivilegedHelperTools/com.weto.helper" ] \
+    || fail "в payload нет демона обновления"
+[ -f "$STAGE/Library/LaunchDaemons/com.weto.helper.plist" ] \
+    || fail "в payload нет LaunchDaemon демона обновления"
+grep -q 'com.weto.helper' "$STAGE/Library/LaunchDaemons/com.weto.helper.plist" \
+    || fail "в plist демона нет его MachService"
+
+grep -q 'launchctl bootstrap system' scripts/postinstall \
+    || fail "postinstall не загружает демон в системный домен"
+grep -q 'bootout system/com.weto.helper' scripts/preinstall \
+    || fail "preinstall не выгружает демон перед подменой файлов"
+grep -q 'bootout system/com.weto.helper' Resources/uninstall-weto.sh \
+    || fail "деинсталлятор не выгружает демон"
+
 # 3. postinstall пишет агент в домашний каталог консольного пользователя
 #    и грузит его в его же графическом сеансе.
 grep -q 'NFSHomeDirectory' scripts/postinstall \

@@ -25,6 +25,32 @@ struct StatusPopupView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                // Новость об обновлении видна там, где пользователь бывает чаще всего,
+                // а не только в футере настроек.
+                if let update = coordinator.update.availableUpdate {
+                    WetoBanner(
+                        tone: .info,
+                        systemImage: "arrow.down.circle.fill",
+                        text: coordinator.update.isInstallingUpdate
+                            ? "Установка обновления…"
+                            : "Доступно обновление \(update.latestVersion)"
+                    ) {
+                        if coordinator.update.isInstallingUpdate {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("Обновить") { coordinator.update.installUpdate() }
+                                .buttonStyle(WetoPillButtonStyle(.primary))
+                        }
+                    }
+                }
+
+                if let failure = coordinator.update.installFailure {
+                    Text(failure)
+                        .font(WetoTokens.caption)
+                        .foregroundStyle(WetoTokens.amber.resolve(scheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if coordinator.settings.guardConfig.hasTargets {
                     WetoDivider()
                     processes

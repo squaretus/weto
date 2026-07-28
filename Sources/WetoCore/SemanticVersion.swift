@@ -33,17 +33,29 @@ public struct UpdateInfo: Codable, Equatable, Sendable {
     public let currentVersion: String
     public let latestVersion: String
     public let releaseURL: String
+
+    /// Прямая ссылка на `.pkg` из ассетов релиза. Её использует только демон:
+    /// он получает адрес из своего собственного запроса к GitHub, а не от клиента —
+    /// иначе любой процесс мог бы попросить root установить произвольный пакет.
+    /// Пустая строка означает «ставить нечего».
+    public let downloadURL: String
+
+    public let releaseNotes: String?
     public let isNewer: Bool
 
     public init(
         currentVersion: String,
         latestVersion: String,
         releaseURL: String,
+        downloadURL: String = "",
+        releaseNotes: String? = nil,
         isNewer: Bool
     ) {
         self.currentVersion = currentVersion
         self.latestVersion = latestVersion
         self.releaseURL = releaseURL
+        self.downloadURL = downloadURL
+        self.releaseNotes = releaseNotes
         self.isNewer = isNewer
     }
 }
@@ -63,6 +75,13 @@ public enum ReleaseParser {
     private struct Release: Decodable {
         let tag_name: String
         let html_url: String?
+        let body: String?
+        let assets: [Asset]?
+
+        struct Asset: Decodable {
+            let name: String
+            let browser_download_url: String
+        }
     }
 
     public static var latestReleaseURL: String {
@@ -89,11 +108,15 @@ public enum ReleaseParser {
         }
 
 
+        let pkg = release.assets?.first { $0.name.hasSuffix(".pkg") }
+
         return .success(UpdateInfo(
             currentVersion: currentVersion,
             latestVersion: versionString,
             releaseURL: release.html_url
                 ?? "https://github.com/\(Constants.githubOwner)/\(Constants.githubRepo)/releases/latest",
+            downloadURL: pkg?.browser_download_url ?? "",
+            releaseNotes: release.body,
             isNewer: current < latest
         ))
     }
