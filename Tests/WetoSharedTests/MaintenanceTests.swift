@@ -54,6 +54,16 @@ private struct RecordingSecrets: SecretStoring {
     }
 }
 
+private struct FakeHelperUninstaller: HelperUninstalling {
+    let recorder: StepRecorder
+    let failure: String?
+
+    func uninstallHelper(completion: @escaping @Sendable (String?) -> Void) {
+        recorder.record("helper.uninstall")
+        completion(failure)
+    }
+}
+
 @MainActor
 final class MaintenanceTests: XCTestCase {
 
@@ -74,12 +84,14 @@ final class MaintenanceTests: XCTestCase {
     private func makeMaintenance(
         agentDisable: Result<Void, LaunchAgentError> = .success(()),
         secretsResult: Result<Void, SecretStoreError> = .success(()),
+        helperFailure: String? = nil,
         bundlePath: String? = "/Applications/Weto.app",
         removeBundle: (@Sendable (String) -> Result<Void, Error>)? = nil
     ) -> Maintenance {
         let localRecorder = recorder!
         return Maintenance(
             agent: FakeAgent(recorder: localRecorder, disableResult: agentDisable),
+            helper: FakeHelperUninstaller(recorder: localRecorder, failure: helperFailure),
             secrets: RecordingSecrets(recorder: localRecorder, result: secretsResult),
             defaultsSuite: "com.weto.tests.\(UUID().uuidString)",
             cachesDirectory: caches,
@@ -102,6 +114,7 @@ final class MaintenanceTests: XCTestCase {
             .clearSettings,
             .removeToken,
             .removeCaches,
+            .removeHelper,
             .scheduleBundleRemoval,
         ])
         XCTAssertFalse(FileManager.default.fileExists(atPath: caches.path))
@@ -118,6 +131,25 @@ final class MaintenanceTests: XCTestCase {
         XCTAssertNotNil(agentIndex)
         XCTAssertNotNil(bundleIndex)
         XCTAssertLessThan(agentIndex ?? .max, bundleIndex ?? .min)
+    }
+
+    func test_helper_failure_is_reported() {
+
+        let result = makeMaintenance(helperFailure: "нет прав на /Library").uninstall()
+
+        XCTAssertEqual(result.failures.map(\.step), [.removeHelper])
+        XCTAssertTrue(result.failureText?.contains("нет прав") == true)
+    }
+
+    func test_helper_is_removed_before_the_bundle_is_scheduled() {
+
+        _ = makeMaintenance().uninstall()
+
+        let steps = recorder.recorded
+        let helperIndex = steps.firstIndex(of: "helper.uninstall")
+        let bundleIndex = steps.firstIndex { $0.hasPrefix("bundle.remove") }
+        XCTAssertNotNil(helperIndex)
+        XCTAssertLessThan(helperIndex ?? .max, bundleIndex ?? .min)
     }
 
     func test_launchd_failure_is_reported_and_does_not_stop_other_steps() {

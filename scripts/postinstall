@@ -2,6 +2,9 @@
 set -euo pipefail
 
 LABEL="com.weto.app"
+HELPER_LABEL="com.weto.helper"
+HELPER="/Library/PrivilegedHelperTools/$HELPER_LABEL"
+HELPER_PLIST="/Library/LaunchDaemons/$HELPER_LABEL.plist"
 APP="/Applications/Weto.app"
 BIN="$APP/Contents/MacOS/WetoMenuBar"
 LEGACY_PLIST="/Library/LaunchAgents/$LABEL.plist"
@@ -63,6 +66,23 @@ fi
 
 if ! /bin/launchctl asuser "$USER_UID" /bin/launchctl bootstrap "gui/$USER_UID" "$PLIST"; then
     echo "launchd отказался загрузить автозапуск из $PLIST" >&2
+    exit 1
+fi
+
+# Демон обновлений: ставит следующие версии под root, поэтому живёт в системном
+# домене. Без него приложение обновляться само не сможет — только через браузер.
+if [ ! -x "$HELPER" ] || [ ! -f "$HELPER_PLIST" ]; then
+    echo "Демон обновления не установлен: $HELPER" >&2
+    exit 1
+fi
+
+/usr/sbin/chown root:wheel "$HELPER" "$HELPER_PLIST"
+/bin/chmod 755 "$HELPER"
+/bin/chmod 644 "$HELPER_PLIST"
+
+/bin/launchctl bootout "system/$HELPER_LABEL" 2>/dev/null || true
+if ! /bin/launchctl bootstrap system "$HELPER_PLIST"; then
+    echo "launchd отказался загрузить демон обновления из $HELPER_PLIST" >&2
     exit 1
 fi
 

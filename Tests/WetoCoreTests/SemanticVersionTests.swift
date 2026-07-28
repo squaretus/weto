@@ -1,6 +1,56 @@
 import XCTest
 @testable import WetoCore
 
+/// Ссылка на PKG нужна демону: он скачивает и ставит обновление сам,
+/// поэтому обязан узнать адрес ассета из ответа GitHub, а не от клиента.
+final class ReleaseAssetTests: XCTestCase {
+
+    private func release(assets: String) -> Data {
+        Data("""
+        {"tag_name":"v1.2.0","html_url":"https://github.com/squaretus/weto/releases/tag/v1.2.0",
+         "body":"описание релиза","assets":[\(assets)]}
+        """.utf8)
+    }
+
+    func test_pkg_asset_url_is_extracted() throws {
+        let data = release(assets: """
+        {"name":"Weto-1.2.0.pkg","browser_download_url":"https://github.com/squaretus/weto/releases/download/v1.2.0/Weto-1.2.0.pkg","size":514083}
+        """)
+
+        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0").get()
+
+        XCTAssertEqual(
+            info.downloadURL,
+            "https://github.com/squaretus/weto/releases/download/v1.2.0/Weto-1.2.0.pkg"
+        )
+        XCTAssertEqual(info.releaseNotes, "описание релиза")
+        XCTAssertTrue(info.isNewer)
+    }
+
+    func test_non_pkg_assets_are_ignored() throws {
+        let data = release(assets: """
+        {"name":"checksums.txt","browser_download_url":"https://example.com/checksums.txt","size":12},
+        {"name":"Weto-1.2.0.pkg","browser_download_url":"https://github.com/squaretus/weto/releases/download/v1.2.0/Weto-1.2.0.pkg","size":1}
+        """)
+
+        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0").get()
+        XCTAssertTrue(info.downloadURL.hasSuffix(".pkg"))
+    }
+
+    func test_release_without_pkg_asset_has_empty_download_url() throws {
+
+        let info = try ReleaseParser.parse(release(assets: ""), currentVersion: "1.0.0").get()
+        XCTAssertTrue(info.downloadURL.isEmpty, "ставить нечего — демон обязан отказаться")
+    }
+
+    func test_missing_assets_key_is_tolerated() throws {
+        let data = Data(#"{"tag_name":"v1.2.0"}"#.utf8)
+        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0").get()
+        XCTAssertTrue(info.downloadURL.isEmpty)
+        XCTAssertNil(info.releaseNotes)
+    }
+}
+
 final class SemanticVersionTests: XCTestCase {
 
     func test_parses_three_component_version() {

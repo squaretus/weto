@@ -46,7 +46,7 @@ struct SettingsFooter: View {
                     .font(.system(size: 15, weight: .medium))
             }
             .buttonStyle(WetoTileButtonStyle())
-            .disabled(coordinator.update.state == .checking)
+            .disabled(coordinator.update.state == .checking || coordinator.update.isInstallingUpdate)
             .accessibilityLabel(accessibilityLabel)
             .help(help)
         }
@@ -63,7 +63,7 @@ struct SettingsFooter: View {
     }
 
     private var accessibilityLabel: String {
-        isUpdateAvailable ? "Открыть страницу релиза" : "Проверить обновления"
+        isUpdateAvailable ? "Установить обновление" : "Проверить обновления"
     }
 
     private var help: String {
@@ -73,7 +73,9 @@ struct SettingsFooter: View {
         case .upToDate(let version):
             return "\(version) — последняя версия"
         case .available(let info):
-            return "Доступна \(info.latestVersion) — нажмите, чтобы открыть релиз"
+            return coordinator.update.isInstallingUpdate
+                ? "Устанавливается \(info.latestVersion)…"
+                : "Доступна \(info.latestVersion) — нажмите, чтобы установить"
         case .noReleases:
             return "Релизов пока нет"
         case .failed(let message):

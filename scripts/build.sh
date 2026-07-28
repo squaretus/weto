@@ -18,6 +18,7 @@ echo "=== weto $VERSION — сборка ==="
 # сборка не меняет, иначе после каждого релиза остаётся грязное рабочее дерево
 # и риск разъезда версии в бинарнике и пакете. Приложение читает версию из Info.plist.
 swift build -c release --product WetoMenuBar
+swift build -c release --product WetoHelper
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -54,11 +55,18 @@ echo "  подпись: ad-hoc (без Developer ID и нотаризации)"
 
 ROOT="$OUT/_pkg-root"
 SCRIPTS="$OUT/_pkg-scripts"
-mkdir -p "$ROOT/Applications" "$SCRIPTS"
+mkdir -p "$ROOT/Applications" "$ROOT/Library/PrivilegedHelperTools" "$ROOT/Library/LaunchDaemons" "$SCRIPTS"
 
 # Агент автозапуска в payload не входит: его пишет postinstall в домашний каталог
 # консольного пользователя — там же, где им управляют приложение и деинсталлятор.
 cp -R "$OUT/_app/Weto.app" "$ROOT/Applications/"
+
+# Демон обновления, наоборот, системный: устанавливать PKG может только root.
+# LaunchDaemon (не агент) — он один на машину и не привязан к сеансу пользователя.
+cp .build/release/WetoHelper "$ROOT/Library/PrivilegedHelperTools/com.weto.helper"
+chmod 755 "$ROOT/Library/PrivilegedHelperTools/com.weto.helper"
+cp Resources/com.weto.helper.plist "$ROOT/Library/LaunchDaemons/"
+chmod 644 "$ROOT/Library/LaunchDaemons/com.weto.helper.plist"
 cp scripts/preinstall scripts/postinstall "$SCRIPTS/"
 chmod +x "$SCRIPTS/preinstall" "$SCRIPTS/postinstall"
 
@@ -85,6 +93,11 @@ cat > "$OUT/_component.plist" << 'PLIST'
 </array>
 </plist>
 PLIST
+
+# Снимаем карантин и прочие снимаемые атрибуты. Записи ._* в архиве всё равно
+# останутся: их создаёт pkgbuild для несбрасываемого com.apple.provenance,
+# и это перенос метаданных, а не файлы — на диск при установке они не попадают.
+xattr -cr "$ROOT" 2>/dev/null || true
 
 bash scripts/tests/launch-agent-contract.sh "$ROOT"
 

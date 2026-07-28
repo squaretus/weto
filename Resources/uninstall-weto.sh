@@ -17,6 +17,12 @@ if [ -f "/Library/LaunchAgents/$LABEL.plist" ]; then
     sudo rm -f "/Library/LaunchAgents/$LABEL.plist"
 fi
 
+# Демон обновления и его рабочий каталог.
+sudo launchctl bootout system/com.weto.helper 2>/dev/null || true
+sudo rm -f /Library/LaunchDaemons/com.weto.helper.plist
+sudo rm -f /Library/PrivilegedHelperTools/com.weto.helper
+sudo rm -rf /var/db/weto
+
 sudo rm -rf /Applications/Weto.app
 
 rm -f "$HOME/Library/Preferences/com.weto.shared.plist"

@@ -2,6 +2,7 @@ import XCTest
 @testable import WetoShared
 import WetoCore
 import WetoSystem
+import WetoXPC
 
 private actor CountingFetcher: HTTPFetching {
     private let payload: Data
@@ -31,6 +32,24 @@ private final class SpyURLOpener: URLOpening, @unchecked Sendable {
     }
 }
 
+private final class StubInstaller: UpdateInstalling, @unchecked Sendable {
+    private let lock = NSLock()
+    private let outcome: UpdateService.InstallResult?
+    private var requests = 0
+
+    init(_ outcome: UpdateService.InstallResult?) { self.outcome = outcome }
+
+    func requestInstall(completion: @escaping @Sendable (UpdateService.InstallResult?) -> Void) {
+        lock.lock(); requests += 1; lock.unlock()
+        completion(outcome)
+    }
+
+    var requestCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return requests
+    }
+}
+
 @MainActor
 final class UpdateVMTests: XCTestCase {
 
@@ -40,7 +59,7 @@ final class UpdateVMTests: XCTestCase {
         """.utf8)
     }
 
-    func test_available_update_opens_release_instead_of_rechecking() async {
+    func test_release_page_can_be_opened_without_rechecking() async {
         let fetcher = CountingFetcher(payload: release(tag: "v9.9.9"))
         let opener = SpyURLOpener()
         let vm = UpdateVM(fetcher: fetcher, opener: opener, currentVersion: "1.0.0")
@@ -50,11 +69,38 @@ final class UpdateVMTests: XCTestCase {
             return XCTFail("ожидалось состояние .available, получено \(vm.state)")
         }
 
-        vm.primaryAction()
+        vm.openReleasePage()
 
         XCTAssertEqual(opener.urls.map(\.absoluteString), [info.releaseURL])
         let calls = await fetcher.count()
         XCTAssertEqual(calls, 1, "открытие релиза не должно повторно опрашивать GitHub")
+    }
+
+    func test_available_update_is_published_for_the_menu_bar() async {
+
+        let vm = UpdateVM(
+            fetcher: CountingFetcher(payload: release(tag: "v9.9.9")),
+            opener: SpyURLOpener(),
+            currentVersion: "1.0.0"
+        )
+        XCTAssertNil(vm.availableUpdate, "до проверки обновления показывать нечего")
+
+        await vm.checkForUpdateAndWait()
+
+        XCTAssertEqual(vm.availableUpdate?.latestVersion, "9.9.9")
+        XCTAssertEqual(vm.availableUpdate?.currentVersion, "1.0.0")
+    }
+
+    func test_up_to_date_publishes_no_available_update() async {
+        let vm = UpdateVM(
+            fetcher: CountingFetcher(payload: release(tag: "v0.0.1")),
+            opener: SpyURLOpener(),
+            currentVersion: "1.0.0"
+        )
+
+        await vm.checkForUpdateAndWait()
+
+        XCTAssertNil(vm.availableUpdate)
     }
 
     func test_up_to_date_state_rechecks_instead_of_opening() async {
@@ -96,6 +142,86 @@ final class UpdateVMTests: XCTestCase {
         vm.stop()
         vm.startPeriodicCheck()
         vm.stop()
+    }
+
+    /// Ответ установщика применяется в задаче на главном акторе — даём ей добежать.
+    private func settle() async {
+        for _ in 0..<10 { await Task.yield() }
+    }
+
+    private func makeVM(
+        tag: String = "v9.9.9",
+        installer: UpdateInstalling,
+        opener: SpyURLOpener
+    ) -> UpdateVM {
+        UpdateVM(
+            fetcher: CountingFetcher(payload: release(tag: tag)),
+            opener: opener,
+            installer: installer,
+            currentVersion: "1.0.0"
+        )
+    }
+
+    func test_available_update_is_installed_by_the_daemon() async {
+
+        let installer = StubInstaller(.started)
+        let opener = SpyURLOpener()
+        let vm = makeVM(installer: installer, opener: opener)
+        await vm.checkForUpdateAndWait()
+
+        vm.primaryAction()
+
+        XCTAssertEqual(installer.requestCount, 1)
+        XCTAssertTrue(vm.isInstallingUpdate, "начатая установка обязана быть видна в UI")
+        XCTAssertTrue(opener.urls.isEmpty, "при работающем демоне браузер не нужен")
+    }
+
+    func test_daemon_failure_is_shown_and_spinner_stops() async {
+        let vm = makeVM(installer: StubInstaller(.failed("нет пакета в релизе")), opener: SpyURLOpener())
+        await vm.checkForUpdateAndWait()
+
+        vm.primaryAction()
+        await settle()
+
+        XCTAssertFalse(vm.isInstallingUpdate)
+        XCTAssertEqual(vm.installFailure, "нет пакета в релизе")
+    }
+
+    func test_missing_daemon_falls_back_to_release_page() async {
+
+        let opener = SpyURLOpener()
+        let vm = makeVM(installer: StubInstaller(nil), opener: opener)
+        await vm.checkForUpdateAndWait()
+
+        vm.primaryAction()
+        await settle()
+
+        XCTAssertFalse(vm.isInstallingUpdate)
+        XCTAssertEqual(opener.urls.count, 1, "без демона остаётся страница релиза")
+        XCTAssertNotNil(vm.installFailure)
+    }
+
+    func test_install_is_not_started_twice() async {
+        let installer = StubInstaller(.started)
+        let vm = makeVM(installer: installer, opener: SpyURLOpener())
+        await vm.checkForUpdateAndWait()
+
+        vm.primaryAction()
+        vm.primaryAction()
+        vm.primaryAction()
+
+        XCTAssertEqual(installer.requestCount, 1, "повторные нажатия не должны множить установку")
+    }
+
+    func test_no_update_means_no_install_request() async {
+        let installer = StubInstaller(.started)
+        let vm = makeVM(tag: "v0.0.1", installer: installer, opener: SpyURLOpener())
+        await vm.checkForUpdateAndWait()
+
+        vm.primaryAction()
+
+        XCTAssertEqual(installer.requestCount, 0)
+        XCTAssertFalse(vm.isInstallingUpdate)
     }
 
     func test_non_github_release_url_is_not_opened() {
