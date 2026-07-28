@@ -3,6 +3,7 @@ import Observation
 import AppKit
 import WetoCore
 import WetoSystem
+import WetoXPC
 
 @Observable
 @MainActor
@@ -20,20 +21,39 @@ public final class UpdateVM {
 
     public private(set) var state: State = .idle
 
+    /// Установка идёт прямо сейчас: демон принял запрос и качает пакет.
+    /// Приложение при успешной установке погибнет — установщик выгружает и его,
+    /// и демон, поэтому снимать флаг обычно не приходится.
+    public private(set) var isInstallingUpdate = false
+
+    /// Почему установка не пошла. Пустое значение — нечего показывать.
+    public private(set) var installFailure: String?
+
+    /// Найденное обновление, пригодное для показа где угодно в UI: в попапе менюбара
+    /// и в окне настроек. Раньше о нём знал только футер настроек, и увидеть новость
+    /// можно было, лишь открыв настройки.
+    public var availableUpdate: UpdateInfo? {
+        guard case .available(let info) = state, info.isNewer else { return nil }
+        return info
+    }
+
     @ObservationIgnored private let fetcher: HTTPFetching
     @ObservationIgnored private let opener: URLOpening
     @ObservationIgnored private var checkTask: Task<Void, Never>?
     @ObservationIgnored private var periodicTask: Task<Void, Never>?
 
     @ObservationIgnored private let currentVersion: String
+    @ObservationIgnored private let installer: UpdateInstalling
 
     public init(
         fetcher: HTTPFetching = URLSessionHTTPFetcher(timeout: 15),
         opener: URLOpening = SystemURLOpener(),
+        installer: UpdateInstalling = HelperUpdateInstaller(),
         currentVersion: String = Constants.appVersion
     ) {
         self.fetcher = fetcher
         self.opener = opener
+        self.installer = installer
         self.currentVersion = currentVersion
     }
 
@@ -74,15 +94,50 @@ public final class UpdateVM {
         checkTask?.cancel(); checkTask = nil
     }
 
-    /// Одна кнопка на два действия: когда обновление найдено — открыть релиз,
-    /// в остальных состояниях — проверить заново. Прежде страницу релиза
-    /// нельзя было открыть вообще: кнопка всегда только перепроверяла.
+    /// Одна кнопка на два действия: когда обновление найдено — поставить его,
+    /// в остальных состояниях — проверить заново.
     public func primaryAction() {
-        if case .available(let info) = state, let url = Self.validatedReleaseURL(info.releaseURL) {
-            opener.open(url)
+        guard availableUpdate != nil else {
+            checkForUpdate()
             return
         }
-        checkForUpdate()
+        installUpdate()
+    }
+
+    /// Просит демон скачать и установить обновление. Демон не получает от нас
+    /// ни ссылки, ни версии — он перепроверяет релиз сам.
+    public func installUpdate() {
+        guard let update = availableUpdate, !isInstallingUpdate else { return }
+
+        isInstallingUpdate = true
+        installFailure = nil
+
+        installer.requestInstall { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                switch result {
+                case .started:
+                    break // Ждём: установщик выгрузит приложение сам.
+                case .failed(let message):
+                    self.isInstallingUpdate = false
+                    self.installFailure = message
+                case nil:
+                    // Демона нет — честно говорим об этом и оставляем ручной путь.
+                    self.isInstallingUpdate = false
+                    self.installFailure = "Служба обновления недоступна — откройте страницу релиза"
+                    if let url = Self.validatedReleaseURL(update.releaseURL) {
+                        self.opener.open(url)
+                    }
+                }
+            }
+        }
+    }
+
+    public func openReleasePage() {
+        guard let update = availableUpdate,
+              let url = Self.validatedReleaseURL(update.releaseURL)
+        else { return }
+        opener.open(url)
     }
 
     public func checkForUpdateAndWait() async {

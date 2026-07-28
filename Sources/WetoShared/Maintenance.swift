@@ -11,6 +11,7 @@ public enum MaintenanceStep: Equatable, Sendable {
     case clearSettings
     case removeToken
     case removeCaches
+    case removeHelper
     case scheduleBundleRemoval
 
     public var displayText: String {
@@ -20,6 +21,7 @@ public enum MaintenanceStep: Equatable, Sendable {
         case .clearSettings: return "очистка настроек и журнала"
         case .removeToken: return "удаление токена ipinfo"
         case .removeCaches: return "удаление кэша флагов"
+        case .removeHelper: return "снятие демона обновления"
         case .scheduleBundleRemoval: return "удаление самого приложения"
         }
     }
@@ -45,6 +47,16 @@ public struct MaintenanceResult: Equatable, Sendable {
     }
 }
 
+private final class FailureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: String?
+
+    var value: String? {
+        get { lock.lock(); defer { lock.unlock() }; return storage }
+        set { lock.lock(); storage = newValue; lock.unlock() }
+    }
+}
+
 public struct Maintenance {
 
     private let agent: LaunchAgentManaging
@@ -54,9 +66,11 @@ public struct Maintenance {
     private let bundlePath: String?
     private let fileManager: FileManager
     private let removeBundle: @Sendable (String) -> Result<Void, Error>
+    private let helper: HelperUninstalling?
 
     public init(
         agent: LaunchAgentManaging = LaunchAgentController(),
+        helper: HelperUninstalling? = HelperUpdateInstaller(),
         secrets: SecretStoring = KeychainStore(service: Constants.keychainService),
         defaultsSuite: String = Constants.userDefaultsSuite,
         cachesDirectory: URL? = FileManager.default
@@ -69,6 +83,7 @@ public struct Maintenance {
         removeBundle: @escaping @Sendable (String) -> Result<Void, Error> = Maintenance.scheduleBundleRemoval
     ) {
         self.agent = agent
+        self.helper = helper
         self.secrets = secrets
         self.defaultsSuite = defaultsSuite
         self.cachesDirectory = cachesDirectory
@@ -116,6 +131,16 @@ public struct Maintenance {
             }
         }
 
+        // Демон снимает сам себя: у приложения нет прав на /Library.
+        if let helper {
+            let failure = Self.awaitHelperUninstall(helper)
+            if let failure {
+                result.failures.append((.removeHelper, failure))
+            } else {
+                result.completed.append(.removeHelper)
+            }
+        }
+
         if let bundlePath {
             switch removeBundle(bundlePath) {
             case .success:
@@ -126,6 +151,23 @@ public struct Maintenance {
         }
 
         return result
+    }
+
+    /// Ответ демона ждём ограниченное время: удаление не должно зависнуть,
+    /// если демона нет или он не отвечает.
+    private static func awaitHelperUninstall(_ helper: HelperUninstalling) -> String? {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = FailureBox()
+
+        helper.uninstallHelper { failure in
+            box.value = failure
+            semaphore.signal()
+        }
+
+        if semaphore.wait(timeout: .now() + 5) == .timedOut {
+            return "демон не ответил за 5 секунд"
+        }
+        return box.value
     }
 
     /// Бандл нельзя удалить из самого работающего приложения, поэтому удаление
