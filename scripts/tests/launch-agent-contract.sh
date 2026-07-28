@@ -41,6 +41,21 @@ grep -q 'bootout system/com.weto.helper' scripts/preinstall \
 grep -q 'bootout system/com.weto.helper' Resources/uninstall-weto.sh \
     || fail "деинсталлятор не выгружает демон"
 
+# 2в. Резидентность: копию, поднятую launchd, система усыпляет автозавершением,
+#     как только у приложения не остаётся окон. Отказ обязан быть и в бандле,
+#     и в коде — иначе охрана исчезает после установки и после каждого входа.
+APP_PLIST="$STAGE/Applications/Weto.app/Contents/Info.plist"
+for key in NSSupportsAutomaticTermination NSSupportsSuddenTermination; do
+    value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP_PLIST" 2>/dev/null || echo "нет ключа")"
+    [ "$value" = "false" ] \
+        || fail "в Info.plist бандла $key = $value, ожидалось false"
+done
+
+grep -q 'disableAutomaticTermination' Sources/WetoMenuBar/WetoMenuBarApp.swift \
+    || fail "приложение не отказывается от автозавершения при старте"
+grep -q 'disableSuddenTermination' Sources/WetoMenuBar/WetoMenuBarApp.swift \
+    || fail "приложение не отказывается от внезапного завершения при старте"
+
 # 3. postinstall пишет агент в домашний каталог консольного пользователя
 #    и грузит его в его же графическом сеансе.
 grep -q 'NFSHomeDirectory' scripts/postinstall \
