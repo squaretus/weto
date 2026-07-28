@@ -127,6 +127,11 @@ scripts/tests/    shell-контракты установки и релизно�
 - **Версия — из `Info.plist` бандла** (`Constants.appVersion` сверяет `CFBundleIdentifier`,
   иначе отдаёт `dev`). Релизный скрипт не правит отслеживаемые файлы; версия подставляется
   только в staging-копию plist.
+- **Резидентность объявлена явно:** приложение отказывается и от автозавершения,
+  и от внезапного завершения (`NSSupportsAutomaticTermination`/`NSSupportsSuddenTermination`
+  в `Info.plist`, `ProcessInfo.disableAutomaticTermination`/`disableSuddenTermination`
+  в `AppDelegate`). Иначе копию, поднятую launchd, система усыпляет в первый момент
+  без окон — и охрана исчезает после установки и после каждого входа в систему.
 - **Ресурсы — в `Contents/Resources`, доступ через `DesignResources`.** Сгенерированный
   SPM `Bundle.module` смотрит лишь в корень бандла и в путь машины сборки, а ресурс в корне
   `.app` `codesign` пломбировать отказывается — подпись молча не создавалась.

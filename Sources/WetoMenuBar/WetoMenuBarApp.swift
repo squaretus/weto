@@ -27,6 +27,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         NSApplication.shared.setActivationPolicy(.accessory)
+
+        // Копию, поднятую launchd (после установки и после каждого входа в систему),
+        // macOS считает праздной и усыпляет автозавершением. Момент, когда у приложения
+        // не остаётся ни одного окна — попап менюбара закрылся, а окно настроек ещё
+        // не создано, — система принимает за конец работы и убивает процесс без крэша
+        // и без логов, вместе с охраной. Резидентность объявляем явно.
+        ProcessInfo.processInfo.disableAutomaticTermination("охрана целей должна работать постоянно")
+        ProcessInfo.processInfo.disableSuddenTermination()
+
         coordinator.start()
     }
 
