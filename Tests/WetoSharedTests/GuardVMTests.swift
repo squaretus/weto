@@ -120,8 +120,8 @@ final class GuardVMTests: XCTestCase {
     private func healthySnapshot() -> NetworkSnapshot {
         NetworkSnapshot(
             services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0"),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6"),
+                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6", isVPN: true),
             ],
             primaryServiceUUID: "HAPP"
         )
@@ -130,8 +130,8 @@ final class GuardVMTests: XCTestCase {
     private func vpnDownSnapshot() -> NetworkSnapshot {
         NetworkSnapshot(
             services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0"),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: nil),
+                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .init(uuid: "HAPP", name: "Happ", activeInterface: nil, isVPN: true),
             ],
             primaryServiceUUID: "WIFI"
         )
@@ -165,7 +165,7 @@ final class GuardVMTests: XCTestCase {
     ) -> Harness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = enabled
-        settings.vpnServiceName = "Happ"
+        settings.vpnServiceID = "HAPP"
         settings.blockedCountryCodes = ["RU"]
         settings.targets = [targetBundleID]
         settings.targets += executables
@@ -245,8 +245,8 @@ final class GuardVMTests: XCTestCase {
     func test_vpn_not_primary_kills() async {
         let snapshot = NetworkSnapshot(
             services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0"),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6"),
+                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6", isVPN: true),
             ],
             primaryServiceUUID: "WIFI"
         )
@@ -349,7 +349,7 @@ final class GuardVMTests: XCTestCase {
 
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceName = "Happ"
+        settings.vpnServiceID = "HAPP"
         settings.targets = [targetBundleID]
 
         let killer = SpyKiller()
@@ -468,7 +468,7 @@ final class GuardVMTests: XCTestCase {
 
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceName = "Happ"
+        settings.vpnServiceID = "HAPP"
         settings.targets = []
         settings.targets = ["nano"]
 
@@ -482,7 +482,7 @@ final class GuardVMTests: XCTestCase {
     func test_first_episode_event_is_termination_second_is_launch_block() async {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceName = "Happ"
+        settings.vpnServiceID = "HAPP"
         settings.targets = [targetBundleID]
 
         let log = EventLogStore(defaults: defaults)
@@ -512,10 +512,11 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(log.events.first?.kind, .launchBlocked)
     }
 
-    func test_available_vpn_names_come_from_snapshot() {
+    func test_only_qualified_vpns_are_offered_as_candidates() {
+
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
-        h.vm.refreshVPNNames()
-        XCTAssertEqual(h.vm.availableVPNNames, ["Happ", "Wi-Fi"])
+        h.vm.refreshVPNCandidates()
+        XCTAssertEqual(h.vm.availableVPNs.map(\.name), ["Happ"])
     }
 
     func test_running_process_count_counts_only_target_bundle() {

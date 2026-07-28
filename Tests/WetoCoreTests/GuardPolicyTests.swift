@@ -4,13 +4,13 @@ import XCTest
 final class GuardPolicyTests: XCTestCase {
 
     private func config(
-        vpn: String? = "Happ",
+        vpn: String? = "BC2D1D42",
         blocked: Set<String> = ["RU"],
         ranges: [IPRange] = [],
         targets: [String] = ["com.example.target"]
     ) -> GuardConfig {
         GuardConfig(
-            vpnServiceName: vpn,
+            vpnServiceID: vpn,
             blockedCountries: blocked,
             blockedIPRanges: ranges,
             targets: targets

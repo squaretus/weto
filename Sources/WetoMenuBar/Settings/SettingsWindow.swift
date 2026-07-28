@@ -73,7 +73,7 @@ struct SettingsWindow: View {
         .preferredColorScheme(scheme)
         .background(SettingsWindowConfigurator())
         .onAppear {
-            coordinator.guardVM.refreshVPNNames()
+            coordinator.guardVM.refreshVPNCandidates()
             tokenDraft = maskedToken
         }
     }
@@ -142,13 +142,15 @@ struct SettingsWindow: View {
 
                     Spacer(minLength: 0)
 
+                    // Значение тега — UUID сервиса: два VPN с одинаковым именем
+                    // должны оставаться различимыми.
                     Picker("", selection: Binding(
-                        get: { coordinator.settings.vpnServiceName ?? "" },
-                        set: { coordinator.settings.vpnServiceName = $0.isEmpty ? nil : $0 }
+                        get: { coordinator.settings.vpnServiceID ?? "" },
+                        set: { coordinator.settings.vpnServiceID = $0.isEmpty ? nil : $0 }
                     )) {
                         Text("Не выбран").tag("")
-                        ForEach(coordinator.guardVM.availableVPNNames, id: \.self) { name in
-                            Text(name).tag(name)
+                        ForEach(coordinator.guardVM.availableVPNs) { service in
+                            Text(service.name).tag(service.uuid)
                         }
                     }
                     .labelsHidden()

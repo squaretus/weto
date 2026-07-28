@@ -22,9 +22,10 @@ public final class SettingsStore {
     private enum Key {
         static let isEnabled = "isEnabled"
         static let appTheme = "appTheme"
-        static let vpnServiceName = "vpnServiceName"
+        static let vpnServiceID = "vpnServiceID"
         static let targets = "targets"
 
+        static let legacyVPNServiceName = "vpnServiceName"
         static let legacyBundleIDs = "targetBundleIDs"
         static let legacyExecutables = "targetExecutables"
         static let blockedCountryCodes = "blockedCountryCodes"
@@ -46,7 +47,7 @@ public final class SettingsStore {
         self._isEnabled = defaults.object(forKey: Key.isEnabled) as? Bool ?? true
         self._appTheme = defaults.string(forKey: Key.appTheme)
             .flatMap(AppTheme.init(rawValue:)) ?? .dark
-        self._vpnServiceName = defaults.string(forKey: Key.vpnServiceName)
+        self._vpnServiceID = defaults.string(forKey: Key.vpnServiceID)
         self._targets = Self.loadTargets(from: defaults)
         self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
         self._blockedIPRangeTexts = defaults.stringArray(forKey: Key.blockedIPRangeTexts) ?? []
@@ -75,10 +76,25 @@ public final class SettingsStore {
         set { _appTheme = newValue; defaults.set(newValue.rawValue, forKey: Key.appTheme) }
     }
 
-    private var _vpnServiceName: String?
-    public var vpnServiceName: String? {
-        get { _vpnServiceName }
-        set { _vpnServiceName = newValue; defaults.set(newValue, forKey: Key.vpnServiceName) }
+    private var _vpnServiceID: String?
+    public var vpnServiceID: String? {
+        get { _vpnServiceID }
+        set { _vpnServiceID = newValue; defaults.set(newValue, forKey: Key.vpnServiceID) }
+    }
+
+    /// Переносит выбор, сделанный прежней версией по имени сервиса, на устойчивый UUID.
+    /// Неоднозначное имя (два сервиса зовутся одинаково) и имя сервиса, не прошедшего
+    /// квалификацию VPN, не угадываем — выбор очищается, и охрана остаётся fail-closed
+    /// до явного выбора пользователем.
+    public func migrateLegacyVPNSelection(in snapshot: NetworkSnapshot) {
+        guard let legacyName = defaults.string(forKey: Key.legacyVPNServiceName) else { return }
+        defer { defaults.removeObject(forKey: Key.legacyVPNServiceName) }
+
+        guard vpnServiceID == nil else { return }
+
+        let matches = snapshot.vpnCandidates.filter { $0.name == legacyName }
+        guard matches.count == 1 else { return }
+        vpnServiceID = matches[0].uuid
     }
 
     private var _targets: [String]
@@ -132,7 +148,7 @@ public final class SettingsStore {
 
     public var guardConfig: GuardConfig {
         GuardConfig(
-            vpnServiceName: vpnServiceName,
+            vpnServiceID: vpnServiceID,
             blockedCountries: Set(blockedCountryCodes),
             blockedIPRanges: blockedIPRangeTexts.compactMap(IPRange.init),
             targets: targets

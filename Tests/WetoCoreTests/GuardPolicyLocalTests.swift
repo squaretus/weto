@@ -8,7 +8,7 @@ final class GuardPolicyLocalTests: XCTestCase {
         targets: [String] = ["com.example.target"]
     ) -> GuardConfig {
         GuardConfig(
-            vpnServiceName: vpn,
+            vpnServiceID: vpn,
             blockedCountries: ["RU"],
             blockedIPRanges: [],
             targets: targets

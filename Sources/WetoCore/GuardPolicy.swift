@@ -2,7 +2,7 @@ import Foundation
 
 public struct GuardConfig: Equatable, Sendable {
 
-    public let vpnServiceName: String?
+    public let vpnServiceID: String?
 
     public let blockedCountries: Set<String>
     public let blockedIPRanges: [IPRange]
@@ -12,12 +12,12 @@ public struct GuardConfig: Equatable, Sendable {
     public var hasTargets: Bool { !targets.isEmpty }
 
     public init(
-        vpnServiceName: String?,
+        vpnServiceID: String?,
         blockedCountries: Set<String>,
         blockedIPRanges: [IPRange],
         targets: [String]
     ) {
-        self.vpnServiceName = vpnServiceName
+        self.vpnServiceID = vpnServiceID
         self.blockedCountries = blockedCountries
         self.blockedIPRanges = blockedIPRanges
         self.targets = targets
@@ -74,7 +74,7 @@ public enum GuardPolicy {
         config: GuardConfig
     ) -> GuardDecision? {
         guard isEnabled, config.hasTargets else { return .safe }
-        guard config.vpnServiceName != nil else { return .kill(.vpnNotConfigured) }
+        guard config.vpnServiceID != nil else { return .kill(.vpnNotConfigured) }
 
         switch vpn {
         case .notConfigured:

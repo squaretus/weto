@@ -30,7 +30,7 @@ public final class GuardVM {
     public private(set) var lastReading: GeoReading?
 
     public private(set) var permissionFailure: String?
-    public private(set) var availableVPNNames: [String] = []
+    public private(set) var availableVPNs: [NetworkServiceSnapshot] = []
     public private(set) var runningTargets: [RunningTarget] = []
 
     @ObservationIgnored private let settings: SettingsStore
@@ -81,7 +81,10 @@ public final class GuardVM {
     }
 
     public func start() {
-        refreshVPNNames()
+        // Миграция выбора «по имени» на UUID выполняется до первого решения:
+        // иначе прежний выбор выглядел бы как «VPN не выбран» и цели ушли бы зря.
+        settings.migrateLegacyVPNSelection(in: snapshotReader.snapshot())
+        refreshVPNCandidates()
         refreshRunningTargets()
         events.start { [weak self] trigger in
             Task { @MainActor [weak self] in self?.handle(trigger) }
@@ -118,8 +121,8 @@ public final class GuardVM {
         LaunchAgentController.disable()
     }
 
-    public func refreshVPNNames() {
-        availableVPNNames = snapshotReader.snapshot().vpnCandidateNames
+    public func refreshVPNCandidates() {
+        availableVPNs = snapshotReader.snapshot().vpnCandidates
     }
 
     public func refreshRunningTargets() {
@@ -172,7 +175,7 @@ public final class GuardVM {
 
         let config = settings.guardConfig
         let vpn = VPNStatusResolver.status(
-            serviceName: config.vpnServiceName,
+            serviceID: config.vpnServiceID,
             in: snapshotReader.snapshot()
         )
 
@@ -205,7 +208,7 @@ public final class GuardVM {
     public func runProbe() async {
         let config = settings.guardConfig
         let vpn = VPNStatusResolver.status(
-            serviceName: config.vpnServiceName,
+            serviceID: config.vpnServiceID,
             in: snapshotReader.snapshot()
         )
         let geo = await geoProbe.probe()
