@@ -7,33 +7,18 @@ public protocol GeoProbing: Sendable {
 
 public actor GeoProbe: GeoProbing {
 
-    /// Кэшируется только удачное подтверждение. Отказ не кэшируется вовсе: иначе
-    /// единственный сбой обоих сервисов оставлял бы цели заблокированными до смены IP
-    /// или перезапуска приложения.
-    private struct ConfirmationCache: Sendable {
-        let ip: String
-        let country: String
-        let source: ConfirmSource
-        let expiresAt: Date
-    }
-
     private let fetcher: HTTPFetching
     private let confirmationFetcher: HTTPFetching
     private let token: @Sendable () -> String?
-    private let now: @Sendable () -> Date
-
-    private var cache: ConfirmationCache?
 
     public init(
         fetcher: HTTPFetching,
         confirmationFetcher: HTTPFetching? = nil,
-        token: @escaping @Sendable () -> String?,
-        now: @escaping @Sendable () -> Date = { Date() }
+        token: @escaping @Sendable () -> String?
     ) {
         self.fetcher = fetcher
         self.confirmationFetcher = confirmationFetcher ?? fetcher
         self.token = token
-        self.now = now
     }
 
     public func probe() async -> GeoOutcome {
@@ -57,7 +42,9 @@ public actor GeoProbe: GeoProbing {
             return .unavailable("ipinfo вернул некорректный адрес")
         }
 
-        let confirmation = await confirmation(for: ipinfo.ip)
+        // Ни адрес, ни страна, ни подтверждение не кэшируются: решение о завершении
+        // целей принимается только по данным, полученным в этой пробе.
+        let confirmation = await confirm(ip: ipinfo.ip)
 
         return .resolved(GeoResponses.makeReading(
             ipinfo: ipinfo,
@@ -66,31 +53,12 @@ public actor GeoProbe: GeoProbing {
         ))
     }
 
-    private func confirmation(for ip: String) async -> (country: String, source: ConfirmSource)? {
-        if let cache, cache.ip == ip, cache.expiresAt > now() {
-            return (cache.country, cache.source)
-        }
-
-        guard let fresh = await confirm(ip: ip) else {
-            cache = nil
-            return nil
-        }
-
-        cache = ConfirmationCache(
-            ip: ip,
-            country: fresh.country,
-            source: fresh.source,
-            expiresAt: now().addingTimeInterval(Constants.geoConfirmationTTLSeconds)
-        )
-        return fresh
-    }
-
     private func confirm(ip: String) async -> (country: String, source: ConfirmSource)? {
         if let country = await fetchCountry(
-            urlString: Constants.ipwhoisURL(ip: ip),
-            decode: GeoResponses.decodeIPWhoIs
+            urlString: Constants.freeipapiURL(ip: ip),
+            decode: GeoResponses.decodeFreeIPAPI
         ) {
-            return (country, .ipwhois)
+            return (country, .freeipapi)
         }
         if let country = await fetchCountry(
             urlString: Constants.geojsURL(ip: ip),

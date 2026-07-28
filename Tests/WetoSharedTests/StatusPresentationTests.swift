@@ -8,7 +8,7 @@ final class StatusPresentationTests: XCTestCase {
         ip: "203.0.113.28",
         primaryCountry: "KZ",
         confirmedCountry: "KZ",
-        confirmSource: .ipwhois
+        confirmSource: .freeipapi
     )
 
     func test_disabled_state_says_guard_is_off() {
@@ -26,7 +26,7 @@ final class StatusPresentationTests: XCTestCase {
         )
         XCTAssertEqual(
             StatusPresentation.title(for: .unsafe(.confirmationUnavailable)),
-            "Ipwhois недоступен"
+            "Подтверждение недоступно"
         )
     }
 
@@ -55,7 +55,7 @@ final class StatusPresentationTests: XCTestCase {
             [
                 StatusLine(key: "IP", value: "203.0.113.28"),
                 StatusLine(key: "ipinfo", value: "KZ"),
-                StatusLine(key: "ipwhois", value: "KZ"),
+                StatusLine(key: "freeipapi", value: "KZ"),
             ]
         )
     }
@@ -70,7 +70,7 @@ final class StatusPresentationTests: XCTestCase {
             [
                 StatusLine(key: "IP", value: "203.0.113.28"),
                 StatusLine(key: "ipinfo", value: "KZ"),
-                StatusLine(key: "ipwhois", value: "—"),
+                StatusLine(key: "подтверждение", value: "—"),
             ]
         )
     }
@@ -85,7 +85,7 @@ final class StatusPresentationTests: XCTestCase {
     func test_detail_joins_lines_for_notifications() {
         XCTAssertEqual(
             StatusPresentation.detail(for: .safe(reading), reading: reading),
-            "IP: 203.0.113.28 · ipinfo: KZ · ipwhois: KZ"
+            "IP: 203.0.113.28 · ipinfo: KZ · freeipapi: KZ"
         )
     }
 

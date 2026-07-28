@@ -21,7 +21,7 @@ final class GuardPolicyTests: XCTestCase {
         ip: String = "203.0.113.28",
         primary: String = "KZ",
         confirmed: String? = "KZ",
-        source: ConfirmSource? = .ipwhois
+        source: ConfirmSource? = .freeipapi
     ) -> GeoOutcome {
         .resolved(GeoReading(
             ip: ip,
@@ -115,10 +115,10 @@ final class GuardPolicyTests: XCTestCase {
     }
 
     func test_blocked_confirmed_country_kills_even_when_primary_is_allowed() {
-        let s = signals(geo: geo(primary: "KZ", confirmed: "RU", source: .ipwhois))
+        let s = signals(geo: geo(primary: "KZ", confirmed: "RU", source: .freeipapi))
         XCTAssertEqual(
             GuardPolicy.decide(s),
-            .kill(.blockedCountry(code: "RU", source: "ipwhois"))
+            .kill(.blockedCountry(code: "RU", source: "freeipapi"))
         )
     }
 

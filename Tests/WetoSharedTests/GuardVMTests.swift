@@ -204,7 +204,7 @@ final class GuardVMTests: XCTestCase {
             ip: "203.0.113.28",
             primaryCountry: primary,
             confirmedCountry: confirmed,
-            confirmSource: confirmed == nil ? nil : .ipwhois
+            confirmSource: confirmed == nil ? nil : .freeipapi
         ))
     }
 

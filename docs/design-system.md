@@ -209,7 +209,7 @@
 ```
 IP: 203.0.113.28
 ipinfo: KZ
-ipwhois: KZ
+freeipapi: KZ
 ```
 
 Недоступное значение — короткое тире `—`, неизвестный адрес — «неизвестен». Пустых мест
@@ -222,7 +222,7 @@ ipwhois: KZ
 ```
 ChatGPT                                   ← 13 medium, ink
 завершено — обнаружена страна KZ по данным ipinfo   ← 13, dim
-27.07.2026 16:49 · IP: 203.0.113.28 · ipinfo: KZ · ipwhois: KZ   ← 11, faint, tabular
+27.07.2026 16:49 · IP: 203.0.113.28 · ipinfo: KZ · freeipapi: KZ   ← 11, faint, tabular
 ```
 
 Причина пишется строчной буквой после действия, кроме аббревиатур («VPN Happ не держит…»).
@@ -249,7 +249,7 @@ ChatGPT                                   ← 13 medium, ink
 │                                  │
 │ IP: 203.0.113.28                  │
 │ ipinfo: KZ                       │
-│ ipwhois: KZ                      │
+│ freeipapi: KZ                      │
 │ ──────────────────────────────── │
 │ ▣ ChatGPT                    +3  │  живые процессы целей
 │ ▣ claude                     +2  │

@@ -106,7 +106,7 @@ extension UnsafeReason {
         case .geoUnavailable:
             return "Ipinfo недоступен"
         case .confirmationUnavailable:
-            return "Ipwhois недоступен"
+            return "Подтверждение недоступно"
         default:
             return "Цели завершены"
         }

@@ -10,14 +10,8 @@ public struct IPInfoLiteResponse: Decodable, Equatable, Sendable {
     }
 }
 
-public struct IPWhoIsResponse: Decodable, Equatable, Sendable {
-    public let success: Bool
+public struct FreeIPAPIResponse: Decodable, Equatable, Sendable {
     public let countryCode: String?
-
-    enum CodingKeys: String, CodingKey {
-        case success
-        case countryCode = "country_code"
-    }
 }
 
 public struct GeoJSCountryResponse: Decodable, Equatable, Sendable {
@@ -32,10 +26,10 @@ public enum GeoResponses {
         try decoder.decode(IPInfoLiteResponse.self, from: data)
     }
 
-    public static func decodeIPWhoIs(_ data: Data) throws -> String? {
-        let response = try decoder.decode(IPWhoIsResponse.self, from: data)
-        guard response.success else { return nil }
-        return response.countryCode
+    public static func decodeFreeIPAPI(_ data: Data) throws -> String? {
+        let code = try decoder.decode(FreeIPAPIResponse.self, from: data).countryCode
+        guard let code, !code.isEmpty else { return nil }
+        return code
     }
 
     public static func decodeGeoJS(_ data: Data) throws -> String? {

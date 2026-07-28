@@ -10,7 +10,7 @@ public enum VPNStatus: Equatable, Sendable {
 }
 
 public enum ConfirmSource: String, Equatable, Codable, Sendable {
-    case ipwhois
+    case freeipapi
     case geojs
 }
 

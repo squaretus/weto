@@ -29,14 +29,14 @@ public enum Constants {
     /// поэтому ждём его заметно меньше, чем основной источник.
     public static let geoConfirmationTimeoutSeconds: TimeInterval = 2.5
 
-    /// Срок жизни успешного подтверждения страны для неизменного IP. Держит расход
-    /// лимита ipwho.is (1000 запросов в сутки) в пределах пары сотен обращений,
-    /// но не превращает единичный отказ в вечную блокировку.
-    public static let geoConfirmationTTLSeconds: TimeInterval = 600
-
     public static let ipinfoLiteURL = "https://v4.api.ipinfo.io/lite/me"
 
-    public static func ipwhoisURL(ip: String) -> String { "https://ipwho.is/\(ip)" }
+    /// Канонический адрес без редиректа: freeipapi.com отвечает 302 на free.freeipapi.com.
+    /// Лимит — 60 запросов в минуту, а мы при опросе раз в 5 секунд тратим 12:
+    /// подтверждение спрашивается на каждой пробе, без кэша.
+    public static func freeipapiURL(ip: String) -> String {
+        "https://free.freeipapi.com/api/json/\(ip)"
+    }
 
     public static func geojsURL(ip: String) -> String {
         "https://get.geojs.io/v1/ip/country/\(ip).json"
