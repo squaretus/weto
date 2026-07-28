@@ -2,11 +2,17 @@ import Foundation
 
 public enum Constants {
 
+    public static let appBundleIdentifier = "com.weto.app"
+
     /// Версия берётся из Info.plist собранного бандла, а не хранится в исходнике:
-    /// релизный скрипт больше не правит отслеживаемые файлы через sed. При запуске
-    /// без бандла (`swift run`) версии нет — там честнее показать «dev».
+    /// релизный скрипт больше не правит отслеживаемые файлы через sed.
+    /// Идентификатор бандла проверяется намеренно: при запуске через `swift run`
+    /// или из тестов `Bundle.main` — чужой бандл, и его версия к нам не относится.
     public static let appVersion: String = {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+        guard Bundle.main.bundleIdentifier == appBundleIdentifier,
+              let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        else { return "dev" }
+        return version
     }()
 
     public static let defaultPollIntervalSeconds: TimeInterval = 5

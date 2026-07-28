@@ -46,4 +46,11 @@ public final class AppCoordinator {
         guardVM.start()
         update.startPeriodicCheck()
     }
+
+    /// Останавливает всё, что владеет задачами: и цикл охраны, и проверку обновлений.
+    /// Цикл обновлений раньше жил до конца процесса, потому что его задачу никто не хранил.
+    public func stopForTermination() {
+        guardVM.stop()
+        update.stop()
+    }
 }

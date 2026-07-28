@@ -234,6 +234,54 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.tokenBox.value, "s3cret")
     }
 
+    func test_country_code_entry_lands_in_country_list() {
+        let store = makeStore()
+
+        XCTAssertTrue(store.addBlockedEntry(" ru ").isSuccess)
+
+        XCTAssertEqual(store.blockedCountryCodes, ["RU"])
+        XCTAssertTrue(store.blockedIPRangeTexts.isEmpty)
+    }
+
+    func test_cidr_entry_lands_in_range_list() {
+        let store = makeStore()
+
+        XCTAssertTrue(store.addBlockedEntry("198.51.100.0/24").isSuccess)
+
+        XCTAssertEqual(store.blockedIPRangeTexts, ["198.51.100.0/24"])
+    }
+
+    func test_rejects_malformed_blacklist_range() {
+
+        let store = makeStore()
+
+        XCTAssertEqual(store.addBlockedEntry("10.0.0.0/99").failureValue, .invalidEntry)
+        XCTAssertEqual(store.addBlockedEntry("совсем не адрес").failureValue, .invalidEntry)
+        XCTAssertEqual(store.addBlockedEntry("   ").failureValue, .empty)
+
+        XCTAssertTrue(store.blockedEntries.isEmpty, "мусор не должен попадать в настройки")
+    }
+
+    func test_duplicate_blacklist_entry_is_reported() {
+        let store = makeStore()
+        XCTAssertTrue(store.addBlockedEntry("RU").isSuccess)
+
+        XCTAssertEqual(store.addBlockedEntry("ru").failureValue, .duplicate)
+        XCTAssertEqual(store.blockedCountryCodes, ["RU"])
+    }
+
+    func test_removing_entry_clears_it_from_both_lists() {
+        let store = makeStore()
+        _ = store.addBlockedEntry("RU")
+        _ = store.addBlockedEntry("198.51.100.0/24")
+
+        store.removeBlockedEntry("RU")
+        XCTAssertEqual(store.blockedEntries, ["198.51.100.0/24"])
+
+        store.removeBlockedEntry("198.51.100.0/24")
+        XCTAssertTrue(store.blockedEntries.isEmpty)
+    }
+
     func test_token_box_mirrors_current_token() {
 
         let secrets = InMemorySecretStore()

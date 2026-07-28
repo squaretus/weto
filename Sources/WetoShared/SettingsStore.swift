@@ -15,6 +15,23 @@ public enum AppTheme: String, CaseIterable, Sendable {
     }
 }
 
+public enum BlacklistEntryError: Error, Equatable, Sendable {
+    case empty
+    case invalidEntry
+    case duplicate
+
+    public var displayText: String {
+        switch self {
+        case .empty:
+            return "введите код страны, IP-адрес или диапазон"
+        case .invalidEntry:
+            return "не похоже ни на код страны, ни на IP-адрес или CIDR"
+        case .duplicate:
+            return "такая запись уже есть в списке"
+        }
+    }
+}
+
 public enum SettingsPersistenceError: Error, Equatable, Sendable {
     case keychainWriteFailed(OSStatus)
 
@@ -208,6 +225,35 @@ public final class SettingsStore {
         tokenBox.value = value
         emit(.ipinfoToken)
         return .success(())
+    }
+
+    /// Разбор строки чёрного списка живёт в store, а не во View: раньше мусорная
+    /// запись молча попадала в настройки и висела там с пометкой «не разобран».
+    @discardableResult
+    public func addBlockedEntry(_ text: String) -> Result<Void, BlacklistEntryError> {
+        let entry = text.trimmingCharacters(in: .whitespaces)
+        guard !entry.isEmpty else { return .failure(.empty) }
+
+        if entry.count == 2, entry.allSatisfy(\.isLetter) {
+            let code = entry.uppercased()
+            guard !blockedCountryCodes.contains(code) else { return .failure(.duplicate) }
+            blockedCountryCodes += [code]
+            return .success(())
+        }
+
+        guard let range = IPRange(entry) else { return .failure(.invalidEntry) }
+        guard !blockedIPRangeTexts.contains(range.text) else { return .failure(.duplicate) }
+        blockedIPRangeTexts += [range.text]
+        return .success(())
+    }
+
+    public func removeBlockedEntry(_ entry: String) {
+        blockedCountryCodes = blockedCountryCodes.filter { $0 != entry }
+        blockedIPRangeTexts = blockedIPRangeTexts.filter { $0 != entry }
+    }
+
+    public var blockedEntries: [String] {
+        blockedCountryCodes + blockedIPRangeTexts
     }
 
     public func onGuardConfigurationChange(
