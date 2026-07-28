@@ -12,6 +12,9 @@ public final class AppCoordinator {
     public let guardVM: GuardVM
     public let update = UpdateVM()
 
+    public let launchAgent: LaunchAgentManaging = LaunchAgentController()
+    public let maintenance = Maintenance()
+
     public init() {
 
         let settings = SettingsStore()
@@ -25,13 +28,16 @@ public final class AppCoordinator {
             snapshotReader: NetworkSnapshotReader(),
             geoProbe: GeoProbe(
                 fetcher: URLSessionHTTPFetcher(),
-
+                confirmationFetcher: URLSessionHTTPFetcher(
+                    timeout: Constants.geoConfirmationTimeoutSeconds
+                ),
                 token: { [box = settings.tokenBox] in box.value }
             ),
             locator: ProcessRegistry(),
             killer: ProcessKiller(),
             notifier: UserNotificationKillNotifier(),
-            events: NetworkEventSource()
+            events: NetworkEventSource(),
+            launchAgent: LaunchAgentController()
         )
     }
 
@@ -39,5 +45,12 @@ public final class AppCoordinator {
         UserNotificationKillNotifier.requestAuthorization()
         guardVM.start()
         update.startPeriodicCheck()
+    }
+
+    /// Останавливает всё, что владеет задачами: и цикл охраны, и проверку обновлений.
+    /// Цикл обновлений раньше жил до конца процесса, потому что его задачу никто не хранил.
+    public func stopForTermination() {
+        guardVM.stop()
+        update.stop()
     }
 }

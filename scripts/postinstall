@@ -1,28 +1,69 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Установщик мог «переехать» на другой бандл com.weto.app: тогда LaunchAgent указывает
-# в пустоту и охраны нет. Молча это пропускать нельзя — установка обязана упасть.
-if [ ! -x "/Applications/Weto.app/Contents/MacOS/WetoMenuBar" ]; then
+LABEL="com.weto.app"
+APP="/Applications/Weto.app"
+BIN="$APP/Contents/MacOS/WetoMenuBar"
+LEGACY_PLIST="/Library/LaunchAgents/$LABEL.plist"
+
+# Установщик мог «переехать» на другой бандл com.weto.app: тогда автозапуск указывал бы
+# в пустоту и охраны не было бы. Молча это пропускать нельзя — установка обязана упасть.
+if [ ! -x "$BIN" ]; then
     echo "Weto.app не оказался в /Applications — установка прервана" >&2
     exit 1
 fi
 
-chown root:wheel /Library/LaunchAgents/com.weto.app.plist
-chmod 644 /Library/LaunchAgents/com.weto.app.plist
-
 CONSOLE_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || echo "")
-if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
-    CURRENT_UID=$(id -u "$CONSOLE_USER")
-else
-    CURRENT_UID=$(id -u "$USER")
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
+    echo "Не найден пользователь графического сеанса — автозапуск настроить некому" >&2
+    exit 1
 fi
 
-launchctl bootstrap gui/"$CURRENT_UID" /Library/LaunchAgents/com.weto.app.plist 2>/dev/null || true
+USER_UID=$(id -u "$CONSOLE_USER")
+HOME_DIR=$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
+if [ -z "$HOME_DIR" ] || [ ! -d "$HOME_DIR" ]; then
+    echo "Не удалось определить домашний каталог пользователя $CONSOLE_USER" >&2
+    exit 1
+fi
 
-sleep 1
-if ! pgrep -x WetoMenuBar > /dev/null 2>&1; then
-    sudo -u "$CONSOLE_USER" open /Applications/Weto.app 2>/dev/null || true
+AGENTS_DIR="$HOME_DIR/Library/LaunchAgents"
+PLIST="$AGENTS_DIR/$LABEL.plist"
+
+# Агент живёт ровно там, где им управляют приложение и деинсталлятор:
+# в домашнем каталоге пользователя. Системный /Library/LaunchAgents прежних
+# версий приложение не видело — тумблер врал, а удаление было неполным.
+/bin/mkdir -p "$AGENTS_DIR"
+/usr/bin/tee "$PLIST" > /dev/null <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+    <key>Program</key>
+    <string>$BIN</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+PLIST_EOF
+
+/usr/sbin/chown "$CONSOLE_USER" "$AGENTS_DIR" "$PLIST"
+/bin/chmod 644 "$PLIST"
+
+# Остаток прежней установки: системный агент поднимал бы вторую копию приложения.
+if [ -f "$LEGACY_PLIST" ]; then
+    /bin/launchctl asuser "$USER_UID" /bin/launchctl bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
+    /bin/rm -f "$LEGACY_PLIST"
+fi
+
+/bin/launchctl asuser "$USER_UID" /bin/launchctl bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
+
+if ! /bin/launchctl asuser "$USER_UID" /bin/launchctl bootstrap "gui/$USER_UID" "$PLIST"; then
+    echo "launchd отказался загрузить автозапуск из $PLIST" >&2
+    exit 1
 fi
 
 exit 0

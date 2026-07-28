@@ -32,20 +32,24 @@ scripts/build.sh 0.1.0         # PKG → .build/release_build/Weto-0.1.0.pkg
 Sources/
 ├── WetoCore/     [library] чистая логика, ноль I/O
 │   ├── Model/    GeoModels, NetworkSnapshot, ProcessSnapshot, TargetRule, KillEvent
-│   ├── GuardPolicy, VPNStatusResolver, ProcessMatcher, IPRange, CountryFlag,
-│   │  GeoResponses, SemanticVersion (+ ReleaseParser), Constants
+│   ├── GuardPolicy, VPNStatusResolver, ProcessMatcher, ProcessTree, IPRange, IPAddress,
+│   │  CountryFlag, GeoResponses, SemanticVersion (+ ReleaseParser), VoidResult, Constants
 ├── WetoSystem/   [library] границы системы, каждая за протоколом
 │   └── NetworkSnapshotReader, NetworkEventSource, GeoProbe, HTTPFetching,
 │      ProcessRegistry, ProcessKiller, TargetResolver, KeychainStore (+ TokenBox),
 │      FlagImageStore
 ├── WetoShared/   [library] VM-слой
-│   └── AppCoordinator, GuardVM, SettingsStore, EventLogStore, UpdateVM,
-│      StatusPresentation, LaunchAgentController, Maintenance, KillNotifying
+│   └── AppCoordinator, GuardVM, GuardController, ProcessEnforcer, SettingsStore,
+│      EventLogStore, UpdateVM, URLOpening, StatusPresentation, LaunchAgentController,
+│      Maintenance, KillNotifying
 ├── WetoDesign/   [library] WetoTokens (+ WetoColor, StatusTone), WetoCard/Row/Panel,
-│      WetoSegmentedControl, стили кнопок и поля, StatusShield, MenuBarImageRenderer
+│      WetoSegmentedControl, WetoDeleteRowAction, стили кнопок и поля, StatusShield,
+│      MenuBarImageRenderer, DesignResources
 └── WetoMenuBar/  [executable] WetoMenuBarApp, MenuBarLabel, StatusPopupView, JournalRow,
-       Settings/ (SettingsWindow, TargetsCard)
+       Settings/ (SettingsWindow, TargetsCard, NetworkSettingsCard, BlacklistCard,
+       MaintenanceCard, JournalCard, SettingsFooter)
 Tests/            WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTests
+scripts/tests/    shell-контракты установки и релизной сборки (запускаются вручную и из build.sh)
 ```
 
 ## Индекс модулей
@@ -54,9 +58,11 @@ Tests/            WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTes
   гео-сервисов и GitHub Releases. Не импортирует системные фреймворки — инвариант проекта.
 - **WetoSystem** — адаптеры к macOS. Каждый за протоколом, чтобы подменяться в тестах
   только на границе.
-- **WetoShared** — `GuardVM` (цикл охраны), хранилища настроек и журнала, обслуживание.
-  `Maintenance.closeApp` выгружает агент из launchd, но оставляет plist: приложение
-  вернётся при следующем входе в систему. `uninstall` стирает всё.
+- **WetoShared** — `GuardController` (машина состояний, ревизии и владение пробой),
+  `ProcessEnforcer` (кэш правил, один обход процессов, завершение), `GuardVM` — наблюдаемый
+  фасад для UI. Хранилища настроек и журнала, обслуживание. `Maintenance.closeApp` выгружает
+  агент из launchd, но оставляет plist: приложение вернётся при следующем входе в систему.
+  `uninstall` возвращает `MaintenanceResult` со списком того, что удалить не удалось.
 - **WetoDesign** — токены и компоненты дизайн-системы (`docs/design-system.md`);
   `MenuBarImageRenderer` рисует лейбл менюбара. Компоненты не знают о состоянии приложения.
 - **WetoMenuBar** — UI и точка входа. Попап показывает только статус и данные гео,
@@ -69,18 +75,50 @@ Tests/            WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTes
   → страна от подтверждающего заблокирована → страны расходятся → безопасно.
 - **Fail-closed строгий:** отсутствие подтверждения страны завершает цели, даже когда ipinfo
   уверенно сообщил безопасную страну. Осознанное решение владельца.
+- **Fail-closed до вердикта:** как только прежний вердикт перестал быть свежим (холодный старт,
+  смена сетевого пути, правка настроек), применяется `verificationPending` — цели завершаются
+  ещё до запроса к ipinfo. Свежесть считается по паре «ревизия конфигурации + отпечаток снимка
+  сети»: без неё штатный тик каждые 5 секунд убивал бы цели при исправном VPN.
+- **Устаревший результат не возвращает safe:** у каждой пробы своя ревизия, решение
+  принимается по настройкам и снимку, прочитанным непосредственно перед применением.
+- **VPN — по UUID сервиса и квалификации SystemConfiguration** (`Type: VPN`, `IPSec`,
+  `PPP` + `L2TP/PPTP`). Имя в логике не участвует: его переименовывают, а Wi-Fi с именем
+  «VPN» иначе сошёл бы за туннель. Незнакомый или потерявший квалификацию UUID → `.down`.
+- **Адрес от ipinfo проверяется через `inet_pton`** до построения URL подтверждающих
+  сервисов: строка из сети не имеет права попасть в URL как есть.
+- **Скриптовая цель сверяется с argv поэлементно** (точное равенство одного элемента).
+  Подстрочное сравнение убивало обёртки с похожим именем и процессы, у которых путь цели
+  встретился в данных команды.
 - **Локальное против сетевого:** `handle` сначала пробует `decideLocal` — падение VPN видно
   из `SCDynamicStore` мгновенно. В сеть идём только когда локальных оснований нет,
   с коалесценцией событий в окне 300 мс.
-- **Источник IP — только ipinfo** (`v4.api.ipinfo.io`). Прочие сервисы при split-routing
-  отвечают про посторонний адрес; они спрашиваются про уже известный IP и кэшируются,
-  иначе лимит `ipwho.is` в 1000 запросов в сутки сгорает за минуты.
+- **Источник IP — только ipinfo** (`v4.api.ipinfo.io`, тариф Lite — без лимита запросов).
+  Прочие сервисы при split-routing отвечают про посторонний адрес, поэтому спрашиваются
+  про уже известный IP.
+- **Подтверждение — `free.freeipapi.com`, при отказе `get.geojs.io`; кэша нет.**
+  Подтверждение запрашивается на каждой пробе: кэш означал бы, что смена страны
+  на неизменном адресе остаётся незамеченной. Выбор сервисов измерен, а не взят на веру:
+  лимит freeipapi — 60 запросов в минуту при нашем расходе 12, geojs лимитов не объявляет,
+  а прежний `ipwho.is` (1000 в сутки **на IP клиента**, то есть на всех за одним выходом VPN)
+  выгорал за 1,4 часа. `ipquery.io` и `ifconfig.co` отвергнуты: по переназначенным диапазонам
+  они отдают страну из устаревших регистрационных данных и дают ложное расхождение стран.
 - **Старт охраны — в `AppDelegate`**, не в `.task` попапа: `MenuBarExtra` со стилем `.window`
   создаёт содержимое лениво.
 - **Поллинг 250 мс при небезопасном состоянии** — единственный способ ловить терминальные
   процессы: `NSWorkspace` уведомляет только про GUI-приложения.
-- **Журнал** пишет каждый новый pid, но не повторы по тем же — иначе попытка поднять цель
-  через час после падения VPN не оставила бы следа.
+- **Журнал** пишет каждый новый pid и каждую новую причину в рамках эпизода: без второго
+  условия запись «подключение ещё не проверено» съедала бы настоящую причину, а попытка
+  поднять цель через час после падения VPN не оставила бы следа.
+- **Автозапуск — один файл** `~/Library/LaunchAgents/com.weto.app.plist`. Его пишет
+  `postinstall` в домашний каталог консольного пользователя, им же управляют тумблер
+  в настройках и деинсталлятор. Системный `/Library/LaunchAgents` не пакуется и подчищается
+  как наследие прежних версий.
+- **Версия — из `Info.plist` бандла** (`Constants.appVersion` сверяет `CFBundleIdentifier`,
+  иначе отдаёт `dev`). Релизный скрипт не правит отслеживаемые файлы; версия подставляется
+  только в staging-копию plist.
+- **Ресурсы — в `Contents/Resources`, доступ через `DesignResources`.** Сгенерированный
+  SPM `Bundle.module` смотрит лишь в корень бандла и в путь машины сборки, а ресурс в корне
+  `.app` `codesign` пломбировать отказывается — подпись молча не создавалась.
 
 ### Базовый образ
 

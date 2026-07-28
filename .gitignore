@@ -15,6 +15,7 @@ DerivedData/
 # Локальные настройки инструментов
 .claude/settings.local.json
 
-# Планы, спеки и мокапы для агентов — не часть репозитория
+# Планы, спеки, ревью и мокапы для агентов — не часть репозитория
 docs/superpowers/
 docs/mockups/
+docs/reviews/

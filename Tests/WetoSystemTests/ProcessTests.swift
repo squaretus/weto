@@ -31,6 +31,31 @@ final class ProcessRegistryTests: XCTestCase {
         XCTAssertEqual(found?.executablePath, "/bin/sleep")
     }
 
+    func test_registry_returns_exact_argv_for_spawned_command() throws {
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        task.arguments = ["30"]
+        try task.run()
+        defer { task.terminate() }
+
+        let found = ProcessRegistry()
+            .allProcesses(includeArguments: true)
+            .first { $0.pid == task.processIdentifier }
+
+        XCTAssertEqual(found?.arguments, ["/bin/sleep", "30"])
+    }
+
+    func test_argv_is_absent_when_not_requested() {
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let found = ProcessRegistry()
+            .allProcesses(includeArguments: false)
+            .first { $0.pid == selfPID }
+
+        XCTAssertNotNil(found)
+        XCTAssertNil(found?.arguments)
+    }
+
     func test_bundle_path_resolves_for_a_system_application() {
 
         let path = ProcessRegistry().bundlePath(forBundleID: "com.apple.finder")

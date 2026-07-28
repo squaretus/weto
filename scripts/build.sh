@@ -8,13 +8,15 @@ VERSION="${1:-0.1.0}"
 PKG_ID="com.weto.pkg"
 OUT=".build/release_build"
 
+# Базовый размер собранного .app в КБ. Превышение больше чем на 10% валит сборку:
+# так замечается случайно попавшая в payload документация или ресурсы.
+APP_BASELINE_KB=2000
+
 echo "=== weto $VERSION — сборка ==="
 
-sed -i '' "s/public static let appVersion = \".*\"/public static let appVersion = \"$VERSION\"/" \
-    Sources/WetoCore/Constants.swift
-sed -i '' "s|<string>[0-9]*\.[0-9]*\.[0-9]*</string>|<string>$VERSION</string>|g" \
-    Resources/Weto-Info.plist
-
+# Версия подставляется только в копию Info.plist внутри staging: отслеживаемые файлы
+# сборка не меняет, иначе после каждого релиза остаётся грязное рабочее дерево
+# и риск разъезда версии в бинарнике и пакете. Приложение читает версию из Info.plist.
 swift build -c release --product WetoMenuBar
 
 rm -rf "$OUT"
@@ -24,33 +26,39 @@ APP="$OUT/_app/Weto.app/Contents"
 mkdir -p "$APP/MacOS" "$APP/Resources"
 cp .build/release/WetoMenuBar "$APP/MacOS/"
 cp Resources/Weto-Info.plist "$APP/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+                        -c "Set :CFBundleVersion $VERSION" "$APP/Info.plist"
 cp Resources/uninstall-weto.sh "$APP/Resources/"
 chmod +x "$APP/Resources/uninstall-weto.sh"
 
-# Сгенерированный SPM аксессор Bundle.module ищет ресурсный бандл в Bundle.main.bundleURL,
-# то есть в КОРНЕ Weto.app, а вторым кандидатом берёт абсолютный путь .build машины сборки
-# (в CI это /Users/runner/...). Без копии в корне приложение падает с fatalError при первой же
-# иконке, и на машине сборки это незаметно — там fallback-путь существует.
-# Копия в Contents/Resources остаётся для кода, ищущего ресурсы через Bundle.main.
+# Ресурсные бандлы лежат в штатном Contents/Resources: только такую раскладку
+# codesign умеет пломбировать. Находит их DesignResources, а не Bundle.module,
+# который смотрит лишь в корень бандла и в путь .build машины сборки.
 for bundle in .build/release/*.bundle; do
     [ -e "$bundle" ] || continue
     cp -R "$bundle" "$APP/Resources/"
-    cp -R "$bundle" "$OUT/_app/Weto.app/"
 done
 
-if grep -q "resources:" Package.swift && ! ls -d "$OUT/_app/Weto.app"/*.bundle >/dev/null 2>&1; then
-    echo "✗ Package.swift объявляет ресурсы, но в корне Weto.app нет ни одного .bundle" >&2
+if grep -q "resources:" Package.swift && ! ls -d "$APP/Resources"/*.bundle >/dev/null 2>&1; then
+    echo "✗ Package.swift объявляет ресурсы, но в Contents/Resources нет ни одного .bundle" >&2
     exit 1
 fi
 
-codesign --force --sign - --deep "$OUT/_app/Weto.app" 2>/dev/null || true
+# Подпись ad-hoc: Developer ID и нотаризация недоступны осознанно (см. README),
+# но отказ самой подписи скрывать нельзя — иначе на выходе битый бандл.
+if ! codesign --force --sign - --deep "$OUT/_app/Weto.app"; then
+    echo "✗ ad-hoc подпись Weto.app не удалась" >&2
+    exit 1
+fi
+echo "  подпись: ad-hoc (без Developer ID и нотаризации)"
 
 ROOT="$OUT/_pkg-root"
 SCRIPTS="$OUT/_pkg-scripts"
-mkdir -p "$ROOT/Applications" "$ROOT/Library/LaunchAgents" "$SCRIPTS"
+mkdir -p "$ROOT/Applications" "$SCRIPTS"
 
+# Агент автозапуска в payload не входит: его пишет postinstall в домашний каталог
+# консольного пользователя — там же, где им управляют приложение и деинсталлятор.
 cp -R "$OUT/_app/Weto.app" "$ROOT/Applications/"
-cp Resources/com.weto.app.plist "$ROOT/Library/LaunchAgents/"
 cp scripts/preinstall scripts/postinstall "$SCRIPTS/"
 chmod +x "$SCRIPTS/preinstall" "$SCRIPTS/postinstall"
 
@@ -78,6 +86,17 @@ cat > "$OUT/_component.plist" << 'PLIST'
 </plist>
 PLIST
 
+bash scripts/tests/launch-agent-contract.sh "$ROOT"
+
+# Бюджет размера: документация и прочий вес не должны утекать в бандл незаметно.
+APP_SIZE_KB=$(du -sk "$OUT/_app/Weto.app" | awk '{print $1}')
+APP_SIZE_LIMIT_KB=$(( APP_BASELINE_KB * 110 / 100 ))
+echo "  размер Weto.app: ${APP_SIZE_KB} КБ (базовый ${APP_BASELINE_KB} КБ, предел ${APP_SIZE_LIMIT_KB} КБ)"
+if [ "$APP_SIZE_KB" -gt "$APP_SIZE_LIMIT_KB" ]; then
+    echo "✗ бандл вырос больше чем на 10% от базового размера" >&2
+    exit 1
+fi
+
 pkgbuild --root "$ROOT" --scripts "$SCRIPTS" --identifier "$PKG_ID" \
          --version "$VERSION" --install-location "/" \
          --component-plist "$OUT/_component.plist" "$OUT/_component.pkg"
@@ -93,8 +112,9 @@ rm -rf "$OUT/_verify"
 for bundle in .build/release/*.bundle; do
     [ -e "$bundle" ] || continue
     name="$(basename "$bundle")"
-    if ! pkgutil --payload-files "$OUT/_component.pkg" | grep -qx "./Applications/Weto.app/$name"; then
-        echo "✗ $name отсутствует в корне Weto.app внутри пакета — Bundle.module упадёт" >&2
+    if ! pkgutil --payload-files "$OUT/_component.pkg" \
+        | grep -qx "./Applications/Weto.app/Contents/Resources/$name"; then
+        echo "✗ $name отсутствует в Contents/Resources внутри пакета — иконок не будет" >&2
         exit 1
     fi
 done

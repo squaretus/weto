@@ -22,6 +22,33 @@ private actor StubGeoProbe: GeoProbing {
     func calls() -> Int { callCount }
 }
 
+/// Проба, которую тест держит на паузе: позволяет наблюдать состояние охраны
+/// именно в окне ожидания гео-вердикта и решать, какая из проб вернёт результат.
+private actor DelayedGeoProbe: GeoProbing {
+    private var startedCalls = 0
+    private var pending: [CheckedContinuation<GeoOutcome, Never>] = []
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func probe() async -> GeoOutcome {
+        startedCalls += 1
+        for waiter in startWaiters { waiter.resume() }
+        startWaiters = []
+        return await withCheckedContinuation { pending.append($0) }
+    }
+
+    func waitUntilStarted() async {
+        guard startedCalls == 0 else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func resumeFirst(with outcome: GeoOutcome) {
+        guard !pending.isEmpty else { return }
+        pending.removeFirst().resume(returning: outcome)
+    }
+
+    func starts() -> Int { startedCalls }
+}
+
 private struct StubLocator: ProcessLocating {
     let bundlePaths: [String: String]
     let processes: [ProcessSnapshot]
@@ -41,6 +68,41 @@ private final class MutableLocator: ProcessLocating, @unchecked Sendable {
 
     func bundlePath(forBundleID bundleID: String) -> String? { bundlePaths[bundleID] }
     func allProcesses(includeArguments: Bool) -> [ProcessSnapshot] { processes }
+}
+
+/// Считает обходы процессов и то, запрашивался ли argv.
+private final class CountingLocator: ProcessLocating, @unchecked Sendable {
+    let bundlePaths: [String: String]
+    let processes: [ProcessSnapshot]
+
+    private let lock = NSLock()
+    private var scans = 0
+    private var argumentRequests: [Bool] = []
+
+    init(bundlePaths: [String: String], processes: [ProcessSnapshot]) {
+        self.bundlePaths = bundlePaths
+        self.processes = processes
+    }
+
+    func bundlePath(forBundleID bundleID: String) -> String? { bundlePaths[bundleID] }
+
+    func allProcesses(includeArguments: Bool) -> [ProcessSnapshot] {
+        lock.lock()
+        scans += 1
+        argumentRequests.append(includeArguments)
+        lock.unlock()
+        return processes
+    }
+
+    var scanCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return scans
+    }
+
+    var argumentsRequested: [Bool] {
+        lock.lock(); defer { lock.unlock() }
+        return argumentRequests
+    }
 }
 
 private struct StubResolver: TargetResolving {
@@ -120,8 +182,8 @@ final class GuardVMTests: XCTestCase {
     private func healthySnapshot() -> NetworkSnapshot {
         NetworkSnapshot(
             services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0"),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6"),
+                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6", isVPN: true),
             ],
             primaryServiceUUID: "HAPP"
         )
@@ -130,8 +192,8 @@ final class GuardVMTests: XCTestCase {
     private func vpnDownSnapshot() -> NetworkSnapshot {
         NetworkSnapshot(
             services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0"),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: nil),
+                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .init(uuid: "HAPP", name: "Happ", activeInterface: nil, isVPN: true),
             ],
             primaryServiceUUID: "WIFI"
         )
@@ -142,7 +204,7 @@ final class GuardVMTests: XCTestCase {
             ip: "203.0.113.28",
             primaryCountry: primary,
             confirmedCountry: confirmed,
-            confirmSource: confirmed == nil ? nil : .ipwhois
+            confirmSource: confirmed == nil ? nil : .freeipapi
         ))
     }
 
@@ -165,7 +227,7 @@ final class GuardVMTests: XCTestCase {
     ) -> Harness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = enabled
-        settings.vpnServiceName = "Happ"
+        settings.vpnServiceID = "HAPP"
         settings.blockedCountryCodes = ["RU"]
         settings.targets = [targetBundleID]
         settings.targets += executables
@@ -202,6 +264,264 @@ final class GuardVMTests: XCTestCase {
 
         return Harness(vm: vm, killer: killer, probe: probe, notifier: notifier,
                        events: events, settings: settings, log: log)
+    }
+
+    private struct DelayedHarness {
+        let vm: GuardVM
+        let killer: SpyKiller
+        let probe: DelayedGeoProbe
+        let settings: SettingsStore
+        let log: EventLogStore
+    }
+
+    private func makeDelayedHarness(snapshot: NetworkSnapshot) -> DelayedHarness {
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnServiceID = "HAPP"
+        settings.blockedCountryCodes = ["RU"]
+        settings.targets = [targetBundleID]
+
+        let killer = SpyKiller()
+        let probe = DelayedGeoProbe()
+        let log = EventLogStore(defaults: defaults)
+
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: log,
+            snapshotReader: StubSnapshotReader(snapshotValue: snapshot),
+            geoProbe: probe,
+            locator: StubLocator(
+                bundlePaths: [targetBundleID: targetPath],
+                processes: [
+                    .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+                    .init(pid: 501, executablePath: "\(targetPath)/Contents/Frameworks/Helper.app/Contents/MacOS/Helper"),
+                    .init(pid: 900, executablePath: "/Applications/Other.app/Contents/MacOS/Other"),
+                ]
+            ),
+            resolver: StubResolver(mapping: [targetBundleID: targetPath]),
+            killer: killer,
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        return DelayedHarness(vm: vm, killer: killer, probe: probe, settings: settings, log: log)
+    }
+
+    /// Даёт отменённым задачам добежать до своих проверок, не привязываясь ко времени.
+    private func settle() async {
+        for _ in 0..<20 { await Task.yield() }
+    }
+
+    func test_start_kills_targets_while_initial_probe_is_suspended() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.start()
+        await h.probe.waitUntilStarted()
+
+        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+        XCTAssertEqual(h.killer.killedBatches, [[500, 501]])
+        h.vm.stop()
+    }
+
+    func test_cancelled_old_probe_cannot_restore_safe_state() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        h.vm.handle(.networkPath)
+        await settle()
+
+        await h.probe.resumeFirst(with: geoOutcome())
+        await settle()
+
+        XCTAssertEqual(
+            h.vm.state, .unsafe(.verificationPending),
+            "результат вытесненной пробы не имеет права вернуть safe"
+        )
+    }
+
+    func test_old_config_probe_result_is_ignored_after_blacklist_change() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+
+        h.settings.blockedIPRangeTexts = ["203.0.113.0/24"]
+        await settle()
+
+        await h.probe.resumeFirst(with: geoOutcome())
+        await settle()
+
+        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+    }
+
+    func test_adding_a_target_while_unsafe_kills_without_waiting_for_tick() {
+        let h = makeHarness(
+            snapshot: vpnDownSnapshot(),
+            geo: geoOutcome(),
+            processes: [
+                .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+                .init(pid: 600, executablePath: "/usr/bin/pico"),
+            ]
+        )
+
+        h.vm.handle(.networkPath)
+        XCTAssertEqual(h.killer.killedBatches, [[500]])
+
+        h.settings.targets = [targetBundleID, "nano"]
+
+        XCTAssertEqual(
+            h.killer.killedBatches.count, 2,
+            "добавленная цель должна быть завершена сразу, а не на следующем тике"
+        )
+        XCTAssertEqual(h.killer.killedBatches.last, [500, 600])
+    }
+
+    func test_changing_selected_vpn_to_missing_service_kills_immediately() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+
+        h.settings.vpnServiceID = "GHOST"
+
+        XCTAssertEqual(h.vm.state, .unsafe(.vpnDown))
+        XCTAssertFalse(h.killer.killedBatches.isEmpty)
+    }
+
+    func test_routine_tick_keeps_safe_state_while_verdict_is_fresh() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        let batchesAfterFirstVerdict = h.killer.killedBatches.count
+
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(
+            h.vm.state, .safe(h.vm.lastReading),
+            "штатный тик при неизменном снимке и настройках не обязан ронять цели"
+        )
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
+    }
+
+    private func makeCountingHarness(
+        targets: [String],
+        resolverMapping: [String: String]
+    ) -> (vm: GuardVM, locator: CountingLocator, settings: SettingsStore) {
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnServiceID = "HAPP"
+        settings.targets = targets
+
+        let locator = CountingLocator(
+            bundlePaths: [targetBundleID: targetPath],
+            processes: [
+                .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+                .init(pid: 600, executablePath: "/usr/bin/pico"),
+            ]
+        )
+
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(defaults: defaults),
+            snapshotReader: StubSnapshotReader(snapshotValue: vpnDownSnapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: locator,
+            resolver: StubResolver(mapping: resolverMapping),
+            killer: SpyKiller(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        return (vm, locator, settings)
+    }
+
+    func test_local_vpn_down_uses_one_process_scan() {
+
+        let h = makeCountingHarness(
+            targets: [targetBundleID],
+            resolverMapping: [targetBundleID: targetPath]
+        )
+
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(
+            h.locator.scanCount, 1,
+            "решение, список для UI и завершение целей обслуживает один обход"
+        )
+    }
+
+    func test_no_argv_collection_without_script_rules() {
+        let h = makeCountingHarness(
+            targets: [targetBundleID],
+            resolverMapping: [targetBundleID: targetPath]
+        )
+
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(h.locator.argumentsRequested, [false])
+    }
+
+    func test_argv_is_collected_when_a_script_target_exists() {
+        let h = makeCountingHarness(
+            targets: ["qwen"],
+            resolverMapping: ["qwen": "/opt/homebrew/lib/qwen/cli.js"]
+        )
+
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(h.locator.argumentsRequested, [true])
+    }
+
+    func test_local_kill_path_p95_stays_under_budget_on_250_processes() {
+
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnServiceID = "HAPP"
+        settings.targets = [targetBundleID]
+
+        var processes: [ProcessSnapshot] = (1...248).map { index in
+            .init(
+                pid: Int32(1000 + index), parentPID: 1,
+                executablePath: "/Applications/Other\(index).app/Contents/MacOS/Other\(index)"
+            )
+        }
+        processes.append(.init(pid: 500, parentPID: 1, executablePath: "\(targetPath)/Contents/MacOS/Target"))
+        processes.append(.init(pid: 501, parentPID: 500, executablePath: "/usr/bin/curl"))
+
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(defaults: defaults),
+            snapshotReader: StubSnapshotReader(snapshotValue: vpnDownSnapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: StubLocator(bundlePaths: [targetBundleID: targetPath], processes: processes),
+            resolver: StubResolver(mapping: [targetBundleID: targetPath]),
+            killer: SpyKiller(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        var samples: [Double] = []
+        for _ in 0..<20 {
+            let started = ContinuousClock.now
+            vm.handle(.networkPath)
+            let elapsed = ContinuousClock.now - started
+            samples.append(
+                Double(elapsed.components.seconds)
+                    + Double(elapsed.components.attoseconds) / 1e18
+            )
+        }
+
+        let sorted = samples.sorted()
+        let p95 = sorted[min(sorted.count - 1, Int((Double(sorted.count) * 0.95).rounded(.up)) - 1)]
+        XCTAssertLessThan(
+            p95, 0.05,
+            "локальное решение, обход процессов и завершение целей: p95 = \(p95) с"
+        )
     }
 
     func test_running_targets_list_parents_of_the_guarded_app() {
@@ -245,8 +565,8 @@ final class GuardVMTests: XCTestCase {
     func test_vpn_not_primary_kills() async {
         let snapshot = NetworkSnapshot(
             services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0"),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6"),
+                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6", isVPN: true),
             ],
             primaryServiceUUID: "WIFI"
         )
@@ -266,14 +586,18 @@ final class GuardVMTests: XCTestCase {
         XCTAssertTrue(h.killer.killedBatches.isEmpty)
     }
 
-    func test_healthy_network_leads_to_safe_state_without_killing() async {
+    func test_healthy_network_ends_in_safe_state_after_verification() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
 
         h.vm.handle(.networkPath)
+        XCTAssertEqual(
+            h.vm.state, .unsafe(.verificationPending),
+            "пока страна не подтверждена, состояние обязано быть небезопасным"
+        )
+
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
-        XCTAssertTrue(h.killer.killedBatches.isEmpty)
         XCTAssertEqual(h.vm.lastReading?.ip, "203.0.113.28")
         XCTAssertEqual(h.vm.state.statusColor, .green)
         XCTAssertEqual(h.vm.currentCountryCode, "KZ")
@@ -289,10 +613,17 @@ final class GuardVMTests: XCTestCase {
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
-        XCTAssertEqual(h.killer.killedBatches, [[500, 501]])
-        XCTAssertEqual(h.log.events.count, 1)
+        XCTAssertEqual(h.killer.killedBatches, [[500, 501], [500, 501]])
+
+        // Первая запись — завершение на время проверки, вторая — настоящая причина.
+        XCTAssertEqual(h.log.events.count, 2)
         XCTAssertEqual(h.log.events.first?.country, "RU")
-        XCTAssertEqual(h.notifier.messages.count, 1)
+        XCTAssertEqual(
+            h.log.events.first?.reasonText,
+            UnsafeReason.blockedCountry(code: "RU", source: "ipinfo").displayText
+        )
+        XCTAssertEqual(h.log.events.last?.reasonText, UnsafeReason.verificationPending.displayText)
+        XCTAssertEqual(h.notifier.messages.count, 2)
     }
 
     func test_missing_confirmation_kills_and_shows_yellow() async {
@@ -349,7 +680,7 @@ final class GuardVMTests: XCTestCase {
 
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceName = "Happ"
+        settings.vpnServiceID = "HAPP"
         settings.targets = [targetBundleID]
 
         let killer = SpyKiller()
@@ -439,9 +770,9 @@ final class GuardVMTests: XCTestCase {
             geo: geoOutcome(),
             processes: [
                 .init(pid: 800, executablePath: "/opt/homebrew/bin/node",
-                      arguments: "node /opt/homebrew/lib/qwen/cli.js chat"),
+                      arguments: ["node", "/opt/homebrew/lib/qwen/cli.js", "chat"]),
                 .init(pid: 801, executablePath: "/opt/homebrew/bin/node",
-                      arguments: "node /Users/me/other-project/server.js"),
+                      arguments: ["node", "/Users/me/other-project/server.js"]),
             ],
             executables: ["qwen"]
         )
@@ -468,7 +799,7 @@ final class GuardVMTests: XCTestCase {
 
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceName = "Happ"
+        settings.vpnServiceID = "HAPP"
         settings.targets = []
         settings.targets = ["nano"]
 
@@ -482,7 +813,7 @@ final class GuardVMTests: XCTestCase {
     func test_first_episode_event_is_termination_second_is_launch_block() async {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceName = "Happ"
+        settings.vpnServiceID = "HAPP"
         settings.targets = [targetBundleID]
 
         let log = EventLogStore(defaults: defaults)
@@ -512,16 +843,34 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(log.events.first?.kind, .launchBlocked)
     }
 
-    func test_available_vpn_names_come_from_snapshot() {
+    func test_only_qualified_vpns_are_offered_as_candidates() {
+
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
-        h.vm.refreshVPNNames()
-        XCTAssertEqual(h.vm.availableVPNNames, ["Happ", "Wi-Fi"])
+        h.vm.refreshVPNCandidates()
+        XCTAssertEqual(h.vm.availableVPNs.map(\.name), ["Happ"])
     }
 
     func test_running_process_count_counts_only_target_bundle() {
+
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.refreshRunningTargets()
+
         XCTAssertEqual(h.vm.runningProcessCount(forTarget: targetBundleID), 2)
         XCTAssertEqual(h.vm.runningProcessCount(forTarget: "com.unknown"), 0)
+    }
+
+    func test_process_count_does_not_start_its_own_scan_per_target() {
+
+        let h = makeCountingHarness(
+            targets: [targetBundleID],
+            resolverMapping: [targetBundleID: targetPath]
+        )
+        h.vm.refreshRunningTargets()
+        let scansAfterRefresh = h.locator.scanCount
+
+        for _ in 0..<5 { _ = h.vm.runningProcessCount(forTarget: targetBundleID) }
+
+        XCTAssertEqual(h.locator.scanCount, scansAfterRefresh)
     }
 
     func test_stop_releases_the_event_source() {

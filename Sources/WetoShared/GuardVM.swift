@@ -30,7 +30,7 @@ public final class GuardVM {
     public private(set) var lastReading: GeoReading?
 
     public private(set) var permissionFailure: String?
-    public private(set) var availableVPNNames: [String] = []
+    public private(set) var availableVPNs: [NetworkServiceSnapshot] = []
     public private(set) var runningTargets: [RunningTarget] = []
 
     @ObservationIgnored private let settings: SettingsStore
@@ -42,11 +42,21 @@ public final class GuardVM {
     @ObservationIgnored private let killer: ProcessKilling
     @ObservationIgnored private let notifier: KillNotifying
     @ObservationIgnored private let events: NetworkEventSourcing
-    @ObservationIgnored private let debounceInterval: TimeInterval
+    @ObservationIgnored private let launchAgent: LaunchAgentManaging
 
     @ObservationIgnored private var recordedPIDs: Set<Int32> = []
 
-    @ObservationIgnored private var probeTask: Task<Void, Never>?
+    // Причины, уже описанные в журнале в рамках текущего небезопасного эпизода.
+    // Без этого запись «подключение ещё не проверено» съедала бы настоящую причину:
+    // pid те же, а дедупликация была только по ним.
+    @ObservationIgnored private var recordedReasons: Set<String> = []
+
+    @ObservationIgnored private var controller: GuardController!
+    @ObservationIgnored private var enforcer: ProcessEnforcer!
+
+    // Обход процессов, сделанный для текущего события: синхронное решение
+    // обязано убивать по нему же, а не запускать второй обход.
+    @ObservationIgnored private var currentScan: ProcessEnforcer.Scan?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var watchdogTask: Task<Void, Never>?
 
@@ -60,6 +70,7 @@ public final class GuardVM {
         killer: ProcessKilling,
         notifier: KillNotifying,
         events: NetworkEventSourcing,
+        launchAgent: LaunchAgentManaging = LaunchAgentController(),
         debounceInterval: TimeInterval = Constants.networkEventDebounceSeconds
     ) {
         self.settings = settings
@@ -71,17 +82,35 @@ public final class GuardVM {
         self.killer = killer
         self.notifier = notifier
         self.events = events
-        self.debounceInterval = debounceInterval
+        self.launchAgent = launchAgent
+
+        self.enforcer = ProcessEnforcer(
+            settings: settings,
+            resolver: resolver,
+            locator: locator,
+            killer: killer
+        )
+
+        self.controller = GuardController(
+            settings: settings,
+            snapshotReader: snapshotReader,
+            geoProbe: geoProbe,
+            debounceInterval: debounceInterval,
+            onDecision: { [weak self] decision in self?.apply(decision) },
+            onReading: { [weak self] reading in self?.receive(reading) }
+        )
     }
 
     deinit {
-        probeTask?.cancel()
         tickTask?.cancel()
         watchdogTask?.cancel()
     }
 
     public func start() {
-        refreshVPNNames()
+        // Миграция выбора «по имени» на UUID выполняется до первого решения:
+        // иначе прежний выбор выглядел бы как «VPN не выбран» и цели ушли бы зря.
+        settings.migrateLegacyVPNSelection(in: snapshotReader.snapshot())
+        refreshVPNCandidates()
         refreshRunningTargets()
         events.start { [weak self] trigger in
             Task { @MainActor [weak self] in self?.handle(trigger) }
@@ -92,7 +121,7 @@ public final class GuardVM {
 
     public func stop() {
         events.stop()
-        probeTask?.cancel(); probeTask = nil
+        controller.stop()
         tickTask?.cancel(); tickTask = nil
         watchdogTask?.cancel(); watchdogTask = nil
     }
@@ -113,35 +142,26 @@ public final class GuardVM {
         }
     }
 
-    public func unloadCompletely() {
+    @discardableResult
+    public func unloadCompletely() -> Result<Void, LaunchAgentError> {
         stop()
-        LaunchAgentController.disable()
+        return launchAgent.disable()
     }
 
-    public func refreshVPNNames() {
-        availableVPNNames = snapshotReader.snapshot().vpnCandidateNames
+    public func refreshVPNCandidates() {
+        availableVPNs = snapshotReader.snapshot().vpnCandidates
     }
 
     public func refreshRunningTargets() {
-        let rules = settings.targets.compactMap(resolver.resolve)
-        guard !rules.isEmpty else {
-            runningTargets = []
-            return
-        }
-
-        let needsArguments = rules.contains { $0.kind == .script }
-        runningTargets = ProcessMatcher.runningTargets(
-            in: locator.allProcesses(includeArguments: needsArguments),
-            rules: rules
-        )
+        runningTargets = enforcer.runningTargets(in: enforcer.scan())
     }
 
+    /// Считается по уже собранному списку: строка настроек не имеет права
+    /// запускать собственный обход процессов на каждую цель.
     public func runningProcessCount(forTarget entry: String) -> Int {
-        guard let rule = resolver.resolve(entry) else { return 0 }
-        return ProcessMatcher.pids(
-            in: locator.allProcesses(includeArguments: rule.kind == .script),
-            rules: [rule]
-        ).count
+        runningTargets
+            .filter { $0.entry == entry }
+            .reduce(0) { $0 + $1.processCount }
     }
 
     public func resolvedDescription(forTarget entry: String) -> String {
@@ -158,7 +178,11 @@ public final class GuardVM {
     }
 
     public func handle(_ trigger: GuardTrigger) {
-        refreshRunningTargets()
+        let scan = enforcer.scan()
+        currentScan = scan
+        defer { currentScan = nil }
+
+        runningTargets = enforcer.runningTargets(in: scan)
 
         if case .appLaunched(let bundleID) = trigger {
 
@@ -170,62 +194,16 @@ public final class GuardVM {
             }
         }
 
-        let config = settings.guardConfig
-        let vpn = VPNStatusResolver.status(
-            serviceName: config.vpnServiceName,
-            in: snapshotReader.snapshot()
-        )
-
-        if let local = GuardPolicy.decideLocal(
-            isEnabled: settings.isEnabled,
-            vpn: vpn,
-            config: config
-        ) {
-            apply(local)
-            return
-        }
-
-        scheduleProbe()
+        controller.evaluate()
     }
 
     public func awaitPendingProbe() async {
-        await probeTask?.value
+        await controller.awaitPendingProbe()
     }
 
-    private func scheduleProbe() {
-        let interval = debounceInterval
-        probeTask?.cancel()
-        probeTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(interval))
-            guard !Task.isCancelled else { return }
-            await self?.runProbe()
-        }
-    }
-
-    public func runProbe() async {
-        let config = settings.guardConfig
-        let vpn = VPNStatusResolver.status(
-            serviceName: config.vpnServiceName,
-            in: snapshotReader.snapshot()
-        )
-        let geo = await geoProbe.probe()
-
-        // Проба, отменённая следующим сетевым событием, не означает, что гео недоступно:
-        // решение примет тот запрос, который её вытеснил.
-        guard !Task.isCancelled else { return }
-
-        if case .resolved(let reading) = geo {
-            lastReading = reading
-
-            FlagImageStore.shared.prefetch(reading.primaryCountry)
-        }
-
-        apply(GuardPolicy.decide(GuardSignals(
-            isEnabled: settings.isEnabled,
-            vpn: vpn,
-            geo: geo,
-            config: config
-        )))
+    private func receive(_ reading: GeoReading) {
+        lastReading = reading
+        FlagImageStore.shared.prefetch(reading.primaryCountry)
     }
 
     private func apply(_ decision: GuardDecision) {
@@ -234,6 +212,7 @@ public final class GuardVM {
             watchdogTask?.cancel(); watchdogTask = nil
             permissionFailure = nil
             recordedPIDs.removeAll()
+            recordedReasons.removeAll()
             state = settings.isEnabled && settings.guardConfig.hasTargets
                 ? .safe(lastReading)
                 : .disabled
@@ -246,28 +225,26 @@ public final class GuardVM {
     }
 
     private func enforce(reason: UnsafeReason) {
-        let rules = settings.targets.compactMap(resolver.resolve)
-        guard !rules.isEmpty else { return }
-
-        let needsArguments = rules.contains { $0.kind == .script }
-        let matched = ProcessMatcher.matches(
-            in: locator.allProcesses(includeArguments: needsArguments),
-            rules: rules
-        )
+        let outcome = enforcer.enforce(currentScan ?? enforcer.scan())
+        let matched = outcome.matched
         guard !matched.isEmpty else { return }
 
-        let results = killer.kill(pids: matched.map(\.pid))
-        refreshRunningTargets()
+        let results = outcome.results
         let refused = results.filter { !$0.isTerminated }
         permissionFailure = refused.isEmpty
             ? nil
             : "Не удалось завершить процессы \(refused.map(\.pid)) — недостаточно прав"
 
         let terminated = Set(results.filter(\.isTerminated).map(\.pid))
-        let fresh = matched.filter { terminated.contains($0.pid) && !recordedPIDs.contains($0.pid) }
+        let reasonKey = reason.displayText
+        let isNewReason = !recordedReasons.contains(reasonKey)
+        let fresh = matched.filter {
+            terminated.contains($0.pid) && (isNewReason || !recordedPIDs.contains($0.pid))
+        }
         guard !fresh.isEmpty else { return }
 
-        let kind: KillEventKind = recordedPIDs.isEmpty ? .terminated : .launchBlocked
+        let kind: KillEventKind = isNewReason ? .terminated : .launchBlocked
+        recordedReasons.insert(reasonKey)
         recordedPIDs.formUnion(fresh.map(\.pid))
 
         var names: [String] = []

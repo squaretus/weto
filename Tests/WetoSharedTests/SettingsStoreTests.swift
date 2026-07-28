@@ -12,11 +12,18 @@ final class InMemorySecretStore: SecretStoring, @unchecked Sendable {
         return storage[account]
     }
 
-    @discardableResult
-    func write(_ value: String?, account: String) -> Bool {
+    func write(_ value: String?, account: String) -> Result<Void, SecretStoreError> {
         lock.lock(); defer { lock.unlock() }
         storage[account] = value
-        return true
+        return .success(())
+    }
+}
+
+final class FailingSecretStore: SecretStoring, @unchecked Sendable {
+    func read(account: String) -> String? { nil }
+
+    func write(_ value: String?, account: String) -> Result<Void, SecretStoreError> {
+        .failure(.keychain(errSecAuthFailed))
     }
 }
 
@@ -69,7 +76,7 @@ final class SettingsStoreTests: XCTestCase {
 
     func test_nothing_is_preconfigured_out_of_the_box() {
         let store = makeStore()
-        XCTAssertNil(store.vpnServiceName)
+        XCTAssertNil(store.vpnServiceID)
         XCTAssertTrue(store.targets.isEmpty)
 
         XCTAssertTrue(store.blockedCountryCodes.isEmpty)
@@ -82,7 +89,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(store.blockedCountryCodes.isEmpty)
         XCTAssertTrue(store.blockedIPRangeTexts.isEmpty)
         XCTAssertTrue(store.ipinfoToken.isEmpty)
-        XCTAssertNil(store.vpnServiceName)
+        XCTAssertNil(store.vpnServiceID)
         XCTAssertNil(store.tokenBox.value)
     }
 
@@ -96,7 +103,7 @@ final class SettingsStoreTests: XCTestCase {
     func test_values_survive_a_new_store_over_same_defaults() {
         let first = makeStore()
         first.isEnabled = true
-        first.vpnServiceName = "Happ"
+        first.vpnServiceID = "BC2D1D42"
         first.targets = ["com.example.a", "com.example.b"]
         first.blockedCountryCodes = ["RU", "BY"]
         first.blockedIPRangeTexts = ["198.51.100.0/22"]
@@ -104,7 +111,7 @@ final class SettingsStoreTests: XCTestCase {
 
         let second = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         XCTAssertTrue(second.isEnabled)
-        XCTAssertEqual(second.vpnServiceName, "Happ")
+        XCTAssertEqual(second.vpnServiceID, "BC2D1D42")
         XCTAssertEqual(second.targets, ["com.example.a", "com.example.b"])
         XCTAssertEqual(second.blockedCountryCodes, ["BY", "RU"])
         XCTAssertEqual(second.blockedIPRangeTexts, ["198.51.100.0/22"])
@@ -119,13 +126,13 @@ final class SettingsStoreTests: XCTestCase {
 
     func test_guard_config_reflects_current_settings() {
         let store = makeStore()
-        store.vpnServiceName = "Happ"
+        store.vpnServiceID = "BC2D1D42"
         store.targets = ["com.example.a"]
         store.blockedCountryCodes = ["RU"]
         store.blockedIPRangeTexts = ["10.0.0.0/8", "мусор"]
 
         let config = store.guardConfig
-        XCTAssertEqual(config.vpnServiceName, "Happ")
+        XCTAssertEqual(config.vpnServiceID, "BC2D1D42")
         XCTAssertEqual(config.targets, ["com.example.a"])
         XCTAssertEqual(config.blockedCountries, ["RU"])
         XCTAssertEqual(config.blockedIPRanges.count, 1, "неразобранные строки отбрасываются")
@@ -135,7 +142,7 @@ final class SettingsStoreTests: XCTestCase {
     func test_token_goes_to_secret_store_not_to_defaults() {
         let secrets = InMemorySecretStore()
         let store = SettingsStore(defaults: defaults, secrets: secrets)
-        store.ipinfoToken = "s3cret"
+        store.setIPInfoToken("s3cret")
 
         XCTAssertEqual(store.ipinfoToken, "s3cret")
         XCTAssertEqual(secrets.read(account: "token"), "s3cret")
@@ -149,9 +156,130 @@ final class SettingsStoreTests: XCTestCase {
     func test_clearing_token_removes_it_from_secret_store() {
         let secrets = InMemorySecretStore()
         let store = SettingsStore(defaults: defaults, secrets: secrets)
-        store.ipinfoToken = "s3cret"
-        store.ipinfoToken = ""
+        store.setIPInfoToken("s3cret")
+        store.setIPInfoToken("")
         XCTAssertNil(secrets.read(account: "token"))
+    }
+
+    private func snapshot(
+        services: [NetworkServiceSnapshot] = [
+            .init(uuid: "108E2488", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+            .init(uuid: "BC2D1D42", name: "Happ", activeInterface: "utun6", isVPN: true),
+        ]
+    ) -> NetworkSnapshot {
+        NetworkSnapshot(services: services, primaryServiceUUID: "BC2D1D42")
+    }
+
+    func test_legacy_vpn_name_migrates_to_the_single_matching_service() {
+        defaults.set("Happ", forKey: "vpnServiceName")
+
+        let store = makeStore()
+        store.migrateLegacyVPNSelection(in: snapshot())
+
+        XCTAssertEqual(store.vpnServiceID, "BC2D1D42")
+        XCTAssertNil(defaults.string(forKey: "vpnServiceName"), "legacy-ключ должен исчезнуть")
+    }
+
+    func test_ambiguous_legacy_vpn_name_is_cleared_instead_of_guessed() {
+
+        defaults.set("Happ", forKey: "vpnServiceName")
+
+        let store = makeStore()
+        store.migrateLegacyVPNSelection(in: snapshot(services: [
+            .init(uuid: "vpn-a", name: "Happ", activeInterface: nil, isVPN: true),
+            .init(uuid: "vpn-b", name: "Happ", activeInterface: "utun6", isVPN: true),
+        ]))
+
+        XCTAssertNil(store.vpnServiceID)
+        XCTAssertNil(defaults.string(forKey: "vpnServiceName"))
+    }
+
+    func test_legacy_name_of_a_non_vpn_service_is_cleared() {
+
+        defaults.set("Wi-Fi", forKey: "vpnServiceName")
+
+        let store = makeStore()
+        store.migrateLegacyVPNSelection(in: snapshot())
+
+        XCTAssertNil(store.vpnServiceID)
+    }
+
+    func test_migration_never_overwrites_an_explicit_service_id() {
+        let first = makeStore()
+        first.vpnServiceID = "BC2D1D42"
+        defaults.set("Wi-Fi", forKey: "vpnServiceName")
+
+        let second = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        second.migrateLegacyVPNSelection(in: snapshot())
+
+        XCTAssertEqual(second.vpnServiceID, "BC2D1D42")
+    }
+
+    func test_failed_token_write_is_reported_and_not_advertised_as_persisted() {
+
+        let store = SettingsStore(defaults: defaults, secrets: FailingSecretStore())
+
+        XCTAssertEqual(
+            store.setIPInfoToken("secret").failureValue,
+            .keychainWriteFailed(errSecAuthFailed)
+        )
+        XCTAssertTrue(store.ipinfoToken.isEmpty, "незаписанный токен не выдаём за сохранённый")
+        XCTAssertNil(store.tokenBox.value)
+    }
+
+    func test_successful_token_write_reports_success() {
+        let store = makeStore()
+        XCTAssertTrue(store.setIPInfoToken("s3cret").isSuccess)
+        XCTAssertEqual(store.ipinfoToken, "s3cret")
+        XCTAssertEqual(store.tokenBox.value, "s3cret")
+    }
+
+    func test_country_code_entry_lands_in_country_list() {
+        let store = makeStore()
+
+        XCTAssertTrue(store.addBlockedEntry(" ru ").isSuccess)
+
+        XCTAssertEqual(store.blockedCountryCodes, ["RU"])
+        XCTAssertTrue(store.blockedIPRangeTexts.isEmpty)
+    }
+
+    func test_cidr_entry_lands_in_range_list() {
+        let store = makeStore()
+
+        XCTAssertTrue(store.addBlockedEntry("198.51.100.0/24").isSuccess)
+
+        XCTAssertEqual(store.blockedIPRangeTexts, ["198.51.100.0/24"])
+    }
+
+    func test_rejects_malformed_blacklist_range() {
+
+        let store = makeStore()
+
+        XCTAssertEqual(store.addBlockedEntry("10.0.0.0/99").failureValue, .invalidEntry)
+        XCTAssertEqual(store.addBlockedEntry("совсем не адрес").failureValue, .invalidEntry)
+        XCTAssertEqual(store.addBlockedEntry("   ").failureValue, .empty)
+
+        XCTAssertTrue(store.blockedEntries.isEmpty, "мусор не должен попадать в настройки")
+    }
+
+    func test_duplicate_blacklist_entry_is_reported() {
+        let store = makeStore()
+        XCTAssertTrue(store.addBlockedEntry("RU").isSuccess)
+
+        XCTAssertEqual(store.addBlockedEntry("ru").failureValue, .duplicate)
+        XCTAssertEqual(store.blockedCountryCodes, ["RU"])
+    }
+
+    func test_removing_entry_clears_it_from_both_lists() {
+        let store = makeStore()
+        _ = store.addBlockedEntry("RU")
+        _ = store.addBlockedEntry("198.51.100.0/24")
+
+        store.removeBlockedEntry("RU")
+        XCTAssertEqual(store.blockedEntries, ["198.51.100.0/24"])
+
+        store.removeBlockedEntry("198.51.100.0/24")
+        XCTAssertTrue(store.blockedEntries.isEmpty)
     }
 
     func test_token_box_mirrors_current_token() {
@@ -162,10 +290,10 @@ final class SettingsStoreTests: XCTestCase {
         let store = SettingsStore(defaults: defaults, secrets: secrets)
         XCTAssertEqual(store.tokenBox.value, "saved")
 
-        store.ipinfoToken = "updated"
+        store.setIPInfoToken("updated")
         XCTAssertEqual(store.tokenBox.value, "updated")
 
-        store.ipinfoToken = ""
+        store.setIPInfoToken("")
         XCTAssertNil(store.tokenBox.value)
     }
 }

@@ -15,6 +15,53 @@ public enum AppTheme: String, CaseIterable, Sendable {
     }
 }
 
+public enum BlacklistEntryError: Error, Equatable, Sendable {
+    case empty
+    case invalidEntry
+    case duplicate
+
+    public var displayText: String {
+        switch self {
+        case .empty:
+            return "введите код страны, IP-адрес или диапазон"
+        case .invalidEntry:
+            return "не похоже ни на код страны, ни на IP-адрес или CIDR"
+        case .duplicate:
+            return "такая запись уже есть в списке"
+        }
+    }
+}
+
+public enum SettingsPersistenceError: Error, Equatable, Sendable {
+    case keychainWriteFailed(OSStatus)
+
+    public var displayText: String {
+        switch self {
+        case .keychainWriteFailed(let status):
+            return "не удалось сохранить токен в связку ключей (ошибка \(status))"
+        }
+    }
+}
+
+/// Изменение настройки, от которой зависит решение охраны. Публикуется синхронно
+/// на главном акторе: цель, добавленная при небезопасном состоянии, обязана быть
+/// завершена сразу, а не через тик поллинга.
+public struct GuardConfigurationChange: Equatable, Sendable {
+    public enum Field: Equatable, Sendable {
+        case guardEnabled
+        case targets
+        case vpnService
+        case ipinfoToken
+        case blacklist
+    }
+
+    public let field: Field
+
+    public init(field: Field) {
+        self.field = field
+    }
+}
+
 @Observable
 @MainActor
 public final class SettingsStore {
@@ -22,9 +69,10 @@ public final class SettingsStore {
     private enum Key {
         static let isEnabled = "isEnabled"
         static let appTheme = "appTheme"
-        static let vpnServiceName = "vpnServiceName"
+        static let vpnServiceID = "vpnServiceID"
         static let targets = "targets"
 
+        static let legacyVPNServiceName = "vpnServiceName"
         static let legacyBundleIDs = "targetBundleIDs"
         static let legacyExecutables = "targetExecutables"
         static let blockedCountryCodes = "blockedCountryCodes"
@@ -39,6 +87,9 @@ public final class SettingsStore {
 
     @ObservationIgnored public let tokenBox = TokenBox()
 
+    @ObservationIgnored
+    private var guardChangeHandlers: [(GuardConfigurationChange) -> Void] = []
+
     public init(defaults: UserDefaults, secrets: SecretStoring) {
         self.defaults = defaults
         self.secrets = secrets
@@ -46,7 +97,7 @@ public final class SettingsStore {
         self._isEnabled = defaults.object(forKey: Key.isEnabled) as? Bool ?? true
         self._appTheme = defaults.string(forKey: Key.appTheme)
             .flatMap(AppTheme.init(rawValue:)) ?? .dark
-        self._vpnServiceName = defaults.string(forKey: Key.vpnServiceName)
+        self._vpnServiceID = defaults.string(forKey: Key.vpnServiceID)
         self._targets = Self.loadTargets(from: defaults)
         self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
         self._blockedIPRangeTexts = defaults.stringArray(forKey: Key.blockedIPRangeTexts) ?? []
@@ -66,7 +117,11 @@ public final class SettingsStore {
     private var _isEnabled: Bool
     public var isEnabled: Bool {
         get { _isEnabled }
-        set { _isEnabled = newValue; defaults.set(newValue, forKey: Key.isEnabled) }
+        set {
+            _isEnabled = newValue
+            defaults.set(newValue, forKey: Key.isEnabled)
+            emit(.guardEnabled)
+        }
     }
 
     private var _appTheme: AppTheme
@@ -75,17 +130,40 @@ public final class SettingsStore {
         set { _appTheme = newValue; defaults.set(newValue.rawValue, forKey: Key.appTheme) }
     }
 
-    private var _vpnServiceName: String?
-    public var vpnServiceName: String? {
-        get { _vpnServiceName }
-        set { _vpnServiceName = newValue; defaults.set(newValue, forKey: Key.vpnServiceName) }
+    private var _vpnServiceID: String?
+    public var vpnServiceID: String? {
+        get { _vpnServiceID }
+        set {
+            _vpnServiceID = newValue
+            defaults.set(newValue, forKey: Key.vpnServiceID)
+            emit(.vpnService)
+        }
+    }
+
+    /// Переносит выбор, сделанный прежней версией по имени сервиса, на устойчивый UUID.
+    /// Неоднозначное имя (два сервиса зовутся одинаково) и имя сервиса, не прошедшего
+    /// квалификацию VPN, не угадываем — выбор очищается, и охрана остаётся fail-closed
+    /// до явного выбора пользователем.
+    public func migrateLegacyVPNSelection(in snapshot: NetworkSnapshot) {
+        guard let legacyName = defaults.string(forKey: Key.legacyVPNServiceName) else { return }
+        defer { defaults.removeObject(forKey: Key.legacyVPNServiceName) }
+
+        guard vpnServiceID == nil else { return }
+
+        let matches = snapshot.vpnCandidates.filter { $0.name == legacyName }
+        guard matches.count == 1 else { return }
+        vpnServiceID = matches[0].uuid
     }
 
     private var _targets: [String]
 
     public var targets: [String] {
         get { _targets }
-        set { _targets = newValue; defaults.set(newValue, forKey: Key.targets) }
+        set {
+            _targets = newValue
+            defaults.set(newValue, forKey: Key.targets)
+            emit(.targets)
+        }
     }
 
     private static func loadTargets(from defaults: UserDefaults) -> [String] {
@@ -105,13 +183,18 @@ public final class SettingsStore {
             let normalized = Array(Set(newValue.map { $0.uppercased() })).sorted()
             _blockedCountryCodes = normalized
             defaults.set(normalized, forKey: Key.blockedCountryCodes)
+            emit(.blacklist)
         }
     }
 
     private var _blockedIPRangeTexts: [String]
     public var blockedIPRangeTexts: [String] {
         get { _blockedIPRangeTexts }
-        set { _blockedIPRangeTexts = newValue; defaults.set(newValue, forKey: Key.blockedIPRangeTexts) }
+        set {
+            _blockedIPRangeTexts = newValue
+            defaults.set(newValue, forKey: Key.blockedIPRangeTexts)
+            emit(.blacklist)
+        }
     }
 
     private var _pollIntervalSeconds: TimeInterval
@@ -121,18 +204,72 @@ public final class SettingsStore {
     }
 
     private var _ipinfoToken: String
-    public var ipinfoToken: String {
+    public private(set) var ipinfoToken: String {
         get { _ipinfoToken }
-        set {
-            _ipinfoToken = newValue
-            secrets.write(newValue.isEmpty ? nil : newValue, account: Self.tokenAccount)
-            tokenBox.value = newValue.isEmpty ? nil : newValue
+        set { _ipinfoToken = newValue }
+    }
+
+    /// Токен становится «сохранённым» только после успешной записи в связку ключей.
+    /// Иначе приложение работало бы с токеном, которого не будет после перезапуска,
+    /// а пользователь не знал бы об этом.
+    @discardableResult
+    public func setIPInfoToken(_ token: String) -> Result<Void, SettingsPersistenceError> {
+        let value = token.isEmpty ? nil : token
+
+        if case .failure(let error) = secrets.write(value, account: Self.tokenAccount) {
+            guard case .keychain(let status) = error else { return .failure(.keychainWriteFailed(0)) }
+            return .failure(.keychainWriteFailed(status))
         }
+
+        _ipinfoToken = token
+        tokenBox.value = value
+        emit(.ipinfoToken)
+        return .success(())
+    }
+
+    /// Разбор строки чёрного списка живёт в store, а не во View: раньше мусорная
+    /// запись молча попадала в настройки и висела там с пометкой «не разобран».
+    @discardableResult
+    public func addBlockedEntry(_ text: String) -> Result<Void, BlacklistEntryError> {
+        let entry = text.trimmingCharacters(in: .whitespaces)
+        guard !entry.isEmpty else { return .failure(.empty) }
+
+        if entry.count == 2, entry.allSatisfy(\.isLetter) {
+            let code = entry.uppercased()
+            guard !blockedCountryCodes.contains(code) else { return .failure(.duplicate) }
+            blockedCountryCodes += [code]
+            return .success(())
+        }
+
+        guard let range = IPRange(entry) else { return .failure(.invalidEntry) }
+        guard !blockedIPRangeTexts.contains(range.text) else { return .failure(.duplicate) }
+        blockedIPRangeTexts += [range.text]
+        return .success(())
+    }
+
+    public func removeBlockedEntry(_ entry: String) {
+        blockedCountryCodes = blockedCountryCodes.filter { $0 != entry }
+        blockedIPRangeTexts = blockedIPRangeTexts.filter { $0 != entry }
+    }
+
+    public var blockedEntries: [String] {
+        blockedCountryCodes + blockedIPRangeTexts
+    }
+
+    public func onGuardConfigurationChange(
+        _ handler: @escaping (GuardConfigurationChange) -> Void
+    ) {
+        guardChangeHandlers.append(handler)
+    }
+
+    private func emit(_ field: GuardConfigurationChange.Field) {
+        let change = GuardConfigurationChange(field: field)
+        for handler in guardChangeHandlers { handler(change) }
     }
 
     public var guardConfig: GuardConfig {
         GuardConfig(
-            vpnServiceName: vpnServiceName,
+            vpnServiceID: vpnServiceID,
             blockedCountries: Set(blockedCountryCodes),
             blockedIPRanges: blockedIPRangeTexts.compactMap(IPRange.init),
             targets: targets

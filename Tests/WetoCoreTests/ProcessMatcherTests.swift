@@ -92,14 +92,34 @@ final class ProcessMatcherTests: XCTestCase {
 
         let tree: [ProcessSnapshot] = [
             .init(pid: 800, parentPID: 1, executablePath: "/opt/homebrew/bin/node",
-                  arguments: "node /opt/homebrew/lib/qwen/cli.js chat"),
+                  arguments: ["node", "/opt/homebrew/lib/qwen/cli.js", "chat"]),
             .init(pid: 801, parentPID: 1, executablePath: "/opt/homebrew/bin/node",
-                  arguments: "node /Users/me/other/server.js"),
+                  arguments: ["node", "/Users/me/other/server.js"]),
         ]
         let pids = ProcessMatcher.pids(
             in: tree, rules: [script("/opt/homebrew/lib/qwen/cli.js", name: "qwen")]
         )
         XCTAssertEqual(pids, [800])
+    }
+
+    func test_script_path_must_equal_one_argv_element() {
+
+        let tree: [ProcessSnapshot] = [
+            .init(
+                pid: 1, parentPID: 1, executablePath: "/opt/homebrew/bin/node",
+                arguments: ["node", "/opt/homebrew/bin/qwen-wrapper"]
+            ),
+            .init(
+                pid: 2, parentPID: 1, executablePath: "/opt/homebrew/bin/node",
+                arguments: ["node", "--eval", "путь /opt/homebrew/bin/qwen внутри данных"]
+            ),
+        ]
+        XCTAssertTrue(
+            ProcessMatcher.pids(
+                in: tree, rules: [script("/opt/homebrew/bin/qwen", name: "qwen")]
+            ).isEmpty,
+            "ни обёртка с похожим именем, ни путь внутри данных не являются целью"
+        )
     }
 
     func test_script_rule_ignores_processes_without_arguments() {
@@ -160,7 +180,7 @@ final class ProcessMatcherTests: XCTestCase {
             .init(
                 pid: 100, parentPID: 1,
                 executablePath: "/opt/homebrew/opt/node/bin/node",
-                arguments: "/opt/homebrew/opt/node/bin/node /opt/homebrew/bin/qwen"
+                arguments: ["/opt/homebrew/opt/node/bin/node", "/opt/homebrew/bin/qwen"]
             )
         ]
 

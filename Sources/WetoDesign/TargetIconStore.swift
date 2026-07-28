@@ -46,8 +46,7 @@ public final class TargetIconStore {
 
     private func brand(named name: String, size: CGFloat) -> NSImage? {
         guard let brand = Self.brands[name.lowercased()],
-              let url = Bundle.module.url(forResource: brand.asset, withExtension: nil)
-                  ?? Bundle.module.urlForImageResource(brand.asset),
+              let url = DesignResources.url(forResource: brand.asset),
               let artwork = NSImage(contentsOf: url)
         else { return nil }
 
