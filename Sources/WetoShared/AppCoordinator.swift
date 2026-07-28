@@ -25,7 +25,9 @@ public final class AppCoordinator {
             snapshotReader: NetworkSnapshotReader(),
             geoProbe: GeoProbe(
                 fetcher: URLSessionHTTPFetcher(),
-
+                confirmationFetcher: URLSessionHTTPFetcher(
+                    timeout: Constants.geoConfirmationTimeoutSeconds
+                ),
                 token: { [box = settings.tokenBox] in box.value }
             ),
             locator: ProcessRegistry(),
