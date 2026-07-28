@@ -47,7 +47,7 @@ public struct ProcessRegistry: ProcessLocating {
                 pid: pid,
                 parentPID: parentPID(pid: pid),
                 executablePath: path,
-                arguments: includeArguments ? commandLine(pid: pid) : nil
+                arguments: includeArguments ? arguments(pid: pid) : nil
             ))
         }
         return result
@@ -68,27 +68,37 @@ public struct ProcessRegistry: ProcessLocating {
         return pid_t(info.pbi_ppid)
     }
 
-    private func commandLine(pid: pid_t) -> String? {
-        var size = Self.argumentsBufferSize
-        var buffer = [CChar](repeating: 0, count: size)
+    /// argv процесса отдельными элементами.
+    ///
+    /// Размер спрашивается у ядра, а не берётся с запасом: под каждый процесс выделялось
+    /// 256 KiB, и на горячем пути это стоило десятков мегабайт впустую. Склейка в строку
+    /// намеренно не делается — сравнение по подстроке ловило чужие процессы.
+    private func arguments(pid: pid_t) -> [String]? {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
 
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size
+        else { return nil }
+        size = min(size, Self.argumentsSizeCeiling)
+
+        var buffer = [CChar](repeating: 0, count: size)
         guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size
         else { return nil }
 
         let bytes = buffer.prefix(size).map { UInt8(bitPattern: $0) }
-        let argc = bytes.prefix(4).enumerated().reduce(Int32(0)) { acc, pair in
+        let argc = bytes.prefix(MemoryLayout<Int32>.size).enumerated().reduce(Int32(0)) { acc, pair in
             acc | (Int32(pair.element) << (8 * Int32(pair.offset)))
         }
         guard argc > 0 else { return nil }
 
+        // Первая строка после argc — путь запуска, дальше идут сами argv.
         let payload = bytes.dropFirst(MemoryLayout<Int32>.size)
         let chunks = payload.split(separator: 0, omittingEmptySubsequences: true)
             .map { String(decoding: $0, as: UTF8.self) }
-        guard !chunks.isEmpty else { return nil }
+        guard chunks.count > 1 else { return nil }
 
-        return chunks.prefix(Int(argc) + 1).joined(separator: " ")
+        return Array(chunks.dropFirst().prefix(Int(argc)))
     }
 
-    private static let argumentsBufferSize = 262_144
+    private static let argumentsSizeCeiling = Int(ARG_MAX)
 }

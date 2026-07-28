@@ -74,6 +74,7 @@ struct SettingsWindow: View {
         .background(SettingsWindowConfigurator())
         .onAppear {
             coordinator.guardVM.refreshVPNCandidates()
+            coordinator.guardVM.refreshRunningTargets()
             tokenDraft = maskedToken
         }
     }

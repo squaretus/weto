@@ -51,6 +51,11 @@ public final class GuardVM {
     @ObservationIgnored private var recordedReasons: Set<String> = []
 
     @ObservationIgnored private var controller: GuardController!
+    @ObservationIgnored private var enforcer: ProcessEnforcer!
+
+    // Обход процессов, сделанный для текущего события: синхронное решение
+    // обязано убивать по нему же, а не запускать второй обход.
+    @ObservationIgnored private var currentScan: ProcessEnforcer.Scan?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var watchdogTask: Task<Void, Never>?
 
@@ -75,6 +80,13 @@ public final class GuardVM {
         self.killer = killer
         self.notifier = notifier
         self.events = events
+
+        self.enforcer = ProcessEnforcer(
+            settings: settings,
+            resolver: resolver,
+            locator: locator,
+            killer: killer
+        )
 
         self.controller = GuardController(
             settings: settings,
@@ -137,25 +149,15 @@ public final class GuardVM {
     }
 
     public func refreshRunningTargets() {
-        let rules = settings.targets.compactMap(resolver.resolve)
-        guard !rules.isEmpty else {
-            runningTargets = []
-            return
-        }
-
-        let needsArguments = rules.contains { $0.kind == .script }
-        runningTargets = ProcessMatcher.runningTargets(
-            in: locator.allProcesses(includeArguments: needsArguments),
-            rules: rules
-        )
+        runningTargets = enforcer.runningTargets(in: enforcer.scan())
     }
 
+    /// Считается по уже собранному списку: строка настроек не имеет права
+    /// запускать собственный обход процессов на каждую цель.
     public func runningProcessCount(forTarget entry: String) -> Int {
-        guard let rule = resolver.resolve(entry) else { return 0 }
-        return ProcessMatcher.pids(
-            in: locator.allProcesses(includeArguments: rule.kind == .script),
-            rules: [rule]
-        ).count
+        runningTargets
+            .filter { $0.entry == entry }
+            .reduce(0) { $0 + $1.processCount }
     }
 
     public func resolvedDescription(forTarget entry: String) -> String {
@@ -172,7 +174,11 @@ public final class GuardVM {
     }
 
     public func handle(_ trigger: GuardTrigger) {
-        refreshRunningTargets()
+        let scan = enforcer.scan()
+        currentScan = scan
+        defer { currentScan = nil }
+
+        runningTargets = enforcer.runningTargets(in: scan)
 
         if case .appLaunched(let bundleID) = trigger {
 
@@ -215,18 +221,11 @@ public final class GuardVM {
     }
 
     private func enforce(reason: UnsafeReason) {
-        let rules = settings.targets.compactMap(resolver.resolve)
-        guard !rules.isEmpty else { return }
-
-        let needsArguments = rules.contains { $0.kind == .script }
-        let matched = ProcessMatcher.matches(
-            in: locator.allProcesses(includeArguments: needsArguments),
-            rules: rules
-        )
+        let outcome = enforcer.enforce(currentScan ?? enforcer.scan())
+        let matched = outcome.matched
         guard !matched.isEmpty else { return }
 
-        let results = killer.kill(pids: matched.map(\.pid))
-        refreshRunningTargets()
+        let results = outcome.results
         let refused = results.filter { !$0.isTerminated }
         permissionFailure = refused.isEmpty
             ? nil

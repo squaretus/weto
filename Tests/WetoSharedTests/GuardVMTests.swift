@@ -70,6 +70,41 @@ private final class MutableLocator: ProcessLocating, @unchecked Sendable {
     func allProcesses(includeArguments: Bool) -> [ProcessSnapshot] { processes }
 }
 
+/// Считает обходы процессов и то, запрашивался ли argv.
+private final class CountingLocator: ProcessLocating, @unchecked Sendable {
+    let bundlePaths: [String: String]
+    let processes: [ProcessSnapshot]
+
+    private let lock = NSLock()
+    private var scans = 0
+    private var argumentRequests: [Bool] = []
+
+    init(bundlePaths: [String: String], processes: [ProcessSnapshot]) {
+        self.bundlePaths = bundlePaths
+        self.processes = processes
+    }
+
+    func bundlePath(forBundleID bundleID: String) -> String? { bundlePaths[bundleID] }
+
+    func allProcesses(includeArguments: Bool) -> [ProcessSnapshot] {
+        lock.lock()
+        scans += 1
+        argumentRequests.append(includeArguments)
+        lock.unlock()
+        return processes
+    }
+
+    var scanCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return scans
+    }
+
+    var argumentsRequested: [Bool] {
+        lock.lock(); defer { lock.unlock() }
+        return argumentRequests
+    }
+}
+
 private struct StubResolver: TargetResolving {
     let mapping: [String: String]
 
@@ -371,6 +406,124 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
     }
 
+    private func makeCountingHarness(
+        targets: [String],
+        resolverMapping: [String: String]
+    ) -> (vm: GuardVM, locator: CountingLocator, settings: SettingsStore) {
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnServiceID = "HAPP"
+        settings.targets = targets
+
+        let locator = CountingLocator(
+            bundlePaths: [targetBundleID: targetPath],
+            processes: [
+                .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+                .init(pid: 600, executablePath: "/usr/bin/pico"),
+            ]
+        )
+
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(defaults: defaults),
+            snapshotReader: StubSnapshotReader(snapshotValue: vpnDownSnapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: locator,
+            resolver: StubResolver(mapping: resolverMapping),
+            killer: SpyKiller(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        return (vm, locator, settings)
+    }
+
+    func test_local_vpn_down_uses_one_process_scan() {
+
+        let h = makeCountingHarness(
+            targets: [targetBundleID],
+            resolverMapping: [targetBundleID: targetPath]
+        )
+
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(
+            h.locator.scanCount, 1,
+            "решение, список для UI и завершение целей обслуживает один обход"
+        )
+    }
+
+    func test_no_argv_collection_without_script_rules() {
+        let h = makeCountingHarness(
+            targets: [targetBundleID],
+            resolverMapping: [targetBundleID: targetPath]
+        )
+
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(h.locator.argumentsRequested, [false])
+    }
+
+    func test_argv_is_collected_when_a_script_target_exists() {
+        let h = makeCountingHarness(
+            targets: ["qwen"],
+            resolverMapping: ["qwen": "/opt/homebrew/lib/qwen/cli.js"]
+        )
+
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(h.locator.argumentsRequested, [true])
+    }
+
+    func test_local_kill_path_p95_stays_under_budget_on_250_processes() {
+
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnServiceID = "HAPP"
+        settings.targets = [targetBundleID]
+
+        var processes: [ProcessSnapshot] = (1...248).map { index in
+            .init(
+                pid: Int32(1000 + index), parentPID: 1,
+                executablePath: "/Applications/Other\(index).app/Contents/MacOS/Other\(index)"
+            )
+        }
+        processes.append(.init(pid: 500, parentPID: 1, executablePath: "\(targetPath)/Contents/MacOS/Target"))
+        processes.append(.init(pid: 501, parentPID: 500, executablePath: "/usr/bin/curl"))
+
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(defaults: defaults),
+            snapshotReader: StubSnapshotReader(snapshotValue: vpnDownSnapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: StubLocator(bundlePaths: [targetBundleID: targetPath], processes: processes),
+            resolver: StubResolver(mapping: [targetBundleID: targetPath]),
+            killer: SpyKiller(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        var samples: [Double] = []
+        for _ in 0..<20 {
+            let started = ContinuousClock.now
+            vm.handle(.networkPath)
+            let elapsed = ContinuousClock.now - started
+            samples.append(
+                Double(elapsed.components.seconds)
+                    + Double(elapsed.components.attoseconds) / 1e18
+            )
+        }
+
+        let sorted = samples.sorted()
+        let p95 = sorted[min(sorted.count - 1, Int((Double(sorted.count) * 0.95).rounded(.up)) - 1)]
+        XCTAssertLessThan(
+            p95, 0.05,
+            "локальное решение, обход процессов и завершение целей: p95 = \(p95) с"
+        )
+    }
+
     func test_running_targets_list_parents_of_the_guarded_app() {
         let h = makeHarness(
             snapshot: healthySnapshot(),
@@ -617,9 +770,9 @@ final class GuardVMTests: XCTestCase {
             geo: geoOutcome(),
             processes: [
                 .init(pid: 800, executablePath: "/opt/homebrew/bin/node",
-                      arguments: "node /opt/homebrew/lib/qwen/cli.js chat"),
+                      arguments: ["node", "/opt/homebrew/lib/qwen/cli.js", "chat"]),
                 .init(pid: 801, executablePath: "/opt/homebrew/bin/node",
-                      arguments: "node /Users/me/other-project/server.js"),
+                      arguments: ["node", "/Users/me/other-project/server.js"]),
             ],
             executables: ["qwen"]
         )
@@ -698,9 +851,26 @@ final class GuardVMTests: XCTestCase {
     }
 
     func test_running_process_count_counts_only_target_bundle() {
+
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.refreshRunningTargets()
+
         XCTAssertEqual(h.vm.runningProcessCount(forTarget: targetBundleID), 2)
         XCTAssertEqual(h.vm.runningProcessCount(forTarget: "com.unknown"), 0)
+    }
+
+    func test_process_count_does_not_start_its_own_scan_per_target() {
+
+        let h = makeCountingHarness(
+            targets: [targetBundleID],
+            resolverMapping: [targetBundleID: targetPath]
+        )
+        h.vm.refreshRunningTargets()
+        let scansAfterRefresh = h.locator.scanCount
+
+        for _ in 0..<5 { _ = h.vm.runningProcessCount(forTarget: targetBundleID) }
+
+        XCTAssertEqual(h.locator.scanCount, scansAfterRefresh)
     }
 
     func test_stop_releases_the_event_source() {
