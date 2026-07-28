@@ -22,20 +22,17 @@ struct MaintenanceCard: View {
 
                     Spacer(minLength: 0)
 
-                    Toggle("", isOn: $launchAtLogin)
+                    // Действие висит на сеттере привязки, а не на `onChange`:
+                    // тумблер синхронизируется с системой при появлении окна,
+                    // и `onChange` принимал эту синхронизацию за нажатие —
+                    // настройки перерегистрировали агент при каждом открытии.
+                    Toggle("", isOn: Binding(
+                        get: { launchAtLogin },
+                        set: { setLaunchAtLogin($0) }
+                    ))
                         .toggleStyle(.switch)
                         .labelsHidden()
                         .tint(WetoTokens.violet.resolve(scheme))
-                        .onChange(of: launchAtLogin) { _, isOn in
-                            let outcome = isOn
-                                ? coordinator.launchAgent.enable()
-                                : coordinator.launchAgent.disable()
-
-                            maintenanceError = outcome.failureValue?.displayText
-                            // Состояние тумблера берём из системы, а не из нажатия:
-                            // отказ launchd не должен выглядеть успехом.
-                            launchAtLogin = coordinator.launchAgent.isInstalled
-                        }
                 }
 
                 if let maintenanceError {
@@ -67,6 +64,17 @@ struct MaintenanceCard: View {
             }
         }
         .onAppear { launchAtLogin = coordinator.launchAgent.isInstalled }
+    }
+
+    private func setLaunchAtLogin(_ isOn: Bool) {
+        let outcome = isOn
+            ? coordinator.launchAgent.enable()
+            : coordinator.launchAgent.disable()
+
+        maintenanceError = outcome.failureValue?.displayText
+        // Состояние тумблера берём из системы, а не из нажатия:
+        // отказ launchd не должен выглядеть успехом.
+        launchAtLogin = coordinator.launchAgent.isInstalled
     }
 
     // NSAlert, а не SwiftUI-алерт: в приложении с MenuBarExtra последний закрывает попап.

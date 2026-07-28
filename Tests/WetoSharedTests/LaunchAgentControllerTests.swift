@@ -19,11 +19,36 @@ final class LaunchAgentControllerTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    private func makeController(executable: String? = "/Applications/Weto.app/Contents/MacOS/WetoMenuBar") -> LaunchAgentController {
+    /// Записывает вызовы launchctl вместо настоящих: в тестах нельзя ни выгружать
+    /// чужие задания, ни — тем более — задание самого раннера.
+    private final class LaunchctlSpy: @unchecked Sendable {
+        private let lock = NSLock()
+        private var invocations: [[String]] = []
+
+        func run(_ arguments: [String]) -> Int32 {
+            lock.lock(); invocations.append(arguments); lock.unlock()
+            return 0
+        }
+
+        var calls: [[String]] {
+            lock.lock(); defer { lock.unlock() }
+            return invocations
+        }
+
+        var subcommands: [String] { calls.compactMap(\.first) }
+    }
+
+    private func makeController(
+        executable: String? = "/Applications/Weto.app/Contents/MacOS/WetoMenuBar",
+        launchctl: LaunchctlSpy = LaunchctlSpy(),
+        runningAsAgent: Bool = false
+    ) -> LaunchAgentController {
         LaunchAgentController(
             plistPath: plistPath,
             executablePath: { executable },
-            uid: 0
+            uid: 0,
+            launchdServiceName: { runningAsAgent ? LaunchAgentController.serviceName : nil },
+            launchctl: { launchctl.run($0) }
         )
     }
 
@@ -81,6 +106,59 @@ final class LaunchAgentControllerTests: XCTestCase {
     func test_disable_of_absent_agent_is_not_an_error() {
         let controller = makeController()
         XCTAssertTrue(controller.disable().isSuccess)
+    }
+
+    // Копия, поднятая launchd, сама и есть задание com.weto.app. Выгрузка задания
+    // из этого процесса — SIGTERM самому себе: приложение исчезало вместе с охраной
+    // в момент открытия настроек, а агент оставался снятым.
+    func test_enable_does_not_boot_out_the_job_the_app_itself_is() {
+        let launchctl = LaunchctlSpy()
+        let controller = makeController(launchctl: launchctl, runningAsAgent: true)
+
+        let outcome = controller.enable()
+
+        XCTAssertTrue(outcome.isSuccess)
+        XCTAssertTrue(controller.isInstalled, "файл автозапуска обязан быть записан")
+        XCTAssertFalse(
+            launchctl.subcommands.contains("bootout"),
+            "приложение выгрузило само себя из launchd: \(launchctl.calls)"
+        )
+    }
+
+    func test_disable_does_not_boot_out_the_job_the_app_itself_is() {
+        let launchctl = LaunchctlSpy()
+        let controller = makeController(launchctl: launchctl, runningAsAgent: true)
+        _ = controller.enable()
+
+        let outcome = controller.disable()
+
+        XCTAssertTrue(outcome.isSuccess)
+        XCTAssertFalse(controller.isInstalled, "агент обязан перестать существовать")
+        XCTAssertFalse(
+            launchctl.subcommands.contains("bootout"),
+            "выключение автозапуска не должно завершать работающее приложение"
+        )
+    }
+
+    // А вот копия, запущенная не launchd (например через open), обязана
+    // перерегистрировать агент честно: иначе путь в задании останется старым.
+    func test_enable_reloads_the_agent_when_the_app_is_not_the_job() {
+        let launchctl = LaunchctlSpy()
+
+        _ = makeController(launchctl: launchctl).enable()
+
+        XCTAssertEqual(launchctl.subcommands, ["bootout", "bootstrap"])
+    }
+
+    func test_disable_boots_out_the_agent_when_the_app_is_not_the_job() {
+        let launchctl = LaunchctlSpy()
+        let controller = makeController(launchctl: launchctl)
+        _ = controller.enable()
+
+        _ = controller.disable()
+
+        XCTAssertEqual(launchctl.subcommands.last, "bootout")
+        XCTAssertFalse(controller.isInstalled)
     }
 
     func test_default_path_is_inside_the_user_home() {

@@ -69,12 +69,17 @@ scripts/build.sh 0.1.0         # PKG-установщик → .build/release_bui
 - Состояние `verificationPending` нельзя применять на каждом штатном тике: без признака
   свежести вердикта (ревизия конфигурации + отпечаток снимка сети) цели умирали бы
   каждые 5 секунд при полностью исправном VPN.
-- Копию приложения, поднятую launchd (сразу после установки и после каждого входа
-  в систему), macOS помечает как праздную (`_kLSApplicationWouldBeTerminatedByTALKey=1`)
-  и усыпляет автозавершением в первый момент, когда у процесса нет ни одного окна.
-  Клик по шестерёнке — ровно такой момент: попап менюбара уже закрыт, окно настроек ещё
-  не создано. Процесс исчезал без крэш-репорта и с кодом 0, вместе с ним — охрана.
-  Лечится отказом от автозавершения (`NSSupportsAutomaticTermination`,
-  `NSSupportsSuddenTermination` в `Info.plist` плюс `ProcessInfo.disableAutomaticTermination`
-  и `disableSuddenTermination` на старте). Копия, запущенная через `open`, под TAL
-  не попадает — отсюда обманчивое «после `open` всё работает».
+- Копия, поднятая launchd, **сама и есть** задание `com.weto.app`: launchd кладёт ей
+  в окружение `XPC_SERVICE_NAME=com.weto.app` (у копии от `open` там длинный
+  `application.com.weto.app.…`). Любой `launchctl bootout` своего задания из такого
+  процесса — SIGTERM самому себе. Приложение исчезало при открытии настроек без
+  крэш-репорта: `onAppear` синхронизировал тумблер автозапуска, `onChange` принимал это
+  за нажатие и перерегистрировал агент. Отсюда же вечный респаун (`runs` в сотнях):
+  перерегистрация поднимала копию, которая умирала на singleton-порте. Побочные эффекты
+  вешать на сеттер привязки, а не на `onChange` синхронизируемого состояния.
+- Копию, поднятую launchd, macOS вдобавок помечает как праздную
+  (`_kLSApplicationWouldBeTerminatedByTALKey=1`) и вправе усыпить автозавершением, когда
+  у процесса нет ни одного окна. Отсюда явный отказ от автозавершения и внезапного
+  завершения (`NSSupportsAutomaticTermination`, `NSSupportsSuddenTermination`
+  в `Info.plist` плюс `ProcessInfo.disableAutomaticTermination`
+  и `disableSuddenTermination` на старте).
