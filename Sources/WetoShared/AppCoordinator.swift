@@ -12,6 +12,9 @@ public final class AppCoordinator {
     public let guardVM: GuardVM
     public let update = UpdateVM()
 
+    public let launchAgent: LaunchAgentManaging = LaunchAgentController()
+    public let maintenance = Maintenance()
+
     public init() {
 
         let settings = SettingsStore()
@@ -33,7 +36,8 @@ public final class AppCoordinator {
             locator: ProcessRegistry(),
             killer: ProcessKiller(),
             notifier: UserNotificationKillNotifier(),
-            events: NetworkEventSource()
+            events: NetworkEventSource(),
+            launchAgent: LaunchAgentController()
         )
     }
 

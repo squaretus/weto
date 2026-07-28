@@ -42,6 +42,7 @@ public final class GuardVM {
     @ObservationIgnored private let killer: ProcessKilling
     @ObservationIgnored private let notifier: KillNotifying
     @ObservationIgnored private let events: NetworkEventSourcing
+    @ObservationIgnored private let launchAgent: LaunchAgentManaging
 
     @ObservationIgnored private var recordedPIDs: Set<Int32> = []
 
@@ -69,6 +70,7 @@ public final class GuardVM {
         killer: ProcessKilling,
         notifier: KillNotifying,
         events: NetworkEventSourcing,
+        launchAgent: LaunchAgentManaging = LaunchAgentController(),
         debounceInterval: TimeInterval = Constants.networkEventDebounceSeconds
     ) {
         self.settings = settings
@@ -80,6 +82,7 @@ public final class GuardVM {
         self.killer = killer
         self.notifier = notifier
         self.events = events
+        self.launchAgent = launchAgent
 
         self.enforcer = ProcessEnforcer(
             settings: settings,
@@ -139,9 +142,10 @@ public final class GuardVM {
         }
     }
 
-    public func unloadCompletely() {
+    @discardableResult
+    public func unloadCompletely() -> Result<Void, LaunchAgentError> {
         stop()
-        LaunchAgentController.disable()
+        return launchAgent.disable()
     }
 
     public func refreshVPNCandidates() {

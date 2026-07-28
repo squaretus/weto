@@ -27,7 +27,8 @@ struct SettingsWindow: View {
 
     @State private var tab: SettingsTab = .settings
     @State private var newBlockEntry = ""
-    @State private var launchAtLogin = LaunchAgentController.isInstalled
+    @State private var launchAtLogin = false
+    @State private var maintenanceError: String?
     @State private var tokenDraft = ""
     @State private var isHoveringGithub = false
     @FocusState private var isTokenFocused: Bool
@@ -75,6 +76,7 @@ struct SettingsWindow: View {
         .onAppear {
             coordinator.guardVM.refreshVPNCandidates()
             coordinator.guardVM.refreshRunningTargets()
+            launchAtLogin = coordinator.launchAgent.isInstalled
             tokenDraft = maskedToken
         }
     }
@@ -172,10 +174,10 @@ struct SettingsWindow: View {
                     TextField("", text: $tokenDraft, prompt: Text("Ключ ipinfo.io"))
                         .textFieldStyle(WetoFieldStyle())
                         .labelsHidden()
-                        .onSubmit { coordinator.settings.ipinfoToken = tokenDraft }
+                        .onSubmit { saveToken(tokenDraft) }
                         .onChange(of: tokenDraft) { _, value in
                             guard value != maskedToken else { return }
-                            coordinator.settings.ipinfoToken = value
+                            saveToken(value)
                         }
                         .onChange(of: isTokenFocused) { _, focused in
                             tokenDraft = focused ? coordinator.settings.ipinfoToken : maskedToken
@@ -299,16 +301,30 @@ struct SettingsWindow: View {
                         .labelsHidden()
                         .tint(WetoTokens.violet.resolve(scheme))
                         .onChange(of: launchAtLogin) { _, isOn in
-                            if isOn {
-                                LaunchAgentController.enable()
+                            let outcome = isOn
+                                ? coordinator.launchAgent.enable()
+                                : coordinator.launchAgent.disable()
+
+                            if case .failure(let error) = outcome {
+                                maintenanceError = error.displayText
                             } else {
-                                LaunchAgentController.disable()
+                                maintenanceError = nil
                             }
-                            launchAtLogin = LaunchAgentController.isInstalled
+                            // Состояние берём из системы, а не из нажатия.
+                            launchAtLogin = coordinator.launchAgent.isInstalled
                         }
                 }
 
-                if LaunchAgentController.isInstalled && !LaunchAgentController.pointsAtCurrentBundle {
+                if let maintenanceError {
+                    WetoRow {
+                        Text(maintenanceError)
+                            .font(WetoTokens.caption)
+                            .foregroundStyle(WetoTokens.red.resolve(scheme))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if coordinator.launchAgent.isInstalled && !coordinator.launchAgent.pointsAtCurrentBundle {
                     WetoRow {
                         Text("Автозапуск указывает на другую копию приложения. Переключите тумблер, чтобы обновить путь.")
                             .font(WetoTokens.caption)
@@ -385,6 +401,14 @@ struct SettingsWindow: View {
             coordinator.settings.blockedIPRangeTexts.filter { $0 != entry }
     }
 
+    private func saveToken(_ token: String) {
+        if case .failure(let error) = coordinator.settings.setIPInfoToken(token) {
+            maintenanceError = error.displayText
+        } else {
+            maintenanceError = nil
+        }
+    }
+
     private func confirmClose() {
         let alert = NSAlert()
         alert.messageText = "Закрыть Weto?"
@@ -398,7 +422,11 @@ struct SettingsWindow: View {
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         coordinator.guardVM.stop()
-        Maintenance.closeApp()
+
+        if case .failure(let error) = coordinator.maintenance.closeApp() {
+            maintenanceError = error.displayText
+            return
+        }
         NSApplication.shared.terminate(nil)
     }
 
@@ -415,8 +443,27 @@ struct SettingsWindow: View {
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         coordinator.guardVM.stop()
-        Maintenance.uninstall()
-        NSApplication.shared.terminate(nil)
+
+        // Приложение не закрывается молча, если что-то не удалилось: иначе
+        // пользователь считал бы систему чистой, а следы остались бы на диске.
+        let result = coordinator.maintenance.uninstall()
+        guard let failureText = result.failureText else {
+            NSApplication.shared.terminate(nil)
+            return
+        }
+
+        let report = NSAlert()
+        report.messageText = "Удаление прошло не полностью"
+        report.informativeText = failureText
+        report.alertStyle = .critical
+        report.addButton(withTitle: "Всё равно закрыть")
+        report.addButton(withTitle: "Оставить открытым")
+
+        if report.runModal() == .alertFirstButtonReturn {
+            NSApplication.shared.terminate(nil)
+        } else {
+            maintenanceError = failureText
+        }
     }
 }
 

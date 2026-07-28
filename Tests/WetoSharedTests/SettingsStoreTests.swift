@@ -12,11 +12,18 @@ final class InMemorySecretStore: SecretStoring, @unchecked Sendable {
         return storage[account]
     }
 
-    @discardableResult
-    func write(_ value: String?, account: String) -> Bool {
+    func write(_ value: String?, account: String) -> Result<Void, SecretStoreError> {
         lock.lock(); defer { lock.unlock() }
         storage[account] = value
-        return true
+        return .success(())
+    }
+}
+
+final class FailingSecretStore: SecretStoring, @unchecked Sendable {
+    func read(account: String) -> String? { nil }
+
+    func write(_ value: String?, account: String) -> Result<Void, SecretStoreError> {
+        .failure(.keychain(errSecAuthFailed))
     }
 }
 
@@ -135,7 +142,7 @@ final class SettingsStoreTests: XCTestCase {
     func test_token_goes_to_secret_store_not_to_defaults() {
         let secrets = InMemorySecretStore()
         let store = SettingsStore(defaults: defaults, secrets: secrets)
-        store.ipinfoToken = "s3cret"
+        store.setIPInfoToken("s3cret")
 
         XCTAssertEqual(store.ipinfoToken, "s3cret")
         XCTAssertEqual(secrets.read(account: "token"), "s3cret")
@@ -149,8 +156,8 @@ final class SettingsStoreTests: XCTestCase {
     func test_clearing_token_removes_it_from_secret_store() {
         let secrets = InMemorySecretStore()
         let store = SettingsStore(defaults: defaults, secrets: secrets)
-        store.ipinfoToken = "s3cret"
-        store.ipinfoToken = ""
+        store.setIPInfoToken("s3cret")
+        store.setIPInfoToken("")
         XCTAssertNil(secrets.read(account: "token"))
     }
 
@@ -208,6 +215,25 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(second.vpnServiceID, "BC2D1D42")
     }
 
+    func test_failed_token_write_is_reported_and_not_advertised_as_persisted() {
+
+        let store = SettingsStore(defaults: defaults, secrets: FailingSecretStore())
+
+        XCTAssertEqual(
+            store.setIPInfoToken("secret").failureValue,
+            .keychainWriteFailed(errSecAuthFailed)
+        )
+        XCTAssertTrue(store.ipinfoToken.isEmpty, "незаписанный токен не выдаём за сохранённый")
+        XCTAssertNil(store.tokenBox.value)
+    }
+
+    func test_successful_token_write_reports_success() {
+        let store = makeStore()
+        XCTAssertTrue(store.setIPInfoToken("s3cret").isSuccess)
+        XCTAssertEqual(store.ipinfoToken, "s3cret")
+        XCTAssertEqual(store.tokenBox.value, "s3cret")
+    }
+
     func test_token_box_mirrors_current_token() {
 
         let secrets = InMemorySecretStore()
@@ -216,10 +242,10 @@ final class SettingsStoreTests: XCTestCase {
         let store = SettingsStore(defaults: defaults, secrets: secrets)
         XCTAssertEqual(store.tokenBox.value, "saved")
 
-        store.ipinfoToken = "updated"
+        store.setIPInfoToken("updated")
         XCTAssertEqual(store.tokenBox.value, "updated")
 
-        store.ipinfoToken = ""
+        store.setIPInfoToken("")
         XCTAssertNil(store.tokenBox.value)
     }
 }

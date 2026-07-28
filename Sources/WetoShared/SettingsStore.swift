@@ -15,6 +15,17 @@ public enum AppTheme: String, CaseIterable, Sendable {
     }
 }
 
+public enum SettingsPersistenceError: Error, Equatable, Sendable {
+    case keychainWriteFailed(OSStatus)
+
+    public var displayText: String {
+        switch self {
+        case .keychainWriteFailed(let status):
+            return "не удалось сохранить токен в связку ключей (ошибка \(status))"
+        }
+    }
+}
+
 /// Изменение настройки, от которой зависит решение охраны. Публикуется синхронно
 /// на главном акторе: цель, добавленная при небезопасном состоянии, обязана быть
 /// завершена сразу, а не через тик поллинга.
@@ -176,14 +187,27 @@ public final class SettingsStore {
     }
 
     private var _ipinfoToken: String
-    public var ipinfoToken: String {
+    public private(set) var ipinfoToken: String {
         get { _ipinfoToken }
-        set {
-            _ipinfoToken = newValue
-            secrets.write(newValue.isEmpty ? nil : newValue, account: Self.tokenAccount)
-            tokenBox.value = newValue.isEmpty ? nil : newValue
-            emit(.ipinfoToken)
+        set { _ipinfoToken = newValue }
+    }
+
+    /// Токен становится «сохранённым» только после успешной записи в связку ключей.
+    /// Иначе приложение работало бы с токеном, которого не будет после перезапуска,
+    /// а пользователь не знал бы об этом.
+    @discardableResult
+    public func setIPInfoToken(_ token: String) -> Result<Void, SettingsPersistenceError> {
+        let value = token.isEmpty ? nil : token
+
+        if case .failure(let error) = secrets.write(value, account: Self.tokenAccount) {
+            guard case .keychain(let status) = error else { return .failure(.keychainWriteFailed(0)) }
+            return .failure(.keychainWriteFailed(status))
         }
+
+        _ipinfoToken = token
+        tokenBox.value = value
+        emit(.ipinfoToken)
+        return .success(())
     }
 
     public func onGuardConfigurationChange(
