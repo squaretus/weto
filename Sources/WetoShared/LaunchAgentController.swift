@@ -53,15 +53,30 @@ public struct LaunchAgentController: LaunchAgentManaging {
     public let plistPath: String
     private let executablePathProvider: @Sendable () -> String?
     private let uid: uid_t
+    private let launchdServiceName: @Sendable () -> String?
+    private let launchctl: @Sendable ([String]) -> Int32
 
     public init(
         plistPath: String = LaunchAgentController.defaultPlistPath,
         executablePath: @escaping @Sendable () -> String? = { Bundle.main.executablePath },
-        uid: uid_t = getuid()
+        uid: uid_t = getuid(),
+        launchdServiceName: @escaping @Sendable () -> String? = {
+            ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"]
+        },
+        launchctl: (@Sendable ([String]) -> Int32)? = nil
     ) {
         self.plistPath = plistPath
         self.executablePathProvider = executablePath
         self.uid = uid
+        self.launchdServiceName = launchdServiceName
+        self.launchctl = launchctl ?? Self.runLaunchctl
+    }
+
+    /// Копию, поднятую launchd, launchd же и представляет заданием `com.weto.app`:
+    /// имя сервиса он кладёт процессу в окружение. Такому процессу нельзя выгружать
+    /// собственное задание — это SIGTERM самому себе.
+    public var isRunningAsAgent: Bool {
+        launchdServiceName() == Self.serviceName
     }
 
     public var isInstalled: Bool {
@@ -103,20 +118,38 @@ public struct LaunchAgentController: LaunchAgentManaging {
             return .failure(.write(error.localizedDescription))
         }
 
+        // Мы и есть это задание: оно уже загружено и работает, а перерегистрация
+        // означала бы выгрузку самого себя. Достаточно верного файла на диске.
+        if isRunningAsAgent { return .success(()) }
+
         // Перед загрузкой снимаем прежнюю регистрацию: launchd иначе откажет,
         // если агент уже загружен с другим путём.
-        _ = runLaunchctl(["bootout", "gui/\(uid)/\(Self.serviceName)"])
+        _ = launchctl(["bootout", "gui/\(uid)/\(Self.serviceName)"])
 
-        let status = runLaunchctl(["bootstrap", "gui/\(uid)", plistPath])
+        let status = launchctl(["bootstrap", "gui/\(uid)", plistPath])
         return status == 0 ? .success(()) : .failure(.bootstrap(status))
     }
 
     public func disable() -> Result<Void, LaunchAgentError> {
         let hadAgent = FileManager.default.fileExists(atPath: plistPath)
 
+        // Отключение автозапуска не должно завершать работающее приложение:
+        // когда задание — это мы сами, снимаем только файл. Загруженное задание
+        // launchd отпустит при выходе из системы, и обратно приложение не вернётся.
+        if isRunningAsAgent {
+            if hadAgent {
+                do {
+                    try FileManager.default.removeItem(atPath: plistPath)
+                } catch {
+                    return .failure(.remove(error.localizedDescription))
+                }
+            }
+            return .success(())
+        }
+
         // Порядок важен: сначала выгрузка, потом удаление файла. Иначе launchd
         // держит задание, ссылающееся на исчезнувший plist.
-        let status = runLaunchctl(["bootout", "gui/\(uid)/\(Self.serviceName)"])
+        let status = launchctl(["bootout", "gui/\(uid)/\(Self.serviceName)"])
 
         if hadAgent {
             do {
@@ -134,15 +167,17 @@ public struct LaunchAgentController: LaunchAgentManaging {
         return .success(())
     }
 
+    /// Выгрузка задания как таковая. Вызывается только тем, кто и намерен завершить
+    /// приложение (`Maintenance.closeApp`), — здесь SIGTERM самому себе уместен.
     public func bootout() -> Result<Void, LaunchAgentError> {
-        let status = runLaunchctl(["bootout", "gui/\(uid)/\(Self.serviceName)"])
+        let status = launchctl(["bootout", "gui/\(uid)/\(Self.serviceName)"])
         return status == 0 || status == launchdNotLoaded ? .success(()) : .failure(.bootout(status))
     }
 
     /// launchctl возвращает 3, когда выгружать было нечего, — это не ошибка.
     private let launchdNotLoaded: Int32 = 3
 
-    private func runLaunchctl(_ arguments: [String]) -> Int32 {
+    private static func runLaunchctl(_ arguments: [String]) -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = arguments
