@@ -39,6 +39,7 @@ public struct GuardSignals: Equatable, Sendable {
 }
 
 public enum UnsafeReason: Equatable, Sendable {
+    case verificationPending
     case vpnNotConfigured
     case vpnDown
     case vpnNotPrimary
@@ -55,6 +56,17 @@ public enum GuardDecision: Equatable, Sendable {
 }
 
 public enum GuardPolicy {
+
+    /// Решение на время, пока локальные основания исчерпаны, а свежего гео-вердикта ещё нет.
+    /// Это окно обязано быть fail-closed: иначе цели живут все секунды, что идёт запрос
+    /// к ipinfo и подтверждающим сервисам.
+    public static func pendingVerification(
+        isEnabled: Bool,
+        config: GuardConfig
+    ) -> GuardDecision {
+        guard isEnabled, config.hasTargets else { return .safe }
+        return .kill(.verificationPending)
+    }
 
     public static func decideLocal(
         isEnabled: Bool,

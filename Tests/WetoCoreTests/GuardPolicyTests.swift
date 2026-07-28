@@ -159,4 +159,22 @@ final class GuardPolicyTests: XCTestCase {
         let s = signals(geo: geo(primary: "KZ", confirmed: "kz"))
         XCTAssertEqual(GuardPolicy.decide(s), .safe)
     }
+
+    func test_pending_verification_kills_when_guard_is_armed() {
+        XCTAssertEqual(
+            GuardPolicy.pendingVerification(isEnabled: true, config: config()),
+            .kill(.verificationPending)
+        )
+    }
+
+    func test_pending_verification_is_harmless_when_disabled_or_targetless() {
+        XCTAssertEqual(
+            GuardPolicy.pendingVerification(isEnabled: false, config: config()),
+            .safe
+        )
+        XCTAssertEqual(
+            GuardPolicy.pendingVerification(isEnabled: true, config: config(targets: [])),
+            .safe
+        )
+    }
 }

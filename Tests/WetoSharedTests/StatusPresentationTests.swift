@@ -38,6 +38,17 @@ final class StatusPresentationTests: XCTestCase {
         )
     }
 
+    func test_pending_verification_names_the_check_in_progress() {
+        XCTAssertEqual(
+            StatusPresentation.title(for: .unsafe(.verificationPending)),
+            "Проверка подключения"
+        )
+    }
+
+    func test_pending_verification_is_blocking_rather_than_degraded() {
+        XCTAssertEqual(GuardState.unsafe(.verificationPending).statusColor, .red)
+    }
+
     func test_lines_are_ip_and_both_sources() {
         XCTAssertEqual(
             StatusPresentation.lines(for: .safe(reading), reading: reading),

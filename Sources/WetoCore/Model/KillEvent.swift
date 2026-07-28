@@ -71,6 +71,8 @@ extension UnsafeReason {
 
     public var displayText: String {
         switch self {
+        case .verificationPending:
+            return "Подключение ещё не проверено"
         case .vpnNotConfigured:
             return "VPN-сервис не выбран в настройках"
         case .vpnDown:
@@ -99,6 +101,8 @@ extension UnsafeReason {
 
     public var statusTitle: String {
         switch self {
+        case .verificationPending:
+            return "Проверка подключения"
         case .geoUnavailable:
             return "Ipinfo недоступен"
         case .confirmationUnavailable:
