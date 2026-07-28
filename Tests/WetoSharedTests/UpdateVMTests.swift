@@ -35,13 +35,21 @@ private final class SpyURLOpener: URLOpening, @unchecked Sendable {
 private final class StubInstaller: UpdateInstalling, @unchecked Sendable {
     private let lock = NSLock()
     private let outcome: UpdateService.InstallResult?
+    private let lateFailure: String?
     private var requests = 0
 
-    init(_ outcome: UpdateService.InstallResult?) { self.outcome = outcome }
+    init(_ outcome: UpdateService.InstallResult?, lateFailure: String? = nil) {
+        self.outcome = outcome
+        self.lateFailure = lateFailure
+    }
 
     func requestInstall(completion: @escaping @Sendable (UpdateService.InstallResult?) -> Void) {
         lock.lock(); requests += 1; lock.unlock()
         completion(outcome)
+    }
+
+    func requestLastFailure(completion: @escaping @Sendable (String?) -> Void) {
+        completion(lateFailure)
     }
 
     var requestCount: Int {
@@ -55,7 +63,17 @@ final class UpdateVMTests: XCTestCase {
 
     private func release(tag: String, url: String = "https://github.com/squaretus/weto/releases/tag/v9.9.9") -> Data {
         Data("""
-        {"tag_name":"\(tag)","html_url":"\(url)"}
+        {"tag_name":"\(tag)","html_url":"\(url)","assets":[
+          {"name":"Weto-9.9.9.pkg",
+           "browser_download_url":"https://github.com/squaretus/weto/releases/download/v9.9.9/Weto-9.9.9.pkg"}
+        ]}
+        """.utf8)
+    }
+
+    /// Тег без собранного пакета: `ReleaseParser` оставляет ссылку пустой.
+    private func releaseWithoutPackage(tag: String) -> Data {
+        Data("""
+        {"tag_name":"\(tag)","html_url":"https://github.com/squaretus/weto/releases/tag/v\(tag)","assets":[]}
         """.utf8)
     }
 
@@ -222,6 +240,60 @@ final class UpdateVMTests: XCTestCase {
 
         XCTAssertEqual(installer.requestCount, 0)
         XCTAssertFalse(vm.isInstallingUpdate)
+    }
+
+    // Релиз без .pkg демон установить не может: раньше баннер обещал установку
+    // в один клик, а демон отвечал отказом уже после нажатия.
+    func test_release_without_a_package_does_not_ask_the_daemon() async {
+        let installer = StubInstaller(.started)
+        let opener = SpyURLOpener()
+        let vm = UpdateVM(
+            fetcher: CountingFetcher(payload: releaseWithoutPackage(tag: "v9.9.9")),
+            opener: opener,
+            installer: installer,
+            currentVersion: "1.0.0"
+        )
+        await vm.checkForUpdateAndWait()
+        XCTAssertNotNil(vm.availableUpdate, "о новой версии сообщить всё равно надо")
+
+        vm.primaryAction()
+
+        XCTAssertEqual(installer.requestCount, 0, "root не о чем просить — пакета нет")
+        XCTAssertFalse(vm.isInstallingUpdate)
+        XCTAssertNotNil(vm.installFailure)
+        XCTAssertEqual(opener.urls.count, 1, "остаётся ручной путь — страница релиза")
+    }
+
+    // Ответ «установка начата» уходит до скачивания, поэтому провал после него
+    // приходил только в unified log, а пользователь оставался со спиннером.
+    func test_failure_after_the_start_reply_stops_the_spinner() async {
+        let vm = makeVM(
+            installer: StubInstaller(.started, lateFailure: "Не удалось скачать пакет: нет сети"),
+            opener: SpyURLOpener()
+        )
+        await vm.checkForUpdateAndWait()
+        vm.primaryAction()
+        XCTAssertTrue(vm.isInstallingUpdate)
+
+        vm.refreshInstallOutcome()
+        await settle()
+
+        XCTAssertFalse(vm.isInstallingUpdate)
+        XCTAssertEqual(vm.installFailure, "Не удалось скачать пакет: нет сети")
+        vm.stop()
+    }
+
+    func test_silent_daemon_keeps_the_spinner_up() async {
+        let vm = makeVM(installer: StubInstaller(.started), opener: SpyURLOpener())
+        await vm.checkForUpdateAndWait()
+        vm.primaryAction()
+
+        vm.refreshInstallOutcome()
+        await settle()
+
+        XCTAssertTrue(vm.isInstallingUpdate, "молчание демона — не провал, установка идёт")
+        XCTAssertNil(vm.installFailure)
+        vm.stop()
     }
 
     func test_non_github_release_url_is_not_opened() {
