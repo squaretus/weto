@@ -29,39 +29,70 @@ final class MenuBarImageRendererTests: XCTestCase {
     }
 
     func test_canvas_is_square_and_matches_menu_bar_height() {
-        let image = MenuBarImageRenderer.image(countryCode: nil, flagImage: nil, color: .systemGray)
+        let image = MenuBarImageRenderer.image(flagImage: nil, color: .systemGray)
         XCTAssertEqual(image.size.height, 22)
         XCTAssertEqual(image.size.width, image.size.height)
     }
 
     func test_image_is_not_a_template() {
-        let image = MenuBarImageRenderer.image(
-            countryCode: "kz", flagImage: flagStub(), color: .systemGreen
-        )
+        let image = MenuBarImageRenderer.image(flagImage: flagStub(), color: .systemGreen)
         XCTAssertFalse(image.isTemplate)
     }
 
     func test_identical_input_returns_cached_instance() {
-        let first = MenuBarImageRenderer.image(countryCode: nil, flagImage: nil, color: .systemGreen)
-        let second = MenuBarImageRenderer.image(countryCode: nil, flagImage: nil, color: .systemGreen)
+        let first = MenuBarImageRenderer.image(flagImage: nil, color: .systemGreen)
+        let second = MenuBarImageRenderer.image(flagImage: nil, color: .systemGreen)
         XCTAssertTrue(first === second)
     }
 
     func test_different_color_produces_different_instance() {
-        let green = MenuBarImageRenderer.image(countryCode: nil, flagImage: nil, color: .systemGreen)
-        let red = MenuBarImageRenderer.image(countryCode: nil, flagImage: nil, color: .systemRed)
+        let green = MenuBarImageRenderer.image(flagImage: nil, color: .systemGreen)
+        let red = MenuBarImageRenderer.image(flagImage: nil, color: .systemRed)
         XCTAssertFalse(green === red)
     }
 
-    func test_different_country_produces_different_instance() {
-        let stub = flagStub()
-        let kz = MenuBarImageRenderer.image(countryCode: "kz", flagImage: stub, color: .systemGreen)
-        let ru = MenuBarImageRenderer.image(countryCode: "ru", flagImage: stub, color: .systemGreen)
+    func test_different_flag_produces_different_instance() {
+        let kz = MenuBarImageRenderer.image(flagImage: flagStub(), color: .systemGreen)
+        let ru = MenuBarImageRenderer.image(flagImage: flagStub(), color: .systemGreen)
         XCTAssertFalse(kz === ru)
     }
 
+    func test_the_same_flag_and_color_are_rendered_once() {
+        let stub = flagStub()
+        let first = MenuBarImageRenderer.image(flagImage: stub, color: .systemGreen)
+        let second = MenuBarImageRenderer.image(flagImage: stub, color: .systemGreen)
+        XCTAssertTrue(first === second, "код страны не рисуется — второй раз рисовать нечего")
+    }
+
+    // Кэш ключевался кодом страны и `NSColor.description`, а не самим флагом:
+    // подъехавший битмап для уже закешированного кода отдавал старую картинку.
+    func test_new_flag_bitmap_for_the_same_country_is_re_rendered() {
+        let color = NSColor.systemGreen
+        let first = MenuBarImageRenderer.image(flagImage: flagStub(), color: color)
+        let second = MenuBarImageRenderer.image(flagImage: flagStub(), color: color)
+
+        XCTAssertFalse(
+            first === second,
+            "заменённый флаг обязан перерисоваться, а не прийти из кэша"
+        )
+    }
+
+    // Идентичность цвета берётся из компонент, а не из недокументированного
+    // `description`: один и тот же цвет в другом цветовом пространстве — тот же цвет.
+    func test_same_color_in_another_color_space_hits_the_cache() throws {
+        let plain = NSColor(red: 0.2, green: 0.6, blue: 0.4, alpha: 1)
+        guard let converted = plain.usingColorSpace(.deviceRGB) else {
+            throw XCTSkip("цвет не переводится в deviceRGB на этой машине")
+        }
+
+        let first = MenuBarImageRenderer.image(flagImage: nil, color: plain)
+        let second = MenuBarImageRenderer.image(flagImage: nil, color: converted)
+
+        XCTAssertTrue(first === second, "один и тот же цвет не должен рисоваться дважды")
+    }
+
     func test_placeholder_is_round_not_a_glyph() {
-        let image = MenuBarImageRenderer.image(countryCode: nil, flagImage: nil, color: .systemGray)
+        let image = MenuBarImageRenderer.image(flagImage: nil, color: .systemGray)
         guard let rep = bitmap(from: image) else { return XCTFail("не удалось растеризовать") }
 
         XCTAssertGreaterThan(
@@ -75,7 +106,7 @@ final class MenuBarImageRendererTests: XCTestCase {
     }
 
     func test_status_dot_sits_on_the_ring() {
-        let image = MenuBarImageRenderer.image(countryCode: nil, flagImage: nil, color: .systemRed)
+        let image = MenuBarImageRenderer.image(flagImage: nil, color: .systemRed)
         guard let rep = bitmap(from: image) else { return XCTFail("не удалось растеризовать") }
 
         // Кружок рисуется под 45° вправо-вниз от центра: в координатах NSImage

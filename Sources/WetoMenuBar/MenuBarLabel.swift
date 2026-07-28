@@ -11,7 +11,6 @@ struct MenuBarLabel: View {
     var body: some View {
         let code = coordinator.guardVM.currentCountryCode
         Image(nsImage: MenuBarImageRenderer.image(
-            countryCode: code,
             flagImage: code.flatMap { FlagImageStore.shared.image(for: $0) },
             color: Self.color(for: coordinator.guardVM.state.statusColor)
         ))

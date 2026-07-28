@@ -16,3 +16,14 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+
+      # Раскладка установщика проверяется здесь, а не только на релизе: оба
+      # прошлых сбоя («приложение не появилось» и «попап падал при клике») были
+      # именно про упаковку, а CI до сих пор их не видел. Контракт делает
+      # настоящую релизную сборку и заодно прогоняет launch-agent-contract.sh.
+      - name: Packaging contracts
+        run: |
+          chmod +x scripts/build.sh scripts/preinstall scripts/postinstall \
+                   scripts/tests/build-artifact-contract.sh \
+                   scripts/tests/launch-agent-contract.sh
+          bash scripts/tests/build-artifact-contract.sh 9.9.9

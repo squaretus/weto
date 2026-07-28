@@ -33,7 +33,8 @@ Sources/
 ├── WetoCore/     [library] чистая логика, ноль I/O
 │   ├── Model/    GeoModels, NetworkSnapshot, ProcessSnapshot, TargetRule, KillEvent
 │   ├── GuardPolicy, VPNStatusResolver, ProcessMatcher, ProcessTree, IPRange, IPAddress,
-│   │  CountryFlag, GeoResponses, SemanticVersion (+ ReleaseParser), VoidResult, Constants
+│   │  GeoResponses, SemanticVersion (+ ReleaseParser), ReleasePackageURL, VoidResult,
+│   │  Constants
 ├── WetoXPC/      [library] граница демона: WetoHelperProtocol, WetoXPCClient,
 │      UpdateService, XPCConstants
 ├── WetoHelper/   [executable] привилегированный демон обновления: main, HelperDelegate,
@@ -57,26 +58,30 @@ scripts/tests/    shell-контракты установки и релизно�
 ```
 
 ## Индекс модулей
-- **WetoCore** — `GuardPolicy.decide` и `decideLocal`, разрешение статуса VPN из снимка,
-  отбор процессов по правилам с обходом дерева потомков, CIDR, флаги, разбор ответов
-  гео-сервисов и GitHub Releases. Не импортирует системные фреймворки — инвариант проекта.
-- **WetoXPC** — протокол демона и клиент к нему. `performUpdate` не принимает ни ссылки,
-  ни версии: параметры от клиента означали бы, что любой авторизованный процесс может
-  попросить root установить произвольный пакет.
-- **WetoHelper** — LaunchDaemon `com.weto.helper` под root. Сам опрашивает GitHub, скачивает
+- **WetoCore** ([docs](../docs/modules/weto-core.md)) — `GuardPolicy.decide` и `decideLocal`,
+  разрешение статуса VPN из снимка, отбор процессов по правилам с обходом дерева потомков, CIDR,
+  разбор ответов гео-сервисов и GitHub Releases.
+  Не импортирует системные фреймворки — инвариант проекта.
+- **WetoXPC** ([docs](../docs/modules/weto-xpc.md)) — протокол демона (`performUpdate`,
+  `lastInstallFailure`, `uninstallHelper` — и ни одного лишнего: каждый исполняется под root)
+  и клиент к нему. `performUpdate` не принимает ни ссылки, ни версии: параметры от клиента
+  означали бы, что любой авторизованный процесс может попросить root поставить любой пакет.
+- **WetoHelper** ([docs](../docs/modules/weto-helper.md)) — LaunchDaemon `com.weto.helper` под root. Сам опрашивает GitHub, скачивает
   `.pkg` в `/var/db/weto/updates` (0700, файл 0600) и ставит через `installer -pkg`.
-  Клиента авторизует по пути исполняемого файла: Developer ID нет, а `SecCodeCheckValidity`
-  без team-id сверять нечего. От root это не защищает — предел принят осознанно.
-- **WetoSystem** — адаптеры к macOS. Каждый за протоколом, чтобы подменяться в тестах
+  Провал установки запоминает (`lastFailure`) и отдаёт по запросу. Клиента авторизует по пути
+  исполняемого файла: Developer ID нет, а `SecCodeCheckValidity` без team-id сверять нечего.
+  От root это не защищает — предел принят осознанно.
+- **WetoSystem** ([docs](../docs/modules/weto-system.md)) — адаптеры к macOS. Каждый за протоколом, чтобы подменяться в тестах
   только на границе.
-- **WetoShared** — `GuardController` (машина состояний, ревизии и владение пробой),
+- **WetoShared** ([docs](../docs/modules/weto-shared.md)) — `GuardController` (машина состояний, ревизии и владение пробой),
   `ProcessEnforcer` (кэш правил, один обход процессов, завершение), `GuardVM` — наблюдаемый
   фасад для UI. Хранилища настроек и журнала, обслуживание. `Maintenance.closeApp` выгружает
   агент из launchd, но оставляет plist: приложение вернётся при следующем входе в систему.
   `uninstall` возвращает `MaintenanceResult` со списком того, что удалить не удалось.
-- **WetoDesign** — токены и компоненты дизайн-системы (`docs/design-system.md`);
-  `MenuBarImageRenderer` рисует лейбл менюбара. Компоненты не знают о состоянии приложения.
-- **WetoMenuBar** — UI и точка входа. Попап показывает статус, данные гео, живые цели
+- **WetoDesign** ([docs](../docs/modules/weto-design.md)) — токены
+  и компоненты дизайн-системы (`docs/design-system.md`); `MenuBarImageRenderer` рисует лейбл
+  менюбара. Компоненты не знают о состоянии приложения.
+- **WetoMenuBar** ([docs](../docs/modules/weto-menubar.md)) — UI и точка входа. Попап показывает статус, данные гео, живые цели
   и баннер найденного обновления; всё управление — в окне с двумя вкладками.
 
 ## Ключевые контракты
@@ -143,11 +148,15 @@ scripts/tests/    shell-контракты установки и релизно�
 
 ### Автообновление
 
-Проверка идёт из приложения по HTTP (`UpdateVM`), а установка — только через демон:
-`installer` требует root. Демон перед установкой перепроверяет релиз сам и качает
-пакет лишь с доверенных хостов доставки GitHub (`ReleasePackageURL`). Установщик по ходу
-выгружает и приложение, и демон, поэтому спиннер установки обычно гаснет вместе с процессом.
-Полное удаление снимает демон его же руками — у приложения нет прав на `/Library`.
+Проверка идёт из приложения по HTTP (`UpdateVM`), а установка — только через демон: `installer`
+требует root. Демон перепроверяет релиз сам, требует читаемую версию установленного приложения
+(нечитаемая останавливает установку, а не считается «0.0.0») и качает пакет лишь с доверенных
+хостов доставки GitHub (`ReleasePackageURL`). Релиз без `.pkg` до демона не доходит: приложение
+показывает сообщение и открывает страницу релиза. Установщик по ходу выгружает и приложение,
+и демон, поэтому спиннер обычно гаснет вместе с процессом; успех иначе и не отчитывается,
+а провал демон запоминает и отдаёт по опросу раз в 5 секунд (`lastInstallFailure`,
+`Constants.installOutcomePollSeconds`). Полное удаление снимает демон его же руками — прав
+на `/Library` у приложения нет.
 
 ### Базовый образ
 

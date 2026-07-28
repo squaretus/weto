@@ -6,19 +6,22 @@ import WetoXPC
 final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol {
 
     private let lock = NSLock()
-    private var cachedUpdate: UpdateInfo?
     private var isInstalling = false
+    private var lastFailure: String?
 
     /// Версия приложения, установленного в /Applications: демон сравнивает
-    /// релиз именно с ней, а не со своей собственной сборкой.
-    private var installedAppVersion: String {
+    /// релиз именно с ней, а не со своей собственной сборкой. `nil` — прочитать
+    /// не удалось; подставлять «0.0.0» нельзя, иначе любой релиз оказывается
+    /// новее и демон под root ставит пакет на пустом основании.
+    private var installedAppVersion: String? {
         let plist = "/Applications/Weto.app/Contents/Info.plist"
         guard let data = FileManager.default.contents(atPath: plist),
               let dictionary = try? PropertyListSerialization.propertyList(
                   from: data, options: [], format: nil
               ) as? [String: Any],
-              let version = dictionary["CFBundleShortVersionString"] as? String
-        else { return "0.0.0" }
+              let version = dictionary["CFBundleShortVersionString"] as? String,
+              !version.isEmpty
+        else { return nil }
         return version
     }
 
@@ -44,24 +47,11 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol 
 
     // MARK: - WetoHelperProtocol
 
-    func getHelperVersion(reply: @escaping (String) -> Void) {
-        reply(WetoXPCConstants.protocolVersion)
-    }
-
-    func checkForUpdate(reply: @escaping (Data?, String?) -> Void) {
+    func lastInstallFailure(reply: @escaping (String?) -> Void) {
         lock.lock()
-        let cached = cachedUpdate
+        let failure = lastFailure
         lock.unlock()
-
-        if let cached, let data = try? JSONEncoder().encode(cached) {
-            reply(data, nil)
-            return
-        }
-        fetchRelease(reply: reply)
-    }
-
-    func checkForUpdateForced(reply: @escaping (Data?, String?) -> Void) {
-        fetchRelease(reply: reply)
+        reply(failure)
     }
 
     func performUpdate(reply: @escaping (String?) -> Void) {
@@ -72,11 +62,20 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol 
             return
         }
         isInstalling = true
+        lastFailure = nil
         lock.unlock()
+
+        guard let currentVersion = installedAppVersion else {
+            finishInstalling()
+            let message = "Не удалось прочитать версию установленного приложения"
+            HelperLogger.error(message)
+            reply(message)
+            return
+        }
 
         // Установка идёт только по данным собственной проверки демона:
         // клиент не передаёт ни ссылку, ни версию.
-        UpdateChecker.checkLatestRelease(currentVersion: installedAppVersion) { [weak self] result in
+        UpdateChecker.checkLatestRelease(currentVersion: currentVersion) { [weak self] result in
             guard let self else { return }
 
             switch result {
@@ -86,8 +85,6 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol 
                 reply(error.localizedDescription)
 
             case .success(let info):
-                self.cache(info)
-
                 guard info.isNewer else {
                     self.finishInstalling()
                     reply("Обновления нет: установлена \(info.currentVersion)")
@@ -135,29 +132,11 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol 
 
     // MARK: - Внутреннее
 
-    private func fetchRelease(reply: @escaping (Data?, String?) -> Void) {
-        UpdateChecker.checkLatestRelease(currentVersion: installedAppVersion) { [weak self] result in
-            switch result {
-            case .success(let info):
-                self?.cache(info)
-                HelperLogger.log(
-                    "проверка: установлена \(info.currentVersion), в релизе \(info.latestVersion), новее=\(info.isNewer)"
-                )
-                if let data = try? JSONEncoder().encode(info) {
-                    reply(data, nil)
-                } else {
-                    reply(nil, "Не удалось закодировать ответ")
-                }
-            case .failure(let error):
-                HelperLogger.error("проверка не удалась: \(error.localizedDescription)")
-                reply(nil, error.localizedDescription)
-            }
-        }
-    }
-
     private func downloadAndInstall(_ info: UpdateInfo) {
         HelperLogger.log("скачиваю \(info.latestVersion) с \(info.downloadURL)")
 
+        // Провал записывается, а не только логируется: клиент спросит о нём
+        // сам — ответ «установка начата» ушёл ещё до скачивания.
         UpdateChecker.downloadPackage(from: info.downloadURL) { [weak self] result in
             switch result {
             case .success(let path):
@@ -167,16 +146,18 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol 
                     HelperLogger.log("установка завершена")
                 } catch {
                     HelperLogger.error("установка не удалась: \(error.localizedDescription)")
+                    self?.record(failure: "Установка не удалась: \(error.localizedDescription)")
                 }
             case .failure(let error):
                 HelperLogger.error("скачивание не удалось: \(error.localizedDescription)")
+                self?.record(failure: "Не удалось скачать пакет: \(error.localizedDescription)")
             }
             self?.finishInstalling()
         }
     }
 
-    private func cache(_ info: UpdateInfo) {
-        lock.lock(); cachedUpdate = info; lock.unlock()
+    private func record(failure: String) {
+        lock.lock(); lastFailure = failure; lock.unlock()
     }
 
     private func finishInstalling() {
