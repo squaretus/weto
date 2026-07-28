@@ -41,6 +41,7 @@ public final class UpdateVM {
     @ObservationIgnored private let opener: URLOpening
     @ObservationIgnored private var checkTask: Task<Void, Never>?
     @ObservationIgnored private var periodicTask: Task<Void, Never>?
+    @ObservationIgnored private var installWatchTask: Task<Void, Never>?
 
     @ObservationIgnored private let currentVersion: String
     @ObservationIgnored private let installer: UpdateInstalling
@@ -60,6 +61,7 @@ public final class UpdateVM {
     deinit {
         checkTask?.cancel()
         periodicTask?.cancel()
+        installWatchTask?.cancel()
     }
 
     public func checkForUpdate() {
@@ -92,6 +94,7 @@ public final class UpdateVM {
     public func stop() {
         periodicTask?.cancel(); periodicTask = nil
         checkTask?.cancel(); checkTask = nil
+        installWatchTask?.cancel(); installWatchTask = nil
     }
 
     /// Одна кнопка на два действия: когда обновление найдено — поставить его,
@@ -109,6 +112,15 @@ public final class UpdateVM {
     public func installUpdate() {
         guard let update = availableUpdate, !isInstallingUpdate else { return }
 
+        // Релиз без `.pkg` среди assets демон установить не может: `ReleaseParser`
+        // оставляет ссылку пустой. Просить root начинать нечего — сразу ведём
+        // на страницу релиза, вместо обещания установки в один клик.
+        guard !update.downloadURL.isEmpty else {
+            installFailure = "В релизе нет пакета — откройте страницу релиза"
+            openReleasePage()
+            return
+        }
+
         isInstallingUpdate = true
         installFailure = nil
 
@@ -117,7 +129,9 @@ public final class UpdateVM {
                 guard let self else { return }
                 switch result {
                 case .started:
-                    break // Ждём: установщик выгрузит приложение сам.
+                    // Ждём: при успехе установщик выгрузит приложение сам,
+                    // а о провале после этого ответа спрашиваем демон отдельно.
+                    self.startWatchingInstall()
                 case .failed(let message):
                     self.isInstallingUpdate = false
                     self.installFailure = message
@@ -129,6 +143,34 @@ public final class UpdateVM {
                         self.opener.open(url)
                     }
                 }
+            }
+        }
+    }
+
+    /// Пока спиннер установки поднят, периодически спрашиваем демон, не упала ли
+    /// установка: успех виден по гибели процесса, а провал — только так.
+    private func startWatchingInstall() {
+        installWatchTask?.cancel()
+        installWatchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Constants.installOutcomePollSeconds))
+                guard !Task.isCancelled else { return }
+                await MainActor.run { self?.refreshInstallOutcome() }
+            }
+        }
+    }
+
+    /// Один опрос демона о судьбе начатой установки.
+    func refreshInstallOutcome() {
+        guard isInstallingUpdate else { return }
+
+        installer.requestLastFailure { [weak self] failure in
+            Task { @MainActor [weak self] in
+                guard let self, let failure, self.isInstallingUpdate else { return }
+                self.isInstallingUpdate = false
+                self.installFailure = failure
+                self.installWatchTask?.cancel()
+                self.installWatchTask = nil
             }
         }
     }
