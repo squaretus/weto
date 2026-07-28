@@ -127,6 +127,11 @@ scripts/tests/    shell-контракты установки и релизно�
 - **Версия — из `Info.plist` бандла** (`Constants.appVersion` сверяет `CFBundleIdentifier`,
   иначе отдаёт `dev`). Релизный скрипт не правит отслеживаемые файлы; версия подставляется
   только в staging-копию plist.
+- **Приложение не выгружает задание, которым само является.** Копия от launchd видит
+  себя по `XPC_SERVICE_NAME=com.weto.app`; для неё `enable` только пишет plist,
+  а `disable` только удаляет его. Иначе тумблер автозапуска и любая перерегистрация
+  агента означают SIGTERM самому себе. `bootout` остаётся только у `Maintenance.closeApp`,
+  который и намерен завершить приложение.
 - **Резидентность объявлена явно:** приложение отказывается и от автозавершения,
   и от внезапного завершения (`NSSupportsAutomaticTermination`/`NSSupportsSuddenTermination`
   в `Info.plist`, `ProcessInfo.disableAutomaticTermination`/`disableSuddenTermination`
