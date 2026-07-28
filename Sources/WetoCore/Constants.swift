@@ -58,4 +58,8 @@ public enum Constants {
 
     public static let updateCheckInterval: TimeInterval = 21_600
 
+    /// Как часто спрашивать демон о судьбе начатой установки. Успешная установка
+    /// завершает приложение сама, так что этот опрос существует ради провала.
+    public static let installOutcomePollSeconds: TimeInterval = 5
+
 }

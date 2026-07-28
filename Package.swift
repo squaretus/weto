@@ -18,11 +18,10 @@ let package = Package(
             dependencies: ["WetoCore"],
             path: "Sources/WetoSystem"
         ),
-        .target(
-            name: "WetoXPC",
-            dependencies: ["WetoCore"],
-            path: "Sources/WetoXPC"
-        ),
+        // Зависимости от WetoCore нет намеренно: граница демона возит строки
+        // и не должна тянуть доменные типы — после удаления проверки обновления
+        // из протокола ей от WetoCore ничего не нужно.
+        .target(name: "WetoXPC", path: "Sources/WetoXPC"),
         .executableTarget(
             name: "WetoHelper",
             dependencies: ["WetoCore", "WetoXPC"],
@@ -57,7 +56,7 @@ let package = Package(
         ),
         .testTarget(
             name: "WetoXPCTests",
-            dependencies: ["WetoXPC", "WetoCore"],
+            dependencies: ["WetoXPC"],
             path: "Tests/WetoXPCTests"
         ),
         .testTarget(
