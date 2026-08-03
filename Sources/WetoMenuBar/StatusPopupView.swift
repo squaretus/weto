@@ -114,6 +114,24 @@ struct StatusPopupView: View {
 
             Spacer(minLength: 0)
 
+            // Проверка по требованию: когда гео-сервис молчит, пользователю нужен
+            // способ увидеть текущее положение дел, а не ждать очередного тика.
+            if coordinator.guardVM.isProbing {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 22, height: 22)
+            } else {
+                Button {
+                    coordinator.guardVM.recheckNow()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15))
+                }
+                .buttonStyle(WetoIconButtonStyle())
+                .accessibilityLabel("Проверить сейчас")
+                .help("Проверить сейчас")
+            }
+
             Button {
                 openWindow(id: SettingsWindow.identifier)
                 NSApplication.shared.activate(ignoringOtherApps: true)
@@ -127,14 +145,21 @@ struct StatusPopupView: View {
         }
     }
 
+    /// Пока пробы не было (холодный старт, VPN не поднят) показывать нечего, кроме
+    /// последнего известного чтения; дальше говорит отчёт последней пробы.
+    private var lines: [StatusLine] {
+        if let report = coordinator.guardVM.lastReport {
+            return StatusPresentation.lines(for: coordinator.guardVM.state, report: report)
+        }
+        return StatusPresentation.lines(
+            for: coordinator.guardVM.state,
+            reading: coordinator.guardVM.lastReading
+        )
+    }
+
     private var readout: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(
-                StatusPresentation.lines(
-                    for: coordinator.guardVM.state,
-                    reading: coordinator.guardVM.lastReading
-                )
-            ) { line in
+            ForEach(lines) { line in
                 HStack(spacing: 4) {
                     Text(verbatim: "\(line.key):")
                         .foregroundStyle(WetoTokens.faint.resolve(scheme))

@@ -13,10 +13,11 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `Sources/WetoCore/ProcessTree.swift` — parent/child index shared by both matcher passes
 - `Sources/WetoCore/IPAddress.swift`, `IPRange.swift` — `inet_pton` parsing, CIDR containment
 - `Sources/WetoCore/GeoResponses.swift` — DTOs and decoding for ipinfo / freeipapi / geojs
+- `Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user
 - `Sources/WetoCore/SemanticVersion.swift` — `SemanticVersion`, `UpdateInfo`, `ReleaseParser`
 - `Sources/WetoCore/ReleasePackageURL.swift` — allow-list for the URL the root daemon downloads
 - `Sources/WetoCore/VoidResult.swift`, `Constants.swift`
-- `Sources/WetoCore/Model/` — `GeoModels`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`
+- `Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`
 - Tests: `Tests/WetoCoreTests/` (8 files, ~100 cases; `ProcessMatcherTests` and `GuardPolicyTests` are the load-bearing ones)
 
 ## Entry points
@@ -91,6 +92,9 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   `.claude/rules/ARCHITECTURE.md` → "Ключевые контракты".
 - **`decide` has an unreachable branch:** the `geoUnavailable("нет данных")` fallback can only fire if
   `GeoOutcome` gains a third case. Adding one routes it into a generic reason instead of a compile error.
+- **`GeoFailure.other` is load-bearing, not a leftover:** it is the escape hatch for codes the
+  classifier does not know. Replacing it with a fixed wording would present an unknown failure
+  as a known one — the popup would say "нет сети" about a certificate error.
 - **`matches` and `runningTargets` implement root selection and de-duplication separately** and share
   only `ProcessTree`. A fix applied to one (session ownership, child counting, app-bundle collapsing)
   is easy to forget in the other; both have dedicated cycle tests for that reason.

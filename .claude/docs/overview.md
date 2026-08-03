@@ -33,10 +33,16 @@
    that follows only coalesces outgoing requests — the state is already fail-closed.
 5. **Probe.** `GeoProbe.probe()`: Keychain token → ipinfo Lite (`v4.api.ipinfo.io`),
    `IPAddress.isValid` on the returned address *before* it goes into a URL, then confirmation
-   `free.freeipapi.com` → `get.geojs.io` fallback. Nothing is cached.
+   `free.freeipapi.com` → `get.geojs.io` fallback. Nothing is cached. The return value is a
+   `GeoProbeReport` — per-source outcome, `NWPathMonitor` path flag, timestamp — and the guard
+   verdict is `report.outcome`, so the popup and the enforcement read the same object.
+   A press of the popup's recheck button enters here through `GuardController.probeNow()`:
+   no debounce, and freshness is deliberately *not* invalidated, so the press cannot kill
+   targets on a healthy VPN.
 6. **Apply.** `applyLatestNetworkOutcome` drops outcomes whose `revision` is stale, re-reads
    config and snapshot immediately before deciding (a slow probe must never resurrect `safe`),
-   publishes the reading (`GuardVM.receive` prefetches the flag) and calls `GuardPolicy.decide`.
+   publishes the report (`GuardVM.receive` keeps `lastReport`, prefetches the flag when the
+   reading resolved) and calls `GuardPolicy.decide`.
 7. **Enforce.** `GuardVM.apply`: `.safe` cancels the watchdog and clears `recordedPIDs` /
    `recordedReasons`; `.kill` sets `.unsafe`, enforces and starts a 250 ms watchdog
    (`Constants.watchdogIntervalSeconds`) that re-runs `enforce` only — no re-evaluation and no

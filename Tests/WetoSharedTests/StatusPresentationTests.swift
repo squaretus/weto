@@ -82,6 +82,59 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertEqual(lines.map(\.value), ["неизвестен", "—", "—"])
     }
 
+    // 1770000000 = 2026-02-02 02:40:00 UTC
+    private let moment = Date(timeIntervalSince1970: 1_770_000_000)
+
+    func test_silent_ipinfo_shows_who_failed_instead_of_blank_dashes() {
+        let report = GeoProbeReport(
+            ip: nil,
+            ipinfo: .failed(.timedOut),
+            confirmation: .notRequested,
+            confirmSource: nil,
+            hasNetworkPath: true,
+            checkedAt: moment
+        )
+
+        XCTAssertEqual(
+            StatusPresentation.lines(
+                for: .unsafe(.geoUnavailable("таймаут запроса")),
+                report: report,
+                timeZone: TimeZone(identifier: "UTC")!
+            ),
+            [
+                StatusLine(key: "ipinfo", value: "таймаут запроса"),
+                StatusLine(key: "подтверждение", value: "не запрашивалось"),
+                StatusLine(key: "сеть", value: "есть"),
+                StatusLine(key: "Проверено", value: "02:40:00"),
+            ]
+        )
+    }
+
+    func test_successful_probe_names_the_address_and_the_service_that_answered() {
+        let report = GeoProbeReport(
+            ip: "203.0.113.28",
+            ipinfo: .answered("KZ"),
+            confirmation: .answered("KZ"),
+            confirmSource: .freeipapi,
+            hasNetworkPath: true,
+            checkedAt: moment
+        )
+
+        XCTAssertEqual(
+            StatusPresentation.lines(
+                for: .safe(reading),
+                report: report,
+                timeZone: TimeZone(identifier: "UTC")!
+            ),
+            [
+                StatusLine(key: "IP", value: "203.0.113.28"),
+                StatusLine(key: "ipinfo", value: "KZ"),
+                StatusLine(key: "freeipapi", value: "KZ"),
+                StatusLine(key: "Проверено", value: "02:40:00"),
+            ]
+        )
+    }
+
     func test_detail_joins_lines_for_notifications() {
         XCTAssertEqual(
             StatusPresentation.detail(for: .safe(reading), reading: reading),
