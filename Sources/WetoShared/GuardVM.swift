@@ -29,6 +29,12 @@ public final class GuardVM {
     public private(set) var state: GuardState = .disabled
     public private(set) var lastReading: GeoReading?
 
+    /// Что ответил каждый сервис в последней пробе — материал попапа.
+    public private(set) var lastReport: GeoProbeReport?
+
+    /// Идёт проверка, запрошенная пользователем.
+    public private(set) var isProbing = false
+
     public private(set) var permissionFailure: String?
     public private(set) var availableVPNs: [NetworkServiceSnapshot] = []
     public private(set) var runningTargets: [RunningTarget] = []
@@ -97,7 +103,7 @@ public final class GuardVM {
             geoProbe: geoProbe,
             debounceInterval: debounceInterval,
             onDecision: { [weak self] decision in self?.apply(decision) },
-            onReading: { [weak self] reading in self?.receive(reading) }
+            onReport: { [weak self] report in self?.receive(report) }
         )
     }
 
@@ -197,11 +203,26 @@ public final class GuardVM {
         controller.evaluate()
     }
 
+    /// Проверка по кнопке из попапа. Повторное нажатие, пока ответ не пришёл,
+    /// не порождает второго запроса: у подтверждающего сервиса есть лимит.
+    public func recheckNow() {
+        guard !isProbing else { return }
+        isProbing = true
+        controller.probeNow()
+
+        Task { [weak self] in
+            await self?.awaitPendingProbe()
+            self?.isProbing = false
+        }
+    }
+
     public func awaitPendingProbe() async {
         await controller.awaitPendingProbe()
     }
 
-    private func receive(_ reading: GeoReading) {
+    private func receive(_ report: GeoProbeReport) {
+        lastReport = report
+        guard case .resolved(let reading) = report.outcome else { return }
         lastReading = reading
         FlagImageStore.shared.prefetch(reading.primaryCountry)
     }
