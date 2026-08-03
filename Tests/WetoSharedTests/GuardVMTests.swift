@@ -8,15 +8,40 @@ private struct StubSnapshotReader: NetworkSnapshotReading {
     func snapshot() -> NetworkSnapshot { snapshotValue }
 }
 
+/// Отчёт, чей вердикт равен заданному: тестам охраны важен именно вердикт,
+/// а разбор по сервисам проверяется в `GeoProbeTests` и `StatusPresentationTests`.
+private func stubReport(_ outcome: GeoOutcome) -> GeoProbeReport {
+    switch outcome {
+    case .resolved(let reading):
+        return GeoProbeReport(
+            ip: reading.ip,
+            ipinfo: .answered(reading.primaryCountry),
+            confirmation: reading.confirmedCountry.map { .answered($0) } ?? .failed(.unreachable),
+            confirmSource: reading.confirmSource,
+            hasNetworkPath: true,
+            checkedAt: Date()
+        )
+    case .unavailable(let detail):
+        return GeoProbeReport(
+            ip: nil,
+            ipinfo: .failed(.other(detail)),
+            confirmation: .notRequested,
+            confirmSource: nil,
+            hasNetworkPath: true,
+            checkedAt: Date()
+        )
+    }
+}
+
 private actor StubGeoProbe: GeoProbing {
-    private let outcome: GeoOutcome
+    private let report: GeoProbeReport
     private var callCount = 0
 
-    init(_ outcome: GeoOutcome) { self.outcome = outcome }
+    init(_ outcome: GeoOutcome) { self.report = stubReport(outcome) }
 
-    func probe() async -> GeoOutcome {
+    func probe() async -> GeoProbeReport {
         callCount += 1
-        return outcome
+        return report
     }
 
     func calls() -> Int { callCount }
@@ -26,24 +51,25 @@ private actor StubGeoProbe: GeoProbing {
 /// именно в окне ожидания гео-вердикта и решать, какая из проб вернёт результат.
 private actor DelayedGeoProbe: GeoProbing {
     private var startedCalls = 0
-    private var pending: [CheckedContinuation<GeoOutcome, Never>] = []
+    private var pending: [CheckedContinuation<GeoProbeReport, Never>] = []
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
 
-    func probe() async -> GeoOutcome {
+    func probe() async -> GeoProbeReport {
         startedCalls += 1
         for waiter in startWaiters { waiter.resume() }
         startWaiters = []
         return await withCheckedContinuation { pending.append($0) }
     }
 
-    func waitUntilStarted() async {
-        guard startedCalls == 0 else { return }
-        await withCheckedContinuation { startWaiters.append($0) }
+    func waitUntilStarted(atLeast count: Int = 1) async {
+        while startedCalls < count {
+            await withCheckedContinuation { startWaiters.append($0) }
+        }
     }
 
     func resumeFirst(with outcome: GeoOutcome) {
         guard !pending.isEmpty else { return }
-        pending.removeFirst().resume(returning: outcome)
+        pending.removeFirst().resume(returning: stubReport(outcome))
     }
 
     func starts() -> Int { startedCalls }
@@ -404,6 +430,82 @@ final class GuardVMTests: XCTestCase {
         )
         await h.vm.awaitPendingProbe()
         XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
+    }
+
+    func test_manual_recheck_does_not_kill_targets_on_a_healthy_vpn() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        let batchesAfterFirstVerdict = h.killer.killedBatches.count
+
+        h.vm.recheckNow()
+
+        XCTAssertEqual(
+            h.vm.state, .safe(h.vm.lastReading),
+            "нажатие кнопки — не повод объявлять подключение непроверенным"
+        )
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
+    }
+
+    func test_manual_recheck_shows_as_running_until_the_answer_arrives() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted()
+
+        XCTAssertTrue(h.vm.isProbing)
+
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        await settle()
+
+        XCTAssertFalse(h.vm.isProbing)
+        h.vm.stop()
+    }
+
+    func test_manual_recheck_lifts_the_block_as_soon_as_the_service_answers_again() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("таймаут запроса")))
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(
+            h.vm.state, .safe(h.vm.lastReading),
+            "восстановившийся сервис снимает блокировку сразу, а не через тик поллинга"
+        )
+        h.vm.stop()
+    }
+
+    func test_second_tap_while_probing_does_not_spend_another_request() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted()
+        h.vm.recheckNow()
+        await settle()
+
+        let starts = await h.probe.starts()
+        XCTAssertEqual(starts, 1, "у подтверждающего сервиса лимит: спам кнопкой его не жжёт")
+        h.vm.stop()
+    }
+
+    func test_probe_result_is_kept_for_the_popup_even_when_the_service_was_silent() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: .unavailable("таймаут запроса"))
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(
+            h.vm.lastReport?.ipinfo, .failed(.other("таймаут запроса")),
+            "молчание сервиса обязано доезжать до экрана, а не только до журнала"
+        )
     }
 
     private func makeCountingHarness(

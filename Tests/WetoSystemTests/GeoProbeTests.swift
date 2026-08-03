@@ -23,7 +23,51 @@ private actor FakeFetcher: HTTPFetching {
     func setResponse(_ key: String, _ result: Result<Data, Error>) { responses[key] = result }
 }
 
+private struct FakeNetworkPath: NetworkPathReporting {
+    let hasPath: Bool
+}
+
 final class GeoProbeTests: XCTestCase {
+
+    func test_report_names_the_service_that_answered() async {
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .success(freeipapiKZ),
+        ])
+        let probe = GeoProbe(
+            fetcher: fetcher,
+            networkPath: FakeNetworkPath(hasPath: true),
+            token: { "t" }
+        )
+
+        let report = await probe.probe()
+
+        XCTAssertEqual(report.ip, "203.0.113.28")
+        XCTAssertEqual(report.ipinfo, .answered("KZ"))
+        XCTAssertEqual(report.confirmation, .answered("KZ"))
+        XCTAssertEqual(report.confirmSource, .freeipapi)
+        XCTAssertTrue(report.hasNetworkPath)
+    }
+
+    func test_report_keeps_why_the_confirmation_refused() async {
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .failure(HTTPFetchError.badStatus(429)),
+            "geojs.io": .failure(HTTPFetchError.badStatus(503)),
+        ])
+        let probe = GeoProbe(
+            fetcher: fetcher,
+            networkPath: FakeNetworkPath(hasPath: true),
+            token: { "t" }
+        )
+
+        let report = await probe.probe()
+
+        XCTAssertEqual(
+            report.confirmation, .failed(.rateLimited(429)),
+            "исчерпанный лимит первичного подтверждающего сервиса нельзя выдавать за общую недоступность"
+        )
+    }
 
     private func ipinfoData(ip: String, country: String) -> Data {
         Data("""
@@ -39,7 +83,7 @@ final class GeoProbeTests: XCTestCase {
         let fetcher = FakeFetcher(responses: ["ipinfo.io": .failure(FetchFailure())])
         let probe = GeoProbe(fetcher: fetcher, token: { "t" })
 
-        guard case .unavailable = await probe.probe() else {
+        guard case .unavailable = await probe.probe().outcome else {
             return XCTFail("ожидался .unavailable")
         }
     }
@@ -48,7 +92,7 @@ final class GeoProbeTests: XCTestCase {
         let fetcher = FakeFetcher(responses: [:])
         let probe = GeoProbe(fetcher: fetcher, token: { nil })
 
-        guard case .unavailable = await probe.probe() else {
+        guard case .unavailable = await probe.probe().outcome else {
             return XCTFail("ожидался .unavailable")
         }
         let calls = await fetcher.count("ipinfo.io")
@@ -62,7 +106,7 @@ final class GeoProbeTests: XCTestCase {
         ])
         let probe = GeoProbe(fetcher: fetcher, token: { "t" })
 
-        guard case .resolved(let reading) = await probe.probe() else {
+        guard case .resolved(let reading) = await probe.probe().outcome else {
             return XCTFail("ожидался .resolved")
         }
         XCTAssertEqual(reading.ip, "203.0.113.28")
@@ -79,7 +123,7 @@ final class GeoProbeTests: XCTestCase {
         ])
         let probe = GeoProbe(fetcher: fetcher, token: { "t" })
 
-        guard case .resolved(let reading) = await probe.probe() else {
+        guard case .resolved(let reading) = await probe.probe().outcome else {
             return XCTFail("ожидался .resolved")
         }
         XCTAssertEqual(reading.confirmedCountry, "KZ")
@@ -94,7 +138,7 @@ final class GeoProbeTests: XCTestCase {
         ])
         let probe = GeoProbe(fetcher: fetcher, token: { "t" })
 
-        guard case .resolved(let reading) = await probe.probe() else {
+        guard case .resolved(let reading) = await probe.probe().outcome else {
             return XCTFail("ожидался .resolved, а не .unavailable — IP-то мы получили")
         }
         XCTAssertNil(reading.confirmedCountry)
@@ -135,7 +179,7 @@ final class GeoProbeTests: XCTestCase {
             .success(Data(#"{"ipVersion":4,"ipAddress":"203.0.113.28","countryCode":"RU"}"#.utf8))
         )
 
-        guard case .resolved(let reading) = await probe.probe() else {
+        guard case .resolved(let reading) = await probe.probe().outcome else {
             return XCTFail("ожидался .resolved")
         }
         XCTAssertEqual(reading.confirmedCountry, "RU")
@@ -152,7 +196,7 @@ final class GeoProbeTests: XCTestCase {
         _ = await probe.probe()
         await fetcher.setResponse("freeipapi", .success(freeipapiKZ))
 
-        guard case .resolved(let reading) = await probe.probe() else {
+        guard case .resolved(let reading) = await probe.probe().outcome else {
             return XCTFail("ожидался .resolved")
         }
         XCTAssertEqual(reading.confirmedCountry, "KZ")
@@ -166,7 +210,7 @@ final class GeoProbeTests: XCTestCase {
         ])
         let probe = GeoProbe(fetcher: fetcher, token: { "t" })
 
-        guard case .unavailable = await probe.probe() else {
+        guard case .unavailable = await probe.probe().outcome else {
             return XCTFail("мусорный адрес не должен считаться разрешённым результатом")
         }
         let confirmCalls = await fetcher.count("freeipapi")
@@ -180,7 +224,7 @@ final class GeoProbeTests: XCTestCase {
         ])
         let probe = GeoProbe(fetcher: fetcher, token: { "t" })
 
-        guard case .resolved(let reading) = await probe.probe() else {
+        guard case .resolved(let reading) = await probe.probe().outcome else {
             return XCTFail("ожидался .resolved")
         }
         XCTAssertEqual(reading.ip, "2606:2040::1")
@@ -198,7 +242,7 @@ final class GeoProbeTests: XCTestCase {
         await fetcher.setResponse("ipinfo.io", .success(ipinfoData(ip: "198.51.100.231", country: "RU")))
         await fetcher.setResponse("freeipapi", .success(Data(#"{"ipVersion":4,"ipAddress":"198.51.100.231","countryCode":"RU"}"#.utf8)))
 
-        guard case .resolved(let reading) = await probe.probe() else {
+        guard case .resolved(let reading) = await probe.probe().outcome else {
             return XCTFail("ожидался .resolved")
         }
         XCTAssertEqual(reading.confirmedCountry, "RU")
