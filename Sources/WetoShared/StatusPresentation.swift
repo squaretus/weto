@@ -42,6 +42,53 @@ public enum StatusPresentation {
         ]
     }
 
+    /// Строки по отчёту последней пробы: показываем, кто именно ответил, кто молчит
+    /// и была ли вообще сеть. Без этого отказ ipinfo выглядел на экране как пустые прочерки.
+    public static func lines(
+        for state: GuardState,
+        report: GeoProbeReport,
+        timeZone: TimeZone = .current
+    ) -> [StatusLine] {
+        var lines: [StatusLine] = []
+
+        // Адрес есть только когда ipinfo ответил: показывать «неизвестен» рядом
+        // с текстом отказа значило бы повторять одно и то же дважды.
+        if let ip = report.ip {
+            lines.append(StatusLine(key: "IP", value: ip))
+        }
+
+        lines.append(StatusLine(key: "ipinfo", value: text(for: report.ipinfo)))
+        lines.append(StatusLine(
+            key: report.confirmSource?.rawValue ?? confirmationLabel,
+            value: text(for: report.confirmation)
+        ))
+
+        // Про сеть спрашиваем системный монитор, и строка нужна лишь тогда,
+        // когда что-то не сложилось: это ответ на «мой VPN виноват или сервис?».
+        if !report.isFullyAnswered {
+            lines.append(StatusLine(key: "сеть", value: report.hasNetworkPath ? "есть" : "нет"))
+        }
+
+        lines.append(StatusLine(key: "Проверено", value: time(report.checkedAt, in: timeZone)))
+        return lines
+    }
+
+    private static func text(for outcome: GeoProbeReport.SourceOutcome) -> String {
+        switch outcome {
+        case .answered(let value): return value
+        case .failed(let failure): return failure.displayText
+        case .notRequested: return "не запрашивалось"
+        }
+    }
+
+    private static func time(_ date: Date, in timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss"
+        formatter.timeZone = timeZone
+        return formatter.string(from: date)
+    }
+
     private static func knownReading(for state: GuardState, reading: GeoReading?) -> GeoReading? {
         if case .unsafe(let reason) = state, case .geoUnavailable = reason { return nil }
         if case .safe(let current) = state { return current ?? reading }

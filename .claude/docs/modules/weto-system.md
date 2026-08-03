@@ -13,6 +13,7 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `Sources/WetoSystem/NetworkSnapshotReader.swift`
 - `Sources/WetoSystem/NetworkEventSource.swift`
 - `Sources/WetoSystem/GeoProbe.swift`
+- `Sources/WetoSystem/NetworkPathReporter.swift` (also `NetworkPathReporting`)
 - `Sources/WetoSystem/HTTPFetching.swift`
 - `Sources/WetoSystem/ProcessRegistry.swift`
 - `Sources/WetoSystem/ProcessKiller.swift`
@@ -25,7 +26,9 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; `SCDynamicStore`.
 - `NetworkEventSourcing.start(handler: @Sendable (GuardTrigger) -> Void)` / `.stop()`
 - `GuardTrigger` — `.networkPath`, `.dynamicStore`, `.wake`, `.appLaunched(bundleID:)`, `.tick`
-- `GeoProbing.probe() async → GeoOutcome` (`GeoProbe` is an `actor`)
+- `GeoProbing.probe() async → GeoProbeReport` (`GeoProbe` is an `actor`); the guard verdict is
+  `report.outcome`, the popup reads the per-service breakdown
+- `NetworkPathReporting.hasPath → Bool` — `NWPathMonitor.currentPath`, no request of its own
 - `HTTPFetching.data(from:headers:) async throws → Data`; impl `URLSessionHTTPFetcher(timeout:)`
 - `ProcessLocating.allProcesses(includeArguments:) → [ProcessSnapshot]`,
   `.allProcesses()` (convenience, argv off), `.bundlePath(forBundleID:) → String?`
@@ -64,6 +67,12 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - Reads the first two bytes of candidate executables (shebang sniffing in `TargetResolver`).
 
 ## Invariants / assumptions
+- **«Is there a network at all» costs nothing.** `NetworkPathReporter` answers from a running
+  `NWPathMonitor`, never with a probe request of its own. The popup shows that line only when
+  something failed — it is the answer to "is my VPN to blame, or the service?".
+- **A refused confirmation keeps its reason.** When both confirmers fail, the report carries
+  the failure of the primary one (`free.freeipapi.com`), so an exhausted quota does not read
+  as a generic outage.
 <!-- generated, verify -->
 - **Read-only core boundary.** Nothing here may be imported by `WetoCore`; the arrow points
   one way. Everything is exposed as a protocol so `WetoShared` tests can substitute it.

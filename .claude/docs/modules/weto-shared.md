@@ -23,6 +23,7 @@ this layer decides *when* to ask and *what to do* with the answer.
 ## Entry points
 - `AppCoordinator.init()` → wires real system adapters; `start()`, `stopForTermination()`
 - `GuardVM.start()` / `stop()` / `handle(_ trigger: GuardTrigger)` / `awaitPendingProbe() async`
+- `GuardVM.recheckNow()` — user-driven probe from the popup; `isProbing`, `lastReport` back it
 - `GuardVM.refreshVPNCandidates()`, `refreshRunningTargets()`, `runningProcessCount(forTarget:)`,
   `displayName(forTarget:)`, `resolvedDescription(forTarget:)`, `unloadCompletely() → Result<Void, LaunchAgentError>`
 - `SettingsStore` setters (`isEnabled`, `targets`, `vpnServiceID`, `blockedCountryCodes`,
@@ -39,7 +40,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   internal so tests can step the loop by hand
 - `UpdateInstalling.requestInstall(completion:)`, `requestLastFailure(completion:)`;
   `HelperUninstalling.uninstallHelper(completion:)`
-- `StatusPresentation.title(for:)`, `lines(for:reading:)`, `detail(for:reading:)`
+- `StatusPresentation.title(for:)`, `lines(for:reading:)`, `lines(for:report:timeZone:)`,
+  `detail(for:reading:)`
 
 ## Dependencies
 - `WetoCore`: `GuardPolicy`, `VPNStatusResolver`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`
@@ -74,6 +76,13 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Invariants / assumptions
 <!-- generated, verify -->
+- **A manual recheck must not cost the user their targets.** `GuardController.probeNow()`
+  skips the debounce window *and* leaves `freshVerdict` alone, so pressing the button on a
+  healthy VPN keeps the current `.safe` state instead of dropping into `verificationPending`
+  (which would terminate everything before the request even left). Its answer is applied the
+  normal way, so a recovered ipinfo lifts the block without waiting for the next tick.
+- **One request per press.** `GuardVM.recheckNow()` refuses to start while `isProbing`:
+  `free.freeipapi.com` allows 60 requests/minute and the poll loop already spends 12.
 - **The launchd copy *is* the `com.weto.app` job.** launchd puts `XPC_SERVICE_NAME=com.weto.app`
   into the environment of the copy it started (a copy launched via `open` gets a long
   `application.com.weto.app.…` instead). `LaunchAgentController.isRunningAsAgent` reads exactly
