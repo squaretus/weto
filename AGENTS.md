@@ -36,6 +36,10 @@ scripts/build.sh 0.1.0         # PKG-установщик → .build/release_bui
 - Мокаются только границы системы (`GeoProbing`, `ProcessKilling`, `NetworkSnapshotReading`,
   `TargetResolving`, `NetworkEventSourcing`; в пакете — `ReleaseFetching`, `UpdateInstalling`,
   `UpdateStateStoring`, `UpdateClock`, `URLOpening`). Внутренние типы не подменяются.
+- Иконка приложения собирается из `icon/dark.icon` и `icon/light.icon` скриптом
+  `icon/build-icon.sh`; править PNG в `Sources/WetoDesign/Resources` и `Resources/AppIcon.icns`
+  руками нельзя — они генерируются. `NSImage` бандлы `.icon` не читает, поэтому скрипт
+  собирает картинку из двух файлов бандла: заливки в `icon.json` и слоя `Assets/grid.svg`.
 - Файл с `@main` называется по имени приложения (`WetoMenuBarApp.swift`), не `main.swift`.
 - Старт охраны живёт в `AppDelegate.applicationDidFinishLaunching`, а НЕ в `.task`
   у содержимого `MenuBarExtra`: при стиле `.window` SwiftUI создаёт попап лениво,
