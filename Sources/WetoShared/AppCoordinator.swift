@@ -4,6 +4,7 @@ import WetoCore
 import WetoSystem
 import UpdateKitCore
 import UpdateKit
+import UpdateKitUI
 
 @Observable
 @MainActor
@@ -13,6 +14,10 @@ public final class AppCoordinator {
     public let eventLog: EventLogStore
     public let guardVM: GuardVM
     public let update: UpdateController
+
+    /// Окно обновления держится координатором: контроллер знает только о флаге
+    /// показа, а чем именно рисуется окно — дело приложения.
+    @ObservationIgnored public private(set) var updateWindow: UpdateWindowPresenter?
 
     public let launchAgent: LaunchAgentManaging = LaunchAgentController()
     public let maintenance = Maintenance()
@@ -53,6 +58,10 @@ public final class AppCoordinator {
             events: NetworkEventSource(),
             launchAgent: LaunchAgentController()
         )
+
+        self.updateWindow = UpdateWindowPresenter(controller: update) { [settings] in
+            WetoUpdateTheme.make(for: settings.appTheme)
+        }
     }
 
     public func start() {
