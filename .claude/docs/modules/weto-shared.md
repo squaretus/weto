@@ -82,6 +82,11 @@ this layer decides *when* to ask and *what to do* with the answer.
   healthy VPN keeps the current `.safe` state instead of dropping into `verificationPending`
   (which would terminate everything before the request even left). Its answer is applied the
   normal way, so a recovered ipinfo lifts the block without waiting for the next tick.
+- **A manual recheck always goes to the network.** Local grounds (VPN down, no VPN chosen,
+  guard off, no targets) decide the fate of the targets and are applied immediately, but they
+  no longer short-circuit the request: the button answers "where am I right now", and that
+  question does not depend on whether the guard needs a verdict. Before this, the popup went
+  silent about the country exactly when the user pressed the button to see it.
 - **One request per press.** `GuardVM.recheckNow()` refuses to start while `isProbing`:
   `free.freeipapi.com` allows 60 requests/minute and the poll loop already spends 12.
 - **The launchd copy *is* the `com.weto.app` job.** launchd puts `XPC_SERVICE_NAME=com.weto.app`

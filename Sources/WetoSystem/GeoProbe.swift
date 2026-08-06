@@ -26,7 +26,7 @@ public actor GeoProbe: GeoProbing {
 
     public func probe() async -> GeoProbeReport {
         guard let token = token(), !token.isEmpty else {
-            return report(ipinfo: .failed(.other("не задан токен ipinfo")))
+            return await referenceOnlyReport()
         }
         guard let url = URL(string: Constants.ipinfoLiteURL) else {
             return report(ipinfo: .failed(.other("некорректный URL ipinfo")))
@@ -57,6 +57,41 @@ public actor GeoProbe: GeoProbing {
             hasNetworkPath: networkPath.hasPath,
             checkedAt: Date()
         )
+    }
+
+    /// Проба без токена ipinfo: справочно спрашиваем единственный сервис, который
+    /// отвечает про звонящего сам. Вердикт от этого не меняется — `outcome` требует
+    /// ответа ipinfo и остаётся `.unavailable`, то есть fail-closed. Нужен этот путь
+    /// ради свежей установки: пользователь должен узнать, где он, ещё до настройки
+    /// токена, а раньше проба выходила молча и не показывала ничего.
+    private func referenceOnlyReport() async -> GeoProbeReport {
+        let noToken = GeoProbeReport.SourceOutcome.failed(.other("не задан токен ipinfo"))
+
+        guard let url = URL(string: Constants.geojsSelfURL) else {
+            return report(ipinfo: noToken)
+        }
+
+        do {
+            let data = try await confirmationFetcher.data(from: url, headers: [:])
+            let answer = try GeoResponses.decodeGeoJSSelf(data)
+            return GeoProbeReport(
+                ip: answer.ip,
+                ipinfo: noToken,
+                confirmation: .answered(answer.country),
+                confirmSource: .geojs,
+                hasNetworkPath: networkPath.hasPath,
+                checkedAt: Date()
+            )
+        } catch {
+            return GeoProbeReport(
+                ip: nil,
+                ipinfo: noToken,
+                confirmation: .failed(GeoFailure(error)),
+                confirmSource: nil,
+                hasNetworkPath: networkPath.hasPath,
+                checkedAt: Date()
+            )
+        }
     }
 
     private func report(ipinfo: GeoProbeReport.SourceOutcome) -> GeoProbeReport {
