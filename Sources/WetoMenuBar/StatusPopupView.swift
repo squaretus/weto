@@ -179,9 +179,3 @@ extension StatusTone {
         }
     }
 }
-
-extension AppTheme {
-    var colorScheme: ColorScheme {
-        self == .light ? .light : .dark
-    }
-}
