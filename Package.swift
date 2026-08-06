@@ -55,10 +55,11 @@ let package = Package(
         .target(
             name: "WetoShared",
             dependencies: [
-                "WetoCore", "WetoSystem",
+                "WetoCore", "WetoSystem", "WetoDesign",
                 .product(name: "UpdateKitCore", package: "UpdateKit"),
                 .product(name: "UpdateKitXPC", package: "UpdateKit"),
                 .product(name: "UpdateKit", package: "UpdateKit"),
+                .product(name: "UpdateKitUI", package: "UpdateKit"),
             ],
             path: "Sources/WetoShared"
         ),
@@ -69,6 +70,7 @@ let package = Package(
                 .product(name: "UpdateKitCore", package: "UpdateKit"),
                 .product(name: "UpdateKitXPC", package: "UpdateKit"),
                 .product(name: "UpdateKit", package: "UpdateKit"),
+                .product(name: "UpdateKitUI", package: "UpdateKit"),
             ],
             path: "Tests/WetoSharedTests"
         ),

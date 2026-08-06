@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "UpdateKitXPC", targets: ["UpdateKitXPC"]),
         .library(name: "UpdateKitHelper", targets: ["UpdateKitHelper"]),
         .library(name: "UpdateKit", targets: ["UpdateKit"]),
+        .library(name: "UpdateKitUI", targets: ["UpdateKitUI"]),
     ],
     targets: [
         // Ноль I/O: политика, версии, разбор ответа GitHub, тексты.
@@ -18,6 +19,7 @@ let package = Package(
         .target(name: "UpdateKitXPC"),
         .target(name: "UpdateKitHelper", dependencies: ["UpdateKitCore", "UpdateKitXPC"]),
         .target(name: "UpdateKit", dependencies: ["UpdateKitCore", "UpdateKitXPC"]),
+        .target(name: "UpdateKitUI", dependencies: ["UpdateKitCore", "UpdateKit"]),
         .testTarget(name: "UpdateKitCoreTests", dependencies: ["UpdateKitCore"]),
         .testTarget(name: "UpdateKitXPCTests", dependencies: ["UpdateKitXPC"]),
         .testTarget(
