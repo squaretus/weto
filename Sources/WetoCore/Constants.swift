@@ -42,6 +42,11 @@ public enum Constants {
         "https://get.geojs.io/v1/ip/country/\(ip).json"
     }
 
+    /// Тот же сервис, но про самого звонящего: адрес на входе не нужен.
+    /// Единственный источник, который отвечает без токена, — поэтому справочная
+    /// строка на свежей установке берётся отсюда.
+    public static let geojsSelfURL = "https://get.geojs.io/v1/ip/country.json"
+
     public static let eventLogCapacity = 10
 
     public static let userDefaultsSuite = "com.weto.shared"
