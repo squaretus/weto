@@ -31,7 +31,7 @@ let package = Package(
             dependencies: [
                 "WetoCore",
                 .product(name: "UpdateKitCore", package: "UpdateKit"),
-                .product(name: "UpdateKitXPC", package: "UpdateKit"),
+                .product(name: "UpdateKitHelper", package: "UpdateKit"),
             ],
             path: "Sources/WetoHelper"
         ),
