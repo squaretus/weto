@@ -13,7 +13,31 @@ public struct StatusLine: Equatable, Sendable, Identifiable {
     }
 }
 
+/// Что написать, когда целей на машине не запущено. Совет про VPN — часть
+/// смысла, а не оформления, поэтому решение живёт здесь и проверяется тестом.
+public struct IdleTargetsNotice: Equatable, Sendable {
+    public let text: String
+
+    /// Появляется только тогда, когда это правда: после срабатывания охраны
+    /// цели молчат не потому, что всё хорошо, а потому что VPN уже упал.
+    public let hint: String?
+
+    public init(text: String, hint: String?) {
+        self.text = text
+        self.hint = hint
+    }
+}
+
 public enum StatusPresentation {
+
+    public static func idleTargets(for state: GuardState) -> IdleTargetsNotice {
+        switch state {
+        case .safe:
+            return IdleTargetsNotice(text: "Цели не запущены", hint: "— VPN можно выключать")
+        case .unsafe, .disabled:
+            return IdleTargetsNotice(text: "Цели не запущены", hint: nil)
+        }
+    }
 
     public static let unknownIP = "неизвестен"
     public static let missingValue = "—"

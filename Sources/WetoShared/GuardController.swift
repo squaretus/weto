@@ -91,21 +91,26 @@ final class GuardController {
     /// Проверка по требованию пользователя: запрос уходит немедленно и не объявляет
     /// прежний вердикт протухшим. Иначе кнопка «проверить сейчас» означала бы
     /// завершение целей при полностью исправном VPN.
+    ///
+    /// В сеть идём **всегда**, даже когда судьба целей решается локально — при
+    /// выключенном VPN, невыбранном сервисе или выключенной охране. Экономия
+    /// запросов имеет смысл на штатном тике, а кнопка отвечает на другой вопрос:
+    /// «где я сейчас». Раньше локальное основание закрывало этот путь, и попап
+    /// молчал о стране ровно тогда, когда пользователь и хотел её увидеть.
     func probeNow() {
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
         let vpn = VPNStatusResolver.status(serviceID: config.vpnServiceID, in: snapshot)
 
+        // Локальное основание применяем сразу: ответ гео-сервисов не должен
+        // ни продлевать целям жизнь, ни задерживать их завершение.
         if let local = GuardPolicy.decideLocal(
             isEnabled: settings.isEnabled,
             vpn: vpn,
             config: config
         ) {
-            probeTask?.cancel()
-            probeTask = nil
             record(snapshot: snapshot)
             onDecision(local)
-            return
         }
 
         startProbe(after: 0)

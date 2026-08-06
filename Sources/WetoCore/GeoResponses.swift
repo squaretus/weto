@@ -18,6 +18,12 @@ public struct GeoJSCountryResponse: Decodable, Equatable, Sendable {
     public let country: String
 }
 
+/// Ответ geojs про звонящего: кроме страны приходит и его адрес.
+public struct GeoJSSelfResponse: Decodable, Equatable, Sendable {
+    public let country: String
+    public let ip: String
+}
+
 public enum GeoResponses {
 
     private static let decoder = JSONDecoder()
@@ -34,6 +40,10 @@ public enum GeoResponses {
 
     public static func decodeGeoJS(_ data: Data) throws -> String? {
         try decoder.decode(GeoJSCountryResponse.self, from: data).country
+    }
+
+    public static func decodeGeoJSSelf(_ data: Data) throws -> GeoJSSelfResponse {
+        try decoder.decode(GeoJSSelfResponse.self, from: data)
     }
 
     public static func makeReading(

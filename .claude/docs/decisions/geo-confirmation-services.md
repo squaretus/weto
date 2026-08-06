@@ -43,5 +43,13 @@ fails loud and wrong.
 - Adding a third confirmer means re-measuring, not just appending a URL: the limit has to
   hold at our per-probe rate, and the data has to be accurate on reassigned ranges.
 
+- Without an ipinfo token the probe has no IP to ask about, and until this was addressed it
+  returned "no token" without touching the network — a fresh install could not answer "where
+  am I" at all. `get.geojs.io/v1/ip/country.json` answers about the caller with no token and
+  no IP on input, so it fills the popup's confirmation line in that state. It stays strictly
+  informational: `GeoProbeReport.outcome` still requires ipinfo, so the verdict remains
+  `.unavailable` and the guard stays fail-closed. A single unconfirmed source is not allowed
+  to decide anything — that is the same rule that makes a missing confirmation a kill reason.
+
 Implementation: `Sources/WetoSystem/GeoProbe.swift`, `Sources/WetoCore/Constants.swift`.
 Flow: [overview](../overview.md). Module: [weto-system](../modules/weto-system.md).

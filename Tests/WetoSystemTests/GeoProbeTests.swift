@@ -23,6 +23,10 @@ private actor FakeFetcher: HTTPFetching {
     func setResponse(_ key: String, _ result: Result<Data, Error>) { responses[key] = result }
 }
 
+private let geojsSelfKZ = Data(
+    #"{"country":"KZ","country_3":"KAZ","ip":"91.224.74.56","name":"Kazakhstan"}"#.utf8
+)
+
 private struct FakeNetworkPath: NetworkPathReporting {
     let hasPath: Bool
 }
@@ -88,15 +92,42 @@ final class GeoProbeTests: XCTestCase {
         }
     }
 
-    func test_missing_token_yields_unavailable_without_network_call() async {
-        let fetcher = FakeFetcher(responses: [:])
-        let probe = GeoProbe(fetcher: fetcher, token: { nil })
+    /// Токена нет — вердикт остаётся fail-closed, но справочный источник спрашиваем:
+    /// на свежей установке пользователю нужно узнать, где он, ещё до настройки ipinfo.
+    func test_missing_token_keeps_verdict_unavailable_but_asks_the_reference_source() async {
+        let fetcher = FakeFetcher(responses: ["geojs.io": .success(geojsSelfKZ)])
+        let probe = GeoProbe(
+            fetcher: fetcher,
+            networkPath: FakeNetworkPath(hasPath: true),
+            token: { nil }
+        )
 
-        guard case .unavailable = await probe.probe().outcome else {
-            return XCTFail("ожидался .unavailable")
+        let report = await probe.probe()
+
+        guard case .unavailable = report.outcome else {
+            return XCTFail("без ipinfo вердикт обязан остаться fail-closed")
         }
-        let calls = await fetcher.count("ipinfo.io")
-        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(report.ipinfo, .failed(.other("не задан токен ipinfo")))
+        XCTAssertEqual(report.confirmation, .answered("KZ"))
+        XCTAssertEqual(report.confirmSource, .geojs)
+        XCTAssertEqual(report.ip, "91.224.74.56")
+
+        let ipinfoCalls = await fetcher.count("ipinfo.io")
+        XCTAssertEqual(ipinfoCalls, 0, "без токена ipinfo спрашивать нечем")
+    }
+
+    func test_reference_source_failure_is_shown_instead_of_a_country() async {
+        let fetcher = FakeFetcher(responses: ["geojs.io": .failure(HTTPFetchError.badStatus(503))])
+        let probe = GeoProbe(
+            fetcher: fetcher,
+            networkPath: FakeNetworkPath(hasPath: true),
+            token: { "" }
+        )
+
+        let report = await probe.probe()
+
+        XCTAssertNil(report.ip)
+        XCTAssertEqual(report.confirmation, .failed(GeoFailure(httpStatus: 503)))
     }
 
     func test_successful_probe_uses_freeipapi_as_confirmation() async {
