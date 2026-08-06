@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import WetoCore
 import WetoSystem
+import UpdateKit
 
 /// Что именно делает удаление. План отделён от исполнения, чтобы порядок шагов
 /// и их состав проверялись без реального сноса приложения.
@@ -70,7 +71,7 @@ public struct Maintenance {
 
     public init(
         agent: LaunchAgentManaging = LaunchAgentController(),
-        helper: HelperUninstalling? = HelperUpdateInstaller(),
+        helper: HelperUninstalling? = HelperUpdateInstaller(configuration: WetoUpdate.configuration),
         secrets: SecretStoring = KeychainStore(service: Constants.keychainService),
         defaultsSuite: String = Constants.userDefaultsSuite,
         cachesDirectory: URL? = FileManager.default

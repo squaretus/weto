@@ -20,6 +20,7 @@
 ```bash
 swift build                    # Debug-сборка
 swift test                     # Тесты
+swift test --package-path Packages/UpdateKit   # Тесты пакета обновления
 swift run WetoMenuBar          # Запуск без бандла (без Keychain и уведомлений)
 scripts/make-app.sh release    # .app → .build/app/Weto.app
 scripts/build.sh 0.1.0         # PKG → .build/release_build/Weto-0.1.0.pkg
@@ -29,13 +30,18 @@ scripts/build.sh 0.1.0         # PKG → .build/release_build/Weto-0.1.0.pkg
 ```
 Sources/
 ├── WetoCore/     [library] чистая логика, ноль I/O: политика, снимки, матчинг, разбор ответов
-├── WetoXPC/      [library] граница демона: протокол, клиент, отображение ответов
-├── WetoHelper/   [executable] привилегированный демон обновления под root
+├── WetoHelper/   [executable] точка входа демона: конфигурация + listener, логика в UpdateKit
 ├── WetoSystem/   [library] адаптеры к macOS, каждый за протоколом
 ├── WetoShared/   [library] VM-слой: координатор, машина состояний охраны, хранилища
 ├── WetoDesign/   [library] токены и компоненты дизайн-системы, лейбл менюбара
 └── WetoMenuBar/  [executable] точка входа, попап и окно настроек
-Tests/            WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTests, WetoXPCTests
+Packages/UpdateKit/   переносимый между проектами механизм обновления, свой Package.swift
+├── UpdateKitCore/    [library] ноль I/O: конфигурация, версии, политика показа, фазы, тексты
+├── UpdateKitXPC/     [library] граница демона: протокол, клиент; зависимостей нет
+├── UpdateKit/        [library] UpdateController, планировщик, хранилище, фетчер релиза
+├── UpdateKitUI/      [library] окно обновления и протокол темы
+└── UpdateKitHelper/  [library] root-логика: перепроверка релиза, загрузка с долей, installer
+Tests/            WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTests
 scripts/tests/    shell-контракты установки и релизной сборки (из build.sh, вручную и из CI)
 ```
 Состав файлов каждого таргета — в его документе из индекса ниже.
@@ -45,13 +51,16 @@ scripts/tests/    shell-контракты установки и релизно�
   статус VPN из снимка, отбор процессов с обходом дерева потомков, CIDR, разбор ответов
   гео-сервисов и GitHub Releases, отчёт о пробе (`GeoProbeReport`) и классификация отказа
   (`GeoFailure`). Не импортирует системные фреймворки — инвариант проекта.
-- **WetoXPC** ([docs](../docs/modules/weto-xpc.md)) — протокол демона (`performUpdate`,
-  `lastInstallFailure`, `uninstallHelper` — и ни одного лишнего: каждый исполняется под root)
-  и клиент к нему. Зависимостей у таргета нет намеренно.
+- **UpdateKit** ([docs](../docs/modules/update-kit.md)) — весь механизм обновления одним
+  переносимым пакетом из пяти таргетов: политика показа и фазы (`UpdateKitCore`), протокол
+  демона `performUpdate`/`installState`/`uninstallHelper` (`UpdateKitXPC`), `UpdateController`
+  (`UpdateKit`), окно и тема (`UpdateKitUI`), root-логика (`UpdateKitHelper`). Ни одной
+  константы проекта внутри: всё приходит `UpdateFeedConfiguration`.
 - **WetoHelper** ([docs](../docs/modules/weto-helper.md)) — LaunchDaemon `com.weto.helper`
-  под root: сам опрашивает GitHub, качает `.pkg` в `/var/db/weto/updates` (0700, файл 0600),
-  ставит через `installer -pkg`, помнит провал. Клиента авторизует по пути исполняемого файла:
-  Developer ID нет, сверять team-id нечем. От root это не защищает — предел принят осознанно.
+  под root: `main.swift` на 15 строк собирает `UpdaterHelperService` из конфигурации weto.
+  Демон сам опрашивает GitHub, качает `.pkg` в `/var/db/weto/updates` (0700, файл 0600),
+  ставит через `installer -pkg`, отдаёт фазу и долю. Клиента авторизует по пути исполняемого
+  файла: Developer ID нет, сверять team-id нечем. От root это не защищает — предел осознан.
 - **WetoSystem** ([docs](../docs/modules/weto-system.md)) — адаптеры к macOS, каждый
   за протоколом: только на этой границе тесты и подменяют что-либо.
 - **WetoShared** ([docs](../docs/modules/weto-shared.md)) — `GuardController` (машина
@@ -114,6 +123,14 @@ scripts/tests/    shell-контракты установки и релизно�
   у `Maintenance.closeApp`, который и намерен завершить приложение.
 - **Резидентность объявлена явно** (`NSSupportsAutomaticTermination`/`NSSupportsSuddenTermination`
   плюс отказ в `AppDelegate`): иначе копию от launchd система усыпляет в первый момент без окон.
+- **В Dock приложение приходит только с окном.** По умолчанию оно фоновое
+  (`LSUIElement` плюс `.accessory`), но открытые настройки или окно обновления — обычные окна,
+  и без иконки в Dock их не найти ни в Cmd+Tab, ни мышью. `DockPresence` слушает появление
+  и закрытие окон и переключает политику активации; попап менюбара окном не считается
+  (не титульный, не может стать главным) — иначе иконка мигала бы на каждое открытие меню.
+- **Иконка приложения меняется вместе с темой** (`WetoAppIcon` + `AppCoordinator.applyAppIcon`):
+  её видят Dock, `NSAlert` и окно обновления. Бандл несёт статичный `AppIcon.icns`; обе картинки
+  и `.icns` собираются из `icon/*.icon` скриптом `icon/build-icon.sh`.
 - **Версия — из `Info.plist` бандла** (`Constants.appVersion` сверяет `CFBundleIdentifier`,
   иначе отдаёт `dev`). Релизная сборка не правит отслеживаемые файлы.
 - **Ресурсы — в `Contents/Resources`, доступ через `DesignResources`:** `Bundle.module` смотрит
@@ -122,11 +139,27 @@ scripts/tests/    shell-контракты установки и релизно�
 
 ### Автообновление
 
-Проверка — из приложения по HTTP (`UpdateVM`), установка — только через демон: `installer`
-требует root. Демон перепроверяет релиз сам, требует читаемую версию установленного приложения
-и качает пакет лишь с доверенных хостов GitHub (`ReleasePackageURL`). Релиз без `.pkg` до демона
-не доходит. Успех не отчитывается — установщик выгружает и приложение, и демон; провал демон
-запоминает и отдаёт по опросу. Подробно — [overview](../docs/overview.md#update-http-check-in-the-app-root-install-in-the-daemon).
+Проверка — из приложения по HTTP (`UpdateController`), установка — только через демон:
+`installer` требует root. Демон перепроверяет релиз сам, требует читаемую версию установленного
+приложения и качает пакет лишь с доверенных хостов GitHub (`ReleasePackageURL`). Релиз без `.pkg`
+до демона не доходит. Успех не отчитывается — установщик выгружает и приложение, и демон.
+Подробно — [overview](../docs/overview.md#update-http-check-in-the-app-root-install-in-the-daemon).
+
+- **Проверка раз в час и на старте**; интервал — поле `UpdateFeedConfiguration`, а не константа.
+- **Что делать с находкой, решает чистая функция** `UpdatePolicy.decide`: `silent` (версия
+  пропущена, отложена или не новее), `prompt` (окно и баннер) или `install` (молча, без окна).
+  Тихий исход прячет и окно, и баннер.
+- **Пропуск действует до версии выше пропущенной** и снимается сам — управлять им из настроек
+  не нужно. Отсрочка хранится абсолютной датой и переживает перезапуск; дата дальше шести часов
+  считается испорченной (перевод часов назад иначе запер бы обновления).
+- **Ручная проверка игнорирует пропуск и отсрочку** — единственный и достаточный способ
+  вернуть пропущенную версию.
+- **Ход установки читается методом `installState`**: код фазы, доля скачанного, текст провала.
+  Метод только читает — root-поверхность от него не растёт. Молчание демона не выдаётся
+  за успех, а незнакомый код фазы читается как «идёт установка», а не как «простой».
+  Доля честная только на загрузке: `installer` прогресса не отдаёт.
+- **Автоустановка идёт молча** и опирается на `KeepAlive` агента: launchd поднимает
+  приложение сразу после того, как установщик его завершил.
 
 ### Базовый образ
 

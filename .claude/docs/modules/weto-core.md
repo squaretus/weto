@@ -14,8 +14,6 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `Sources/WetoCore/IPAddress.swift`, `IPRange.swift` — `inet_pton` parsing, CIDR containment
 - `Sources/WetoCore/GeoResponses.swift` — DTOs and decoding for ipinfo / freeipapi / geojs
 - `Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user
-- `Sources/WetoCore/SemanticVersion.swift` — `SemanticVersion`, `UpdateInfo`, `ReleaseParser`
-- `Sources/WetoCore/ReleasePackageURL.swift` — allow-list for the URL the root daemon downloads
 - `Sources/WetoCore/VoidResult.swift`, `Constants.swift`
 - `Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`
 - Tests: `Tests/WetoCoreTests/` (8 files, ~100 cases; `ProcessMatcherTests` and `GuardPolicyTests` are the load-bearing ones)
@@ -31,7 +29,6 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `IPAddress.isValid(_:)`, `IPRange.init?(_:)`, `IPRange.contains(_:)`
 - `GeoResponses.decodeIPInfo/decodeFreeIPAPI/decodeGeoJS/makeReading`
 - `ReleaseParser.parse(_:currentVersion:) → Result<UpdateInfo, Error>`, `ReleaseParser.latestReleaseURL`
-- `ReleasePackageURL.isTrusted(_:) → Bool`
 - `UnsafeReason.displayText / statusTitle / isDegradedRatherThanBlocked` — user-facing wording lives here, not in the views
 - `Result<Void, _>.isSuccess / .failureValue`
 - `ProcessTree` is `public` but has no call site outside `ProcessMatcher`
@@ -41,8 +38,9 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - Imports: `Foundation` only, plus `Darwin` in `IPAddress.swift` and `IPRange.swift` for `inet_pton`.
 - Service / DB / queue / external API: none — the module never performs a request or a write.
 - Consumers: `WetoSystem` (`GeoProbe`, `ProcessRegistry`, `TargetResolver`, `NetworkSnapshotReader`),
-  `WetoShared` (`GuardController`, `ProcessEnforcer`, `GuardVM`, `UpdateVM`, `SettingsStore`),
-  `WetoMenuBar`, `WetoXPC`, `WetoHelper` (`UpdateChecker` uses `ReleaseParser` + `ReleasePackageURL`).
+  `WetoShared` (`GuardController`, `ProcessEnforcer`, `GuardVM`, `SettingsStore`),
+  `WetoMenuBar`, `WetoHelper` (entry point only). Release parsing, versions and the download
+  host allow-list moved to `UpdateKitCore` — see `modules/update-kit.md`.
 
 ## Side effects
 <!-- generated, verify -->
@@ -100,18 +98,15 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   is easy to forget in the other; both have dedicated cycle tests for that reason.
 - **`runningTargets` merges `appBundle` rows by `entry`.** Two rules pointing at the same entry with a
   different `kind`, or the same app reached through two different entries, will not collapse into one row.
-- **`SemanticVersion` accepts only 1–3 numeric components** and zero-pads. Pre-release tags
-  (`1.2.3-beta`) and four-part versions are rejected, and `ReleaseParser` turns that into
-  `ParseError.invalidVersion` for the whole update check — a tag naming slip breaks update discovery.
-- **`Constants.appVersion == "dev"` outside the app bundle** makes `ReleaseParser.parse` fail with
-  `invalidVersion`. This is why `UpdateVM` takes the current version as a parameter instead of reading
-  the constant directly; a new caller that reads it will "work" in the app and fail in tests.
+- **`Constants.appVersion == "dev"` outside the app bundle** makes `ReleaseParser.parse` (now in
+  `UpdateKitCore`) fail with `invalidVersion`. This is why `UpdateController` takes the current
+  version as a parameter instead of reading the constant directly; a new caller that reads it will
+  "work" in the app and fail in tests.
+- **`WetoUpdate.configuration` is the single place that names the repository and the daemon.**
+  `Constants.githubRepoURL` is derived from it; a second copy of those strings is a bug.
 - **`IPRange.contains` returns `false` for a family mismatch or unparsable input.** Errors are absent
   by design: an entry that survived `IPRange.init?` but is compared against the wrong family simply
   never matches, and no reason surfaces to the user.
-- **`ReleasePackageURL.allowedHosts` is a hard-coded set.** If GitHub changes its asset-delivery host,
-  updates stop installing with no diagnostic beyond the daemon's rejection; loosening it hands the
-  root installer an arbitrary download target.
 
 ## Related docs
 - Map and cross-module contracts: `.claude/rules/ARCHITECTURE.md` (check order, fail-closed rules,
