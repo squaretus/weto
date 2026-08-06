@@ -26,29 +26,24 @@ struct StatusPopupView: View {
                 }
 
                 // Новость об обновлении видна там, где пользователь бывает чаще всего,
-                // а не только в футере настроек.
-                if let update = coordinator.update.availableUpdate {
+                // а не только в футере настроек. Пропущенная и отложенная версии
+                // сюда не попадают: их прячет bannerUpdate.
+                if let update = coordinator.update.bannerUpdate {
                     WetoBanner(
-                        tone: .info,
+                        tone: coordinator.update.progress.phase == .failed ? .warning : .info,
                         systemImage: "arrow.down.circle.fill",
-                        text: coordinator.update.isInstallingUpdate
-                            ? "Установка обновления…"
-                            : "Доступно обновление \(update.latestVersion)"
+                        text: coordinator.update.strings.bannerProgress(
+                            coordinator.update.progress,
+                            version: update.latestVersion
+                        )
                     ) {
-                        if coordinator.update.isInstallingUpdate {
+                        if coordinator.update.progress.isInFlight {
                             ProgressView().controlSize(.small)
                         } else {
-                            Button("Обновить") { coordinator.update.installUpdate() }
+                            Button("Подробнее") { coordinator.update.presentDialog() }
                                 .buttonStyle(WetoPillButtonStyle(.primary))
                         }
                     }
-                }
-
-                if let failure = coordinator.update.installFailure {
-                    Text(failure)
-                        .font(WetoTokens.caption)
-                        .foregroundStyle(WetoTokens.amber.resolve(scheme))
-                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if coordinator.settings.guardConfig.hasTargets {
@@ -182,11 +177,5 @@ extension StatusTone {
         case .red: self = .blocked
         case .grey: self = .off
         }
-    }
-}
-
-extension AppTheme {
-    var colorScheme: ColorScheme {
-        self == .light ? .light : .dark
     }
 }

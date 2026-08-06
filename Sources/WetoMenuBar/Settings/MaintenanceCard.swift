@@ -35,6 +35,24 @@ struct MaintenanceCard: View {
                         .tint(WetoTokens.violet.resolve(scheme))
                 }
 
+                WetoRow {
+                    Text("Обновлять автоматически")
+                        .font(WetoTokens.label)
+                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
+
+                    Spacer(minLength: 0)
+
+                    // Та же настройка, что и галочка в окне обновления: одно
+                    // хранилище, поэтому оба места всегда показывают одно и то же.
+                    Toggle("", isOn: Binding(
+                        get: { coordinator.update.isAutoInstallEnabled },
+                        set: { coordinator.update.isAutoInstallEnabled = $0 }
+                    ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .tint(WetoTokens.violet.resolve(scheme))
+                }
+
                 if let maintenanceError {
                     WetoRow {
                         Text(maintenanceError)

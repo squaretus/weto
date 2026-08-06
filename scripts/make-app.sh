@@ -21,6 +21,7 @@ mkdir -p "$APP/MacOS" "$APP/Resources"
 
 cp "$BUILD_DIR/WetoMenuBar" "$APP/MacOS/WetoMenuBar"
 cp Resources/Weto-Info.plist "$APP/Info.plist"
+cp Resources/AppIcon.icns "$APP/Resources/AppIcon.icns"
 
 # Раскладка ресурсов та же, что в PKG: Contents/Resources и ничего в корне бандла.
 for bundle in "$BUILD_DIR"/*.bundle; do

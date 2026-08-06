@@ -65,59 +65,77 @@ Files: `Sources/WetoSystem/NetworkEventSource.swift`, `Sources/WetoShared/GuardV
 
 ### Update: HTTP check in the app, root install in the daemon
 
-1. **Check.** `AppCoordinator.start` → `UpdateVM.startPeriodicCheck`: one check immediately,
-   then every `Constants.updateCheckInterval` (6 h). The app queries GitHub itself over HTTP
+The whole mechanism lives in `Packages/UpdateKit` and is driven by `UpdateFeedConfiguration`;
+weto contributes the configuration value, the dialog theme and the daemon entry point.
+Module doc: `modules/update-kit.md`.
+
+1. **Check.** `AppCoordinator.start` → `UpdateController.start`: one check immediately, then
+   every `UpdateFeedConfiguration.checkInterval` (1 h). The app queries GitHub itself over HTTP
    and compares with `Constants.appVersion` via `ReleaseParser.parse`; HTTP 404 → `.noReleases`.
-2. **Surface.** `availableUpdate` is non-nil only for `.available` + `isNewer`, and feeds both
-   the banner in `StatusPopupView` and the settings footer.
-3. **Request.** `UpdateVM.installUpdate` first refuses locally when `downloadURL` is empty
+2. **Decide.** `UpdatePolicy.decide(latest:deferral:now:)` — a pure function over the release,
+   the stored deferral and the clock — answers `silent`, `prompt` or `install`:
+   - the version equals `skippedVersion` → silent (a higher version clears the skip by itself);
+   - `remindAt` is in the future and no further than six hours ahead → silent (a date beyond
+     that is treated as expired, so moving the clock back cannot lock updates away);
+   - auto-install is on → install, with no dialog at all;
+   - otherwise → prompt.
+   A manual check (`checkNow`, the settings footer button) passes `prompt` unconditionally,
+   ignoring both skip and reminder. That is the only way back to a skipped version.
+3. **Surface.** `prompt` raises `isDialogPresented`; `UpdateWindowPresenter` (subscribed through
+   `presentationHandler`) shows an `NSWindow` hosting `UpdateDialogView`, skinned by
+   `WetoUpdateTheme`. `bannerUpdate` feeds the popup banner and is `nil` while the verdict is
+   silent, so a skipped or deferred version hides the banner too. What the dialog shows is
+   `UpdateDialogModel.make(info:progress:strings:)` — a pure value, tested without SwiftUI.
+   Skip stores the version, "remind later" stores an absolute date (1/3/6 h), closing the window
+   equals three hours.
+4. **Request.** `UpdateController.install` first refuses locally when `downloadURL` is empty
    (a release with no `.pkg` asset): the daemon could not install it either, so nothing is asked
-   of root — `installFailure` is set and the release page opens. Otherwise
-   → `HelperUpdateInstaller.requestInstall`
-   (`UpdateInstalling` boundary, so the app is testable without a live daemon) →
-   `WetoXPCClient.helper` (mach service `com.weto.helper`, `.privileged`) →
-   `UpdateService.install` → `helper.performUpdate()` **with no arguments**: no URL,
-   no version, no path. `AnsweredOnce` collapses the two possible completions
-   (connection error handler / daemon reply) into one. A `nil` result means «no daemon»:
-   `installFailure` is shown and the release page is opened through
-   `UpdateVM.validatedReleaseURL` (https + host `github.com` only).
-4. **Authorize.** `HelperDelegate.listener` accepts a connection only if
+   of root — the failure phase is shown and the release page opens. Otherwise
+   → `HelperUpdateInstaller.requestInstall` (`UpdateInstalling` boundary, so the app is testable
+   without a live daemon) → `UpdaterXPCClient.helper` (mach service `com.weto.helper`,
+   `.privileged`) → `UpdaterService.install` → `helper.performUpdate()` **with no arguments**:
+   no URL, no version, no path. `AnsweredOnce` collapses the two possible completions
+   (connection error handler / daemon reply) into one. A `nil` result means «no daemon»: the
+   message is shown and the release page is opened through `UpdateController.validatedReleaseURL`
+   (https + host `github.com` only).
+5. **Authorize.** `UpdaterHelperService.listener` accepts a connection only if
    `ClientAuthorization.isAuthorized(pid:)` matches the client executable path against
-   `/Applications/Weto.app/Contents/MacOS/WetoMenuBar` (dev-build suffixes compile in `DEBUG`
-   only). No Developer ID exists, so there is no team-id requirement to check.
-5. **Re-check under root.** `performUpdate` guards a single install with `isInstalling`, clears
-   the previous `lastFailure`, and reads the version from
-   `/Applications/Weto.app/Contents/Info.plist`. An unreadable or empty version aborts right
-   there ("Не удалось прочитать версию установленного приложения") — degrading to `"0.0.0"`
-   would make every release look newer and let root install on no basis. Then it runs its own
-   `UpdateChecker.checkLatestRelease`, replies `nil` (= started) to the client
-   immediately and only then downloads. `UpdateChecker.downloadPackage` requires
-   `ReleasePackageURL.isTrusted`, stores into `/var/db/weto/updates` (dir 0700, pkg 0600 —
-   never `/tmp`, where the package could be swapped between download and install) and runs
-   `/usr/sbin/installer -pkg … -target /`; the package is deleted regardless of outcome.
-6. **The installer removes both callers.** The new package's `preinstall` does
+   `configuration.clientExecutablePaths` (dev-build suffixes compile in `DEBUG` only).
+   No Developer ID exists, so there is no team-id requirement to check.
+6. **Re-check under root.** `HelperUpdateFlow.start` guards a single install with
+   `HelperInstallState.begin()` and reads the version from the installed app's `Info.plist`.
+   An unreadable or empty version aborts right there ("Не удалось прочитать версию
+   установленного приложения") — degrading to `"0.0.0"` would make every release look newer and
+   let root install on no basis. Then `ReleaseChecker` runs the daemon's own query, the client
+   gets `nil` (= started) immediately, and only then `PackageDownloader` downloads: it requires
+   `ReleasePackageURL.isTrusted`, stores into `/var/db/weto/updates` (dir 0700, pkg 0600 — never
+   `/tmp`, where the package could be swapped between download and install) and `PackageInstaller`
+   runs `/usr/sbin/installer -pkg … -target /`; the package is deleted regardless of outcome.
+7. **Progress comes back by polling.** Because the reply was sent before the download, both the
+   progress and a failure have to be read separately. The daemon keeps phase, fraction and
+   failure text in `HelperInstallState`; the app polls `installState` every 0.4 s while the
+   install is in flight and renders the phase in the dialog and in the popup banner. The
+   fraction is real while downloading and honestly indeterminate during `installer`, which
+   reports nothing. Silence from the daemon changes nothing (it is neither success nor failure),
+   and an unknown phase code reads as "installing" so an older daemon cannot look finished.
+8. **The installer removes both callers.** The new package's `preinstall` does
    `launchctl bootout system/com.weto.helper` and `killall WetoMenuBar` — the daemon kills
-   itself and the app in the middle of its own install, which is why `isInstallingUpdate`
-   normally never gets cleared on the success path.
-   `postinstall` bootstraps both again.
-7. **Failure comes back by polling.** Because the reply was sent before the download,
-   a failed download or a failed `installer` cannot be reported through it. The daemon writes
-   the reason into its in-memory `lastFailure` (`record(failure:)`), and
-   `UpdateVM.startWatchingInstall` asks `requestLastFailure` → `lastInstallFailure` every
-   `Constants.installOutcomePollSeconds` (5 s) while the spinner is up. A non-`nil` answer stops
-   the spinner and shows the message; `nil` means "nothing to report" and is also what a dead
-   daemon looks like. Success is still never reported — it is observed as the process dying.
+   itself and the app in the middle of its own install, which is why the progress normally never
+   reaches a success state. `postinstall` bootstraps both again, and the app's launch agent has
+   `KeepAlive`, so launchd brings the app back — this is what makes silent auto-install viable.
 
-Files: `Sources/WetoShared/UpdateVM.swift`, `Sources/WetoShared/UpdateInstalling.swift`,
-`Sources/WetoXPC/WetoXPCClient.swift`, `Sources/WetoXPC/UpdateService.swift`,
-`Sources/WetoHelper/HelperDelegate.swift`, `Sources/WetoHelper/ClientAuthorization.swift`,
-`Sources/WetoHelper/UpdateChecker.swift`, `Sources/WetoCore/ReleasePackageURL.swift`,
-`scripts/preinstall`, `scripts/postinstall`.
+Files: `Packages/UpdateKit/Sources/UpdateKit/UpdateController.swift`, `HelperUpdateInstaller.swift`,
+`Packages/UpdateKit/Sources/UpdateKitCore/UpdatePolicy.swift`, `UpdateProgress.swift`,
+`UpdateDialogModel.swift`, `ReleasePackageURL.swift`,
+`Packages/UpdateKit/Sources/UpdateKitUI/UpdateWindowPresenter.swift`, `UpdateDialogView.swift`,
+`Packages/UpdateKit/Sources/UpdateKitXPC/`, `Packages/UpdateKit/Sources/UpdateKitHelper/`,
+`Sources/WetoCore/WetoUpdate.swift`, `Sources/WetoShared/WetoUpdateTheme.swift`,
+`Sources/WetoHelper/main.swift`, `scripts/preinstall`, `scripts/postinstall`.
 
-The XPC surface of this flow is exactly `performUpdate`, `lastInstallFailure`,
-`uninstallHelper` — every method has a caller. The former check-over-XPC branch
-(`checkForUpdate`, `checkForUpdateForced`, `getHelperVersion`) was removed: it had no callers
-while being executed by a root process.
+The XPC surface of this flow is exactly `performUpdate`, `installState`, `uninstallHelper` —
+every method has a caller, and only the read-only one was added for progress. The former
+check-over-XPC branch (`checkForUpdate`, `checkForUpdateForced`, `getHelperVersion`) was removed:
+it had no callers while being executed by a root process.
 
 ### Install and autostart: PKG → launchd → running copy
 
