@@ -58,6 +58,7 @@ let package = Package(
                 "WetoCore", "WetoSystem",
                 .product(name: "UpdateKitCore", package: "UpdateKit"),
                 .product(name: "UpdateKitXPC", package: "UpdateKit"),
+                .product(name: "UpdateKit", package: "UpdateKit"),
             ],
             path: "Sources/WetoShared"
         ),
@@ -67,6 +68,7 @@ let package = Package(
                 "WetoShared", "WetoCore", "WetoSystem",
                 .product(name: "UpdateKitCore", package: "UpdateKit"),
                 .product(name: "UpdateKitXPC", package: "UpdateKit"),
+                .product(name: "UpdateKit", package: "UpdateKit"),
             ],
             path: "Tests/WetoSharedTests"
         ),

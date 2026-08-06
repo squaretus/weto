@@ -52,10 +52,4 @@ public enum Constants {
     /// обновления — второго места с этими строками быть не должно.
     public static var githubRepoURL: String { WetoUpdate.configuration.repositoryURL }
 
-    public static let updateCheckInterval: TimeInterval = 21_600
-
-    /// Как часто спрашивать демон о судьбе начатой установки. Успешная установка
-    /// завершает приложение сама, так что этот опрос существует ради провала.
-    public static let installOutcomePollSeconds: TimeInterval = 5
-
 }
