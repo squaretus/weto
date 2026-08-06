@@ -17,36 +17,44 @@ public struct UpdateDialogView: View {
     public var body: some View {
         let model = controller.dialogModel
 
-        HStack(alignment: .top, spacing: 14) {
-            theme.icon
-                .resizable()
-                .frame(width: 52, height: 52)
+        // Ряд кнопок идёт во всю ширину окна, а не внутри колонки с текстом:
+        // в колонке ему остаётся ширина минус иконка, и подписи обрезались
+        // в «Проп…» и «Обн…».
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 14) {
+                theme.icon
+                    .resizable()
+                    .frame(width: 52, height: 52)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text(model.title)
-                    .font(theme.titleFont)
-                    .foregroundStyle(theme.text)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(model.title)
+                        .font(theme.titleFont)
+                        .foregroundStyle(theme.text)
 
-                Text(model.detail)
-                    .font(theme.bodyFont)
-                    .foregroundStyle(theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if controller.progress.isInFlight {
-                    progressBar(fraction: model.fraction)
-                }
-
-                if model.showsChoiceButtons {
-                    Toggle(controller.strings.autoInstallToggle, isOn: $controller.isAutoInstallEnabled)
+                    Text(model.detail)
                         .font(theme.bodyFont)
                         .foregroundStyle(theme.secondaryText)
-                        .toggleStyle(.checkbox)
-                        .tint(theme.accent)
-                }
+                        .fixedSize(horizontal: false, vertical: true)
 
-                buttons(model: model)
-                    .padding(.top, 4)
+                    if controller.progress.isInFlight {
+                        progressBar(fraction: model.fraction)
+                    }
+
+                    if model.showsChoiceButtons {
+                        Toggle(
+                            controller.strings.autoInstallToggle,
+                            isOn: $controller.isAutoInstallEnabled
+                        )
+                            .font(theme.bodyFont)
+                            .foregroundStyle(theme.secondaryText)
+                            .toggleStyle(.checkbox)
+                            .tint(theme.accent)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+
+            buttons(model: model)
         }
         .padding(18)
         .frame(width: theme.width, alignment: .leading)
@@ -67,13 +75,15 @@ public struct UpdateDialogView: View {
         }
     }
 
+    /// Кнопкам запрещено сжиматься: подпись целиком или окно шире, но не «Обн…».
     @ViewBuilder
     private func buttons(model: UpdateDialogModel) -> some View {
         HStack(spacing: 8) {
             if model.showsChoiceButtons {
                 theme.secondaryButton(controller.strings.skip) { controller.skipCurrentVersion() }
+                    .fixedSize(horizontal: true, vertical: false)
 
-                Spacer(minLength: 12)
+                Spacer(minLength: 8)
 
                 theme.menuButton(
                     controller.strings.remindLater,
@@ -85,17 +95,20 @@ public struct UpdateDialogView: View {
                         )
                     }
                 )
+                    .fixedSize(horizontal: true, vertical: false)
 
                 if model.canInstall {
                     theme.primaryButton(controller.strings.install) { controller.install() }
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
 
             if model.showsReleasePageButton {
-                Spacer(minLength: 12)
+                Spacer(minLength: 8)
                 theme.secondaryButton(controller.strings.openReleasePage) {
                     controller.openReleasePage()
                 }
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
     }
