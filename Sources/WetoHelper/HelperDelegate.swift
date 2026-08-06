@@ -1,10 +1,10 @@
 import Foundation
 import WetoCore
-import WetoXPC
+import UpdateKitXPC
 import UpdateKitCore
 
 /// Обслуживание XPC-соединений и установка обновлений под root.
-final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol {
+final class HelperDelegate: NSObject, NSXPCListenerDelegate, UpdaterHelperProtocol {
 
     private let lock = NSLock()
     private var isInstalling = false
@@ -39,20 +39,27 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol 
             return false
         }
 
-        connection.exportedInterface = NSXPCInterface(with: WetoHelperProtocol.self)
+        connection.exportedInterface = NSXPCInterface(with: UpdaterHelperProtocol.self)
         connection.exportedObject = self
         connection.resume()
         HelperLogger.log("соединение принято: pid=\(pid)")
         return true
     }
 
-    // MARK: - WetoHelperProtocol
+    // MARK: - UpdaterHelperProtocol
 
-    func lastInstallFailure(reply: @escaping (String?) -> Void) {
+    func installState(reply: @escaping (Int, Double, String?) -> Void) {
         lock.lock()
-        let failure = lastFailure
+        let progress: UpdateProgress
+        if let lastFailure {
+            progress = UpdateProgress(phase: .failed, failure: lastFailure)
+        } else {
+            progress = isInstalling ? UpdateProgress(phase: .installing) : .idle
+        }
         lock.unlock()
-        reply(failure)
+
+        let triple = progress.xpc
+        reply(triple.phase, triple.fraction, triple.failure)
     }
 
     func performUpdate(reply: @escaping (String?) -> Void) {
@@ -106,8 +113,8 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol 
     }
 
     func uninstallHelper(reply: @escaping (String?) -> Void) {
-        let plist = "/Library/LaunchDaemons/com.weto.helper.plist"
-        let binary = "/Library/PrivilegedHelperTools/com.weto.helper"
+        let plist = WetoUpdate.configuration.daemonPlistPath
+        let binary = WetoUpdate.configuration.daemonBinaryPath
         var failures: [String] = []
 
         for path in [plist, binary, UpdateChecker.updatesDirectory] {
@@ -126,7 +133,7 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol 
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            process.arguments = ["bootout", "system/com.weto.helper"]
+            process.arguments = ["bootout", "system/\(WetoUpdate.configuration.machServiceName)"]
             try? process.run()
         }
     }

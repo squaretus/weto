@@ -3,12 +3,15 @@ import Foundation
 /// Клиент привилегированного демона. Соединение поднимается лениво и
 /// переустанавливается после разрыва: демон умирает при установке обновления,
 /// потому что установщик его выгружает.
-public final class WetoXPCClient: @unchecked Sendable {
+public final class UpdaterXPCClient: @unchecked Sendable {
 
+    private let machServiceName: String
     private let lock = NSLock()
     private var connection: NSXPCConnection?
 
-    public init() {}
+    public init(machServiceName: String) {
+        self.machServiceName = machServiceName
+    }
 
     deinit {
         connection?.invalidate()
@@ -17,14 +20,11 @@ public final class WetoXPCClient: @unchecked Sendable {
     /// Прокси демона либо nil, если демон не установлен или не отвечает.
     public func helper(
         errorHandler: @escaping @Sendable (Error) -> Void = { _ in }
-    ) -> WetoHelperProtocol? {
+    ) -> UpdaterHelperProtocol? {
         lock.lock()
         if connection == nil {
-            let created = NSXPCConnection(
-                machServiceName: WetoXPCConstants.machServiceName,
-                options: .privileged
-            )
-            created.remoteObjectInterface = NSXPCInterface(with: WetoHelperProtocol.self)
+            let created = NSXPCConnection(machServiceName: machServiceName, options: .privileged)
+            created.remoteObjectInterface = NSXPCInterface(with: UpdaterHelperProtocol.self)
             created.invalidationHandler = { [weak self] in self?.forgetConnection() }
             created.interruptionHandler = { [weak self] in self?.forgetConnection() }
             created.resume()
@@ -35,7 +35,7 @@ public final class WetoXPCClient: @unchecked Sendable {
 
         return current?.remoteObjectProxyWithErrorHandler { error in
             errorHandler(error)
-        } as? WetoHelperProtocol
+        } as? UpdaterHelperProtocol
     }
 
     public func invalidate() {

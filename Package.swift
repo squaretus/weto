@@ -9,7 +9,6 @@ let package = Package(
         .library(name: "WetoSystem", targets: ["WetoSystem"]),
         .library(name: "WetoShared", targets: ["WetoShared"]),
         .library(name: "WetoDesign", targets: ["WetoDesign"]),
-        .library(name: "WetoXPC", targets: ["WetoXPC"]),
     ],
     dependencies: [
         // Механизм обновления живёт отдельным пакетом: он переносится между
@@ -27,15 +26,12 @@ let package = Package(
             dependencies: ["WetoCore"],
             path: "Sources/WetoSystem"
         ),
-        // Зависимости от WetoCore нет намеренно: граница демона возит строки
-        // и не должна тянуть доменные типы — после удаления проверки обновления
-        // из протокола ей от WetoCore ничего не нужно.
-        .target(name: "WetoXPC", path: "Sources/WetoXPC"),
         .executableTarget(
             name: "WetoHelper",
             dependencies: [
-                "WetoCore", "WetoXPC",
+                "WetoCore",
                 .product(name: "UpdateKitCore", package: "UpdateKit"),
+                .product(name: "UpdateKitXPC", package: "UpdateKit"),
             ],
             path: "Sources/WetoHelper"
         ),
@@ -58,18 +54,21 @@ let package = Package(
         ),
         .target(
             name: "WetoShared",
-            dependencies: ["WetoCore", "WetoSystem", "WetoXPC"],
+            dependencies: [
+                "WetoCore", "WetoSystem",
+                .product(name: "UpdateKitCore", package: "UpdateKit"),
+                .product(name: "UpdateKitXPC", package: "UpdateKit"),
+            ],
             path: "Sources/WetoShared"
         ),
         .testTarget(
             name: "WetoSharedTests",
-            dependencies: ["WetoShared", "WetoCore", "WetoSystem", "WetoXPC"],
+            dependencies: [
+                "WetoShared", "WetoCore", "WetoSystem",
+                .product(name: "UpdateKitCore", package: "UpdateKit"),
+                .product(name: "UpdateKitXPC", package: "UpdateKit"),
+            ],
             path: "Tests/WetoSharedTests"
-        ),
-        .testTarget(
-            name: "WetoXPCTests",
-            dependencies: ["WetoXPC"],
-            path: "Tests/WetoXPCTests"
         ),
         .testTarget(
             name: "WetoCoreTests",
