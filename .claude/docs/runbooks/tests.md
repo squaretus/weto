@@ -18,15 +18,27 @@ Test targets declared in `Package.swift` (`Tests/<name>/`):
 
 | Target | Depends on | Covers |
 | --- | --- | --- |
-| `WetoCoreTests` | `WetoCore` | policy decisions (`GuardPolicy`, `GuardPolicyLocal`), `VPNStatusResolver`, `ProcessMatcher`, `IPRange`, `SemanticVersion`, `ReleasePackageURL`, geo response parsing |
+| `WetoCoreTests` | `WetoCore` | policy decisions (`GuardPolicy`, `GuardPolicyLocal`), `VPNStatusResolver`, `ProcessMatcher`, `IPRange`, geo response parsing |
 | `WetoSystemTests` | `WetoSystem`, `WetoCore` | boundary adapters: `GeoProbe`, `KeychainStore`, `NetworkEventSource`, `NetworkSnapshotReader`, process listing |
-| `WetoSharedTests` | `WetoShared`, `WetoCore`, `WetoSystem`, `WetoXPC` | VM layer: `GuardVM`, `UpdateVM`, `SettingsStore`, `EventLogStore`, `LaunchAgentController`, `Maintenance`, `StatusPresentation` |
+| `WetoSharedTests` | `WetoShared`, `WetoCore`, `WetoSystem`, `UpdateKit*` | VM layer: `GuardVM`, `SettingsStore`, `EventLogStore`, `LaunchAgentController`, `Maintenance`, `StatusPresentation`, `WetoUpdateTheme`, update banner texts |
 | `WetoDesignTests` | `WetoDesign` | `DesignResources` bundle resolution, `MenuBarImageRenderer` |
-| `WetoXPCTests` | `WetoXPC`, `WetoCore` | `UpdateService` |
 
 `WetoHelper` and `WetoMenuBar` are executable targets with no test target: the helper's behaviour is root-only and the menu bar target is the `@main` entry point.
 
-CI (`.github/workflows/pr-checks.yml`, runner `macos-26`, every PR and push to `master`) runs three steps: `swift build`, `swift test`, then **Packaging contracts** — `bash scripts/tests/build-artifact-contract.sh 9.9.9`, which does a real release build and therefore also runs `launch-agent-contract.sh` from inside `build.sh`. So both shell contracts below are gated on every PR, not only locally and on release. The step `chmod +x`s `build.sh`, `preinstall`, `postinstall` and both contract scripts before running them.
+The update mechanism is a separate SPM package and its tests are **not** run by `swift test` of the root project:
+
+```bash
+swift test --package-path Packages/UpdateKit
+```
+
+| Target | Covers |
+| --- | --- |
+| `UpdateKitCoreTests` | `UpdateFeedConfiguration`, `SemanticVersion` / `ReleaseParser`, `ReleasePackageURL`, `UpdatePolicy` (skip / reminder / clock moved back / auto-install), `UpdateProgress` (XPC triple, unknown phase), `UpdateDialogModel` |
+| `UpdateKitXPCTests` | `UpdaterService` reply mapping |
+| `UpdateKitTests` | `UpdateController` against fake fetcher / installer / store / clock, `UserDefaultsUpdateStore` |
+| `UpdateKitHelperTests` | `HelperInstallState`, `HelperUpdateFlow` (refusals, ordering, recorded failures) |
+
+CI (`.github/workflows/pr-checks.yml`, runner `macos-26`, every PR and push to `master`) runs four steps: `swift build`, `swift test`, `swift test --package-path Packages/UpdateKit`, then **Packaging contracts** — `bash scripts/tests/build-artifact-contract.sh 9.9.9`, which does a real release build and therefore also runs `launch-agent-contract.sh` from inside `build.sh`. So both shell contracts below are gated on every PR, not only locally and on release. The step `chmod +x`s `build.sh`, `preinstall`, `postinstall` and both contract scripts before running them.
 
 Both packaging failures the project has shipped so far ("the app never appeared" and "the popup crashed on click") were about packaging, which is why this step exists despite costing a full release build per PR.
 
@@ -35,8 +47,10 @@ Both packaging failures the project has shipped so far ("the app never appeared"
 Only system boundaries are substituted, and only through their protocols:
 `GeoProbing`, `ProcessKilling`, `NetworkSnapshotReading`, `TargetResolving`, `NetworkEventSourcing`
 (plus the adjacent `HTTPFetching`, `SecretStoring`, `ProcessLocating` in `Sources/WetoSystem/`).
+In the update package the boundaries are `ReleaseFetching`, `UpdateInstalling`,
+`UpdateStateStoring`, `UpdateClock`, `URLOpening` — nothing else is substituted there either.
 
-Internal types are never substituted: `GuardPolicy`, `GuardController`, `ProcessEnforcer`, `ProcessMatcher` are exercised for real. This is what keeps the bulk of `WetoCoreTests` synchronous and double-free — `WetoCore` imports no system framework at all (project invariant, see `.claude/rules/ARCHITECTURE.md`). Test doubles live inline in the test file that needs them (`FakeFetcher` in `GeoProbeTests`, doubles in `GuardVMTests`, `UpdateVMTests`, `LaunchAgentControllerTests`); there is no shared mock/support target.
+Internal types are never substituted: `GuardPolicy`, `GuardController`, `ProcessEnforcer`, `ProcessMatcher` are exercised for real. This is what keeps the bulk of `WetoCoreTests` synchronous and double-free — `WetoCore` imports no system framework at all (project invariant, see `.claude/rules/ARCHITECTURE.md`). Test doubles live inline in the test file that needs them (`FakeFetcher` in `GeoProbeTests`, doubles in `GuardVMTests`, `LaunchAgentControllerTests`, `TestDoubles.swift` of `UpdateKitTests`); there is no shared mock/support target.
 
 ### 3. Launch agent contract
 
@@ -82,7 +96,7 @@ Every invariant above lives in artifacts that XCTest never sees: shell installer
 ## Common issues
 
 - **`XCTSkip` in `WetoSystemTests`** — expected, not a failure: `NetworkEventSourceTests` skips when no running app exposes a bundle ID, `NetworkSnapshotReaderTests` skips when the machine has no network service literally named `Wi-Fi`. These read the live system, so results differ per machine.
-- **Keychain/notification tests under `swift run` or bare `swift test`** — `Bundle.main` is the xctest runner, not the app bundle. `Constants.appVersion` therefore checks `CFBundleIdentifier` and returns `dev`, and `UpdateVM` takes the current version as a parameter. Don't "fix" a version mismatch by trusting `Bundle.main`.
+- **Keychain/notification tests under `swift run` or bare `swift test`** — `Bundle.main` is the xctest runner, not the app bundle. `Constants.appVersion` therefore checks `CFBundleIdentifier` and returns `dev`, and `UpdateController` takes the current version as a parameter. Don't "fix" a version mismatch by trusting `Bundle.main`.
 - **`DesignResourcesTests` failing after moving resources** — resources must resolve through `DesignResources`, never `Bundle.module`; the generated `Bundle.module` only looks at the bundle root and the build machine's absolute path, and a resource bundle in the `.app` root makes `codesign` refuse to seal.
 - **`build-artifact-contract.sh` reporting "сборка изменила отслеживаемые файлы версии"** — something in the release path is writing the version into tracked sources instead of the staging copy.
 - **`launch-agent-contract.sh` failing with no payload** — the argument is mandatory; the script exits immediately if the payload root is not passed.

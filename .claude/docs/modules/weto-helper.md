@@ -9,31 +9,29 @@ client may only say "install an update" (never *which* one), ask how the last at
 or ask the daemon to remove itself.
 
 ## Key files
-- `Sources/WetoHelper/main.swift`
-- `Sources/WetoHelper/HelperDelegate.swift`
-- `Sources/WetoHelper/ClientAuthorization.swift`
-- `Sources/WetoHelper/UpdateChecker.swift`
-- `Sources/WetoHelper/HelperLogger.swift`
+- `Sources/WetoHelper/main.swift` — the whole target: builds `UpdaterHelperService` from
+  `WetoUpdate.configuration` and resumes the listener. All logic lives in `UpdateKitHelper`.
 - `Resources/com.weto.helper.plist`
 - `scripts/preinstall`, `scripts/postinstall` (bootout/bootstrap of the daemon)
-- `Sources/WetoCore/ReleasePackageURL.swift` (download host allowlist, lives in Core to stay testable)
-- `Sources/WetoXPC/WetoHelperProtocol.swift`, `Sources/WetoXPC/WetoXPCClient.swift` (client side)
+- `Packages/UpdateKit/Sources/UpdateKitHelper/` — service, install flow, downloader, authorization
+- `Packages/UpdateKit/Sources/UpdateKitCore/ReleasePackageURL.swift` (download host allow-list)
+- `Packages/UpdateKit/Sources/UpdateKitXPC/` (protocol and client side)
 
 ## Entry points
 Mach service `com.weto.helper` (`NSXPCListener`, `MachServices` in the LaunchDaemon plist).
-Protocol `WetoHelperProtocol` — three methods, each with a real caller in the app:
+Protocol `UpdaterHelperProtocol` — three methods, each with a real caller in the app:
 - `performUpdate(reply: (String?) -> Void)` — replies `nil` **before** download/install finish;
   the reply means "accepted", not "installed". Refuses early with a message when a second
   install is running, when the installed app's version cannot be read, when the release is not
-  newer, or when the release has no `.pkg` (`UpdateChecker.UpdateError.noPackage`).
-- `lastInstallFailure(reply: (String?) -> Void)` — the failure recorded *after* that `nil`
-  reply, or `nil` if there was none. Called from `UpdateVM` on a 5 s poll while the spinner is up.
+  newer, or when the release has no `.pkg`.
+- `installState(reply: (Int, Double, String?) -> Void)` — phase code, downloaded fraction and
+  the failure text. Read-only, which is what justifies it on a root surface. Polled by
+  `UpdateController` every 0.4 s while an install is in flight.
 - `uninstallHelper(reply: (String?) -> Void)` — self-removal, then `launchctl bootout` of itself.
 
-There is no version handshake and no release check over XPC: `getHelperVersion`,
-`checkForUpdate` and `checkForUpdateForced` were removed because they had no callers while
-being executed as root. Checking is `UpdateVM`'s job, over plain HTTP.
-Callers: `WetoShared/UpdateInstalling.swift` (install + failure poll),
+There is no version handshake and no release check over XPC: those methods were removed
+because they had no callers while being executed as root. Checking is `UpdateController`'s job,
+over plain HTTP. Callers: `UpdateKit/HelperUpdateInstaller.swift` (install + progress poll),
 `WetoShared/Maintenance.swift` (uninstall).
 
 ## Dependencies
@@ -43,7 +41,8 @@ Callers: `WetoShared/UpdateInstalling.swift` (install + failure poll),
 - Download hosts: `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`.
 - Binaries invoked: `/usr/sbin/installer`, `/bin/launchctl`.
 - Reads `/Applications/Weto.app/Contents/Info.plist` (`CFBundleShortVersionString`).
-- Libraries: `WetoCore` (`ReleaseParser`, `ReleasePackageURL`, `SemanticVersion`), `WetoXPC`, `libproc`.
+- Libraries: `UpdateKitCore` (`ReleaseParser`, `ReleasePackageURL`, `SemanticVersion`,
+  `UpdateFeedConfiguration`), `UpdateKitXPC`, `UpdateKitHelper`, `WetoCore` (configuration value), `libproc`.
 - DB / queue: none.
 
 ## Side effects
@@ -57,10 +56,9 @@ Callers: `WetoShared/UpdateInstalling.swift` (install + failure poll),
   so it must happen after the XPC reply).
 - Logging: unified log, subsystem `com.weto.helper`, category `Helper`, messages marked
   `privacy: .public`. Verify no client path or URL logged there is considered sensitive.
-- In-memory `lastFailure` string (`record(failure:)`), guarded by the same `NSLock` as
-  `isInstalling`; never persisted. Cleared at the start of every `performUpdate`, so a stale
-  failure cannot leak into a new attempt, and lost entirely when the daemon restarts.
-  Nothing else is cached — the daemon no longer keeps the last `UpdateInfo`.
+- In-memory `HelperInstallState` (phase + fraction + failure) under an `NSLock`; never
+  persisted. `begin()` resets it, so a stale failure cannot leak into a new attempt, and it is
+  lost entirely when the daemon restarts. Nothing else is cached — the daemon keeps no `UpdateInfo`.
 
 ## Invariants / assumptions
 <!-- generated, verify -->
@@ -98,7 +96,7 @@ Callers: `WetoShared/UpdateInstalling.swift` (install + failure poll),
 - **Install usually kills the caller and the daemon.** `preinstall` does
   `launchctl bootout system/com.weto.helper` and `killall WetoMenuBar`, so the process running
   the install dies mid-flight. The spinner in the UI going dark is the expected outcome, not an error;
-  `WetoXPCClient` re-creates the connection after invalidation for this reason.
+  `UpdaterXPCClient` re-creates the connection after invalidation for this reason.
 - **Install failure survives only in memory.** `downloadAndInstall` logs *and* records into
   `lastFailure`; the app has to ask for it within the daemon's lifetime. `KeepAlive` respawn,
   `bootout`, or a client that quits before the next 5 s poll all mean the message is never seen

@@ -100,12 +100,12 @@ minimum OS `26.0`. Editing installer copy means editing those two files.
 
 ## Auto-update depends on the `.pkg` asset
 
-`UpdateVM` polls `https://api.github.com/repos/squaretus/weto/releases/latest`
-every `Constants.updateCheckInterval` = 21600 s (6 h). `ReleaseParser.parse` strips a leading
+`UpdateController` polls `https://api.github.com/repos/squaretus/weto/releases/latest`
+every `UpdateFeedConfiguration.checkInterval` = 3600 s (1 h), and once at launch. `ReleaseParser.parse` strips a leading
 `v` from `tag_name`, compares with `SemanticVersion`, and picks
 `assets.first { name.hasSuffix(".pkg") }` as `downloadURL` — falling back to `""`.
 
-Installation goes through the root daemon, and `WetoXPC.performUpdate` takes **no arguments**:
+Installation goes through the root daemon, and `UpdaterHelperProtocol.performUpdate` takes **no arguments**:
 the daemon re-fetches the release itself, re-checks `isNewer`, re-reads the installed version
 from `/Applications/Weto.app/Contents/Info.plist` (unreadable → the install is refused, not
 attempted), and passes the asset URL through `ReleasePackageURL.isTrusted` — https only, host in
@@ -113,10 +113,10 @@ attempted), and passes the asset URL through `ReleasePackageURL.isTrusted` — h
 path ending in `.pkg`.
 
 A release without a `.pkg` asset (or with the package hosted elsewhere) yields
-`downloadURL == ""`. The app does **not** ask the daemon in that case: `UpdateVM.installUpdate`
+`downloadURL == ""`. The app does **not** ask the daemon in that case: `UpdateController.install`
 shows "В релизе нет пакета — откройте страницу релиза" and opens the release page, so the
 button never promises a one-click install it cannot deliver. (If the daemon were reached anyway
-it would answer `UpdateChecker.UpdateError.noPackage` — "В релизе нет файла .pkg".)
+it would answer "В релизе нет файла .pkg".)
 
 Practical consequences for a release:
 - The asset name must end in `.pkg`; `Weto-<X.Y.Z>.pkg` from `build.sh` satisfies this.
@@ -126,12 +126,14 @@ Practical consequences for a release:
 - Don't publish as draft/pre-release: `releases/latest` skips those. <!-- generated, verify -->
 - The daemon downloads to `/var/db/weto/updates` (dir 0700, file 0600) and installs with
   `/usr/sbin/installer -pkg`. `preinstall` does `bootout system/com.weto.helper` and
-  `killall WetoMenuBar`, which kills the very process doing the install — the spinner
-  usually dies with it. That is expected, not a failed update.
-- A *failed* download or `installer` run is reported: the daemon records it in memory and the app
-  polls `lastInstallFailure` every 5 s while the spinner is up, then shows the message. The
-  record is not persisted, so if the daemon respawns before the next poll the only remaining
-  evidence is `log show --predicate 'subsystem == "com.weto.helper"'`.
+  `killall WetoMenuBar`, which kills the very process doing the install — the progress window
+  usually dies with it. That is expected, not a failed update. The app's launch agent has
+  `KeepAlive`, so launchd starts the new version right after.
+- The download progress *is* visible: the daemon keeps phase and fraction in memory and the app
+  polls `installState` every 0.4 s while the install is in flight, rendering it in the update
+  window and in the popup banner. A failed download or `installer` run arrives the same way, as
+  the `failed` phase. The record is not persisted, so if the daemon respawns before the next poll
+  the only remaining evidence is `log show --predicate 'subsystem == "com.weto.helper"'`.
 
 ## Signing: ad-hoc only, on purpose
 
@@ -168,9 +170,10 @@ trade-off (README, "Установка"). Consequences to keep in mind and to ke
 
 - CI: GitHub Actions → workflows `Release` (tags `v*`) and `PR Checks` (`master` PRs/pushes).
 - Local build output: `.build/release_build/` (`Weto-<version>.pkg`), `.build/app/Weto.app`.
-- Update daemon: `HelperLogger` (`Sources/WetoHelper/HelperLogger.swift`); working directory
-  `/var/db/weto`. <!-- generated, verify --> The last install failure is additionally readable
-  from the app itself (spinner → error text, via `lastInstallFailure`) while the daemon lives.
+- Update daemon: `HelperLogger` (`Packages/UpdateKit/Sources/UpdateKitHelper/HelperLogger.swift`);
+  working directory `/var/db/weto`. The install phase and the last failure are additionally
+  readable from the app itself (update window → progress or error text, via `installState`)
+  while the daemon lives.
 - In-app journal: popup / Settings → Journal card (ring buffer of 10 entries in
   `UserDefaults(suiteName: "com.weto.shared")`).
 - Full removal for a clean re-test: `Resources/uninstall-weto.sh` (also shipped inside the
