@@ -1,5 +1,6 @@
 import Foundation
 import WetoCore
+import UpdateKitCore
 
 /// Проверка релиза и установка PKG. Живёт в демоне, потому что `installer`
 /// требует root, а скачанный пакет до установки не должен быть доступен
@@ -38,7 +39,7 @@ enum UpdateChecker {
         currentVersion: String,
         completion: @escaping @Sendable (Result<UpdateInfo, Error>) -> Void
     ) {
-        guard let url = URL(string: ReleaseParser.latestReleaseURL) else {
+        guard let url = URL(string: WetoUpdate.configuration.latestReleaseURL) else {
             completion(.failure(UpdateError.invalidURL))
             return
         }
@@ -60,7 +61,11 @@ enum UpdateChecker {
                 completion(.failure(UpdateError.emptyResponse))
                 return
             }
-            completion(ReleaseParser.parse(data, currentVersion: currentVersion))
+            completion(ReleaseParser.parse(
+                data,
+                currentVersion: currentVersion,
+                configuration: WetoUpdate.configuration
+            ))
         }.resume()
     }
 

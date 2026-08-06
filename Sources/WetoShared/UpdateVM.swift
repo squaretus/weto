@@ -3,6 +3,7 @@ import Observation
 import AppKit
 import WetoCore
 import WetoSystem
+import UpdateKitCore
 import WetoXPC
 
 @Observable
@@ -197,7 +198,7 @@ public final class UpdateVM {
     }
 
     private func fetchLatest() async -> State {
-        guard let url = URL(string: ReleaseParser.latestReleaseURL) else {
+        guard let url = URL(string: WetoUpdate.configuration.latestReleaseURL) else {
             return .failed("Некорректный адрес репозитория")
         }
         do {
@@ -205,7 +206,11 @@ public final class UpdateVM {
                 from: url,
                 headers: ["Accept": "application/vnd.github+json"]
             )
-            let info = try ReleaseParser.parse(data, currentVersion: currentVersion).get()
+            let info = try ReleaseParser.parse(
+                data,
+                currentVersion: currentVersion,
+                configuration: WetoUpdate.configuration
+            ).get()
             return info.isNewer ? .available(info) : .upToDate(info.currentVersion)
         } catch HTTPFetchError.badStatus(404) {
             return .noReleases

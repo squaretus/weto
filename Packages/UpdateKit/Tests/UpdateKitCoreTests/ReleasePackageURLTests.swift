@@ -1,5 +1,5 @@
 import XCTest
-@testable import WetoCore
+@testable import UpdateKitCore
 
 /// Адрес пакета приходит из сети, а качает по нему процесс с правами root.
 final class ReleasePackageURLTests: XCTestCase {
