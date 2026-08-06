@@ -152,4 +152,32 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertEqual(GuardState.unsafe(.confirmationUnavailable).statusColor, .yellow)
         XCTAssertEqual(GuardState.unsafe(.vpnDown).statusColor, .red)
     }
+
+    // MARK: - Подсказка про незапущенные цели
+
+    /// Совет «VPN можно выключать» имеет смысл ровно в одном состоянии — когда
+    /// охрана на страже и подтвердила безопасность.
+    func test_idle_targets_hint_offers_to_disconnect_only_when_safe() {
+        let notice = StatusPresentation.idleTargets(for: .safe(nil))
+
+        XCTAssertEqual(notice.text, "Цели не запущены")
+        XCTAssertEqual(notice.hint, "— VPN можно выключать")
+    }
+
+    /// После срабатывания охраны цели молчат не потому, что всё хорошо:
+    /// VPN уже выключен, и советовать выключить его — ложь.
+    func test_idle_targets_hint_is_silent_after_the_kill_switch() {
+        let notice = StatusPresentation.idleTargets(for: .unsafe(.vpnDown))
+
+        XCTAssertEqual(notice.text, "Цели не запущены")
+        XCTAssertNil(notice.hint, "выключенный VPN не повод советовать его выключить")
+    }
+
+    func test_idle_targets_hint_is_silent_while_verification_is_pending() {
+        XCTAssertNil(StatusPresentation.idleTargets(for: .unsafe(.verificationPending)).hint)
+    }
+
+    func test_idle_targets_hint_is_silent_when_guard_is_off() {
+        XCTAssertNil(StatusPresentation.idleTargets(for: .disabled).hint)
+    }
 }

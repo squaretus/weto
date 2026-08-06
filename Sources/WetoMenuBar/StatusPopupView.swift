@@ -61,18 +61,25 @@ struct StatusPopupView: View {
         let running = coordinator.guardVM.runningTargets
 
         if running.isEmpty {
+            // Цвет и совет берём из состояния охраны, а не из самого факта
+            // «целей нет»: после срабатывания kill switch цели молчат именно
+            // потому, что VPN уже выключен.
+            let notice = StatusPresentation.idleTargets(for: coordinator.guardVM.state)
+
             HStack(spacing: WetoTokens.space2) {
-                Image(systemName: "checkmark")
+                Image(systemName: notice.hint == nil ? "circle.slash" : "checkmark")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(WetoTokens.green.resolve(scheme))
+                    .foregroundStyle(tone.color.resolve(scheme))
 
-                Text("Цели не запущены")
+                Text(notice.text)
                     .font(WetoTokens.caption)
-                    .foregroundStyle(WetoTokens.green.resolve(scheme))
+                    .foregroundStyle(tone.color.resolve(scheme))
 
-                Text("— VPN можно выключать")
-                    .font(WetoTokens.caption)
-                    .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                if let hint = notice.hint {
+                    Text(hint)
+                        .font(WetoTokens.caption)
+                        .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                }
             }
         } else {
             VStack(spacing: WetoTokens.space2) {
