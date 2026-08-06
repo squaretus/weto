@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  weto · слой сетки: полные 5×5 точек, акцентом выложена буква W,
+  остальные — нейтральный серый #5F5C6E (одинаковый в обеих темах).
+  A — акцент, n — нейтральная точка:
+
+      nnnnn
+      AnnnA
+      AnAnA
+      nAnAn
+      nnnnn
+
+  Точка r=56, шаг 156: сетка занимает 72 % канвы.
+  Зазор 44 между краями точек — узкий намеренно, чтобы сетка читалась
+  единым блоком, но буква не слипалась в мелком размере.
+  Рамка по краю живёт здесь же, а не в композиторе: фон иконки равен фону
+  приложения, и без неё квадрат сливается с любой подложкой того же цвета.
+  Канва 1024×1024, прозрачная; форма и радиус совпадают с фигурой иконки.
+-->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <rect x="4.0" y="4.0" width="1016" height="1016"
+        rx="229" ry="229" fill="none"
+        stroke="rgba(28,20,60,0.22)" stroke-width="8"/>
+  <circle cx="200" cy="200" r="56" fill="#5F5C6E"/>
+  <circle cx="356" cy="200" r="56" fill="#5F5C6E"/>
+  <circle cx="512" cy="200" r="56" fill="#5F5C6E"/>
+  <circle cx="668" cy="200" r="56" fill="#5F5C6E"/>
+  <circle cx="824" cy="200" r="56" fill="#5F5C6E"/>
+  <circle cx="200" cy="356" r="56" fill="#6244F0"/>
+  <circle cx="356" cy="356" r="56" fill="#5F5C6E"/>
+  <circle cx="512" cy="356" r="56" fill="#5F5C6E"/>
+  <circle cx="668" cy="356" r="56" fill="#5F5C6E"/>
+  <circle cx="824" cy="356" r="56" fill="#6244F0"/>
+  <circle cx="200" cy="512" r="56" fill="#6244F0"/>
+  <circle cx="356" cy="512" r="56" fill="#5F5C6E"/>
+  <circle cx="512" cy="512" r="56" fill="#6244F0"/>
+  <circle cx="668" cy="512" r="56" fill="#5F5C6E"/>
+  <circle cx="824" cy="512" r="56" fill="#6244F0"/>
+  <circle cx="200" cy="668" r="56" fill="#5F5C6E"/>
+  <circle cx="356" cy="668" r="56" fill="#6244F0"/>
+  <circle cx="512" cy="668" r="56" fill="#5F5C6E"/>
+  <circle cx="668" cy="668" r="56" fill="#6244F0"/>
+  <circle cx="824" cy="668" r="56" fill="#5F5C6E"/>
+  <circle cx="200" cy="824" r="56" fill="#5F5C6E"/>
+  <circle cx="356" cy="824" r="56" fill="#5F5C6E"/>
+  <circle cx="512" cy="824" r="56" fill="#5F5C6E"/>
+  <circle cx="668" cy="824" r="56" fill="#5F5C6E"/>
+  <circle cx="824" cy="824" r="56" fill="#5F5C6E"/>
+</svg>

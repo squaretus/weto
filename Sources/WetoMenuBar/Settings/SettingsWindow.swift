@@ -79,7 +79,12 @@ struct SettingsWindow: View {
                 WetoSegmentedControl(
                     selection: Binding(
                         get: { coordinator.settings.appTheme },
-                        set: { coordinator.settings.appTheme = $0 }
+                        set: {
+                            coordinator.settings.appTheme = $0
+                            // Иконка приложения тоже тёмная или светлая:
+                            // её видят NSAlert и окно обновления.
+                            coordinator.applyAppIcon()
+                        }
                     ),
                     options: AppTheme.allCases.map { ($0, $0.title) }
                 )

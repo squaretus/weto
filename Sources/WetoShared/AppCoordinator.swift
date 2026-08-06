@@ -5,6 +5,8 @@ import WetoSystem
 import UpdateKitCore
 import UpdateKit
 import UpdateKitUI
+import AppKit
+import WetoDesign
 
 @Observable
 @MainActor
@@ -64,8 +66,16 @@ public final class AppCoordinator {
         }
     }
 
+    /// Иконка приложения следует теме: её видят диалоги `NSAlert`, окно обновления
+    /// и переключатель приложений. Вызывается на старте и при смене темы.
+    public func applyAppIcon() {
+        guard let icon = WetoAppIcon.nsImage(for: settings.appTheme.colorScheme) else { return }
+        NSApplication.shared.applicationIconImage = icon
+    }
+
     public func start() {
         UserNotificationKillNotifier.requestAuthorization()
+        applyAppIcon()
         guardVM.start()
         update.start()
     }

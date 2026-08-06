@@ -10,9 +10,10 @@ OUT=".build/release_build"
 
 # Базовый размер собранного .app в КБ. Превышение больше чем на 10% валит сборку:
 # так замечается случайно попавшая в payload документация или ресурсы.
-# 2000 → 2250 при переезде механизма обновления в пакет UpdateKit: приложение
-# линкует пять его таргетов, и это +230 КБ кода, а не ресурсов.
-APP_BASELINE_KB=2250
+# История правок базы — чтобы рост был осознанным, а не «подвинули, раз красное»:
+#   2000 → 2250  пакет UpdateKit: приложение линкует пять его таргетов, +230 КБ кода;
+#   2250 → 2520  иконка приложения: AppIcon.icns 204 КБ и два PNG по 16 КБ на темы.
+APP_BASELINE_KB=2520
 
 echo "=== weto $VERSION — сборка ==="
 
@@ -33,6 +34,9 @@ cp Resources/Weto-Info.plist "$APP/Info.plist"
                         -c "Set :CFBundleVersion $VERSION" "$APP/Info.plist"
 cp Resources/uninstall-weto.sh "$APP/Resources/"
 chmod +x "$APP/Resources/uninstall-weto.sh"
+# Иконка бандла: Finder и установщик показывают её, внутри приложения иконка
+# меняется вместе с темой из PNG в ресурсном бандле дизайн-системы.
+cp Resources/AppIcon.icns "$APP/Resources/"
 
 # Ресурсные бандлы лежат в штатном Contents/Resources: только такую раскладку
 # codesign умеет пломбировать. Находит их DesignResources, а не Bundle.module,
