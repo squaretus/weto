@@ -3,15 +3,19 @@ import os
 
 /// Журнал демона. У root-процесса нет пользовательского интерфейса, поэтому
 /// единственный способ понять, что произошло при установке, — системный лог.
-enum HelperLogger {
+public struct HelperLogger: Sendable {
 
-    private static let logger = Logger(subsystem: "com.weto.helper", category: "Helper")
+    private let logger: Logger
 
-    static func log(_ message: String) {
+    public init(subsystem: String) {
+        self.logger = Logger(subsystem: subsystem, category: "Helper")
+    }
+
+    public func log(_ message: String) {
         logger.info("\(message, privacy: .public)")
     }
 
-    static func error(_ message: String) {
+    public func error(_ message: String) {
         logger.error("\(message, privacy: .public)")
     }
 }

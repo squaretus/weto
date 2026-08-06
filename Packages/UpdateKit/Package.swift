@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "UpdateKitCore", targets: ["UpdateKitCore"]),
         .library(name: "UpdateKitXPC", targets: ["UpdateKitXPC"]),
+        .library(name: "UpdateKitHelper", targets: ["UpdateKitHelper"]),
     ],
     targets: [
         // Ноль I/O: политика, версии, разбор ответа GitHub, тексты.
@@ -14,7 +15,12 @@ let package = Package(
         // Зависимостей нет намеренно: через границу демона ходят только
         // числа и строки, доменные типы её не пересекают.
         .target(name: "UpdateKitXPC"),
+        .target(name: "UpdateKitHelper", dependencies: ["UpdateKitCore", "UpdateKitXPC"]),
         .testTarget(name: "UpdateKitCoreTests", dependencies: ["UpdateKitCore"]),
         .testTarget(name: "UpdateKitXPCTests", dependencies: ["UpdateKitXPC"]),
+        .testTarget(
+            name: "UpdateKitHelperTests",
+            dependencies: ["UpdateKitHelper", "UpdateKitCore"]
+        ),
     ]
 )
