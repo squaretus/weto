@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "UpdateKitCore", targets: ["UpdateKitCore"]),
         .library(name: "UpdateKitXPC", targets: ["UpdateKitXPC"]),
         .library(name: "UpdateKitHelper", targets: ["UpdateKitHelper"]),
+        .library(name: "UpdateKit", targets: ["UpdateKit"]),
     ],
     targets: [
         // Ноль I/O: политика, версии, разбор ответа GitHub, тексты.
@@ -16,11 +17,16 @@ let package = Package(
         // числа и строки, доменные типы её не пересекают.
         .target(name: "UpdateKitXPC"),
         .target(name: "UpdateKitHelper", dependencies: ["UpdateKitCore", "UpdateKitXPC"]),
+        .target(name: "UpdateKit", dependencies: ["UpdateKitCore", "UpdateKitXPC"]),
         .testTarget(name: "UpdateKitCoreTests", dependencies: ["UpdateKitCore"]),
         .testTarget(name: "UpdateKitXPCTests", dependencies: ["UpdateKitXPC"]),
         .testTarget(
             name: "UpdateKitHelperTests",
             dependencies: ["UpdateKitHelper", "UpdateKitCore"]
+        ),
+        .testTarget(
+            name: "UpdateKitTests",
+            dependencies: ["UpdateKit", "UpdateKitCore", "UpdateKitXPC"]
         ),
     ]
 )

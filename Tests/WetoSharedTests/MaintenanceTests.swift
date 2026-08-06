@@ -2,6 +2,7 @@ import XCTest
 @testable import WetoShared
 import WetoCore
 import WetoSystem
+import UpdateKit
 
 private final class StepRecorder: @unchecked Sendable {
     private let lock = NSLock()

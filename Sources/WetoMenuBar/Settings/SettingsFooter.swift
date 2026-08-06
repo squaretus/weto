@@ -37,16 +37,20 @@ struct SettingsFooter: View {
                 .font(WetoTokens.caption)
                 .foregroundStyle(WetoTokens.faint.resolve(scheme))
 
-            // Одна кнопка на два действия: найденное обновление открывает страницу
-            // релиза, все прочие состояния — перепроверяют.
+            // Кнопка только проверяет: установка запускается из окна обновления.
+            // Ручная проверка игнорирует пропуск версии и отложенное напоминание —
+            // другого способа вернуть пропущенную версию нет.
             Button {
-                coordinator.update.primaryAction()
+                coordinator.update.checkNow()
             } label: {
                 Image(systemName: icon)
                     .font(.system(size: 15, weight: .medium))
             }
             .buttonStyle(WetoTileButtonStyle())
-            .disabled(coordinator.update.state == .checking || coordinator.update.isInstallingUpdate)
+            .disabled(
+                coordinator.update.state == .checking
+                    || coordinator.update.progress.isInFlight
+            )
             .accessibilityLabel(accessibilityLabel)
             .help(help)
         }
@@ -63,7 +67,7 @@ struct SettingsFooter: View {
     }
 
     private var accessibilityLabel: String {
-        isUpdateAvailable ? "Установить обновление" : "Проверить обновления"
+        isUpdateAvailable ? "Показать обновление" : "Проверить обновления"
     }
 
     private var help: String {
@@ -73,9 +77,9 @@ struct SettingsFooter: View {
         case .upToDate(let version):
             return "\(version) — последняя версия"
         case .available(let info):
-            return coordinator.update.isInstallingUpdate
+            return coordinator.update.progress.isInFlight
                 ? "Устанавливается \(info.latestVersion)…"
-                : "Доступна \(info.latestVersion) — нажмите, чтобы установить"
+                : "Доступна \(info.latestVersion) — нажмите, чтобы открыть окно обновления"
         case .noReleases:
             return "Релизов пока нет"
         case .failed(let message):
