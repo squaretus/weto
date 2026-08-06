@@ -2,7 +2,8 @@ import XCTest
 @testable import WetoShared
 import WetoCore
 import WetoSystem
-import WetoXPC
+import UpdateKitCore
+import UpdateKitXPC
 
 private actor CountingFetcher: HTTPFetching {
     private let payload: Data
@@ -34,22 +35,22 @@ private final class SpyURLOpener: URLOpening, @unchecked Sendable {
 
 private final class StubInstaller: UpdateInstalling, @unchecked Sendable {
     private let lock = NSLock()
-    private let outcome: UpdateService.InstallResult?
+    private let outcome: UpdaterService.InstallResult?
     private let lateFailure: String?
     private var requests = 0
 
-    init(_ outcome: UpdateService.InstallResult?, lateFailure: String? = nil) {
+    init(_ outcome: UpdaterService.InstallResult?, lateFailure: String? = nil) {
         self.outcome = outcome
         self.lateFailure = lateFailure
     }
 
-    func requestInstall(completion: @escaping @Sendable (UpdateService.InstallResult?) -> Void) {
+    func requestInstall(completion: @escaping @Sendable (UpdaterService.InstallResult?) -> Void) {
         lock.lock(); requests += 1; lock.unlock()
         completion(outcome)
     }
 
-    func requestLastFailure(completion: @escaping @Sendable (String?) -> Void) {
-        completion(lateFailure)
+    func requestProgress(completion: @escaping @Sendable (UpdateProgress?) -> Void) {
+        completion(lateFailure.map { UpdateProgress(phase: .failed, failure: $0) } ?? .idle)
     }
 
     var requestCount: Int {

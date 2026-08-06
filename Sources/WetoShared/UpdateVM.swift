@@ -4,7 +4,7 @@ import AppKit
 import WetoCore
 import WetoSystem
 import UpdateKitCore
-import WetoXPC
+import UpdateKitXPC
 
 @Observable
 @MainActor
@@ -161,15 +161,17 @@ public final class UpdateVM {
         }
     }
 
-    /// Один опрос демона о судьбе начатой установки.
+    /// Один опрос демона о ходе начатой установки.
     func refreshInstallOutcome() {
         guard isInstallingUpdate else { return }
 
-        installer.requestLastFailure { [weak self] failure in
+        installer.requestProgress { [weak self] progress in
             Task { @MainActor [weak self] in
-                guard let self, let failure, self.isInstallingUpdate else { return }
+                guard let self, self.isInstallingUpdate,
+                      let progress, progress.phase == .failed
+                else { return }
                 self.isInstallingUpdate = false
-                self.installFailure = failure
+                self.installFailure = progress.failure
                 self.installWatchTask?.cancel()
                 self.installWatchTask = nil
             }
