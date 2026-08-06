@@ -16,7 +16,8 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `Sources/WetoShared/EventLogStore.swift` — 10-entry ring buffer of `KillEvent`
 - `Sources/WetoShared/LaunchAgentController.swift` — `~/Library/LaunchAgents/com.weto.app.plist`
 - `Sources/WetoShared/Maintenance.swift` — `closeApp` and full `uninstall` plan
-- `Sources/WetoShared/UpdateVM.swift`, `UpdateInstalling.swift` — release check + helper-driven install
+- `Sources/WetoShared/WetoUpdateTheme.swift` — weto skin for the `UpdateKit` dialog
+- `Sources/WetoCore/WetoUpdate.swift` — the update configuration this module wires up
 - `Sources/WetoShared/StatusPresentation.swift`, `KillNotifying.swift`, `URLOpening.swift`
 - Tests: `Tests/WetoSharedTests/` (`GuardVMTests` is the behavioural bulk, 31 KB)
 
@@ -34,10 +35,10 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `EventLogStore.record(_)`, `clear()`
 - `LaunchAgentManaging.enable() / disable() / bootout()`, `isInstalled`, `pointsAtCurrentBundle`
 - `Maintenance.closeApp() → Result<Void, LaunchAgentError>`, `uninstall() → MaintenanceResult`
-- `UpdateVM.startPeriodicCheck()`, `checkForUpdate()`, `primaryAction()`, `installUpdate()`,
-  `openReleasePage()`, `stop()`, `availableUpdate`, `isInstallingUpdate`, `installFailure`;
-  internal `refreshInstallOutcome()` — one poll of the daemon about a started install,
-  internal so tests can step the loop by hand
+- `AppCoordinator.update` — an `UpdateController` from `Packages/UpdateKit`, built from
+  `WetoUpdate.configuration`; `AppCoordinator.updateWindow` owns the dialog presenter.
+  The mechanism itself is documented in `modules/update-kit.md`
+- `WetoUpdateTheme.make(for:) → UpdateTheme` — the only weto-specific part of the dialog
 - `UpdateInstalling.requestInstall(completion:)`, `requestLastFailure(completion:)`;
   `HelperUninstalling.uninstallHelper(completion:)`
 - `StatusPresentation.title(for:)`, `lines(for:reading:)`, `lines(for:report:timeZone:)`,
@@ -47,7 +48,8 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `WetoCore`: `GuardPolicy`, `VPNStatusResolver`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`
 - `WetoSystem` protocols (injected, mocked in tests): `NetworkSnapshotReading`, `NetworkEventSourcing`,
   `GeoProbing`, `ProcessLocating`, `ProcessKilling`, `TargetResolving`, `SecretStoring`, `HTTPFetching`
-- `WetoXPC`: `WetoXPCClient`, `UpdateService` (via `HelperUpdateInstaller`)
+- `UpdateKit` / `UpdateKitUI`: `UpdateController`, `HelperUpdateInstaller`, `UserDefaultsUpdateStore`,
+  `UpdateWindowPresenter` (see `modules/update-kit.md`)
 - Frameworks: `AppKit` (`NSWorkspace.open`, bundle paths), `UserNotifications`, `Observation`
 - Storage: `UserDefaults(suiteName: "com.weto.shared")`, Keychain service `com.weto.ipinfo`,
   `~/Library/Caches/com.weto.app/`
@@ -63,11 +65,10 @@ this layer decides *when* to ask and *what to do* with the answer.
 - Filesystem: writes/removes `~/Library/LaunchAgents/com.weto.app.plist`, removes the flag
   cache directory, spawns a detached `bash` that `rm -rf`s the `.app` after our pid exits.
 - Spawns `launchctl bootout/bootstrap` for `gui/<uid>/com.weto.app`.
-- Network: ipinfo + confirmation probes via `GeoProbing`; GitHub releases API every 6 h
-  (`Constants.updateCheckInterval`), plus flag SVG prefetch on each new reading.
-- XPC to `com.weto.helper` for install, for polling the outcome of a started install
-  (`lastInstallFailure`, every `Constants.installOutcomePollSeconds` = 5 s while the spinner is
-  up) and for helper self-uninstall.
+- Network: ipinfo + confirmation probes via `GeoProbing`; GitHub releases API every hour
+  (`UpdateFeedConfiguration.checkInterval`), plus flag SVG prefetch on each new reading.
+- XPC to `com.weto.helper` for install, for polling the progress of a started install
+  (`installState`, every 0.4 s while the install is in flight) and for helper self-uninstall.
 - User notifications on each newly recorded kill; authorization requested in `start()`.
 - Long-lived `Task`s: tick loop (`pollIntervalSeconds`, default 5 s), watchdog (0.25 s),
   probe task (300 ms debounce), update periodic task, install-outcome watch task (5 s, only
@@ -114,7 +115,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   failure used to be reported as success.
 - `SettingsStore.migrateLegacyVPNSelection` runs before the first decision and refuses to guess:
   an ambiguous or unqualified legacy name clears the selection and leaves the guard fail-closed.
-- `UpdateVM` takes the current version as a parameter — under `swift test` / `swift run`
+- `UpdateController` takes the current version as a parameter — under `swift test` / `swift run`
   `Bundle.main` is a foreign bundle.
 - Release URLs are opened only when `https` + host `github.com`; the helper never receives a URL
   or version from us.
@@ -139,13 +140,13 @@ this layer decides *when* to ask and *what to do* with the answer.
   errors here show up as either kills on a healthy VPN or a stale `safe` after the VPN dropped.
 - `GuardVM.enforce` journal dedup — the classic regression is `verificationPending` swallowing the
   real reason, or a relaunch an hour later leaving no trace.
-- Task lifecycles (`tickTask`, `watchdogTask`, `probeTask`, `periodicTask`, `installWatchTask`):
+- Task lifecycles (`tickTask`, `watchdogTask`, `probeTask`, `periodicTask`):
   leaked loops keep killing after `stop()`; over-eager cancellation silently disables the
   watchdog or the install-outcome poll (the latter's symptom is an eternal install spinner).
-- `UpdateVM.installUpdate` / `refreshInstallOutcome` — the install spinner has no success path by
-  design: a successful install kills the app. Every *other* way out has to be explicit (daemon
-  error, missing daemon, empty `downloadURL`, recorded late failure); a missing branch shows up
-  as a spinner that never stops.
+- The install progress has no success path by design: a successful install kills the app. Every
+  *other* way out has to be explicit (daemon error, missing daemon, empty `downloadURL`, reported
+  failure phase); a missing branch shows up as progress that never stops. Lives in
+  `UpdateController` now — see `modules/update-kit.md`.
 - `Maintenance.uninstall` step order — the agent must be unloaded before its plist is removed, and
   `awaitHelperUninstall` hard-caps at 5 s so a missing daemon cannot hang the uninstall.
 - `Maintenance.scheduleBundleRemoval` builds a shell string; the path is quote-escaped, and it

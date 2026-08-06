@@ -9,6 +9,7 @@ Swift Package Manager, macOS 26+.
 ```bash
 swift build                    # сборка
 swift test                     # тесты
+swift test --package-path Packages/UpdateKit   # тесты пакета обновления
 swift run WetoMenuBar          # запуск без бандла (без Keychain и уведомлений)
 scripts/make-app.sh release    # .app для локального запуска → .build/app/Weto.app
 scripts/build.sh 0.1.0         # PKG-установщик → .build/release_build/Weto-0.1.0.pkg
@@ -26,8 +27,15 @@ scripts/build.sh 0.1.0         # PKG-установщик → .build/release_bui
 - **Инвариант границ:** `WetoCore` не импортирует `Network`, `SystemConfiguration`, `AppKit`,
   `SwiftUI` и не использует `URLSession`. Он держит основную массу тестов синхронной
   и свободной от моков. Нарушение этого инварианта — самая дорогая ошибка в проекте.
+- **Пакет обновления переносится целиком.** `Packages/UpdateKit` не знает ни одной константы
+  weto: репозиторий, пути, имя mach-сервиса и интервалы приходят `UpdateFeedConfiguration`.
+  Весь клей — `Sources/WetoCore/WetoUpdate.swift`, `Sources/WetoShared/WetoUpdateTheme.swift`
+  и `Sources/WetoHelper/main.swift`. Появилось желание написать «weto» внутри пакета —
+  значение просится в конфигурацию. `UpdateKitCore` держит тот же инвариант, что `WetoCore`,
+  а у `UpdateKitXPC` нет зависимостей вообще.
 - Мокаются только границы системы (`GeoProbing`, `ProcessKilling`, `NetworkSnapshotReading`,
-  `TargetResolving`, `NetworkEventSourcing`). Внутренние типы не подменяются.
+  `TargetResolving`, `NetworkEventSourcing`; в пакете — `ReleaseFetching`, `UpdateInstalling`,
+  `UpdateStateStoring`, `UpdateClock`, `URLOpening`). Внутренние типы не подменяются.
 - Файл с `@main` называется по имени приложения (`WetoMenuBarApp.swift`), не `main.swift`.
 - Старт охраны живёт в `AppDelegate.applicationDidFinishLaunching`, а НЕ в `.task`
   у содержимого `MenuBarExtra`: при стиле `.window` SwiftUI создаёт попап лениво,
@@ -65,7 +73,7 @@ scripts/build.sh 0.1.0         # PKG-установщик → .build/release_bui
   доступ — только через `DesignResources`, никогда через `Bundle.module`.
 - В тестах и при `swift run` `Bundle.main` — чужой бандл (раннер xctest сообщает версию
   вроде «16.0»). Поэтому `Constants.appVersion` сверяет `CFBundleIdentifier`,
-  а `UpdateVM` принимает текущую версию параметром.
+  а `UpdateController` принимает текущую версию параметром.
 - Состояние `verificationPending` нельзя применять на каждом штатном тике: без признака
   свежести вердикта (ревизия конфигурации + отпечаток снимка сети) цели умирали бы
   каждые 5 секунд при полностью исправном VPN.

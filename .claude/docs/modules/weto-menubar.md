@@ -34,7 +34,7 @@ parsing, validation and persistence happen in the stores.
 
 ## Dependencies
 - Package targets: `WetoShared` (`AppCoordinator`, `GuardVM`, `SettingsStore`, `EventLogStore`,
-  `UpdateVM`, `LaunchAgentManaging`, `Maintenance`, `StatusPresentation`), `WetoDesign`
+  `UpdateController` (from `UpdateKit`), `LaunchAgentManaging`, `Maintenance`, `StatusPresentation`), `WetoDesign`
   (`WetoTokens`, `WetoCard/Row/Panel/Divider`, `WetoSegmentedControl`, `WetoBanner`,
   button/field styles, `StatusShield`, `MenuBarImageRenderer`, `TargetIconStore`),
   `WetoCore` (`KillEvent`, `GuardStatusColor`, `Constants`, `AppTheme`), `WetoSystem`
