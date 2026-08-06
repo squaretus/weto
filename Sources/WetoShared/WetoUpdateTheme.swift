@@ -15,7 +15,9 @@ public extension AppTheme {
 @MainActor
 public enum WetoUpdateTheme {
 
-    public static let width: CGFloat = 420
+    /// Ширина под самый длинный ряд кнопок: «Пропустить версию», «Напомнить позже»
+    /// и «Обновить» должны помещаться целиком, без сокращения подписей.
+    public static let width: CGFloat = 480
 
     public static func make(for appTheme: AppTheme) -> UpdateTheme {
         let scheme = appTheme.colorScheme
