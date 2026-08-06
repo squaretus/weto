@@ -66,6 +66,9 @@ public final class AppCoordinator {
         }
     }
 
+    /// Приложение показывается в Dock, пока открыто окно настроек или обновления.
+    @ObservationIgnored public let dockPresence = DockPresence()
+
     /// Иконка приложения следует теме: её видят диалоги `NSAlert`, окно обновления
     /// и переключатель приложений. Вызывается на старте и при смене темы.
     public func applyAppIcon() {
@@ -76,6 +79,7 @@ public final class AppCoordinator {
     public func start() {
         UserNotificationKillNotifier.requestAuthorization()
         applyAppIcon()
+        dockPresence.start()
         guardVM.start()
         update.start()
     }
@@ -83,6 +87,7 @@ public final class AppCoordinator {
     /// Останавливает всё, что владеет задачами: и цикл охраны, и проверку обновлений.
     /// Цикл обновлений раньше жил до конца процесса, потому что его задачу никто не хранил.
     public func stopForTermination() {
+        dockPresence.stop()
         guardVM.stop()
         update.stop()
     }
