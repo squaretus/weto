@@ -1,5 +1,5 @@
 import XCTest
-@testable import WetoCore
+@testable import UpdateKitCore
 
 /// Ссылка на PKG нужна демону: он скачивает и ставит обновление сам,
 /// поэтому обязан узнать адрес ассета из ответа GitHub, а не от клиента.
@@ -17,7 +17,7 @@ final class ReleaseAssetTests: XCTestCase {
         {"name":"Weto-1.2.0.pkg","browser_download_url":"https://github.com/squaretus/weto/releases/download/v1.2.0/Weto-1.2.0.pkg","size":514083}
         """)
 
-        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0").get()
+        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0", configuration: .testing).get()
 
         XCTAssertEqual(
             info.downloadURL,
@@ -33,19 +33,19 @@ final class ReleaseAssetTests: XCTestCase {
         {"name":"Weto-1.2.0.pkg","browser_download_url":"https://github.com/squaretus/weto/releases/download/v1.2.0/Weto-1.2.0.pkg","size":1}
         """)
 
-        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0").get()
+        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0", configuration: .testing).get()
         XCTAssertTrue(info.downloadURL.hasSuffix(".pkg"))
     }
 
     func test_release_without_pkg_asset_has_empty_download_url() throws {
 
-        let info = try ReleaseParser.parse(release(assets: ""), currentVersion: "1.0.0").get()
+        let info = try ReleaseParser.parse(release(assets: ""), currentVersion: "1.0.0", configuration: .testing).get()
         XCTAssertTrue(info.downloadURL.isEmpty, "ставить нечего — демон обязан отказаться")
     }
 
     func test_missing_assets_key_is_tolerated() throws {
         let data = Data(#"{"tag_name":"v1.2.0"}"#.utf8)
-        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0").get()
+        let info = try ReleaseParser.parse(data, currentVersion: "1.0.0", configuration: .testing).get()
         XCTAssertTrue(info.downloadURL.isEmpty)
         XCTAssertNil(info.releaseNotes)
     }
@@ -88,33 +88,27 @@ final class ReleaseParserTests: XCTestCase {
     }
 
     func test_newer_tag_is_reported_as_update() throws {
-        let info = try ReleaseParser.parse(releaseJSON(tag: "v1.1.0"), currentVersion: "1.0.0").get()
+        let info = try ReleaseParser.parse(releaseJSON(tag: "v1.1.0"), currentVersion: "1.0.0", configuration: .testing).get()
         XCTAssertTrue(info.isNewer)
         XCTAssertEqual(info.latestVersion, "1.1.0")
         XCTAssertEqual(info.releaseURL, "https://github.com/o/r/releases/tag/v1.1.0")
     }
 
     func test_tag_without_v_prefix_is_accepted() throws {
-        let info = try ReleaseParser.parse(releaseJSON(tag: "1.1.0"), currentVersion: "1.0.0").get()
+        let info = try ReleaseParser.parse(releaseJSON(tag: "1.1.0"), currentVersion: "1.0.0", configuration: .testing).get()
         XCTAssertEqual(info.latestVersion, "1.1.0")
     }
 
     func test_same_and_older_versions_are_not_updates() throws {
-        let same = try ReleaseParser.parse(releaseJSON(tag: "v1.0.0"), currentVersion: "1.0.0").get()
+        let same = try ReleaseParser.parse(releaseJSON(tag: "v1.0.0"), currentVersion: "1.0.0", configuration: .testing).get()
         XCTAssertFalse(same.isNewer)
-        let older = try ReleaseParser.parse(releaseJSON(tag: "v0.9.0"), currentVersion: "1.0.0").get()
+        let older = try ReleaseParser.parse(releaseJSON(tag: "v0.9.0"), currentVersion: "1.0.0", configuration: .testing).get()
         XCTAssertFalse(older.isNewer)
     }
 
     func test_malformed_tag_fails() {
-        guard case .failure = ReleaseParser.parse(releaseJSON(tag: "релиз"), currentVersion: "1.0.0")
+        guard case .failure = ReleaseParser.parse(releaseJSON(tag: "релиз"), currentVersion: "1.0.0", configuration: .testing)
         else { return XCTFail("нечитаемый тег должен приводить к ошибке") }
     }
 
-    func test_latest_release_url_points_at_configured_repository() {
-        XCTAssertEqual(
-            ReleaseParser.latestReleaseURL,
-            "https://api.github.com/repos/\(Constants.githubOwner)/\(Constants.githubRepo)/releases/latest"
-        )
-    }
 }

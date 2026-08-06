@@ -11,8 +11,17 @@ let package = Package(
         .library(name: "WetoDesign", targets: ["WetoDesign"]),
         .library(name: "WetoXPC", targets: ["WetoXPC"]),
     ],
+    dependencies: [
+        // Механизм обновления живёт отдельным пакетом: он переносится между
+        // проектами целиком, и компилятор не даёт утечь в него weto-типам.
+        .package(path: "Packages/UpdateKit"),
+    ],
     targets: [
-        .target(name: "WetoCore", path: "Sources/WetoCore"),
+        .target(
+            name: "WetoCore",
+            dependencies: [.product(name: "UpdateKitCore", package: "UpdateKit")],
+            path: "Sources/WetoCore"
+        ),
         .target(
             name: "WetoSystem",
             dependencies: ["WetoCore"],
@@ -24,7 +33,10 @@ let package = Package(
         .target(name: "WetoXPC", path: "Sources/WetoXPC"),
         .executableTarget(
             name: "WetoHelper",
-            dependencies: ["WetoCore", "WetoXPC"],
+            dependencies: [
+                "WetoCore", "WetoXPC",
+                .product(name: "UpdateKitCore", package: "UpdateKit"),
+            ],
             path: "Sources/WetoHelper"
         ),
         .target(

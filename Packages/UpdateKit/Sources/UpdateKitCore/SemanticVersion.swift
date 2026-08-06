@@ -84,11 +84,13 @@ public enum ReleaseParser {
         }
     }
 
-    public static var latestReleaseURL: String {
-        "https://api.github.com/repos/\(Constants.githubOwner)/\(Constants.githubRepo)/releases/latest"
-    }
-
-    public static func parse(_ data: Data, currentVersion: String) -> Result<UpdateInfo, Error> {
+    /// Адрес запроса и суффикс ассета приходят конфигурацией: парсер не знает
+    /// ни одного адреса конкретного проекта.
+    public static func parse(
+        _ data: Data,
+        currentVersion: String,
+        configuration: UpdateFeedConfiguration
+    ) -> Result<UpdateInfo, Error> {
         let release: Release
         do {
             release = try JSONDecoder().decode(Release.self, from: data)
@@ -108,13 +110,12 @@ public enum ReleaseParser {
         }
 
 
-        let pkg = release.assets?.first { $0.name.hasSuffix(".pkg") }
+        let pkg = release.assets?.first { $0.name.hasSuffix(configuration.assetSuffix) }
 
         return .success(UpdateInfo(
             currentVersion: currentVersion,
             latestVersion: versionString,
-            releaseURL: release.html_url
-                ?? "https://github.com/\(Constants.githubOwner)/\(Constants.githubRepo)/releases/latest",
+            releaseURL: release.html_url ?? configuration.releasesPageURL,
             downloadURL: pkg?.browser_download_url ?? "",
             releaseNotes: release.body,
             isNewer: current < latest

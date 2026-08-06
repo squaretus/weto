@@ -1,6 +1,7 @@
 import Foundation
 import WetoCore
 import WetoXPC
+import UpdateKitCore
 
 /// Обслуживание XPC-соединений и установка обновлений под root.
 final class HelperDelegate: NSObject, NSXPCListenerDelegate, WetoHelperProtocol {

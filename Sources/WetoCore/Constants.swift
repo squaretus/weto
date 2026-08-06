@@ -48,13 +48,9 @@ public enum Constants {
 
     public static let keychainService = "com.weto.ipinfo"
 
-    public static let githubOwner = "squaretus"
-
-    public static let githubRepo = "weto"
-
-    public static var githubRepoURL: String {
-        "https://github.com/\(githubOwner)/\(githubRepo)"
-    }
+    /// Ссылка в футере настроек. Владелец и репозиторий известны конфигурации
+    /// обновления — второго места с этими строками быть не должно.
+    public static var githubRepoURL: String { WetoUpdate.configuration.repositoryURL }
 
     public static let updateCheckInterval: TimeInterval = 21_600
 
