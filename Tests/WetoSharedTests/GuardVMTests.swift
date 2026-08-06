@@ -982,4 +982,38 @@ final class GuardVMTests: XCTestCase {
         h.vm.stop()
         XCTAssertTrue(h.events.stopped)
     }
+
+    // MARK: - Проверка по кнопке
+
+    /// Кнопка отвечает на вопрос «где я сейчас», а не «нужна ли охране проверка».
+    /// Выключенный VPN — основание завершить цели, но не повод молчать о стране.
+    func test_manual_recheck_asks_geo_even_when_vpn_is_down() async {
+        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome(primary: "KZ"))
+        h.vm.start()
+        await h.vm.awaitPendingProbe()
+
+        h.vm.recheckNow()
+        await h.vm.awaitPendingProbe()
+
+        let calls = await h.probe.calls()
+        XCTAssertEqual(calls, 1, "кнопка обязана сходить в сеть и при выключенном VPN")
+        XCTAssertEqual(h.vm.lastReport?.ipinfo, .answered("KZ"))
+        XCTAssertEqual(h.vm.state, .unsafe(.vpnDown), "вердикт охраны кнопка не смягчает")
+    }
+
+    /// Свежая установка: охрана выключена, целей нет — но узнать своё положение
+    /// пользователь всё равно должен.
+    func test_manual_recheck_asks_geo_when_guard_is_disabled() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(), enabled: false)
+        h.vm.start()
+        await h.vm.awaitPendingProbe()
+
+        h.vm.recheckNow()
+        await h.vm.awaitPendingProbe()
+
+        let calls = await h.probe.calls()
+        XCTAssertEqual(calls, 1, "выключенная охрана не отменяет вопрос «где я сейчас»")
+        XCTAssertNotNil(h.vm.lastReport)
+        XCTAssertEqual(h.vm.state, .disabled, "состояние охраны от кнопки не меняется")
+    }
 }

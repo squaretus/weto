@@ -38,7 +38,11 @@
    verdict is `report.outcome`, so the popup and the enforcement read the same object.
    A press of the popup's recheck button enters here through `GuardController.probeNow()`:
    no debounce, and freshness is deliberately *not* invalidated, so the press cannot kill
-   targets on a healthy VPN.
+   targets on a healthy VPN. The press also bypasses the local short-circuit: even with the
+   VPN down or the guard off, the request goes out — the local decision is applied first, then
+   the report arrives and fills the popup. Without an ipinfo token the probe asks
+   `get.geojs.io/v1/ip/country.json` about the caller and reports that country as the
+   confirmation line; `report.outcome` still requires ipinfo, so the verdict stays fail-closed.
 6. **Apply.** `applyLatestNetworkOutcome` drops outcomes whose `revision` is stale, re-reads
    config and snapshot immediately before deciding (a slow probe must never resurrect `safe`),
    publishes the report (`GuardVM.receive` keeps `lastReport`, prefetches the flag when the
