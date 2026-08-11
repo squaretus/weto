@@ -71,7 +71,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libssl-dev pkg-config zstd minisign xvfb
+            libgtk-4-dev libssl-dev pkg-config zstd xvfb
 
       - name: Lint
         run: |
@@ -87,8 +87,6 @@ jobs:
       - name: Build
         env:
           VERSION: ${{ needs.version.outputs.VERSION }}
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: bash scripts/build.sh "$VERSION"
 
       - name: Install contract
@@ -101,7 +99,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: linux/target/release_build/*.tar.zst*
+          path: linux/target/release_build/*.tar.zst
 
   publish:
     name: Publish release

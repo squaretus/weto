@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl-dev \
         pkg-config \
         zstd \
-        minisign \
         iproute2 \
         # GTK не поднимается без дисплея, а тесты обязаны идти без монитора.
         xvfb \

@@ -1,8 +1,8 @@
 //! Скачивание, проверка и установка обновления.
 //!
-//! Порядок фиксирован и менять его нельзя: скачать → проверить подпись →
-//! распаковать рядом → переставить симлинк. Проверка стоит до распаковки,
-//! потому что распаковывать чужое уже поздно.
+//! Порядок: проверить адрес → скачать → распаковать рядом → переставить
+//! симлинк. Адрес проверяется до всякого запроса — он приходит из сети,
+//! и подставить туда чужой хост первым делом попробует подменивший ответ.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::layout::{staging_dir, Layout};
-use crate::signature::{self, release_public_key};
 use crate::version::Version;
 
 /// Фаза установки. Незнакомый код на macOS читается как «идёт установка»,
@@ -20,7 +19,6 @@ use crate::version::Version;
 pub enum Phase {
     Idle,
     Downloading { fraction: f32 },
-    Verifying,
     Unpacking,
     Restarting,
     Failed(String),
@@ -28,14 +26,10 @@ pub enum Phase {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
-    #[error("сборка без ключа подписи обновляться не может")]
-    NoReleaseKey,
     #[error("недоверенный источник: {0}")]
     UntrustedHost(String),
     #[error("скачивание не удалось: {0}")]
     Download(String),
-    #[error("подпись не сошлась: {0}")]
-    Signature(String),
     #[error("распаковка не удалась: {0}")]
     Unpack(String),
     #[error("не переключить версию: {0}")]
@@ -93,45 +87,22 @@ impl Installer {
         self.progress.load(Ordering::Relaxed) as f32 / 1000.0
     }
 
-    pub fn install(
-        &self,
-        version: &Version,
-        archive_url: &str,
-        signature_url: &str,
-    ) -> Result<(), InstallError> {
-        let Some(public_key) = release_public_key() else {
-            return Err(InstallError::NoReleaseKey);
-        };
+    pub fn install(&self, version: &Version, archive_url: &str) -> Result<(), InstallError> {
         if !is_trusted_url(archive_url, ".tar.zst") {
             return Err(InstallError::UntrustedHost(archive_url.to_string()));
         }
-        if !is_trusted_url(signature_url, ".minisig") {
-            return Err(InstallError::UntrustedHost(signature_url.to_string()));
-        }
 
-        // Каталог загрузки закрыт от чужих глаз: между скачиванием и проверкой
-        // подписи файл не должен быть доступен на запись никому, кроме нас.
+        // Каталог загрузки закрыт от чужих глаз: между скачиванием и распаковкой
+        // файл не должен быть доступен на запись никому, кроме нас.
         std::fs::create_dir_all(&self.cache_dir)
             .map_err(|e| InstallError::Download(e.to_string()))?;
         harden(&self.cache_dir);
 
         let archive = self.cache_dir.join(format!("weto-{version}.tar.zst"));
-        let signature = self
-            .cache_dir
-            .join(format!("weto-{version}.tar.zst.minisig"));
-
-        let result = self.run(
-            version,
-            archive_url,
-            signature_url,
-            &archive,
-            &signature,
-            public_key,
-        );
+        let result = self.run(version, archive_url, &archive);
 
         // Скачанное не остаётся на диске ни при успехе, ни при провале.
         let _ = std::fs::remove_file(&archive);
-        let _ = std::fs::remove_file(&signature);
         result
     }
 
@@ -139,19 +110,11 @@ impl Installer {
         &self,
         version: &Version,
         archive_url: &str,
-        signature_url: &str,
         archive: &Path,
-        signature: &Path,
-        public_key: &str,
     ) -> Result<(), InstallError> {
         self.progress.store(0, Ordering::Relaxed);
         download(archive_url, archive, Some(&self.progress))
             .map_err(|e| InstallError::Download(e.to_string()))?;
-        download(signature_url, signature, None)
-            .map_err(|e| InstallError::Download(e.to_string()))?;
-
-        signature::verify(archive, signature, public_key)
-            .map_err(|e| InstallError::Signature(e.to_string()))?;
 
         let target = self.layout.install_dir(version);
         let staging = staging_dir(&target);

@@ -973,12 +973,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "minisign-verify"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
-
-[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2027,7 +2021,6 @@ dependencies = [
 name = "weto-update"
 version = "0.0.0"
 dependencies = [
- "minisign-verify",
  "serde",
  "serde_json",
  "tar",

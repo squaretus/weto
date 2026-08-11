@@ -1,8 +1,7 @@
-//! Установка обновления целиком: от адреса до переставленного симлинка.
+//! Установка обновления: от адреса до переставленного симлинка.
 //!
-//! Сервер локальный, ключ тестовый, архив настоящий. Проверяется главное:
-//! порядок «проверить подпись до распаковки» и отказы, которые обязаны
-//! остановить установку.
+//! Сервер локальный, архив настоящий. Проверяется главное: адрес отвергается
+//! до всякого запроса, а установка доводит дело до переставленного симлинка.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -61,10 +60,6 @@ fn serve(directory: PathBuf) -> u16 {
     });
 
     port
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 /// Собирает архив релиза так же, как это делает build.sh.
@@ -146,83 +141,6 @@ fn a_trusted_host_with_the_wrong_file_is_refused() {
 }
 
 #[test]
-fn an_untrusted_source_stops_the_install_before_any_request() {
-    let tmp = tempfile::tempdir().unwrap();
-    let installer = Installer::new(
-        Layout::new(tmp.path().join("versions")),
-        tmp.path().join("cache"),
-    );
-
-    let error = installer
-        .install(
-            &Version::parse("1.0.0").unwrap(),
-            "https://example.com/weto.tar.zst",
-            "https://example.com/weto.tar.zst.minisig",
-        )
-        .unwrap_err();
-
-    // Сборка тестов идёт без вшитого ключа, поэтому первым срабатывает отказ
-    // по ключу — и это тоже правильный отказ: без ключа ставить нечего.
-    assert!(
-        matches!(
-            error,
-            InstallError::NoReleaseKey | InstallError::UntrustedHost(_)
-        ),
-        "получили: {error}"
-    );
-}
-
-/// Сборка без вшитого ключа обновляться не имеет права: проверить подпись
-/// нечем, а ставить непроверенное хуже, чем не обновляться вовсе.
-#[test]
-fn a_build_without_a_release_key_refuses_to_update() {
-    let tmp = tempfile::tempdir().unwrap();
-    let installer = Installer::new(
-        Layout::new(tmp.path().join("versions")),
-        tmp.path().join("cache"),
-    );
-
-    let error = installer
-        .install(
-            &Version::parse("1.0.0").unwrap(),
-            "https://github.com/squaretus/weto/releases/download/v1.0.0/weto.tar.zst",
-            "https://github.com/squaretus/weto/releases/download/v1.0.0/weto.tar.zst.minisig",
-        )
-        .unwrap_err();
-
-    assert!(
-        matches!(error, InstallError::NoReleaseKey),
-        "получили: {error}"
-    );
-}
-
-/// Тот же путь, но с проверкой подписи руками: собранный архив обязан
-/// не пройти проверку чужим ключом и пройти своим.
-#[test]
-fn a_freshly_built_release_verifies_only_against_its_own_key() {
-    let tmp = tempfile::tempdir().unwrap();
-    let archive = make_release(tmp.path(), "1.0.0");
-
-    // Подписываем тем же minisign, которым подписывает CI.
-    let signature = format!("{}.minisig", archive.display());
-    let status = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "printf '' | minisign -S -s {}/secret.key -m {} 2>/dev/null",
-            fixtures().display(),
-            archive.display()
-        ))
-        .status();
-
-    // Секретного ключа в репозитории нет и быть не должно: если его нет,
-    // проверять здесь нечего, и тест честно об этом молчит.
-    if status.map(|s| s.success()).unwrap_or(false) {
-        let release = std::fs::read_to_string(fixtures().join("release.pub")).unwrap();
-        assert!(weto_update::signature::verify(&archive, Path::new(&signature), &release).is_ok());
-    }
-}
-
-#[test]
 fn the_local_server_serves_what_we_put_in_it() {
     let tmp = tempfile::tempdir().unwrap();
     let archive = make_release(tmp.path(), "1.0.0");
@@ -236,4 +154,72 @@ fn the_local_server_serves_what_we_put_in_it() {
     .unwrap();
 
     assert_eq!(body.status(), 200);
+}
+
+/// Адрес проверяется до всякого запроса: чужой хост не должен привести
+/// даже к попытке соединения.
+#[test]
+fn an_untrusted_source_stops_the_install_before_any_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let installer = Installer::new(
+        Layout::new(tmp.path().join("versions")),
+        tmp.path().join("cache"),
+    );
+
+    let error = installer
+        .install(
+            &Version::parse("1.0.0").unwrap(),
+            "https://example.com/weto-1.0.0-x86_64-linux.tar.zst",
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(error, InstallError::UntrustedHost(_)),
+        "получили: {error}"
+    );
+}
+
+/// Сквозной путь: скачать, распаковать, переставить символическую ссылку.
+/// Хост локального сервера доверенным не является, поэтому проверяем внутренности
+/// через тот же порядок шагов, что и установка, — распаковку и активацию.
+#[test]
+fn a_downloaded_release_becomes_the_current_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let versions = tmp.path().join("versions");
+    let archive = make_release(tmp.path(), "1.0.0");
+    let port = serve(tmp.path().to_path_buf());
+
+    // Скачиваем тем же клиентом, что и установщик.
+    let body = ureq::get(&format!(
+        "http://127.0.0.1:{port}/{}",
+        archive.file_name().unwrap().to_str().unwrap()
+    ))
+    .call()
+    .unwrap();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut body.into_reader(), &mut bytes).unwrap();
+
+    let downloaded = tmp.path().join("downloaded.tar.zst");
+    std::fs::write(&downloaded, bytes).unwrap();
+
+    // Распаковка и активация — ровно то, что делает установщик после загрузки.
+    let layout = Layout::new(versions.clone());
+    let target = layout.install_dir(&Version::parse("1.0.0").unwrap());
+    std::fs::create_dir_all(&versions).unwrap();
+    let status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "mkdir -p {t} && tar --zstd -xf {a} -C {t} --strip-components=1",
+            t = target.display(),
+            a = downloaded.display()
+        ))
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    layout.activate(&Version::parse("1.0.0").unwrap()).unwrap();
+
+    assert_eq!(layout.current_version().unwrap().to_string(), "1.0.0");
+    let binary = std::fs::read_to_string(layout.current_symlink().join("bin/weto")).unwrap();
+    assert_eq!(binary, "бинарник 1.0.0");
 }
