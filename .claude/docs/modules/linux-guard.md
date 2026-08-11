@@ -71,11 +71,11 @@ that quietly stopped working on one OS.
 
 ## Testing
 
-109 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+156 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. Everything that cannot be
-faked — a real WireGuard tunnel — is covered by the checklist in
-`linux/docs/manual-check.md`.
+faked — a real WireGuard tunnel, the look of the tray icon — is covered by the
+checklists in `linux/docs/manual-check.md` and `linux/docs/manual-ui-check.md`.
 
 ## Sibling crates
 
