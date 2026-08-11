@@ -41,12 +41,12 @@ the service that actually answered (`freeipapi` / `geojs`), or `подтверж
   `lines(for:reading:)` still serves the cold start, before any probe exists.
 
 ## Tests
-- `Tests/WetoCoreTests/GeoFailureTests.swift` — status/code → wording, including the fallback
-- `Tests/WetoCoreTests/GeoProbeReportTests.swift` — report → verdict
-- `Tests/WetoSystemTests/GeoProbeTests.swift` — report contents, refused confirmation keeps its reason
-- `Tests/WetoSharedTests/GuardVMTests.swift` — recheck does not kill on a healthy VPN, lifts the
+- `macos/Tests/WetoCoreTests/GeoFailureTests.swift` — status/code → wording, including the fallback
+- `macos/Tests/WetoCoreTests/GeoProbeReportTests.swift` — report → verdict
+- `macos/Tests/WetoSystemTests/GeoProbeTests.swift` — report contents, refused confirmation keeps its reason
+- `macos/Tests/WetoSharedTests/GuardVMTests.swift` — recheck does not kill on a healthy VPN, lifts the
   block when the service answers again, one request per press, report kept for the popup
-- `Tests/WetoSharedTests/StatusPresentationTests.swift` — both line layouts
+- `macos/Tests/WetoSharedTests/StatusPresentationTests.swift` — both line layouts
 
 ## Related
 - `.claude/docs/decisions/geo-confirmation-services.md` — why these services, and the quotas

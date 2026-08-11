@@ -153,7 +153,7 @@ Expected order per install: `Executing script "preinstall"` → `PackageKit: Ext
 ### 6. Reset state completely
 
 ```bash
-Resources/uninstall-weto.sh        # from the repo, asks for sudo
+macos/Resources/uninstall-weto.sh        # from the repo, asks for sudo
 ```
 
 Removes, in this order: the agent (`bootout` + plist), the running process, the legacy
@@ -174,7 +174,7 @@ plists and a leftover receipt are the usual reason a "fixed" build still misbeha
   line from step 4.
 - **App disappears shortly after login or install with no crash report.** Automatic/sudden
   termination of the window-less launchd copy — check the four opt-outs are present in the
-  *installed* `Info.plist`, not only in `Resources/Weto-Info.plist`.
+  *installed* `Info.plist`, not only in `macos/Resources/Weto-Info.plist`.
 - **`launchctl print` shows the wrong `program`.** Stale plist from a previous install path;
   run step 6 and reinstall.
 - **Predicate quoting.** `log show --predicate` needs the predicate in single quotes as one

@@ -212,11 +212,11 @@ weto проверяет не только сам VPN, но и то, из как�
 ## Для разработчиков
 
 ```bash
-swift build                    # сборка
-swift test                     # тесты
-swift run WetoMenuBar          # запуск без бандла приложения
-scripts/make-app.sh release    # .app для локального запуска → .build/app/Weto.app
-scripts/build.sh 1.0.0         # PKG-установщик → .build/release_build/Weto-1.0.0.pkg
+cd macos && swift build              # сборка
+cd macos && swift test               # тесты
+cd macos && swift run WetoMenuBar    # запуск без бандла приложения
+macos/scripts/make-app.sh release    # .app для локального запуска → macos/.build/app/Weto.app
+macos/scripts/build.sh 1.0.0         # PKG-установщик → macos/.build/release_build/Weto-1.0.0.pkg
 ```
 
 Карта проекта и соглашения — в [AGENTS.md](AGENTS.md) и `.claude/rules/ARCHITECTURE.md`,

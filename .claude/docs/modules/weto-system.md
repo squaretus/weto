@@ -10,17 +10,17 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 `WetoShared` is ever substituted.
 
 ## Key files
-- `Sources/WetoSystem/NetworkSnapshotReader.swift`
-- `Sources/WetoSystem/NetworkEventSource.swift`
-- `Sources/WetoSystem/GeoProbe.swift`
-- `Sources/WetoSystem/NetworkPathReporter.swift` (also `NetworkPathReporting`)
-- `Sources/WetoSystem/HTTPFetching.swift`
-- `Sources/WetoSystem/ProcessRegistry.swift`
-- `Sources/WetoSystem/ProcessKiller.swift`
-- `Sources/WetoSystem/TargetResolver.swift`
-- `Sources/WetoSystem/KeychainStore.swift` (also `SecretStoring`, `SecretStoreError`, `TokenBox`)
-- `Sources/WetoSystem/FlagImageStore.swift`
-- Tests: `Tests/WetoSystemTests/{GeoProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,ProcessTests,KeychainStoreTests}.swift`
+- `macos/Sources/WetoSystem/NetworkSnapshotReader.swift`
+- `macos/Sources/WetoSystem/NetworkEventSource.swift`
+- `macos/Sources/WetoSystem/GeoProbe.swift`
+- `macos/Sources/WetoSystem/NetworkPathReporter.swift` (also `NetworkPathReporting`)
+- `macos/Sources/WetoSystem/HTTPFetching.swift`
+- `macos/Sources/WetoSystem/ProcessRegistry.swift`
+- `macos/Sources/WetoSystem/ProcessKiller.swift`
+- `macos/Sources/WetoSystem/TargetResolver.swift`
+- `macos/Sources/WetoSystem/KeychainStore.swift` (also `SecretStoring`, `SecretStoreError`, `TokenBox`)
+- `macos/Sources/WetoSystem/FlagImageStore.swift`
+- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,ProcessTests,KeychainStoreTests}.swift`
 
 ## Entry points
 - `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; `SCDynamicStore`.

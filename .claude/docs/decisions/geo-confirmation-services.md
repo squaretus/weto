@@ -51,5 +51,5 @@ fails loud and wrong.
   `.unavailable` and the guard stays fail-closed. A single unconfirmed source is not allowed
   to decide anything — that is the same rule that makes a missing confirmation a kill reason.
 
-Implementation: `Sources/WetoSystem/GeoProbe.swift`, `Sources/WetoCore/Constants.swift`.
+Implementation: `macos/Sources/WetoSystem/GeoProbe.swift`, `macos/Sources/WetoCore/Constants.swift`.
 Flow: [overview](../overview.md). Module: [weto-system](../modules/weto-system.md).
