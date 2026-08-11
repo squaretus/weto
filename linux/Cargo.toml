@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/weto-core"]
+members = ["crates/weto-core", "crates/weto-sys"]
 
 [workspace.package]
 edition = "2021"
@@ -12,3 +12,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tempfile = "3"
+rustix = "1"
+if-addrs = "0.13"

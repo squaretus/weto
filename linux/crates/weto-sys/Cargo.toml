@@ -1,0 +1,17 @@
+[package]
+name = "weto-sys"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Граница системы. Всё, что здесь появляется, обязано прятаться за трейтом:
+# подменяются в тестах только эти реализации, внутренние типы — никогда.
+[dependencies]
+weto-core = { path = "../weto-core" }
+rustix = { workspace = true, features = ["process"] }
+if-addrs = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
