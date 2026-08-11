@@ -1,0 +1,19 @@
+[package]
+name = "weto-update"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+minisign-verify = { workspace = true }
+ureq = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+ureq = { workspace = true }

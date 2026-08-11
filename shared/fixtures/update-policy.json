@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "about": [
+    "Голден-фикстуры политики показа обновления. Один набор случаев прогоняют",
+    "обе реализации: macos/Packages/UpdateKit/Tests/UpdateKitCoreTests/",
+    "UpdatePolicyFixtureTests.swift и linux/crates/weto-update/tests/policy_fixtures.rs.",
+    "",
+    "Случаи извлечены из действующих Swift-тестов, а не написаны заново.",
+    "",
+    "now — секунды эпохи. remindAt — тоже, либо null.",
+    "outcome: silent | prompt | install."
+  ],
+  "now": 1800000000,
+  "cases": [
+    {
+      "name": "та же версия — молчим",
+      "latestVersion": "0.4.0",
+      "isNewer": false,
+      "deferral": { "skippedVersion": null, "remindAt": null, "autoInstall": false },
+      "outcome": "silent"
+    },
+    {
+      "name": "свежая версия — показываем окно",
+      "latestVersion": "0.4.2",
+      "isNewer": true,
+      "deferral": { "skippedVersion": null, "remindAt": null, "autoInstall": false },
+      "outcome": "prompt"
+    },
+    {
+      "name": "пропущенная версия — молчим",
+      "latestVersion": "0.4.2",
+      "isNewer": true,
+      "deferral": { "skippedVersion": "0.4.2", "remindAt": null, "autoInstall": false },
+      "outcome": "silent"
+    },
+    {
+      "name": "версия выше пропущенной снимает пропуск сама",
+      "latestVersion": "0.4.3",
+      "isNewer": true,
+      "deferral": { "skippedVersion": "0.4.2", "remindAt": null, "autoInstall": false },
+      "outcome": "prompt"
+    },
+    {
+      "name": "отсрочка в будущем — молчим",
+      "latestVersion": "0.4.2",
+      "isNewer": true,
+      "deferral": { "skippedVersion": null, "remindAt": 1800003600, "autoInstall": false },
+      "outcome": "silent"
+    },
+    {
+      "name": "истёкшая отсрочка — показываем окно",
+      "latestVersion": "0.4.2",
+      "isNewer": true,
+      "deferral": { "skippedVersion": null, "remindAt": 1799999940, "autoInstall": false },
+      "outcome": "prompt"
+    },
+    {
+      "name": "отсрочка дальше шести часов считается испорченной",
+      "latestVersion": "0.4.2",
+      "isNewer": true,
+      "deferral": { "skippedVersion": null, "remindAt": 1800025200, "autoInstall": false },
+      "outcome": "prompt"
+    },
+    {
+      "name": "автоустановка сильнее пропуска и отсрочки",
+      "latestVersion": "0.4.2",
+      "isNewer": true,
+      "deferral": { "skippedVersion": "0.4.2", "remindAt": 1800003600, "autoInstall": true },
+      "outcome": "install"
+    },
+    {
+      "name": "автоустановка не срабатывает без новой версии",
+      "latestVersion": "0.4.0",
+      "isNewer": false,
+      "deferral": { "skippedVersion": null, "remindAt": null, "autoInstall": true },
+      "outcome": "silent"
+    }
+  ]
+}

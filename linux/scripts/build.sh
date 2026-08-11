@@ -24,6 +24,17 @@ echo "=== weto $VERSION ($ARCH) ==="
 rm -rf "$OUT"
 mkdir -p "$STAGE/bin" "$STAGE/share"
 
+# Публичный ключ релиза вшивается в бинарник: файл рядом подменяется вместе
+# с архивом, и проверка стала бы проверкой архива самим собой. Без ключа сборка
+# собирается, но обновляться отказывается — так честнее, чем ставить непроверенное.
+KEY_PATH="../shared/keys/weto-release.pub"
+if [ -f "$KEY_PATH" ]; then
+    export WETO_RELEASE_PUBLIC_KEY="$(cat "$KEY_PATH")"
+    echo "ключ проверки обновлений вшит"
+else
+    echo "ключа $KEY_PATH нет — сборка не сможет обновляться"
+fi
+
 WETO_VERSION="$VERSION" cargo build --release -p weto-app
 
 cp target/release/weto "$STAGE/bin/weto"
