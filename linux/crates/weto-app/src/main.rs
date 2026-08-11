@@ -93,7 +93,10 @@ fn handle_cli(arguments: &[String]) -> Option<gtk4::glib::ExitCode> {
         Some("--version") => {
             // Версия приходит из окружения сборки: релизный скрипт не правит
             // отслеживаемые файлы, поэтому в Cargo.toml она остаётся нулевой.
-            println!("{}", option_env!("WETO_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")));
+            println!(
+                "{}",
+                option_env!("WETO_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+            );
             Some(gtk4::glib::ExitCode::SUCCESS)
         }
         Some("--autostart") => {
