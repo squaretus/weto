@@ -11,6 +11,8 @@ license.workspace = true
 weto-core = { path = "../weto-core" }
 rustix = { workspace = true, features = ["process"] }
 if-addrs = { workspace = true }
+libc = { workspace = true }
+ureq = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
