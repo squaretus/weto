@@ -9,3 +9,4 @@ pub mod network_events;
 pub mod network_snapshot;
 pub mod process_killer;
 pub mod process_registry;
+pub mod secret_store;

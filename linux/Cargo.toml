@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/weto-core", "crates/weto-sys"]
+members = ["crates/weto-core", "crates/weto-sys", "crates/weto-config", "crates/weto-guard", "crates/wetod"]
 
 [workspace.package]
 edition = "2021"
@@ -15,4 +15,5 @@ tempfile = "3"
 rustix = "1"
 if-addrs = "0.13"
 libc = "0.2"
+toml = "0.9"
 ureq = { version = "2", features = ["tls"], default-features = false }
