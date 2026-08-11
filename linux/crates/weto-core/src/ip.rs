@@ -169,7 +169,10 @@ mod tests {
         assert!(parse_address("1.2.3.4").is_some());
         assert!(parse_address("2001:db8::1").is_some());
         assert!(parse_address("1.2.3.4/../../etc/passwd").is_none());
-        assert!(parse_address("1.2.3.4 ").is_some(), "пробелы по краям отсекаются");
+        assert!(
+            parse_address("1.2.3.4 ").is_some(),
+            "пробелы по краям отсекаются"
+        );
         assert!(parse_address("1.2.3.4.5").is_none());
     }
 }

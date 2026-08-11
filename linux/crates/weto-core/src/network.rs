@@ -105,20 +105,19 @@ pub fn resolve_vpn_status(snapshot: &NetworkSnapshot, chosen: Option<&str>) -> V
 mod tests {
     use super::*;
 
-    fn snapshot(
-        interfaces: &[(&str, bool, bool)],
-        default_route: Option<&str>,
-    ) -> NetworkSnapshot {
+    fn snapshot(interfaces: &[(&str, bool, bool)], default_route: Option<&str>) -> NetworkSnapshot {
         NetworkSnapshot {
             interfaces: interfaces
                 .iter()
                 .enumerate()
-                .map(|(index, (name, is_up, is_tunnel))| NetworkInterfaceSnapshot {
-                    name: (*name).to_string(),
-                    index: index as u32 + 1,
-                    is_up: *is_up,
-                    is_tunnel: *is_tunnel,
-                })
+                .map(
+                    |(index, (name, is_up, is_tunnel))| NetworkInterfaceSnapshot {
+                        name: (*name).to_string(),
+                        index: index as u32 + 1,
+                        is_up: *is_up,
+                        is_tunnel: *is_tunnel,
+                    },
+                )
                 .collect(),
             default_route_interface: default_route.map(str::to_string),
         }
@@ -190,7 +189,11 @@ mod tests {
     #[test]
     fn only_tunnels_are_offered_as_candidates_and_they_are_sorted() {
         let s = snapshot(
-            &[("tun0", true, true), ("eth0", true, false), ("wg0", true, true)],
+            &[
+                ("tun0", true, true),
+                ("eth0", true, false),
+                ("wg0", true, true),
+            ],
             None,
         );
         let names: Vec<&str> = s.vpn_candidates().iter().map(|i| i.name.as_str()).collect();

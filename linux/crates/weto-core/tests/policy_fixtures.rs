@@ -141,12 +141,12 @@ impl Geo {
         }
         GeoOutcome::Resolved(GeoReading {
             ip: self.ip.clone().expect("resolved без ip"),
-            primary_country: self
-                .primary_country
-                .clone()
-                .expect("resolved без страны"),
+            primary_country: self.primary_country.clone().expect("resolved без страны"),
             confirmed_country: self.confirmed_country.clone(),
-            confirm_source: self.confirm_source.as_deref().and_then(ConfirmSource::parse),
+            confirm_source: self
+                .confirm_source
+                .as_deref()
+                .and_then(ConfirmSource::parse),
         })
     }
 }
@@ -166,13 +166,18 @@ impl Config {
     fn as_guard_config(&self) -> GuardConfig {
         GuardConfig {
             vpn_id: self.vpn_id.clone(),
-            blocked_countries: self.blocked_countries.iter().cloned().collect::<HashSet<_>>(),
+            blocked_countries: self
+                .blocked_countries
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>(),
             blocked_ip_ranges: self
                 .blocked_ip_ranges
                 .iter()
                 .map(|text| {
-                    IpRange::parse(text)
-                        .unwrap_or_else(|| panic!("фикстуры содержат неразбираемый диапазон «{text}»"))
+                    IpRange::parse(text).unwrap_or_else(|| {
+                        panic!("фикстуры содержат неразбираемый диапазон «{text}»")
+                    })
                 })
                 .collect(),
             targets: self.targets.clone(),

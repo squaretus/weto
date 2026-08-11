@@ -10,7 +10,7 @@ license.workspace = true
 # синхронной и свободной от моков. Проверяется core-boundary-contract.sh.
 [dependencies]
 serde = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
+# Разбор ответов гео-сервисов — чистое преобразование текста в данные, никакого
+# I/O: HTTP остаётся за границей, сюда приходит уже прочитанное тело.
 serde_json = { workspace = true }
+thiserror = { workspace = true }
