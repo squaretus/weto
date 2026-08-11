@@ -77,7 +77,16 @@ that quietly stopped working on one OS.
 faked — a real WireGuard tunnel — is covered by the checklist in
 `linux/docs/manual-check.md`.
 
+## Sibling crates
+
+| Crate | Responsibility |
+|---|---|
+| `weto-ui` | design system on plain GTK4; two generated stylesheets, one per theme |
+| `weto-tray` | StatusNotifierItem icon rendered from the shared `.icon` bundle |
+| `weto-update` | release check, show policy, install into `$HOME`, rollback |
+| `weto-app` | `weto` binary: status window, settings, update banner and window |
+
 ## Not here yet
 
-Secret Service over D-Bus (the token currently lives in a `0600` file), the GTK4 UI,
-self-update and packaging. Those are separate pieces.
+Secret Service over D-Bus — the token lives in a `0600` file. Country flags and
+per-target icons are not fetched, so the status window shows generic glyphs.
