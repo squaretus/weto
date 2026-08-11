@@ -17,6 +17,8 @@
 - Системные API: sysfs (`/sys/class/net`), `/proc`, netlink (события сети),
   UDP-`connect` для поиска маршрута, D-Bus (трей, уведомления).
 - Цели: Ubuntu 24.04 LTS и Arch, x86_64. Пол GTK4 — 4.14.
+- Установка целиком в `$HOME`: `~/.local/share/weto/<версия>` плюс симлинк `current`.
+  Обновление — распаковка рядом и атомарная подмена симлинка, подпись minisign.
 - Сборка и тесты идут в Linux-контейнере: `linux/scripts/dev.sh cargo test --workspace`.
   Кросс-компиляции недостаточно — тесты обязаны выполняться на настоящем ядре.
 
@@ -34,12 +36,16 @@
 
 ## Сборка и запуск
 ```bash
-cd macos && swift build                              # Debug-сборка
+cd macos && swift build                              # Debug-сборка macOS
 cd macos && swift test                               # Тесты
 swift test --package-path macos/Packages/UpdateKit   # Тесты пакета обновления
 swift run --package-path macos WetoMenuBar           # Запуск без бандла (без Keychain и уведомлений)
 macos/scripts/make-app.sh release                    # .app → macos/.build/app/Weto.app
 macos/scripts/build.sh 0.1.0                         # PKG → macos/.build/release_build/Weto-0.1.0.pkg
+
+linux/scripts/dev.sh cargo test --workspace          # тесты Linux (в контейнере)
+linux/scripts/dev.sh bash scripts/tests/app-smoke-contract.sh
+linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/
 ```
 
 ## Раскладка репозитория
@@ -78,11 +84,16 @@ macos/scripts/tests/  shell-контракты установки и релиз�
 ```
 linux/crates/
 ├── weto-core/    ноль I/O: политика, снимок сети, матчинг, CIDR, гео-модели, презентация
-├── weto-sys/     адаптеры за трейтами: sysfs, /proc, netlink, HTTP, секрет, завершение
+├── weto-sys/     адаптеры за трейтами: sysfs, /proc, netlink, HTTP, секрет, завершение,
+│                 уведомления, автозапуск
 ├── weto-config/  настройки (TOML), журнал (JSON), пути XDG
 ├── weto-guard/   машина состояний охраны и применение решения к процессам
+├── weto-ui/      дизайн-система на GTK4: сгенерированные стили и компоненты
+├── weto-tray/    иконка StatusNotifierItem и её рендер из общего исходника
+├── weto-update/  самообновление: политика, подпись, раскладка версий, откат
+├── weto-app/     [bin weto] точка входа, окно статуса, окно настроек
 └── wetod/        [bin] испытательный стенд без UI, в продукт не поставляется
-linux/scripts/    dev.sh (сборка в контейнере), Dockerfile.dev, tests/ — контракты
+linux/scripts/    dev.sh (сборка в контейнере), build.sh, install.sh, tests/ — контракты
 ```
 Инвариант границ `weto-core` тот же, что у `WetoCore`, и проверяется машинно:
 `scripts/tests/core-boundary-contract.sh` валит сборку при появлении tokio, zbus,
@@ -214,9 +225,15 @@ reqwest, netlink, procfs, gtk4 или rustix в графе зависимост�
   по умолчанию в свою таблицу за правилом `ip rule`, и дамп `/proc/net/route` показал бы
   старый маршрут через Ethernet — охрана завершила бы цели при исправном VPN.
 - **Root не нужен нигде:** ни установке, ни обновлению, ни завершению целей, ни чтению
-  маршрутов. Привилегированного помощника в Linux-версии нет как класса.
+  маршрутов. Привилегированного помощника в Linux-версии нет как класса, а защиту,
+  которую он давал на macOS, заменяет подпись архива обновления.
 - **Вид цели `appBundle` не переносится:** на Linux нет каталога, которым можно накрыть
   процессы разом; ярлык `.desktop` указывает на обычный бинарник, то есть `Binary`.
+- **CSS-переменные не используются:** `var()` появился в GTK 4.16, а пол проекта — 4.14
+  (Ubuntu 24.04 LTS). Значения подставляются генератором, по таблице стилей на тему.
+- **Попап не привязан к иконке трея:** SNI не сообщает координат, Wayland не даёт окну
+  позиционировать себя. Окно статуса открывается там, где решит композитор — единственное
+  заметное отступление от macOS, и обойти его нечем.
 
 ### Автообновление
 
