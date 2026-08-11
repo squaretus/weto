@@ -151,10 +151,7 @@ pub fn decide(signals: &GuardSignals) -> GuardDecision {
     }
 
     if primary != confirmed {
-        return GuardDecision::Kill(UnsafeReason::CountryConflict {
-            primary,
-            confirmed,
-        });
+        return GuardDecision::Kill(UnsafeReason::CountryConflict { primary, confirmed });
     }
 
     GuardDecision::Safe
