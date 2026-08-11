@@ -1,0 +1,62 @@
+# Linux guard (Rust)
+
+The Linux implementation of weto's guard: same product, same policy, no shared code with
+the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/tokens`).
+
+## Key files
+
+| Crate | File | Responsibility |
+|---|---|---|
+| `weto-core` | `policy.rs` | `decide`, `decide_local`, `pending_verification` — port of `GuardPolicy` |
+| `weto-core` | `network.rs` | `NetworkSnapshot`, `fingerprint`, `resolve_vpn_status` |
+| `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
+| `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
+| `weto-core` | `ip.rs` | address validation and CIDR |
+| `weto-core` | `presentation.rs` | status wording, `ShieldState` |
+| `weto-sys` | `network_snapshot.rs` | sysfs interfaces + kernel route probe |
+| `weto-sys` | `network_events.rs` | netlink subscription |
+| `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root |
+| `weto-sys` | `process_killer.rs` | `SIGTERM` |
+| `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq |
+| `weto-sys` | `secret_store.rs` | token file, mode `0600` |
+| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings, ring-buffer journal, XDG paths |
+| `weto-guard` | `controller.rs`, `enforcer.rs` | state machine, one `/proc` pass per tick |
+| `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
+
+## Boundary invariant
+
+`weto-core` may depend only on `serde`, `serde_json` and `thiserror`.
+`scripts/tests/core-boundary-contract.sh` fails the build if tokio, zbus, reqwest,
+netlink, procfs, gtk4 or rustix ever appear in its dependency graph. Same invariant as
+`WetoCore` on macOS, and for the same reason: it keeps the bulk of the tests synchronous
+and mock-free.
+
+## Why the route is probed, not read
+
+`wg-quick` installs the default route into table 51820 behind an `ip rule`, leaving the
+old Ethernet default in the main table. Reading `/proc/net/route` therefore reports the
+wrong interface and the guard would kill targets while the VPN is perfectly healthy.
+`KernelRouteProbe` instead opens a UDP socket, `connect`s to a public address (no packet
+is sent) and reads back the local address the kernel picked, then maps it to an interface.
+Verified against `ip route get` in `policy-routing-contract.sh`.
+
+## Divergence control
+
+`shared/fixtures/guard-policy.json` holds 27 cases extracted from the existing Swift
+tests. Both `weto-core/tests/policy_fixtures.rs` and
+`macos/Tests/WetoCoreTests/GuardPolicyFixtureTests.swift` run them. A behavioural drift
+between platforms fails a test naming the case, instead of surfacing as a kill-switch
+that quietly stopped working on one OS.
+
+## Testing
+
+109 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+`CAP_NET_ADMIN` because they create interfaces and routing rules:
+`policy-routing-contract.sh` and `netlink-events-contract.sh`. Everything that cannot be
+faked — a real WireGuard tunnel — is covered by the checklist in
+`linux/docs/manual-check.md`.
+
+## Not here yet
+
+Secret Service over D-Bus (the token currently lives in a `0600` file), the GTK4 UI,
+self-update and packaging. Those are separate pieces.
