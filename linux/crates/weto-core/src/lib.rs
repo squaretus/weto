@@ -6,4 +6,7 @@
 //!
 //! Инвариант границ проверяется `scripts/tests/core-boundary-contract.sh`.
 
+pub mod geo;
 pub mod ip;
+pub mod network;
+pub mod policy;
