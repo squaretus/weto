@@ -117,6 +117,67 @@ fn control_page(state: Arc<AppState>) -> GtkBox {
     vpn_hint.set_halign(Align::Start);
     guard_card.append(&vpn_hint);
 
+    // Список туннелей приходит из снимка сети и меняется на глазах: туннель
+    // поднимают уже при открытых настройках. Перестраивается он только когда
+    // состав изменился — иначе выбор пользователя сбрасывался бы дважды в секунду.
+    {
+        let state = state.clone();
+        let picker = vpn_picker.clone();
+        let hint = vpn_hint.clone();
+        let mut known: Vec<String> = Vec::new();
+        let mut applying = false;
+
+        let mut refresh = move || {
+            let candidates = state.snapshot().vpn_candidates;
+            let chosen = state.settings.current().vpn_interface;
+
+            if candidates != known {
+                let items: Vec<&str> = candidates.iter().map(String::as_str).collect();
+                applying = true;
+                picker.set_model(Some(&gtk4::StringList::new(&items)));
+                known = candidates.clone();
+                applying = false;
+            }
+            hint.set_visible(candidates.is_empty());
+
+            if let Some(index) = chosen
+                .as_ref()
+                .and_then(|name| candidates.iter().position(|c| c == name))
+            {
+                if picker.selected() != index as u32 && !applying {
+                    picker.set_selected(index as u32);
+                }
+            }
+        };
+        refresh();
+
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            refresh();
+            gtk4::glib::ControlFlow::Continue
+        });
+    }
+
+    {
+        let state = state.clone();
+        vpn_picker.connect_selected_notify(move |picker| {
+            let Some(model) = picker.model() else { return };
+            let Some(list) = model.downcast_ref::<gtk4::StringList>() else {
+                return;
+            };
+            let Some(name) = list.string(picker.selected()) else {
+                return;
+            };
+            let name = name.to_string();
+
+            // Правка поднимает ревизию и обесценивает прежний вердикт:
+            // смена туннеля обязана заново пройти проверку, а не наследовать
+            // «безопасно» от предыдущего.
+            if state.settings.current().vpn_interface.as_deref() != Some(name.as_str()) {
+                state.settings.edit(|s| s.vpn_interface = Some(name));
+            }
+        });
+    }
+
     let notify_row = ui::row(false);
     notify_row.append(&ui::label("Уведомлять о завершении"));
     let notify_spacer = GtkBox::new(Orientation::Horizontal, 0);
