@@ -9,6 +9,8 @@ mod settings_window;
 mod state;
 mod status_window;
 mod tray;
+mod update;
+mod update_window;
 
 use std::cell::RefCell;
 
@@ -55,6 +57,10 @@ fn main() -> gtk4::glib::ExitCode {
     let paths = Paths::from_env();
     let state = state::AppState::new(paths);
 
+    // Раньше всего остального: если предыдущий запуск не дожил до окна дважды
+    // подряд, новая версия не стартует — возвращаемся к прежней и уходим в неё.
+    update::guard_the_launch(&state);
+
     let application = Application::builder()
         .application_id(APP_ID)
         .flags(ApplicationFlags::empty())
@@ -67,6 +73,7 @@ fn main() -> gtk4::glib::ExitCode {
             // Охрана стартует здесь, а не при первом открытии окна: окно
             // может не открыться никогда, а защита нужна с первой секунды.
             state.start_guard();
+            update::start(state.clone());
         });
     }
 
@@ -90,6 +97,25 @@ fn main() -> gtk4::glib::ExitCode {
 
 fn handle_cli(arguments: &[String]) -> Option<gtk4::glib::ExitCode> {
     match arguments.get(1).map(String::as_str) {
+        Some("--check-updates") => {
+            // Ручная проверка из командной строки: игнорирует пропуск
+            // и отсрочку, как и кнопка в интерфейсе.
+            let paths = Paths::from_env();
+            let store = weto_update::store::UpdateStore::new(paths.state_dir.clone());
+            let scheduler = weto_update::scheduler::UpdateScheduler::new(
+                update::current_version(),
+                std::sync::Arc::new(weto_update::checker::ReleaseChecker::new(
+                    "squaretus/weto",
+                    std::env::consts::ARCH,
+                )),
+                std::sync::Arc::new(update::StoreDeferrals(std::sync::Arc::new(store))),
+            );
+            match scheduler.check(true) {
+                Some(finding) => println!("{finding:?}"),
+                None => println!("обновлений нет"),
+            }
+            Some(gtk4::glib::ExitCode::SUCCESS)
+        }
         Some("--version") => {
             // Версия приходит из окружения сборки: релизный скрипт не правит
             // отслеживаемые файлы, поэтому в Cargo.toml она остаётся нулевой.

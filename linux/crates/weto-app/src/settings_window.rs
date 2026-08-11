@@ -278,6 +278,51 @@ fn control_page(state: Arc<AppState>) -> GtkBox {
         });
     }
 
+    // --- Обновление ---
+    let update_card = ui::card("Обновление");
+
+    let version_row = ui::row(true);
+    version_row.append(&ui::label("Версия"));
+    let version_spacer = GtkBox::new(Orientation::Horizontal, 0);
+    version_spacer.set_hexpand(true);
+    version_row.append(&version_spacer);
+    version_row.append(&ui::value(&crate::update::current_version().to_string()));
+    update_card.append(&version_row);
+
+    let auto_row = ui::row(false);
+    auto_row.append(&ui::label("Обновлять автоматически"));
+    let auto_spacer = GtkBox::new(Orientation::Horizontal, 0);
+    auto_spacer.set_hexpand(true);
+    auto_row.append(&auto_spacer);
+    let auto_install = ui::toggle();
+    auto_install.set_active(
+        weto_update::store::UpdateStore::new(state.paths.state_dir.clone())
+            .deferral()
+            .auto_install,
+    );
+    auto_row.append(&auto_install);
+    update_card.append(&auto_row);
+
+    {
+        let state_dir = state.paths.state_dir.clone();
+        auto_install.connect_state_set(move |_, value| {
+            weto_update::store::UpdateStore::new(state_dir.clone()).set_auto_install(value);
+            gtk4::glib::Propagation::Proceed
+        });
+    }
+
+    // Ручная проверка — единственный и достаточный способ вернуть
+    // пропущенную версию: отдельной кнопки «снять пропуск» поэтому нет.
+    let check = ui::muted_button("Проверить обновления");
+    check.connect_clicked(|button| {
+        if let Some(updates) = crate::update::shared() {
+            updates.check_now();
+            button.set_label("Проверяем…");
+        }
+    });
+    update_card.append(&check);
+    page.append(&update_card);
+
     // --- Тема ---
     let theme_card = ui::card("Оформление");
     let theme_row = ui::row(true);

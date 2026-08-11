@@ -1952,6 +1952,7 @@ dependencies = [
  "weto-sys",
  "weto-tray",
  "weto-ui",
+ "weto-update",
 ]
 
 [[package]]
