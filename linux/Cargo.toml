@@ -14,3 +14,5 @@ thiserror = "2"
 tempfile = "3"
 rustix = "1"
 if-addrs = "0.13"
+libc = "0.2"
+ureq = { version = "2", features = ["tls"], default-features = false }
