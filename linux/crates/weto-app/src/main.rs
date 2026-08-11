@@ -91,7 +91,9 @@ fn main() -> gtk4::glib::ExitCode {
 fn handle_cli(arguments: &[String]) -> Option<gtk4::glib::ExitCode> {
     match arguments.get(1).map(String::as_str) {
         Some("--version") => {
-            println!("{}", env!("CARGO_PKG_VERSION"));
+            // Версия приходит из окружения сборки: релизный скрипт не правит
+            // отслеживаемые файлы, поэтому в Cargo.toml она остаётся нулевой.
+            println!("{}", option_env!("WETO_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")));
             Some(gtk4::glib::ExitCode::SUCCESS)
         }
         Some("--autostart") => {

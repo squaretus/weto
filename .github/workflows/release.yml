@@ -9,18 +9,12 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build PKG & Publish Release
-    runs-on: macos-26
-    # Исходники macOS живут в macos/. Шаг публикации ниже — исключение:
-    # `files:` у action-gh-release разрешается от корня репозитория,
-    # а не от working-directory.
-    defaults:
-      run:
-        working-directory: macos
+  version:
+    name: Extract version
+    runs-on: ubuntu-24.04
+    outputs:
+      VERSION: ${{ steps.version.outputs.VERSION }}
     steps:
-      - uses: actions/checkout@v4
-
       # Имя тега подставляется через окружение, а не интерполяцией в run:
       # прямая подстановка в шелл — классический путь для инъекции команд.
       - name: Extract version from tag
@@ -35,21 +29,98 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
+  macos:
+    name: Build PKG
+    needs: version
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: macos
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Test
         run: swift test
 
       - name: Build release PKG
         env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
+          VERSION: ${{ needs.version.outputs.VERSION }}
         run: |
           chmod +x scripts/build.sh scripts/preinstall scripts/postinstall
           scripts/build.sh "$VERSION"
 
-      # Релиз в этот же репозиторий — источник автообновления:
-      # приложение опрашивает Releases API каждые 6 часов.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: macos/.build/release_build/*.pkg
+
+  linux:
+    name: Build tarball
+    needs: version
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      # Собираем на 24.04 намеренно: GTK там 4.14 — объявленный пол проекта.
+      # Сборка на более новом GTK слинковалась бы с символами, которых
+      # на целевой системе может не быть.
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libssl-dev pkg-config zstd minisign xvfb
+
+      - name: Lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Boundary contract
+        run: bash scripts/tests/core-boundary-contract.sh
+
+      - name: Test
+        run: xvfb-run -a cargo test --workspace
+
+      - name: Build
+        env:
+          VERSION: ${{ needs.version.outputs.VERSION }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: bash scripts/build.sh "$VERSION"
+
+      - name: Install contract
+        env:
+          VERSION: ${{ needs.version.outputs.VERSION }}
+        run: |
+          bash scripts/tests/install-contract.sh \
+            "target/release_build/weto-$VERSION-x86_64-linux.tar.zst" "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: linux/target/release_build/*.tar.zst*
+
+  publish:
+    name: Publish release
+    # Публикация только когда собрались обе платформы: половинчатый релиз
+    # означал бы, что автообновление на второй платформе видит релиз
+    # без своего артефакта.
+    needs: [version, macos, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Релиз в этот же репозиторий — источник автообновления обеих платформ.
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: macos/.build/release_build/Weto-${{ steps.version.outputs.VERSION }}.pkg
-          name: weto ${{ steps.version.outputs.VERSION }}
+          files: |
+            artifacts/macos/*
+            artifacts/linux/*
+          name: weto ${{ needs.version.outputs.VERSION }}
           generate_release_notes: true

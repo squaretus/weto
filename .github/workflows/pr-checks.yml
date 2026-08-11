@@ -7,7 +7,7 @@ on:
     branches: [master]
 
 jobs:
-  build-and-test:
+  macos:
     name: Build & Test (macOS)
     runs-on: macos-26
     # Исходники macOS живут в macos/; относительные пути внутри скриптов
@@ -37,3 +37,65 @@ jobs:
                    scripts/tests/build-artifact-contract.sh \
                    scripts/tests/launch-agent-contract.sh
           bash scripts/tests/build-artifact-contract.sh 9.9.9
+
+  linux:
+    name: Build & Test (Linux)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libssl-dev pkg-config zstd xvfb iproute2
+
+      - name: Lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      # Инвариант границ ядра: ни tokio, ни zbus, ни netlink, ни gtk4
+      # в графе зависимостей weto-core.
+      - name: Boundary contract
+        run: bash scripts/tests/core-boundary-contract.sh
+
+      - name: Test
+        run: xvfb-run -a cargo test --workspace
+
+      # Приложение обязано подниматься без монитора и без трея, молча.
+      - name: App smoke contract
+        run: bash scripts/tests/app-smoke-contract.sh
+
+      # Раннер даёт root, поэтому контракты, которым нужны интерфейсы
+      # и правила маршрутизации, идут прямо здесь.
+      - name: Network contracts
+        run: |
+          sudo -E env "PATH=$PATH" bash scripts/tests/policy-routing-contract.sh
+          sudo -E env "PATH=$PATH" bash scripts/tests/netlink-events-contract.sh
+
+      - name: Build and install contract
+        run: |
+          bash scripts/build.sh 9.9.9
+          bash scripts/tests/install-contract.sh \
+            target/release_build/weto-9.9.9-x86_64-linux.tar.zst 9.9.9
+
+  generators:
+    name: Generators are idempotent
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      # Токены и иконка генерируются из общих исходников. Повторная генерация
+      # обязана ничего не менять: расхождение означает, что кто-то правил
+      # сгенерированный файл руками, и правка потеряется на следующей сборке.
+      - name: Regenerate and diff
+        run: |
+          bash macos/scripts/build-icon.sh
+          cargo run --manifest-path shared/tools/gen-tokens/Cargo.toml -- \
+            --out-swift macos/Sources/WetoDesign/Tokens/WetoTokens.swift \
+            --out-css-dir linux/crates/weto-ui/style
+          git diff --exit-code
