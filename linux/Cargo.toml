@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/weto-core", "crates/weto-sys", "crates/weto-config", "crates/weto-guard", "crates/wetod", "crates/weto-ui", "crates/weto-app"]
+members = ["crates/weto-core", "crates/weto-sys", "crates/weto-config", "crates/weto-guard", "crates/wetod", "crates/weto-ui", "crates/weto-app", "crates/weto-tray"]
 
 [workspace.package]
 edition = "2021"
@@ -17,4 +17,7 @@ if-addrs = "0.13"
 libc = "0.2"
 toml = "0.9"
 gtk4 = { version = "0.10", features = ["v4_14"] }
+ksni = "0.3"
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+resvg = "0.45"
 ureq = { version = "2", features = ["tls"], default-features = false }

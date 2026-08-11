@@ -8,6 +8,7 @@
 mod settings_window;
 mod state;
 mod status_window;
+mod tray;
 
 use std::cell::RefCell;
 
@@ -23,6 +24,7 @@ const APP_ID: &str = "com.weto.app";
 
 thread_local! {
     static STYLES: RefCell<Option<CssProvider>> = const { RefCell::new(None) };
+    static TRAY_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Смена темы — подмена таблицы стилей целиком: CSS-переменных на GTK 4.14 нет,
@@ -70,9 +72,16 @@ fn main() -> gtk4::glib::ExitCode {
 
     {
         let state = state.clone();
-        application.connect_activate(move |app| match app.active_window() {
-            Some(window) => window.present(),
-            None => status_window::build(app, state.clone()).present(),
+        application.connect_activate(move |app| {
+            // Трей поднимается один раз, при первой активации: раньше главного
+            // цикла подписываться не на что.
+            if !TRAY_UP.with(|up| up.replace(true)) {
+                tray::install(app, state.clone());
+            }
+            match app.active_window() {
+                Some(window) => window.present(),
+                None => status_window::build(app, state.clone()).present(),
+            }
         });
     }
 
