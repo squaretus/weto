@@ -40,6 +40,27 @@ wrong interface and the guard would kill targets while the VPN is perfectly heal
 is sent) and reads back the local address the kernel picked, then maps it to an interface.
 Verified against `ip route get` in `policy-routing-contract.sh`.
 
+## Contracts that differ from macOS
+
+Everything the policy decides is shared. What the system dictates is not:
+
+- **VPN is identified by interface name; the tunnel qualification comes from the kernel**
+  (`DEVTYPE`, `tun_flags`, ARPHRD), never from the name — a user will call anything "VPN".
+  An unknown name resolves to `Down`, fail-closed, same as an unknown UUID on macOS.
+- **`is_up` is the IFF_UP bit alone.** IFF_RUNNING is not exposed through sysfs (a working
+  `eth0` reads `0x1003`) and "carries link" is undefined for tunnels anyway. Whether
+  traffic actually flows through an interface is answered by the route probe.
+- **Network events come from a netlink subscription**, the replacement for
+  `NWPathMonitor`: single-digit milliseconds instead of waiting out a five-second tick.
+  Locked down by `netlink-events-contract.sh`.
+- **The 250 ms poll stays.** Catching launches through the netlink connector needs
+  `CAP_NET_ADMIN`, and the whole installation is designed to be unprivileged.
+- **Two macOS traps are solved by the kernel:** `readlink /proc/<pid>/exe` returns an
+  already-resolved path, so the `nano`→`pico` symlink never appears; argv arrives as a
+  ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is needed.
+- **`appBundle` targets do not exist here.** A `.desktop` entry points at an ordinary
+  binary, so it is a `Binary` target.
+
 ## Divergence control
 
 `shared/fixtures/guard-policy.json` holds 27 cases extracted from the existing Swift
