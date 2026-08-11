@@ -1,0 +1,18 @@
+[package]
+name = "weto-app"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "weto"
+path = "src/main.rs"
+
+[dependencies]
+weto-core = { path = "../weto-core" }
+weto-sys = { path = "../weto-sys" }
+weto-config = { path = "../weto-config" }
+weto-guard = { path = "../weto-guard" }
+weto-ui = { path = "../weto-ui" }
+gtk4 = { workspace = true }

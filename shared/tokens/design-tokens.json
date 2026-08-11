@@ -1,0 +1,63 @@
+{
+  "about": [
+    "Машинное представление таблиц из docs/design-system.md.",
+    "Из этого файла генерируются macos/Sources/WetoDesign/Tokens/WetoTokens.swift",
+    "и linux/crates/weto-ui/style/tokens.css. Оба сгенерированных файла лежат",
+    "в репозитории, а CI проверяет, что повторная генерация ничего не меняет.",
+    "",
+    "Канон смысла — docs/design-system.md; канон значений — этот файл.",
+    "Правка hex мимо него означает разъехавшиеся оттенки на двух платформах."
+  ],
+  "colors": {
+    "shell":    { "dark": { "hex": "17161D" }, "light": { "hex": "E7E4F1" } },
+    "card":     { "dark": { "hex": "201F28" }, "light": { "swift": ".white", "hex": "FFFFFF" } },
+    "sunk":     { "dark": { "hex": "2A2833" }, "light": { "hex": "EEEBFA" } },
+    "line":     { "dark": { "white": 1, "opacity": 0.08 }, "light": { "hex": "1C143C", "opacity": 0.16 } },
+    "sunkLine": { "dark": { "swift": ".clear", "hex": "000000", "opacity": 0 }, "light": { "hex": "1C143C", "opacity": 0.10 } },
+    "ink":      { "dark": { "hex": "F4F2FB" }, "light": { "hex": "16102C" } },
+    "dim":      { "dark": { "hex": "F4F2FB", "opacity": 0.66 }, "light": { "hex": "16102C", "opacity": 0.72 } },
+    "faint":    { "dark": { "hex": "F4F2FB", "opacity": 0.40 }, "light": { "hex": "16102C", "opacity": 0.52 } },
+    "violet":   { "dark": { "hex": "8B7BFF" }, "light": { "hex": "6244F0" } },
+    "green":    { "dark": { "hex": "46D09B" }, "light": { "hex": "0E8A5B" } },
+    "amber":    { "dark": { "hex": "F2B544" }, "light": { "hex": "9D6A09" } },
+    "red":      { "dark": { "hex": "FF6B81" }, "light": { "hex": "D43A53" } },
+    "close":    { "dark": { "hex": "FF5F56" }, "light": { "hex": "FF5F56" } }
+  },
+  "shadows": {
+    "panelShadow": { "hex": "140A32", "opacity": 0.32 },
+    "cardShadow": {
+      "dark": { "swift": ".clear", "hex": "000000", "opacity": 0 },
+      "light": { "hex": "180E3C", "opacity": 0.08 }
+    }
+  },
+  "space": {
+    "space1": 3,
+    "space2": 6,
+    "space3": 9,
+    "space4": 12,
+    "space5": 18
+  },
+  "radius": {
+    "radiusPanel": 20,
+    "radiusCard": 15,
+    "radiusControl": 12,
+    "radiusPill": 11,
+    "radiusTile": 10
+  },
+  "sizes": {
+    "popupWidth": 352,
+    "windowWidth": 500,
+    "windowHeight": 640
+  },
+  "typography": {
+    "status":      { "size": 15, "weight": "semibold" },
+    "label":       { "size": 13, "weight": "medium" },
+    "value":       { "size": 13, "weight": "regular" },
+    "caption":     { "size": 12, "weight": "regular" },
+    "data":        { "size": 12, "weight": "regular", "tabular": true },
+    "cardCap":     { "size": 11, "weight": "semibold", "uppercase": true, "tracking": 0.1 },
+    "diagnostics": { "size": 11, "weight": "regular", "tabular": true },
+    "button":      { "size": 13, "weight": "semibold" },
+    "segment":     { "size": 12, "weight": "medium" }
+  }
+}

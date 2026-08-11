@@ -1,0 +1,108 @@
+//! Точка входа Linux-версии weto.
+//!
+//! Приложение единственное в системе: повторный запуск не поднимает второй
+//! процесс, а показывает окно уже работающей копии. Это второй вход помимо
+//! трея — он обязателен, потому что окружение может быть без трея вовсе
+//! (ванильный GNOME без расширений).
+
+mod settings_window;
+mod state;
+mod status_window;
+
+use std::cell::RefCell;
+
+use gtk4::gio::ApplicationFlags;
+use gtk4::prelude::*;
+use gtk4::{Application, CssProvider};
+
+use weto_config::paths::Paths;
+use weto_config::settings::Theme as SettingsTheme;
+use weto_ui::theme::{self, Theme};
+
+const APP_ID: &str = "com.weto.app";
+
+thread_local! {
+    static STYLES: RefCell<Option<CssProvider>> = const { RefCell::new(None) };
+}
+
+/// Смена темы — подмена таблицы стилей целиком: CSS-переменных на GTK 4.14 нет,
+/// поэтому цвета вкомпилированы в две отдельные таблицы.
+pub fn apply_theme(theme: SettingsTheme) {
+    let theme = match theme {
+        SettingsTheme::Dark => Theme::Dark,
+        SettingsTheme::Light => Theme::Light,
+    };
+    STYLES.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let provider = match slot.as_ref() {
+            Some(previous) => theme::switch_theme(previous, theme),
+            None => theme::install_styles(theme),
+        };
+        *slot = Some(provider);
+    });
+}
+
+fn main() -> gtk4::glib::ExitCode {
+    // Флаги командной строки обслуживаются до GTK: контракту установки нужен
+    // ответ без дисплея, а --autostart вообще не про интерфейс.
+    let arguments: Vec<String> = std::env::args().collect();
+    if let Some(code) = handle_cli(&arguments) {
+        return code;
+    }
+
+    let paths = Paths::from_env();
+    let state = state::AppState::new(paths);
+
+    let application = Application::builder()
+        .application_id(APP_ID)
+        .flags(ApplicationFlags::empty())
+        .build();
+
+    {
+        let state = state.clone();
+        application.connect_startup(move |_| {
+            apply_theme(state.theme());
+            // Охрана стартует здесь, а не при первом открытии окна: окно
+            // может не открыться никогда, а защита нужна с первой секунды.
+            state.start_guard();
+        });
+    }
+
+    {
+        let state = state.clone();
+        application.connect_activate(move |app| match app.active_window() {
+            Some(window) => window.present(),
+            None => status_window::build(app, state.clone()).present(),
+        });
+    }
+
+    application.run_with_args::<&str>(&[])
+}
+
+fn handle_cli(arguments: &[String]) -> Option<gtk4::glib::ExitCode> {
+    match arguments.get(1).map(String::as_str) {
+        Some("--version") => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            Some(gtk4::glib::ExitCode::SUCCESS)
+        }
+        Some("--autostart") => {
+            let paths = Paths::from_env();
+            let result = match arguments.get(2).map(String::as_str) {
+                Some("on") => weto_sys::autostart::Autostart::new(&paths).enable(),
+                Some("off") => weto_sys::autostart::Autostart::new(&paths).disable(),
+                _ => {
+                    eprintln!("использование: weto --autostart on|off");
+                    return Some(gtk4::glib::ExitCode::FAILURE);
+                }
+            };
+            match result {
+                Ok(()) => Some(gtk4::glib::ExitCode::SUCCESS),
+                Err(error) => {
+                    eprintln!("weto: {error}");
+                    Some(gtk4::glib::ExitCode::FAILURE)
+                }
+            }
+        }
+        _ => None,
+    }
+}
