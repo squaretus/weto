@@ -9,13 +9,13 @@ client may only say "install an update" (never *which* one), ask how the last at
 or ask the daemon to remove itself.
 
 ## Key files
-- `Sources/WetoHelper/main.swift` — the whole target: builds `UpdaterHelperService` from
+- `macos/Sources/WetoHelper/main.swift` — the whole target: builds `UpdaterHelperService` from
   `WetoUpdate.configuration` and resumes the listener. All logic lives in `UpdateKitHelper`.
-- `Resources/com.weto.helper.plist`
-- `scripts/preinstall`, `scripts/postinstall` (bootout/bootstrap of the daemon)
-- `Packages/UpdateKit/Sources/UpdateKitHelper/` — service, install flow, downloader, authorization
-- `Packages/UpdateKit/Sources/UpdateKitCore/ReleasePackageURL.swift` (download host allow-list)
-- `Packages/UpdateKit/Sources/UpdateKitXPC/` (protocol and client side)
+- `macos/Resources/com.weto.helper.plist`
+- `macos/scripts/preinstall`, `macos/scripts/postinstall` (bootout/bootstrap of the daemon)
+- `macos/Packages/UpdateKit/Sources/UpdateKitHelper/` — service, install flow, downloader, authorization
+- `macos/Packages/UpdateKit/Sources/UpdateKitCore/ReleasePackageURL.swift` (download host allow-list)
+- `macos/Packages/UpdateKit/Sources/UpdateKitXPC/` (protocol and client side)
 
 ## Entry points
 Mach service `com.weto.helper` (`NSXPCListener`, `MachServices` in the LaunchDaemon plist).
@@ -78,7 +78,7 @@ over plain HTTP. Callers: `UpdateKit/HelperUpdateInstaller.swift` (install + pro
 - **The package never passes through `/tmp`.** A world-writable staging path allows swapping
   the file between download and `installer`, and root would install someone else's package.
 - **Authorization is by client executable path**, `proc_pidpath(pid)` compared against
-  `/Applications/Weto.app/Contents/MacOS/WetoMenuBar` (plus `.build/...` suffixes, `#if DEBUG` only,
+  `/Applications/Weto.app/Contents/MacOS/WetoMenuBar` (plus `/.build/…` suffixes, `#if DEBUG` only,
   absent from the release PKG). Honest boundary: the project has no Apple Developer ID, so
   `SecCodeCheckValidity` with a team-id requirement has nothing to verify against.
   This stops unrelated *user* processes from calling `performUpdate`. It does **not** protect

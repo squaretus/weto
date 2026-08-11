@@ -18,31 +18,43 @@
 
 ## Сборка и запуск
 ```bash
-swift build                    # Debug-сборка
-swift test                     # Тесты
-swift test --package-path Packages/UpdateKit   # Тесты пакета обновления
-swift run WetoMenuBar          # Запуск без бандла (без Keychain и уведомлений)
-scripts/make-app.sh release    # .app → .build/app/Weto.app
-scripts/build.sh 0.1.0         # PKG → .build/release_build/Weto-0.1.0.pkg
+cd macos && swift build                              # Debug-сборка
+cd macos && swift test                               # Тесты
+swift test --package-path macos/Packages/UpdateKit   # Тесты пакета обновления
+swift run --package-path macos WetoMenuBar           # Запуск без бандла (без Keychain и уведомлений)
+macos/scripts/make-app.sh release                    # .app → macos/.build/app/Weto.app
+macos/scripts/build.sh 0.1.0                         # PKG → macos/.build/release_build/Weto-0.1.0.pkg
 ```
 
-## Структура
+## Раскладка репозитория
+Продукт существует в двух реализациях, и они не делят ни строчки кода — только данные.
 ```
-Sources/
+macos/     приложение под macOS: SPM-пакет, скрипты сборки и упаковки, ресурсы бандла
+linux/     приложение под Linux: Cargo workspace (Rust + GTK4)
+shared/    то, что обязано совпадать у обеих реализаций: исходники иконки,
+           токены дизайна, голден-фикстуры политики
+docs/      канон дизайн-системы — общий, по платформам не делится
+```
+Голден-фикстуры — единственный механизм, которым расхождение двух реализаций
+ловится машинно: один и тот же набор случаев прогоняют оба тест-раннера.
+
+## Структура macOS-части
+```
+macos/Sources/
 ├── WetoCore/     [library] чистая логика, ноль I/O: политика, снимки, матчинг, разбор ответов
 ├── WetoHelper/   [executable] точка входа демона: конфигурация + listener, логика в UpdateKit
 ├── WetoSystem/   [library] адаптеры к macOS, каждый за протоколом
 ├── WetoShared/   [library] VM-слой: координатор, машина состояний охраны, хранилища
 ├── WetoDesign/   [library] токены и компоненты дизайн-системы, лейбл менюбара
 └── WetoMenuBar/  [executable] точка входа, попап и окно настроек
-Packages/UpdateKit/   переносимый между проектами механизм обновления, свой Package.swift
+macos/Packages/UpdateKit/   переносимый между проектами механизм обновления, свой Package.swift
 ├── UpdateKitCore/    [library] ноль I/O: конфигурация, версии, политика показа, фазы, тексты
 ├── UpdateKitXPC/     [library] граница демона: протокол, клиент; зависимостей нет
 ├── UpdateKit/        [library] UpdateController, планировщик, хранилище, фетчер релиза
 ├── UpdateKitUI/      [library] окно обновления и протокол темы
 └── UpdateKitHelper/  [library] root-логика: перепроверка релиза, загрузка с долей, installer
-Tests/            WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTests
-scripts/tests/    shell-контракты установки и релизной сборки (из build.sh, вручную и из CI)
+macos/Tests/          WetoCoreTests, WetoSystemTests, WetoSharedTests, WetoDesignTests
+macos/scripts/tests/  shell-контракты установки и релизной сборки (из build.sh, вручную и из CI)
 ```
 Состав файлов каждого таргета — в его документе из индекса ниже.
 
@@ -151,7 +163,7 @@ scripts/tests/    shell-контракты установки и релизно�
   (не титульный, не может стать главным) — иначе иконка мигала бы на каждое открытие меню.
 - **Иконка приложения меняется вместе с темой** (`WetoAppIcon` + `AppCoordinator.applyAppIcon`):
   её видят Dock, `NSAlert` и окно обновления. Бандл несёт статичный `AppIcon.icns`; обе картинки
-  и `.icns` собираются из `icon/*.icon` скриптом `icon/build-icon.sh`.
+  и `.icns` собираются из `shared/icon/*.icon` скриптом `macos/scripts/build-icon.sh`.
 - **Версия — из `Info.plist` бандла** (`Constants.appVersion` сверяет `CFBundleIdentifier`,
   иначе отдаёт `dev`). Релизная сборка не правит отслеживаемые файлы.
 - **Ресурсы — в `Contents/Resources`, доступ через `DesignResources`:** `Bundle.module` смотрит

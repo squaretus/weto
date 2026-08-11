@@ -1,18 +1,21 @@
 # weto
 
-Приложение в менюбаре macOS: завершает процессы выбранных приложений, бинарников и команд,
-как только компьютер перестаёт выходить в сеть через заданный VPN. Swift 5.9, SwiftUI,
-Swift Package Manager, macOS 26+.
+Приложение в менюбаре: завершает процессы выбранных приложений, бинарников и команд,
+как только компьютер перестаёт выходить в сеть через заданный VPN. Две реализации
+одного продукта: macOS (Swift 5.9, SwiftUI, SPM, macOS 26+) и Linux (Rust, GTK4).
+
+Исходники разложены по платформам: `macos/`, `linux/`, а то, что обязано совпадать
+у обеих реализаций, — в `shared/`.
 
 ## Запуск
 
 ```bash
-swift build                    # сборка
-swift test                     # тесты
-swift test --package-path Packages/UpdateKit   # тесты пакета обновления
-swift run WetoMenuBar          # запуск без бандла (без Keychain и уведомлений)
-scripts/make-app.sh release    # .app для локального запуска → .build/app/Weto.app
-scripts/build.sh 0.1.0         # PKG-установщик → .build/release_build/Weto-0.1.0.pkg
+cd macos && swift build                              # сборка
+cd macos && swift test                               # тесты
+swift test --package-path macos/Packages/UpdateKit   # тесты пакета обновления
+swift run --package-path macos WetoMenuBar           # запуск без бандла (без Keychain и уведомлений)
+macos/scripts/make-app.sh release                    # .app → macos/.build/app/Weto.app
+macos/scripts/build.sh 0.1.0                         # PKG → macos/.build/release_build/Weto-0.1.0.pkg
 ```
 
 ## Документация
@@ -27,18 +30,19 @@ scripts/build.sh 0.1.0         # PKG-установщик → .build/release_bui
 - **Инвариант границ:** `WetoCore` не импортирует `Network`, `SystemConfiguration`, `AppKit`,
   `SwiftUI` и не использует `URLSession`. Он держит основную массу тестов синхронной
   и свободной от моков. Нарушение этого инварианта — самая дорогая ошибка в проекте.
-- **Пакет обновления переносится целиком.** `Packages/UpdateKit` не знает ни одной константы
+- **Пакет обновления переносится целиком.** `macos/Packages/UpdateKit` не знает ни одной константы
   weto: репозиторий, пути, имя mach-сервиса и интервалы приходят `UpdateFeedConfiguration`.
-  Весь клей — `Sources/WetoCore/WetoUpdate.swift`, `Sources/WetoShared/WetoUpdateTheme.swift`
-  и `Sources/WetoHelper/main.swift`. Появилось желание написать «weto» внутри пакета —
+  Весь клей — `macos/Sources/WetoCore/WetoUpdate.swift`,
+  `macos/Sources/WetoShared/WetoUpdateTheme.swift` и `macos/Sources/WetoHelper/main.swift`.
+  Появилось желание написать «weto» внутри пакета —
   значение просится в конфигурацию. `UpdateKitCore` держит тот же инвариант, что `WetoCore`,
   а у `UpdateKitXPC` нет зависимостей вообще.
 - Мокаются только границы системы (`GeoProbing`, `ProcessKilling`, `NetworkSnapshotReading`,
   `TargetResolving`, `NetworkEventSourcing`; в пакете — `ReleaseFetching`, `UpdateInstalling`,
   `UpdateStateStoring`, `UpdateClock`, `URLOpening`). Внутренние типы не подменяются.
-- Иконка приложения собирается из `icon/dark.icon` и `icon/light.icon` скриптом
-  `icon/build-icon.sh`; править PNG в `Sources/WetoDesign/Resources` и `Resources/AppIcon.icns`
-  руками нельзя — они генерируются. `NSImage` бандлы `.icon` не читает, поэтому скрипт
+- Иконка приложения собирается из `shared/icon/dark.icon` и `shared/icon/light.icon`
+  скриптом `macos/scripts/build-icon.sh`; править PNG в `macos/Sources/WetoDesign/Resources`
+  и `macos/Resources/AppIcon.icns` руками нельзя — они генерируются. `NSImage` бандлы `.icon` не читает, поэтому скрипт
   собирает картинку из двух файлов бандла: заливки в `icon.json` и слоя `Assets/grid.svg`.
 - Файл с `@main` называется по имени приложения (`WetoMenuBarApp.swift`), не `main.swift`.
 - Старт охраны живёт в `AppDelegate.applicationDidFinishLaunching`, а НЕ в `.task`
