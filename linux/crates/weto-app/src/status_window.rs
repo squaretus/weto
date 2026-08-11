@@ -32,6 +32,11 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
     let panel = ui::panel();
     window.set_child(Some(&panel));
 
+    // Баннер обновления стоит выше статуса и появляется только тогда, когда
+    // политика решила показать находку. Тихий исход прячет и его, и окно.
+    let banner_slot = GtkBox::new(Orientation::Vertical, 0);
+    panel.append(&banner_slot);
+
     // Строка статуса: щит и заголовок обновляются на месте, а не пересобираются,
     // иначе окно дёргалось бы каждые полсекунды.
     let header = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
@@ -88,10 +93,36 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
         });
     }
 
-    let refresh = {
+    let mut refresh = {
         let state = state.clone();
+        let app = app.clone();
+        let banner_slot = banner_slot.clone();
+        let mut shown_version: Option<String> = None;
         move || {
             let snapshot = state.snapshot();
+
+            let pending = crate::update::shared().and_then(|updates| updates.pending());
+            let pending_version = pending.as_ref().map(|info| info.latest_version.clone());
+            if pending_version != shown_version {
+                while let Some(child) = banner_slot.first_child() {
+                    banner_slot.remove(&child);
+                }
+                if let Some(info) = pending.clone() {
+                    let (banner, action) = ui::banner(
+                        ui::BannerTone::News,
+                        &format!("Доступно обновление {}", info.latest_version),
+                        Some("Обновить"),
+                    );
+                    if let Some(button) = action {
+                        let app = app.clone();
+                        button.connect_clicked(move |_| {
+                            crate::update_window::present(&app, &info);
+                        });
+                    }
+                    banner_slot.append(&banner);
+                }
+                shown_version = pending_version;
+            }
 
             if let Some(presentation) = &snapshot.presentation {
                 title.set_text(&presentation.title);

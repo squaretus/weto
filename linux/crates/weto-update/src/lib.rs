@@ -18,4 +18,6 @@ pub mod installer;
 pub mod layout;
 pub mod policy;
 pub mod rollback;
+pub mod scheduler;
+pub mod store;
 pub mod version;

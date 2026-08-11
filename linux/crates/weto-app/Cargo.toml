@@ -16,4 +16,5 @@ weto-config = { path = "../weto-config" }
 weto-guard = { path = "../weto-guard" }
 weto-ui = { path = "../weto-ui" }
 weto-tray = { path = "../weto-tray" }
+weto-update = { path = "../weto-update" }
 gtk4 = { workspace = true }
