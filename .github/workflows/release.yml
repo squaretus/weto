@@ -12,6 +12,12 @@ jobs:
   build-and-release:
     name: Build PKG & Publish Release
     runs-on: macos-26
+    # Исходники macOS живут в macos/. Шаг публикации ниже — исключение:
+    # `files:` у action-gh-release разрешается от корня репозитория,
+    # а не от working-directory.
+    defaults:
+      run:
+        working-directory: macos
     steps:
       - uses: actions/checkout@v4
 
@@ -44,6 +50,6 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: .build/release_build/Weto-${{ steps.version.outputs.VERSION }}.pkg
+          files: macos/.build/release_build/Weto-${{ steps.version.outputs.VERSION }}.pkg
           name: weto ${{ steps.version.outputs.VERSION }}
           generate_release_notes: true

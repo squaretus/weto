@@ -8,8 +8,13 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & Test
+    name: Build & Test (macOS)
     runs-on: macos-26
+    # Исходники macOS живут в macos/; относительные пути внутри скриптов
+    # разрешаются от него же, поэтому сами скрипты правок не потребовали.
+    defaults:
+      run:
+        working-directory: macos
     steps:
       - uses: actions/checkout@v4
       - name: Build
