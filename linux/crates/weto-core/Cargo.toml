@@ -1,0 +1,16 @@
+[package]
+name = "weto-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Инвариант границ: здесь допустимы только serde и thiserror. Ни tokio, ни zbus,
+# ни netlink, ни reqwest, ни gtk4 — иначе основная масса тестов перестанет быть
+# синхронной и свободной от моков. Проверяется core-boundary-contract.sh.
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
