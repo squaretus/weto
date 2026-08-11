@@ -42,14 +42,34 @@ pub enum InstallError {
     Activate(String),
 }
 
-/// Скачиваем только с GitHub: адрес приходит из ответа API, и подставить туда
-/// чужой хост — первое, что сделает подменивший ответ.
-pub fn is_trusted_host(url: &str) -> bool {
-    const TRUSTED: [&str; 2] = [
-        "https://github.com/",
-        "https://objects.githubusercontent.com/",
-    ];
-    TRUSTED.iter().any(|prefix| url.starts_with(prefix))
+/// Хосты доставки релизов GitHub. Список тот же, что в `ReleasePackageURL`
+/// на macOS, и расходиться они не имеют права: `release-assets.githubusercontent.com` —
+/// это то, куда GitHub редиректит скачивание, и без него не работает загрузка вовсе.
+pub const ALLOWED_HOSTS: [&str; 3] = [
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
+/// Проверка адреса, по которому пойдёт загрузка.
+///
+/// Адрес приходит из сети (ответ GitHub API), поэтому подставлять его
+/// в загрузчик без проверки нельзя: подменённый ответ увёл бы установку
+/// на чужой файл. Пускаем только https, только хосты доставки релизов GitHub
+/// и только ожидаемое расширение — как на macOS.
+///
+/// Хост сверяется целиком, а не префиксом строки: `https://github.com@evil.com/`
+/// начинается не с чужого хоста, но ведёт именно на него.
+pub fn is_trusted_url(url: &str, expected_suffix: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, path),
+        None => return false,
+    };
+
+    ALLOWED_HOSTS.contains(&authority) && path.ends_with(expected_suffix)
 }
 
 pub struct Installer {
@@ -82,10 +102,11 @@ impl Installer {
         let Some(public_key) = release_public_key() else {
             return Err(InstallError::NoReleaseKey);
         };
-        for url in [archive_url, signature_url] {
-            if !is_trusted_host(url) {
-                return Err(InstallError::UntrustedHost(url.to_string()));
-            }
+        if !is_trusted_url(archive_url, ".tar.zst") {
+            return Err(InstallError::UntrustedHost(archive_url.to_string()));
+        }
+        if !is_trusted_url(signature_url, ".minisig") {
+            return Err(InstallError::UntrustedHost(signature_url.to_string()));
         }
 
         // Каталог загрузки закрыт от чужих глаз: между скачиванием и проверкой
