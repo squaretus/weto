@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
-use weto_update::installer::{is_trusted_host, InstallError, Installer};
+use weto_update::installer::{is_trusted_url, InstallError, Installer};
 use weto_update::layout::Layout;
 use weto_update::version::Version;
 
@@ -90,18 +90,59 @@ fn make_release(into: &Path, version: &str) -> PathBuf {
 }
 
 #[test]
-fn only_github_is_a_trusted_source() {
-    assert!(is_trusted_host(
-        "https://github.com/squaretus/weto/releases/download/v1.0.0/weto.tar.zst"
+fn only_github_delivery_hosts_are_trusted() {
+    assert!(is_trusted_url(
+        "https://github.com/squaretus/weto/releases/download/v1.0.0/weto.tar.zst",
+        ".tar.zst"
     ));
-    assert!(is_trusted_host(
-        "https://objects.githubusercontent.com/whatever"
+    assert!(is_trusted_url(
+        "https://objects.githubusercontent.com/weto.tar.zst",
+        ".tar.zst"
     ));
-    assert!(!is_trusted_host("https://example.com/weto.tar.zst"));
+    // Сюда GitHub редиректит скачивание релизов. Без него не работает загрузка,
+    // а не только защита — на macOS этот хост в списке с самого начала.
+    assert!(is_trusted_url(
+        "https://release-assets.githubusercontent.com/x/weto.tar.zst",
+        ".tar.zst"
+    ));
+
+    assert!(!is_trusted_url(
+        "https://example.com/weto.tar.zst",
+        ".tar.zst"
+    ));
     assert!(
-        !is_trusted_host("http://github.com/weto.tar.zst"),
+        !is_trusted_url("http://github.com/weto.tar.zst", ".tar.zst"),
         "без TLS адрес подменяется по дороге"
     );
+}
+
+/// Хост сверяется целиком, а не префиксом строки: адрес с userinfo начинается
+/// с доверенного имени, но ведёт на чужой сервер.
+#[test]
+fn a_host_that_only_looks_like_github_is_refused() {
+    assert!(!is_trusted_url(
+        "https://github.com@evil.example/weto.tar.zst",
+        ".tar.zst"
+    ));
+    assert!(!is_trusted_url(
+        "https://github.com.evil.example/weto.tar.zst",
+        ".tar.zst"
+    ));
+    assert!(!is_trusted_url(
+        "https://notgithub.com/weto.tar.zst",
+        ".tar.zst"
+    ));
+}
+
+/// Расширение проверяется, как на macOS: там пускают только `.pkg`.
+/// Иначе тот же доверенный хост отдаст что угодно другое.
+#[test]
+fn a_trusted_host_with_the_wrong_file_is_refused() {
+    assert!(!is_trusted_url(
+        "https://github.com/squaretus/weto/releases/download/v1.0.0/weto.sh",
+        ".tar.zst"
+    ));
+    assert!(!is_trusted_url("https://github.com", ".tar.zst"));
 }
 
 #[test]
