@@ -3,7 +3,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 
-use weto_update::checker::{signature_url, CheckError, ReleaseChecker};
+use weto_update::checker::{CheckError, ReleaseChecker};
 use weto_update::version::Version;
 
 fn serve(body: &'static str) -> String {
@@ -112,12 +112,4 @@ fn a_tag_that_is_not_a_version_is_refused() {
         checker(WEIRD).latest(&Version::parse("1.0.0").unwrap()),
         Err(CheckError::Parse(_))
     ));
-}
-
-#[test]
-fn the_signature_lies_next_to_the_archive() {
-    assert_eq!(
-        signature_url("https://github.com/x/weto-1.0.0-x86_64-linux.tar.zst"),
-        "https://github.com/x/weto-1.0.0-x86_64-linux.tar.zst.minisig"
-    );
 }

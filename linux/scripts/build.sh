@@ -24,17 +24,6 @@ echo "=== weto $VERSION ($ARCH) ==="
 rm -rf "$OUT"
 mkdir -p "$STAGE/bin" "$STAGE/share"
 
-# Публичный ключ релиза вшивается в бинарник: файл рядом подменяется вместе
-# с архивом, и проверка стала бы проверкой архива самим собой. Без ключа сборка
-# собирается, но обновляться отказывается — так честнее, чем ставить непроверенное.
-KEY_PATH="../shared/keys/weto-release.pub"
-if [ -f "$KEY_PATH" ]; then
-    export WETO_RELEASE_PUBLIC_KEY="$(cat "$KEY_PATH")"
-    echo "ключ проверки обновлений вшит"
-else
-    echo "ключа $KEY_PATH нет — сборка не сможет обновляться"
-fi
-
 WETO_VERSION="$VERSION" cargo build --release -p weto-app
 
 cp target/release/weto "$STAGE/bin/weto"
@@ -56,14 +45,3 @@ cp ../shared/icon/dark.icon/Assets/grid.svg "$STAGE/share/weto.svg"
 tar --zstd -cf "$ARCHIVE" -C "$OUT" "weto-$VERSION"
 echo "архив: $ARCHIVE"
 
-# Подпись ставится только при наличии ключа: локальная сборка не обязана
-# его иметь, а падать из-за этого ей незачем.
-if [ -n "${MINISIGN_SECRET_KEY:-}" ]; then
-    KEY_FILE="$(mktemp)"
-    trap 'rm -f "$KEY_FILE"' EXIT
-    printf '%s' "$MINISIGN_SECRET_KEY" > "$KEY_FILE"
-    printf '%s\n' "${MINISIGN_PASSWORD:-}" | minisign -S -s "$KEY_FILE" -m "$ARCHIVE"
-    echo "подпись: $ARCHIVE.minisig"
-else
-    echo "ключа подписи нет — архив не подписан (для локальной сборки это норма)"
-fi

@@ -95,8 +95,3 @@ impl ReleaseChecker {
         })
     }
 }
-
-/// Подпись лежит рядом с архивом под тем же именем.
-pub fn signature_url(archive_url: &str) -> String {
-    format!("{archive_url}.minisig")
-}
