@@ -11,6 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         zstd \
         iproute2 \
+        # GTK не поднимается без дисплея, а тесты обязаны идти без монитора.
+        xvfb \
+        xauth \
+        # Трей и уведомления живут на шине; для тестов нужна сессионная.
+        dbus-x11 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup component add clippy rustfmt

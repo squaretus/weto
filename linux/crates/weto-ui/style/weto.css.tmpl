@@ -1,0 +1,291 @@
+/* Дизайн-система weto на GTK4.
+ *
+ * libadwaita не используется намеренно: он отвергает кастомные темы, а канон
+ * прямо требует явного выбора темы без следования системной. Голый GTK4
+ * красится своим провайдером на приоритете APPLICATION, и это ровно та модель,
+ * в которой дизайн-система и задумана.
+ *
+ * Значения сюда не пишутся: на их месте стоят подстановки в двойных фигурных
+ * скобках, которые
+ * заполняет shared/tools/gen-tokens из shared/tokens/design-tokens.json —
+ * по файлу на тему.
+ *
+ * Почему подстановка, а не CSS-переменные: var() появился в GTK 4.16, а пол
+ * проекта — 4.14 (Ubuntu 24.04 LTS). На целевой системе переменные молча
+ * не сработали бы, и приложение осталось бы в дефолтных цветах GTK.
+ */
+
+/* Базовый шрифт системный: переносить веб-шрифт мокапа в пакет не стали,
+   чтобы не терять покрытие кириллицы. */
+.weto-root {
+    font-family: sans-serif;
+    color: {{ink}};
+    background-color: {{shell}};
+}
+
+/* --- Панель ------------------------------------------------------------- */
+
+.weto-panel {
+    background-color: {{shell}};
+    border: 1px solid {{line}};
+    border-radius: {{radiusPanel}};
+    padding: {{space4}};
+}
+
+/* --- Карточка ----------------------------------------------------------- */
+
+.weto-card {
+    background-color: {{card}};
+    border: 1px solid {{line}};
+    border-radius: {{radiusCard}};
+    padding: {{space4}};
+}
+
+/* Капс обязателен: карточка без заголовка в каноне не используется. */
+.weto-caps {
+    font-size: {{fontCardCapSize}};
+    font-weight: {{fontCardCapWeight}};
+    letter-spacing: {{fontCardCapTracking}};
+    color: {{faint}};
+    padding-bottom: {{space3}};
+}
+
+/* --- Строка ------------------------------------------------------------- */
+
+.weto-row {
+    padding-top: {{space2}};
+    padding-bottom: {{space2}};
+}
+
+/* Первая строка карточки идёт без линии сверху. */
+.weto-row.divided {
+    border-top: 1px solid {{line}};
+}
+
+.weto-label {
+    font-size: {{fontLabelSize}};
+    font-weight: {{fontLabelWeight}};
+    color: {{ink}};
+}
+
+.weto-value {
+    font-size: {{fontValueSize}};
+    font-weight: {{fontValueWeight}};
+    color: {{dim}};
+}
+
+.weto-caption {
+    font-size: {{fontCaptionSize}};
+    color: {{faint}};
+}
+
+/* --- Строка данных ------------------------------------------------------ */
+
+.weto-data-key {
+    font-size: {{fontDataSize}};
+    color: {{faint}};
+    font-feature-settings: "tnum";
+}
+
+.weto-data-value {
+    font-size: {{fontDataSize}};
+    color: {{dim}};
+    font-feature-settings: "tnum";
+}
+
+/* --- Сегменты ----------------------------------------------------------- */
+
+.weto-segments {
+    background-color: {{sunk}};
+    border: 1px solid {{sunkLine}};
+    border-radius: {{radiusControl}};
+    padding: {{space1}};
+}
+
+.weto-segments button {
+    font-size: {{fontSegmentSize}};
+    font-weight: {{fontSegmentWeight}};
+    color: {{dim}};
+    background: none;
+    border: none;
+    box-shadow: none;
+    border-radius: {{radiusTile}};
+    padding: 4px 12px;
+    min-height: 0;
+}
+
+.weto-segments button:checked {
+    background-color: {{violet}};
+    color: #ffffff;
+}
+
+/* --- Кнопки ------------------------------------------------------------- */
+
+.weto-primary,
+.weto-muted,
+.weto-destructive {
+    font-size: {{fontButtonSize}};
+    font-weight: {{fontButtonWeight}};
+    border-radius: {{radiusPill}};
+    padding: 8px 15px;
+    min-height: 0;
+    box-shadow: none;
+}
+
+.weto-primary {
+    background-color: {{violet}};
+    color: #ffffff;
+    border: none;
+}
+
+.weto-muted {
+    background-color: {{sunk}};
+    border: 1px solid {{line}};
+    color: {{ink}};
+}
+
+.weto-destructive {
+    background-color: alpha({{red}}, 0.16);
+    color: {{red}};
+    border: none;
+}
+
+/* Нажатие — только непрозрачность заливки: геометрия не сдвигается. */
+.weto-primary:active,
+.weto-muted:active,
+.weto-destructive:active {
+    opacity: 0.82;
+}
+
+.weto-primary:focus-visible,
+.weto-muted:focus-visible,
+.weto-destructive:focus-visible,
+.weto-icon-button:focus-visible {
+    outline: 2px solid {{violet}};
+    outline-offset: 1px;
+}
+
+.weto-icon-button {
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: {{faint}};
+    padding: 2px;
+    min-height: 0;
+    min-width: 0;
+}
+
+.weto-tile-button {
+    background-color: {{violet}};
+    color: #ffffff;
+    border: none;
+    border-radius: {{radiusTile}};
+    min-width: 30px;
+    min-height: 30px;
+    padding: 0;
+}
+
+/* --- Поле ввода --------------------------------------------------------- */
+
+.weto-entry {
+    background-color: {{sunk}};
+    border: 1px solid {{sunkLine}};
+    border-radius: {{radiusPill}};
+    padding: 8px 11px;
+    font-size: {{fontValueSize}};
+    color: {{ink}};
+    min-height: 0;
+    box-shadow: none;
+}
+
+.weto-entry > text > placeholder {
+    color: {{faint}};
+}
+
+/* --- Тумблер ------------------------------------------------------------ */
+
+.weto-switch {
+    min-width: 38px;
+    min-height: 22px;
+    border-radius: {{radiusControl}};
+}
+
+.weto-switch:checked {
+    background-color: {{violet}};
+}
+
+/* --- Щит статуса -------------------------------------------------------- */
+
+/* Единственный элемент, меняющий цвет вместе со статусом. Рядом с ним
+   в каноне обязателен текст того же цвета — цвет не носит смысл в одиночку. */
+.weto-shield {
+    min-width: 32px;
+    min-height: 32px;
+    border-radius: 11px;
+    color: #ffffff;
+}
+
+.weto-shield.guarded { background-color: {{green}}; }
+.weto-shield.pending { background-color: {{amber}}; }
+.weto-shield.killed  { background-color: {{red}}; }
+.weto-shield.disabled { background-color: {{faint}}; }
+
+.weto-status-title {
+    font-size: {{fontStatusSize}};
+    font-weight: {{fontStatusWeight}};
+}
+
+.weto-status-title.guarded { color: {{green}}; }
+.weto-status-title.pending { color: {{amber}}; }
+.weto-status-title.killed  { color: {{red}}; }
+.weto-status-title.disabled { color: {{faint}}; }
+
+/* --- Пилюля процесса ---------------------------------------------------- */
+
+.weto-pill {
+    background-color: {{sunk}};
+    border: 1px solid {{sunkLine}};
+    border-radius: {{radiusCard}};
+    padding-left: 6px;
+    padding-right: 12px;
+    padding-top: {{space2}};
+    padding-bottom: {{space2}};
+}
+
+.weto-pill-extra {
+    font-size: {{fontCaptionSize}};
+    color: {{faint}};
+    font-feature-settings: "tnum";
+}
+
+/* --- Запись журнала ----------------------------------------------------- */
+
+.weto-journal-diagnostics {
+    font-size: {{fontDiagnosticsSize}};
+    color: {{faint}};
+    font-feature-settings: "tnum";
+}
+
+/* --- Баннер ------------------------------------------------------------- */
+
+/* Не спорит с карточками: тот же фон и рамка, отличается иконкой и высотой. */
+.weto-banner {
+    background-color: {{card}};
+    border: 1px solid {{line}};
+    border-radius: {{radiusTile}};
+    padding: {{space2}} {{space3}};
+}
+
+.weto-banner-icon.news { color: {{violet}}; }
+.weto-banner-icon.warning { color: {{amber}}; }
+
+/* --- Кнопка закрытия окна ----------------------------------------------- */
+
+.weto-close-button {
+    background-color: {{close}};
+    border: none;
+    border-radius: 6px;
+    min-width: 12px;
+    min-height: 12px;
+    padding: 0;
+}

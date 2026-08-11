@@ -1,0 +1,12 @@
+[package]
+name = "weto-ui"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+weto-core = { path = "../weto-core" }
+# libadwaita не подключается намеренно: он отвергает кастомные темы, а канон
+# требует явного выбора темы без следования системной.
+gtk4 = { workspace = true }
