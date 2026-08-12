@@ -84,3 +84,85 @@ fn the_two_themes_actually_differ() {
     assert_eq!(weto_ui::theme::css_for(Theme::Dark), DARK_CSS);
     assert_eq!(weto_ui::theme::css_for(Theme::Light), LIGHT_CSS);
 }
+
+/// Контролы, которым мы задаём заливку, обязаны гасить градиент штатной темы.
+///
+/// Breeze и Adwaita красят кнопку через `background-image`, и он ложится поверх
+/// нашего `background-color`: без сброса кнопка остаётся светлой, а светлый текст
+/// на ней исчезает. Ровно этот дефект и был виден на KDE — «Добавить» читалась
+/// белым по белому.
+#[test]
+fn painted_controls_switch_off_the_theme_gradient() {
+    // Только то, что GTK рисует как контрол. Карточкам и панелям градиент
+    // штатная тема не назначает, и требовать от них сброса было бы шумом.
+    const CONTROLS: [&str; 5] = [
+        ".weto-primary",
+        ".weto-tile-button",
+        ".weto-close-button",
+        ".weto-entry",
+        ".weto-segments button:checked",
+    ];
+
+    for (theme, css) in [("тёмная", DARK_CSS), ("светлая", LIGHT_CSS)] {
+        for selector in CONTROLS {
+            let own = block_for(css, selector)
+                .unwrap_or_else(|| panic!("в {theme} теме нет правила {selector}"));
+
+            // Состояние наследует заливку базового правила: у `:checked`
+            // своей картинки нет, её гасит `.weto-segments button`.
+            let base = selector
+                .split_once(':')
+                .and_then(|(base, _)| block_for(css, base))
+                .unwrap_or_default();
+            let block = format!("{own}\n{base}");
+
+            // Сокращённая запись `background: none` гасит картинку тоже.
+            let painted = block.contains("background-color");
+            let reset =
+                block.contains("background-image: none") || block.contains("background: none");
+
+            assert!(
+                !painted || reset,
+                "{selector} в {theme} теме задаёт заливку, но не гасит градиент темы"
+            );
+        }
+    }
+}
+
+/// Тело правила вместе с телами правил, где селектор перечислен через запятую.
+fn block_for(css: &str, selector: &str) -> Option<String> {
+    let css = strip_comments(css);
+    let mut found = None;
+    for chunk in css.split('}') {
+        let Some((head, body)) = chunk.split_once('{') else {
+            continue;
+        };
+        let listed = head
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == selector);
+        if listed {
+            found = Some(match found {
+                Some(previous) => format!("{previous}\n{body}"),
+                None => body.to_string(),
+            });
+        }
+    }
+    found
+}
+
+/// Комментарии убираются до разбора: иначе комментарий перед правилом
+/// приклеивается к первому селектору и правило перестаёт находиться.
+fn strip_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("*/") {
+            Some(end) => rest = &rest[start + end + 2..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}

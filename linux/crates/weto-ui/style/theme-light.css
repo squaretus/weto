@@ -327,6 +327,7 @@
 
 .weto-close-button {
     background-color: rgb(255, 95, 86);
+    background-image: none;
     border: none;
     border-radius: 6px;
     min-width: 12px;
