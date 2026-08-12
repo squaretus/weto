@@ -9,6 +9,7 @@ mod settings_window;
 mod state;
 mod status_window;
 mod tray;
+mod uninstall;
 mod update;
 mod update_window;
 

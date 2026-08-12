@@ -40,6 +40,27 @@ wrong interface and the guard would kill targets while the VPN is perfectly heal
 is sent) and reads back the local address the kernel picked, then maps it to an interface.
 Verified against `ip route get` in `policy-routing-contract.sh`.
 
+## The UI is a port, not a redesign
+
+Both windows mirror their macOS counterparts element for element, and the list below is
+the whole of what the Linux side is allowed to differ in:
+
+| macOS | Linux | Why |
+|---|---|---|
+| popup anchored to the menu bar icon | ordinary window | SNI reports no coordinates; Wayland forbids self-positioning |
+| target hint mentions bundles | hint mentions command and path only | `appBundle` does not exist here |
+| `NSAlert` for destructive confirmations | `Gtk.AlertDialog` | each platform asks its own dialog |
+| — | tray context menu (check / settings / quit) | SNI needs one; the popup carries the same actions |
+
+Everything else matches: the settings window is the same five cards in the same order
+(`Цели`, `Сеть и гео`, `Чёрный список`, `Внешний вид`, `Обслуживание`) plus the same
+footer (github link, version, update tile), and the status popup is shield + title +
+two icon buttons, then the geo readout, the update banner, and live targets.
+
+**There is no guard on/off switch, and that is deliberate.** `is_enabled` exists in the
+settings model on both platforms and is exposed by neither. The same goes for a
+"notify on kill" switch: macOS has no such setting, so notifications always fire.
+
 ## Contracts that differ from macOS
 
 Everything the policy decides is shared. What the system dictates is not:

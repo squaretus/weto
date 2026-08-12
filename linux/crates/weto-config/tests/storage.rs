@@ -191,3 +191,61 @@ fn paths_follow_xdg_layout_under_a_given_home() {
         std::path::Path::new("/дом/.cache/weto/flags-circle")
     );
 }
+
+/// Разбор записи чёрного списка живёт в настройках, а не в окне: мусор
+/// не должен молча попадать в файл и висеть там как «не разобран».
+#[test]
+fn a_blacklist_entry_is_parsed_before_it_is_stored() {
+    let mut settings = Settings::default();
+
+    assert!(settings.add_blocked_entry("ru").is_ok());
+    assert!(settings.add_blocked_entry("185.228.113.231").is_ok());
+    assert!(settings.add_blocked_entry("10.0.0.0/8").is_ok());
+
+    // Код страны приводится к верхнему регистру: политика сравнивает именно так.
+    assert_eq!(settings.blocked_countries, ["RU"]);
+    assert_eq!(settings.blocked_ip_ranges.len(), 2);
+    assert_eq!(settings.blocked_entries().len(), 3);
+
+    assert_eq!(
+        settings.add_blocked_entry("не адрес"),
+        Err(weto_config::settings::BlacklistEntryError::InvalidEntry)
+    );
+    assert_eq!(
+        settings.add_blocked_entry("  "),
+        Err(weto_config::settings::BlacklistEntryError::Empty)
+    );
+    assert_eq!(
+        settings.add_blocked_entry("RU"),
+        Err(weto_config::settings::BlacklistEntryError::Duplicate)
+    );
+}
+
+#[test]
+fn removing_a_blacklist_entry_does_not_care_which_list_it_came_from() {
+    let mut settings = Settings::default();
+    settings.add_blocked_entry("RU").unwrap();
+    settings.add_blocked_entry("10.0.0.0/8").unwrap();
+
+    settings.remove_blocked_entry("RU");
+    settings.remove_blocked_entry("10.0.0.0/8");
+
+    assert!(settings.blocked_entries().is_empty());
+}
+
+/// Испорченный интервал в файле — правка руками. Охрана берёт умолчание,
+/// а не крутится вхолостую и не засыпает навсегда.
+#[test]
+fn a_broken_poll_interval_falls_back_to_the_default() {
+    let mut settings = Settings::default();
+    assert_eq!(settings.poll_interval().as_secs(), 5);
+
+    settings.poll_interval_seconds = 0.0;
+    assert_eq!(settings.poll_interval().as_secs(), 5);
+
+    settings.poll_interval_seconds = -1.0;
+    assert_eq!(settings.poll_interval().as_secs(), 5);
+
+    settings.poll_interval_seconds = 15.0;
+    assert_eq!(settings.poll_interval().as_secs(), 15);
+}

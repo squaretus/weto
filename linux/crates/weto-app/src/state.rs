@@ -16,7 +16,8 @@ use std::time::Duration;
 use weto_config::journal::{Journal, KillEvent, KillEventKind};
 use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
-use weto_core::policy::GuardDecision;
+use weto_core::policy::{GuardDecision, UnsafeReason};
+use weto_core::presentation::GuardState;
 use weto_core::process::MatchedProcess;
 use weto_guard::controller::{GuardController, GuardSnapshot, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
@@ -29,9 +30,8 @@ use weto_sys::process_registry::ProcRegistry;
 use weto_sys::secret_store::FileSecretStore;
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
-/// Когда всё сошлось — 5 секунд.
+/// Шаг штатного тика задаётся в настройках, как на macOS.
 const TICK_UNSAFE: Duration = Duration::from_millis(250);
-const TICK_SAFE: Duration = Duration::from_secs(5);
 
 /// Настройки читаются из файла при каждом обращении охраны — так правка
 /// из окна настроек применяется к следующему же тику без всякой рассылки.
@@ -84,7 +84,6 @@ struct JournalWriter {
     journal: Mutex<Journal>,
     last_reason: Mutex<Option<String>>,
     notifier: Box<dyn KillNotifying>,
-    notify: Arc<AtomicBool>,
 }
 
 impl KillReporting for JournalWriter {
@@ -117,9 +116,8 @@ impl KillReporting for JournalWriter {
             killed_pids: killed.iter().map(|k| k.pid).collect(),
         };
 
-        if self.notify.load(Ordering::Relaxed) {
-            self.notifier.notify(&names, reason);
-        }
+        // Уведомление уходит всегда: настройки «уведомлять или нет» нет и на macOS.
+        self.notifier.notify(&names, reason);
 
         let mut journal = self.journal.lock().expect("журнал");
         journal.append(event);
@@ -134,13 +132,14 @@ pub struct AppState {
     pub settings: Arc<SharedSettings>,
     controller: Arc<GuardController>,
     journal: Arc<Mutex<Journal>>,
-    notify: Arc<AtomicBool>,
+    /// Проба в полёте. На месте кнопки проверки крутится индикатор, а повторное
+    /// нажатие запроса не порождает: у подтверждающего сервиса лимит.
+    probing: Arc<AtomicBool>,
 }
 
 impl AppState {
     pub fn new(paths: Paths) -> Arc<AppState> {
         let settings = SharedSettings::load(&paths);
-        let notify = Arc::new(AtomicBool::new(settings.current().notify_on_kill));
         let journal = Arc::new(Mutex::new(Journal::load(&paths.journal_file())));
 
         let writer = JournalWriter {
@@ -148,7 +147,6 @@ impl AppState {
             journal: Mutex::new(Journal::load(&paths.journal_file())),
             last_reason: Mutex::new(None),
             notifier: Box::new(PortalNotifier::new()),
-            notify: notify.clone(),
         };
 
         let controller = Arc::new(GuardController::new(
@@ -168,7 +166,7 @@ impl AppState {
             settings,
             controller,
             journal,
-            notify,
+            probing: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -180,6 +178,16 @@ impl AppState {
         self.journal.lock().expect("журнал").clone()
     }
 
+    /// Очистка журнала — и в памяти, и на диске: иначе записи вернулись бы
+    /// при следующем чтении файла.
+    pub fn clear_journal(&self) {
+        let mut journal = self.journal.lock().expect("журнал");
+        journal.clear();
+        if let Err(error) = journal.save(&self.paths.journal_file()) {
+            eprintln!("weto: журнал не очистился: {error}");
+        }
+    }
+
     pub fn reload_journal(&self) {
         let fresh = Journal::load(&self.paths.journal_file());
         *self.journal.lock().expect("журнал") = fresh;
@@ -189,16 +197,38 @@ impl AppState {
         self.settings.current().theme
     }
 
-    pub fn set_notify(&self, enabled: bool) {
-        self.notify.store(enabled, Ordering::Relaxed);
+    pub fn is_probing(&self) -> bool {
+        self.probing.load(Ordering::Relaxed)
+    }
+
+    /// Состояние охраны в терминах экрана. Собирается из настроек и снимка:
+    /// вердикта может ещё не быть, и до первой пробы это `verificationPending` —
+    /// то же fail-closed, что применяется к целям.
+    pub fn guard_state(&self) -> GuardState {
+        let settings = self.settings.current();
+        GuardState {
+            is_enabled: settings.is_enabled,
+            has_targets: !settings.targets.is_empty(),
+            decision: self
+                .snapshot()
+                .decision
+                .unwrap_or(GuardDecision::Kill(UnsafeReason::VerificationPending)),
+            country: None,
+        }
     }
 
     /// Проверка по кнопке уходит на рабочий поток: HTTP блокирующий,
-    /// а главный поток занят отрисовкой.
+    /// а главный поток занят отрисовкой. Повторное нажатие в полёте запроса
+    /// не порождает — у подтверждающего сервиса лимит.
     pub fn probe_now(&self) {
+        if self.probing.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let controller = self.controller.clone();
+        let probing = self.probing.clone();
         std::thread::spawn(move || {
             controller.probe_now();
+            probing.store(false, Ordering::SeqCst);
         });
     }
 
@@ -209,14 +239,17 @@ impl AppState {
     /// Здесь та же ловушка ждала бы с окном, которое может не открыться никогда.
     pub fn start_guard(self: &Arc<Self>) {
         let controller = self.controller.clone();
+        let settings = self.settings.clone();
         std::thread::Builder::new()
             .name("weto-guard".to_string())
             .spawn(move || {
                 let events = NetlinkEventSource.subscribe();
                 loop {
                     let decision = controller.tick();
+                    // Шаг штатного тика перечитывается каждый раз: правка
+                    // в настройках применяется со следующего же круга.
                     let interval = match decision {
-                        GuardDecision::Safe => TICK_SAFE,
+                        GuardDecision::Safe => settings.current().poll_interval(),
                         GuardDecision::Kill(_) => TICK_UNSAFE,
                     };
                     // Событие сети прерывает ожидание: реакция на падение

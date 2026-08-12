@@ -113,6 +113,38 @@ pub fn icon_button(icon_name: &str) -> Button {
     button
 }
 
+/// Плитка с иконкой: заливка акцентом, размер 30×30. В каноне ею оканчивается
+/// подвал настроек.
+pub fn tile_button(icon_name: &str) -> Button {
+    let button = Button::from_icon_name(icon_name);
+    button.add_css_class("weto-tile-button");
+    button
+}
+
+/// Ссылка в подвале. Кнопка, а не Label: щёлкать по ней нужно, а `LinkButton`
+/// тянет собственное оформление, которое каноном не предусмотрено.
+pub fn link_button(text: &str) -> Button {
+    let button = Button::with_label(text);
+    button.add_css_class("weto-link");
+    button
+}
+
+/// Отдельная линия между блоками панели.
+pub fn divider() -> GtkBox {
+    let line = GtkBox::new(Orientation::Horizontal, 0);
+    line.add_css_class("weto-divider");
+    line.set_size_request(-1, 1);
+    line
+}
+
+/// Распорка, которая съедает свободное место: строка «подпись слева, контрол
+/// справа» в каноне встречается всюду.
+pub fn spacer() -> GtkBox {
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    spacer
+}
+
 pub fn entry(prompt: &str) -> Entry {
     let entry = Entry::new();
     entry.add_css_class("weto-entry");

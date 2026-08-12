@@ -74,6 +74,107 @@ impl UnsafeReason {
     }
 }
 
+/// Строка показаний: ключ слева, значение справа.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusLine {
+    pub key: String,
+    pub value: String,
+}
+
+pub const UNKNOWN_IP: &str = "неизвестен";
+pub const MISSING_VALUE: &str = "—";
+pub const CONFIRMATION_LABEL: &str = "подтверждение";
+
+/// Показания по отчёту последней пробы: кто ответил, кто молчит и была ли сеть.
+/// Без этого отказ ipinfo выглядел на экране пустыми прочерками.
+///
+/// Время приходит готовой строкой: перевод в местное требует базы часовых поясов,
+/// а ядру запрещено ходить в систему.
+pub fn status_lines(report: &crate::geo::GeoProbeReport, checked_at: &str) -> Vec<StatusLine> {
+    let mut lines = Vec::new();
+
+    // Адрес есть только когда ipinfo ответил: показывать «неизвестен» рядом
+    // с текстом отказа значило бы повторять одно и то же дважды.
+    if let Some(ip) = &report.ip {
+        lines.push(StatusLine {
+            key: "IP".to_string(),
+            value: ip.clone(),
+        });
+    }
+
+    lines.push(StatusLine {
+        key: "ipinfo".to_string(),
+        value: outcome_text(&report.ipinfo),
+    });
+    lines.push(StatusLine {
+        key: report
+            .confirm_source
+            .map(|source| source.name().to_string())
+            .unwrap_or_else(|| CONFIRMATION_LABEL.to_string()),
+        value: outcome_text(&report.confirmation),
+    });
+
+    // Про сеть строка нужна лишь когда что-то не сложилось: это ответ
+    // на «мой VPN виноват или сервис?».
+    if !report.is_fully_answered() {
+        lines.push(StatusLine {
+            key: "сеть".to_string(),
+            value: if report.has_network_path { "есть" } else { "нет" }.to_string(),
+        });
+    }
+
+    lines.push(StatusLine {
+        key: "Проверено".to_string(),
+        value: checked_at.to_string(),
+    });
+    lines
+}
+
+/// Пробы ещё не было — холодный старт или VPN не поднят.
+pub fn status_lines_without_report() -> Vec<StatusLine> {
+    vec![
+        StatusLine {
+            key: "IP".to_string(),
+            value: UNKNOWN_IP.to_string(),
+        },
+        StatusLine {
+            key: "ipinfo".to_string(),
+            value: MISSING_VALUE.to_string(),
+        },
+        StatusLine {
+            key: CONFIRMATION_LABEL.to_string(),
+            value: MISSING_VALUE.to_string(),
+        },
+    ]
+}
+
+fn outcome_text(outcome: &crate::geo::SourceOutcome) -> String {
+    match outcome {
+        crate::geo::SourceOutcome::Answered(value) => value.clone(),
+        crate::geo::SourceOutcome::Failed(failure) => failure.display_text(),
+        crate::geo::SourceOutcome::NotRequested => "не запрашивалось".to_string(),
+    }
+}
+
+/// Что написать, когда целей на машине не запущено. Совет про VPN — часть
+/// смысла, а не оформления, поэтому решение живёт здесь и проверяется тестом.
+/// Порт `IdleTargetsNotice` с macOS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleTargetsNotice {
+    pub text: String,
+    /// Появляется только тогда, когда это правда: после срабатывания охраны
+    /// цели молчат не потому, что всё хорошо, а потому что VPN уже упал.
+    pub hint: Option<String>,
+}
+
+pub fn idle_targets(state: &GuardState) -> IdleTargetsNotice {
+    let is_safe = state.is_enabled && state.has_targets && state.decision == GuardDecision::Safe;
+    IdleTargetsNotice {
+        text: "Цели не запущены".to_string(),
+        hint: is_safe.then(|| "— VPN можно выключать".to_string()),
+    }
+}
+
 /// Состояние охраны в терминах, которые нужны экрану.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuardState {
@@ -188,6 +289,75 @@ mod tests {
         assert_eq!(disabled.title, "Охрана выключена");
         assert_eq!(targetless.title, "Целей нет");
         assert_eq!(disabled.shield, ShieldState::Disabled);
+    }
+
+    /// Подпись строки — имя сервиса, который реально ответил: подтверждающих
+    /// два, и показывать чужое имя было бы ложью.
+    #[test]
+    fn the_confirming_service_is_named_by_its_own_name() {
+        let report = crate::geo::GeoProbeReport {
+            ip: Some("1.2.3.4".into()),
+            ipinfo: crate::geo::SourceOutcome::Answered("NL".into()),
+            confirmation: crate::geo::SourceOutcome::Answered("NL".into()),
+            confirm_source: Some(crate::geo::ConfirmSource::Geojs),
+            has_network_path: true,
+            checked_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        let lines = status_lines(&report, "12:00:00");
+        let keys: Vec<&str> = lines.iter().map(|l| l.key.as_str()).collect();
+
+        assert_eq!(keys, ["IP", "ipinfo", "geojs", "Проверено"]);
+        assert_eq!(lines[3].value, "12:00:00");
+    }
+
+    /// Отказ ipinfo не должен выглядеть пустыми прочерками: адреса нет вовсе,
+    /// причина названа словами, и появляется строка про сеть — это ответ
+    /// на «мой VPN виноват или сервис?».
+    #[test]
+    fn a_failed_probe_names_the_reason_and_reports_the_network() {
+        let report = crate::geo::GeoProbeReport {
+            ip: None,
+            ipinfo: crate::geo::SourceOutcome::Failed(crate::geo::GeoFailure::RateLimited(429)),
+            confirmation: crate::geo::SourceOutcome::NotRequested,
+            confirm_source: None,
+            has_network_path: false,
+            checked_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        let lines = status_lines(&report, "12:00:00");
+        let keys: Vec<&str> = lines.iter().map(|l| l.key.as_str()).collect();
+
+        assert_eq!(keys, ["ipinfo", "подтверждение", "сеть", "Проверено"]);
+        assert!(lines[0].value.contains("лимит запросов"));
+        assert_eq!(lines[1].value, "не запрашивалось");
+        assert_eq!(lines[2].value, "нет");
+    }
+
+    #[test]
+    fn without_a_probe_the_address_is_unknown_not_blank() {
+        let lines = status_lines_without_report();
+        assert_eq!(lines[0].value, "неизвестен");
+        assert_eq!(lines[1].value, "—");
+    }
+
+    /// Совет «VPN можно выключать» — правда только пока охрана на страже.
+    /// После срабатывания цели молчат именно потому, что VPN уже упал,
+    /// и тот же совет там был бы обманом.
+    #[test]
+    fn the_vpn_hint_appears_only_while_on_guard() {
+        let guarded = idle_targets(&state(GuardDecision::Safe));
+        let killed = idle_targets(&state(GuardDecision::Kill(UnsafeReason::VpnDown)));
+        let off = idle_targets(&GuardState {
+            is_enabled: false,
+            ..state(GuardDecision::Safe)
+        });
+
+        assert_eq!(guarded.hint.as_deref(), Some("— VPN можно выключать"));
+        assert_eq!(killed.hint, None);
+        assert_eq!(off.hint, None);
+        assert_eq!(guarded.text, "Цели не запущены");
+        assert_eq!(killed.text, guarded.text);
     }
 
     #[test]
