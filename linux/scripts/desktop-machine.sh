@@ -17,6 +17,7 @@ set -euo pipefail
 DISTRO="${1:-ubuntu:noble}"
 MACHINE="${2:-weto-desktop}"
 ARCH="${WETO_MACHINE_ARCH:-amd64}"
+VNC_PORT="${WETO_VNC_PORT:-5901}"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
 say() { printf '\n=== %s ===\n' "$1"; }
@@ -73,33 +74,49 @@ user_run "set -e
     bash \$STAGE/install.sh"
 
 say "настраиваю VNC"
+# Пароля нет намеренно: в tigervnc из Ubuntu 24.04 утилиты vncpasswd просто нет
+# (проверено — в пакетах её не поставляют), а сервер слушает только localhost
+# машины и достижим исключительно через ssh-туннель. Пароль поверх туннеля
+# добавил бы шаг, но не защиту.
 user_run 'mkdir -p ~/.vnc
-    if [ ! -f ~/.vnc/passwd ]; then
-        printf "weto\nweto\n\n" | vncpasswd > /dev/null 2>&1 || \
-            printf "weto" | vncpasswd -f > ~/.vnc/passwd
-        chmod 600 ~/.vnc/passwd
-    fi
     cat > ~/.vnc/xstartup <<"XSTART"
 #!/bin/sh
 unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
 exec dbus-launch --exit-with-session startplasma-x11
 XSTART
     chmod +x ~/.vnc/xstartup
-    vncserver -kill :1 >/dev/null 2>&1 || true
-    vncserver :1 -geometry 1600x1000 -depth 24 -localhost no >/dev/null 2>&1'
+    vncserver -kill :1 >/dev/null 2>&1 || true'
+
+# Отдельным вызовом и с паузой: прежняя сессия завершается не мгновенно,
+# и запуск в той же команде натыкается на ещё живой дисплей — сервер тогда
+# поднимается и тут же выходит.
+sleep 2
+user_run "vncserver :1 -geometry ${WETO_VNC_GEOMETRY:-1600x1000} -depth 24 \
+              -localhost yes -SecurityTypes None >/dev/null 2>&1"
+
+say "поднимаю ssh-туннель"
+# Порты машин OrbStack с Mac напрямую недоступны: не отвечает ни имя, ни адрес,
+# ни ICMP — при пустых правилах фильтрации внутри машины. Единственный путь
+# внутрь — ssh, и он же снимает вопрос о пароле.
+pkill -f "$VNC_PORT:127.0.0.1:5901" 2>/dev/null || true
+sleep 1
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+    -f -N -L "$VNC_PORT:127.0.0.1:5901" "$MACHINE@orb" >/dev/null 2>&1
 
 say "готово"
 cat <<EOF
-Подключение с Mac:
+Подключение с Mac (туннель уже поднят):
 
-    open vnc://$MACHINE.orb.local:5901
+    open vnc://127.0.0.1:$VNC_PORT
 
-Пароль: weto
+Пароля нет: сервер слушает только localhost машины, снаружи туда хода нет.
+
+Если туннель отвалился:
+    ssh -f -N -L $VNC_PORT:127.0.0.1:5901 $MACHINE@orb
 
 Внутри машины:
-    orb -m $MACHINE                 # шелл
-    weto                            # запустить приложение
-    orb -m $MACHINE -u root bash    # root для туннеля
+    orb -m $MACHINE                 # шелл, weto уже в PATH
+    orb -m $MACHINE -u root bash    # root для туннеля wg0
 
 Сценарий проверки — linux/docs/desktop-testing.md
 EOF
