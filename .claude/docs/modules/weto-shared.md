@@ -113,8 +113,20 @@ this layer decides *when* to ask and *what to do* with the answer.
   before the guard starts must still shape the first decision.
 - One process scan per event: `GuardVM.handle` stores `currentScan` and `enforce` reuses it;
   argv is only read when a `.script` rule exists.
-- Rule cache is keyed on the raw `settings.targets` array; resolution touches the filesystem and
-  LaunchServices, so it must not run per UI row (`runningProcessCount` reads the prepared list).
+- Rule cache is keyed on the raw `settings.targets` array **and on time**
+  (`Constants.targetRuleRefreshSeconds`, 2 s). The entries-only key silently rotted: a binary's
+  symlink-resolved path usually carries the version (`…/claude/versions/2.1.228`), so every
+  update of a target changed it, the cached rule kept pointing at the previous version, and the
+  target dropped out of the running list *and* out of enforcement until it was re-added by hand.
+  Resolution touches the filesystem and LaunchServices, so it must not run per UI row
+  (`runningProcessCount` reads the prepared list) and must not run per watchdog scan —
+  hence the window rather than resolving every time (`test_rules_are_not_resolved_again_within_the_refresh_window`).
+- **Re-resolution never narrows the guard.** A refreshed rule keeps the launch paths it has
+  seen before, so a session started on the previous binary — `proc_pidpath` still reports the
+  old path — stays matched; a forgotten path no longer exists on disk, so no new process can
+  claim it. A target that stops resolving (the instant its file is being replaced) keeps its
+  last known rule instead of disappearing. Both are fail-closed by intent and pinned by
+  `ProcessEnforcerTests`.
 - Journal dedup is by pid **and** by reason within an episode; both sets are cleared only on `safe`.
 - Boundary calls return `Result<Void, Error>`, never `Bool`: a silent Keychain or `launchctl`
   failure used to be reported as success.

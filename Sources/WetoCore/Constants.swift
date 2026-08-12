@@ -23,6 +23,15 @@ public enum Constants {
 
     public static let watchdogIntervalSeconds: TimeInterval = 0.25
 
+    /// Как часто цель разрешается в правило заново. Путь бинарника, развёрнутый
+    /// через симлинки, у многих инструментов содержит номер версии
+    /// (`.local/share/claude/versions/2.1.228`), и обновление меняет его целиком.
+    /// Разрешённое однажды правило устаревало молча: цель пропадала из запущенных
+    /// и переставала завершаться при падении VPN, пока её не добавят заново.
+    /// Интервал заметно короче штатного тика, поэтому к решению охраны
+    /// правила приходят уже свежими.
+    public static let targetRuleRefreshSeconds: TimeInterval = 2
+
     public static let geoRequestTimeoutSeconds: TimeInterval = 5
 
     /// Подтверждение спрашивается уже после ipinfo и удлиняет окно fail-closed,
