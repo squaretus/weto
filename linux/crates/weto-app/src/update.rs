@@ -21,6 +21,10 @@ use crate::state::AppState;
 
 const REPOSITORY: &str = "squaretus/weto";
 
+/// Ссылка из подвала настроек. Тот же репозиторий, что и у проверки обновлений:
+/// расходиться им нельзя.
+pub const REPOSITORY_URL: &str = "https://github.com/squaretus/weto";
+
 /// Версия приходит из окружения сборки: релизный скрипт не правит
 /// отслеживаемые файлы, поэтому в `Cargo.toml` она остаётся нулевой.
 pub fn current_version() -> Version {

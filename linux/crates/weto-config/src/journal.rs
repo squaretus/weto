@@ -84,6 +84,10 @@ impl Journal {
         &self.entries
     }
 
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     pub fn append(&mut self, event: KillEvent) {
         self.entries.push(event);
         if self.entries.len() > CAPACITY {

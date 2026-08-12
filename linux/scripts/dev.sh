@@ -6,6 +6,12 @@
 #   linux/scripts/dev.sh cargo test --workspace
 #   linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh
 #
+# Тестам дизайн-системы нужен дисплей. X-сервер поднимаем сами, а не через
+# xvfb-run: тот в контейнере повисает — стартует Xvfb и не запускает команду вовсе.
+#
+#   linux/scripts/dev.sh bash -c 'Xvfb :99 -screen 0 1280x1024x24 & sleep 2
+#                                 DISPLAY=:99 cargo test --workspace'
+#
 # Образ собирается из linux/scripts/Dockerfile.dev при первом запуске.
 set -euo pipefail
 
