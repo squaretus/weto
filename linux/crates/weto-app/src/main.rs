@@ -97,64 +97,6 @@ fn main() -> gtk4::glib::ExitCode {
 
 fn handle_cli(arguments: &[String]) -> Option<gtk4::glib::ExitCode> {
     match arguments.get(1).map(String::as_str) {
-        // Установка из командной строки — только в отладочной сборке.
-        // В релизе обновление живёт в интерфейсе, как на macOS, и отдельной
-        // команды у него нет.
-        #[cfg(debug_assertions)]
-        Some("--self-update") => {
-            let paths = Paths::from_env();
-            let checker =
-                weto_update::checker::ReleaseChecker::new("squaretus/weto", std::env::consts::ARCH);
-            let info = match checker.latest(&update::current_version()) {
-                Ok(info) if info.is_newer => info,
-                Ok(_) => {
-                    println!("обновлений нет");
-                    return Some(gtk4::glib::ExitCode::SUCCESS);
-                }
-                Err(error) => {
-                    eprintln!("weto: {error}");
-                    return Some(gtk4::glib::ExitCode::FAILURE);
-                }
-            };
-
-            let version = weto_update::version::Version::parse(&info.latest_version)
-                .expect("версия релиза разбирается");
-            let installer = weto_update::installer::Installer::new(
-                weto_update::layout::Layout::new(paths.data_dir.clone()),
-                paths.cache_dir.join("updates"),
-            );
-
-            println!("ставлю {version}…");
-            match installer.install(&version, &info.download_url) {
-                Ok(()) => {
-                    println!("установлено: {version}");
-                    Some(gtk4::glib::ExitCode::SUCCESS)
-                }
-                Err(error) => {
-                    eprintln!("weto: {error}");
-                    Some(gtk4::glib::ExitCode::FAILURE)
-                }
-            }
-        }
-        Some("--check-updates") => {
-            // Ручная проверка из командной строки: игнорирует пропуск
-            // и отсрочку, как и кнопка в интерфейсе.
-            let paths = Paths::from_env();
-            let store = weto_update::store::UpdateStore::new(paths.state_dir.clone());
-            let scheduler = weto_update::scheduler::UpdateScheduler::new(
-                update::current_version(),
-                std::sync::Arc::new(weto_update::checker::ReleaseChecker::new(
-                    "squaretus/weto",
-                    std::env::consts::ARCH,
-                )),
-                std::sync::Arc::new(update::StoreDeferrals(std::sync::Arc::new(store))),
-            );
-            match scheduler.check(true) {
-                Some(finding) => println!("{finding:?}"),
-                None => println!("обновлений нет"),
-            }
-            Some(gtk4::glib::ExitCode::SUCCESS)
-        }
         Some("--version") => {
             // Версия приходит из окружения сборки: релизный скрипт не правит
             // отслеживаемые файлы, поэтому в Cargo.toml она остаётся нулевой.
