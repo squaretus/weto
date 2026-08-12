@@ -32,28 +32,68 @@ final class ProcessEnforcer {
 
     private var cachedEntries: [String]?
     private var cachedRules: [TargetRule] = []
+    private var resolvedAt: Date?
+    private var lastKnownRules: [String: TargetRule] = [:]
+
+    private let now: () -> Date
 
     init(
         settings: SettingsStore,
         resolver: TargetResolving,
         locator: ProcessLocating,
-        killer: ProcessKilling
+        killer: ProcessKilling,
+        now: @escaping () -> Date = Date.init
     ) {
         self.settings = settings
         self.resolver = resolver
         self.locator = locator
         self.killer = killer
+        self.now = now
     }
 
     /// Разрешение цели в правило лезет в файловую систему и LaunchServices,
-    /// поэтому пересчитывается только при смене списка целей.
+    /// поэтому кэшируется. Но кэша по одному лишь списку целей мало: путь
+    /// бинарника, развёрнутый через симлинки, меняется при каждом обновлении
+    /// инструмента, и правило устаревало молча до повторного добавления цели.
+    /// Отсюда второй повод пересчитать — истёкший `targetRuleRefreshSeconds`.
     func rules() -> [TargetRule] {
         let entries = settings.targets
-        if entries != cachedEntries {
+        let moment = now()
+        let isStale = resolvedAt.map {
+            moment.timeIntervalSince($0) >= Constants.targetRuleRefreshSeconds
+        } ?? true
+
+        if entries != cachedEntries || isStale {
             cachedEntries = entries
-            cachedRules = entries.compactMap(resolver.resolve)
+            lastKnownRules = lastKnownRules.filter { entries.contains($0.key) }
+            cachedRules = entries.compactMap(resolve)
+            resolvedAt = moment
         }
         return cachedRules
+    }
+
+    /// Правило помнит пути, по которым цель запускалась раньше. Сеанс, начатый
+    /// до обновления, продолжает жить на прежнем бинарнике, и `proc_pidpath`
+    /// сообщает про него старый путь: без памяти переезд правила на новую версию
+    /// выпускал бы такой процесс из-под охраны. Забытый путь уже не существует
+    /// на диске, поэтому новый процесс по нему появиться не может.
+    ///
+    /// По той же причине неудача разрешения не удаляет правило: пока файл
+    /// подменяют, цель на мгновение не разрешается ни во что, а живой процесс
+    /// в этот момент никуда не девается. Пустой список целей — только тот,
+    /// который выбрал пользователь.
+    private func resolve(_ entry: String) -> TargetRule? {
+        guard let rule = resolver.resolve(entry) else { return lastKnownRules[entry] }
+
+        let remembered = TargetRule(
+            entry: rule.entry,
+            displayName: rule.displayName,
+            kind: rule.kind,
+            path: rule.path,
+            launchPaths: rule.launchPaths + (lastKnownRules[entry]?.launchPaths ?? [])
+        )
+        lastKnownRules[entry] = remembered
+        return remembered
     }
 
     func invalidateRuleCache() {
