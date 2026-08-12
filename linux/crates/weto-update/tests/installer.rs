@@ -223,3 +223,19 @@ fn a_downloaded_release_becomes_the_current_version() {
     let binary = std::fs::read_to_string(layout.current_symlink().join("bin/weto")).unwrap();
     assert_eq!(binary, "бинарник 1.0.0");
 }
+
+/// Окно для локального сервера открывается только переменной окружения
+/// и только в отладочной сборке. В обычном прогоне её нет, и проверка
+/// обязана оставаться строгой.
+#[test]
+fn without_the_test_override_a_local_server_is_refused() {
+    assert!(
+        std::env::var("WETO_TEST_RELEASE_ORIGIN").is_err(),
+        "переменная задана в окружении тестов — строгость проверки не проверяется"
+    );
+
+    assert!(!is_trusted_url(
+        "http://127.0.0.1:8765/weto-1.0.0-x86_64-linux.tar.zst",
+        ".tar.zst"
+    ));
+}
