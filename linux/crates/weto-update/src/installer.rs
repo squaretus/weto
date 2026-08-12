@@ -55,12 +55,6 @@ pub const ALLOWED_HOSTS: [&str; 3] = [
 /// Хост сверяется целиком, а не префиксом строки: `https://github.com@evil.com/`
 /// начинается не с чужого хоста, но ведёт именно на него.
 pub fn is_trusted_url(url: &str, expected_suffix: &str) -> bool {
-    if let Some(origin) = test_release_origin() {
-        if url.starts_with(&origin) && url.ends_with(expected_suffix) {
-            return true;
-        }
-    }
-
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
     };
@@ -70,23 +64,6 @@ pub fn is_trusted_url(url: &str, expected_suffix: &str) -> bool {
     };
 
     ALLOWED_HOSTS.contains(&authority) && path.ends_with(expected_suffix)
-}
-
-/// Локальный сервер релизов вместо GitHub — только для отладочных сборок.
-///
-/// В релизной сборке этой ветки не существует физически: `cfg` вырезает её
-/// целиком, и никакая переменная окружения не заставит приложение скачать
-/// обновление откуда-то ещё. Нужна она затем, чтобы весь путь — баннер, окно,
-/// загрузка, подмена каталога, перезапуск — можно было пройти руками, не
-/// публикуя настоящий релиз.
-#[cfg(debug_assertions)]
-pub fn test_release_origin() -> Option<String> {
-    std::env::var("WETO_TEST_RELEASE_ORIGIN").ok()
-}
-
-#[cfg(not(debug_assertions))]
-pub fn test_release_origin() -> Option<String> {
-    None
 }
 
 pub struct Installer {

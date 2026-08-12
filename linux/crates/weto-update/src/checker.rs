@@ -37,16 +37,6 @@ struct Asset {
     browser_download_url: String,
 }
 
-#[cfg(debug_assertions)]
-fn test_api_url() -> Option<String> {
-    std::env::var("WETO_TEST_RELEASE_API").ok()
-}
-
-#[cfg(not(debug_assertions))]
-fn test_api_url() -> Option<String> {
-    None
-}
-
 pub struct ReleaseChecker {
     api_url: String,
     /// Суффикс имени архива под текущую машину.
@@ -55,19 +45,17 @@ pub struct ReleaseChecker {
 
 impl ReleaseChecker {
     pub fn new(repository: &str, arch: &str) -> ReleaseChecker {
-        // Отладочная сборка может смотреть на локальный сервер: иначе пройти
-        // весь путь обновления руками нельзя, не выпустив настоящий релиз.
-        // В релизной сборке этой ветки нет — её вырезает `cfg`.
-        let api_url = test_api_url().unwrap_or_else(|| {
-            format!("https://api.github.com/repos/{repository}/releases/latest")
-        });
-
         ReleaseChecker {
-            api_url,
+            api_url: format!("https://api.github.com/repos/{repository}/releases/latest"),
             asset_suffix: format!("-{arch}-linux.tar.zst"),
         }
     }
 
+    /// Только для тестов: подменяет адрес фида локальным сервером.
+    ///
+    /// Тот же приём, что на macOS, где тесты подставляют свою реализацию
+    /// `ReleaseFetching`. У приложения этого пути нет — оно всегда ходит
+    /// в GitHub по адресу из `new`.
     pub fn with_api_url(mut self, url: String) -> ReleaseChecker {
         self.api_url = url;
         self
