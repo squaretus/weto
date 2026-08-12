@@ -77,11 +77,21 @@ user_run "set -e
     printf '%s' \$VERSION > \$STAGE/VERSION
     bash \$STAGE/install.sh"
 
+say "убираю прежние сеансы"
+# Каждый перезапуск VNC оставляет осиротевший Plasma: его X-сервер умер, а сам он
+# живёт и мешает следующему. Бьём по имени процесса (`pkill -x`), а не по командной
+# строке: `pkill -f` находит и этот самый шелл, потому что искомые слова есть
+# в нём самом, — так сеанс убивает себя вместо цели.
+user_run 'for name in weto kscreenlocker_g plasmashell kwin_x11 ksmserver \
+                      plasma_session startplasma-x11 Xtigervnc vncserver; do
+              pkill -u "$USER" -x -9 "$name" 2>/dev/null || true
+          done
+          sleep 3
+          pkill -u "$USER" -x -9 dbus-daemon 2>/dev/null || true
+          rm -rf /tmp/.X11-unix/X* /tmp/.X*-lock /tmp/tigervnc.* 2>/dev/null || true
+          rm -f ~/.vnc/*.pid ~/.vnc/*.log 2>/dev/null || true' || true
+
 say "настраиваю VNC"
-# Пароля нет намеренно: в tigervnc из Ubuntu 24.04 утилиты vncpasswd просто нет
-# (проверено — в пакетах её не поставляют), а сервер слушает только localhost
-# машины и достижим исключительно через ssh-туннель. Пароль поверх туннеля
-# добавил бы шаг, но не защиту.
 user_run 'mkdir -p ~/.vnc ~/.config
     cat > ~/.vnc/xstartup <<"XSTART"
 #!/bin/sh
@@ -97,24 +107,32 @@ LockOnStart=false
 LOCKER
     vncserver -kill :1 >/dev/null 2>&1 || true'
 
-# Пароль пользователю: OrbStack заводит его без пароля вовсе (`passwd -S` — `L`),
-# и любой запрос KDE становится тупиком — подобрать нечего.
-MACHINE_USER="$(orb -m "$MACHINE" whoami)"
-run "echo '$MACHINE_USER:weto' | chpasswd"
+# Пароль VNC нужен клиенту macOS: с сервером без авторизации «Общий экран»
+# не соединяется вовсе, хотя сервер при этом исправен (рукопожатие проходит
+# до кадрового буфера). Пароль VNC — сущность отдельная от пароля пользователя.
+#
+# Утилиты `vncpasswd` в Ubuntu 24.04 нет ни под одним именем — в пакетах tigervnc
+# её просто не поставляют. Формат файла открытый: восемь байт пароля, зашифрованных
+# DES с общеизвестным ключом. `-provider legacy` обязателен: в OpenSSL 3 DES уехал
+# в legacy-провайдер, и без него команда молча отдаёт текст ошибки вместо шифротекста.
+user_run 'printf "weto\0\0\0\0" \
+            | openssl enc -provider legacy -provider default \
+                          -des-ecb -K e84ad660c4721ae0 -nopad > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          test -s ~/.vnc/passwd'
 
 # Отдельным вызовом и с паузой: прежняя сессия завершается не мгновенно,
 # и запуск в той же команде натыкается на ещё живой дисплей — сервер тогда
 # поднимается и тут же выходит.
 sleep 2
 user_run "vncserver :1 -geometry ${WETO_VNC_GEOMETRY:-1600x1000} -depth 24 \
-              -localhost yes -SecurityTypes None >/dev/null 2>&1"
+              -localhost yes -SecurityTypes VncAuth -rfbauth ~/.vnc/passwd >/dev/null 2>&1"
 
-# Экран блокировки KDE всё равно всплывает на старте сеанса, невзирая на настройку,
-# и упирается в пароль. Снятый один раз он не возвращается — проверено.
-# Шаблон в скобках нужен, чтобы pgrep не нашёл сам этот шелл.
+# Экран блокировки KDE всё равно всплывает на старте сеанса, невзирая на настройку.
+# Пароля у пользователя OrbStack нет вовсе, так что сквозь него не пройти;
+# снятый один раз он не возвращается — проверено.
 sleep 12
-user_run 'pid=$(pgrep -u "$USER" -f "kscreenlocker_gr[e]et" | head -1)
-          [ -n "$pid" ] && kill "$pid" 2>/dev/null || true' >/dev/null 2>&1 || true
+user_run 'pkill -u "$USER" -x kscreenlocker_g 2>/dev/null || true' >/dev/null 2>&1 || true
 
 say "поднимаю ssh-туннель"
 # Порты машин OrbStack с Mac напрямую недоступны: не отвечает ни имя, ни адрес,
@@ -131,15 +149,16 @@ cat <<EOF
 
     open vnc://127.0.0.1:$VNC_PORT
 
-Пароль VNC не спрашивается: сервер слушает только localhost машины,
-снаружи туда хода нет. Если что-то внутри KDE всё же спросит пароль
-пользователя — он «weto».
+Пароль VNC: weto
+
+Он нужен клиенту macOS — с сервером без авторизации «Общий экран» не соединяется.
+Пароля пользователя Linux при этом нет вовсе, sudo в машине работает без него.
 
 Если туннель отвалился:
     ssh -f -N -L $VNC_PORT:127.0.0.1:5901 $MACHINE@orb
 
 Если вместо рабочего стола висит заставка — всплыл экран блокировки:
-    orb -m $MACHINE bash -lc 'kill \$(pgrep -f "kscreenlocker_gr[e]et")'
+    orb -m $MACHINE bash -lc 'pkill -x kscreenlocker_g'
 
 Внутри машины:
     orb -m $MACHINE                 # шелл, weto уже в PATH
