@@ -18,13 +18,16 @@ use std::path::{Path, PathBuf};
 const MAX_HOPS: usize = 4;
 
 /// Каталоги с ярлыками приложений — местный аналог `/Applications`.
-/// Пользовательский идёт первым: своё установленное встречается чаще системного.
+///
+/// Системный идёт первым, и это не вкусовщина: в пользовательском обычно лежит
+/// один-два ярлыка (в том числе наш собственный), а всё установленное —
+/// в системном. Открытый не там диалог выглядит пустым, и приложение в нём
+/// «нигде не находится».
 pub fn applications_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+    let mut dirs = vec![PathBuf::from("/usr/share/applications")];
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".local/share/applications"));
     }
-    dirs.push(PathBuf::from("/usr/share/applications"));
     dirs
 }
 

@@ -213,6 +213,29 @@ orb -m weto-ubuntu bash -c '~/.local/share/weto/current/share/uninstall.sh; find
 
 - [ ] После удаления не осталось ни одного файла weto.
 
+## Приложения на Electron в этом сеансе
+
+ChatGPT, Slack, VS Code и прочий Electron требуют доступа к GPU и отказываются
+рисовать окно без него: в логе будет «GPU access not allowed». В сеансе VNC
+видеоускорения нет, процесс GPU падает, и Electron запоминает блокировку —
+после этого он не запустится даже когда причина устранена.
+
+Лечится программным растеризатором, а не флагом `--disable-gpu`: тот запрещает
+GPU совсем, и приложение отказывается тем же сообщением.
+
+```bash
+orb -m weto-ubuntu bash -lc '
+  rm -rf ~/.config/<Имя>/GPUCache ~/.config/<Имя>/"Local State"   # сбросить память о падениях
+  bus=$(tr "\0" "\n" < /proc/$(pgrep -x plasmashell | head -1)/environ \
+        | grep ^DBUS_SESSION_BUS_ADDRESS= | cut -d= -f2-)
+  DISPLAY=:1 DBUS_SESSION_BUS_ADDRESS="$bus" LIBGL_ALWAYS_SOFTWARE=1 \
+    nohup chatgpt --use-gl=angle --use-angle=swiftshader \
+                  --ignore-gpu-blocklist --disable-gpu-sandbox >/tmp/chatgpt.log 2>&1 &'
+```
+
+К охране это отношения не имеет: цель завершается по сигналу независимо от того,
+чем она рисует окно. Но без окна её неудобно запускать руками.
+
 ## Чего эти машины не покажут
 
 **Wayland.** Сеанс идёт через VNC, то есть по X11. Единственное отступление
@@ -220,3 +243,12 @@ orb -m weto-ubuntu bash -c '~/.local/share/weto/current/share/uninstall.sh; find
 координат, — на X11 выглядит иначе, чем на Wayland. Проверять это имеет смысл
 только в настоящей VM с Ubuntu Desktop, и поведение там известно заранее:
 место окна выбирает композитор, повлиять на это нечем.
+
+**Привычную оболочку Ubuntu.** С 26.04 сеанс GNOME существует только под Wayland:
+пакет `ubuntu-session` несёт единственный файл `wayland-sessions/ubuntu.desktop`,
+каталога `xsessions` в нём нет. VNC работает по X11, поэтому через него виден KDE,
+а не GNOME. Чтобы посмотреть именно на оболочку Ubuntu, нужен другой канал —
+`gnome-remote-desktop` по RDP (с Mac подключается клиентом Microsoft Remote Desktop)
+или настоящая VM с рабочим столом. На поведение охраны оболочка не влияет; влияет
+она на одно — есть ли трей. В Ubuntu он есть: расширение AppIndicator включено
+по умолчанию, и SNI работает так же, как в KDE.
