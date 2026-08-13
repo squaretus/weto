@@ -96,4 +96,77 @@ final class VPNStatusResolverTests: XCTestCase {
 
         XCTAssertEqual(duplicateNameSnapshot.vpnCandidates.map(\.uuid), ["vpn-a", "vpn-b"])
     }
+
+    // MARK: - Туннель без сервиса
+
+    /// Клиент, поднявший `utun` сам, сетевого сервиса не создаёт. Раньше такой
+    /// туннель было невозможно ни выбрать, ни опознать — сборка из GitHub
+    /// не появлялась в списке, в отличие от сборки из App Store.
+    func test_interface_backed_candidate_holding_the_route_is_up_and_primary() {
+        let snapshot = NetworkSnapshot(
+            services: [
+                .init(uuid: "108E2488", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .fromInterface("utun4"),
+            ],
+            // Сервисом остаётся Wi-Fi: у туннеля сервиса нет вовсе.
+            primaryServiceUUID: "108E2488",
+            primaryInterface: "utun4"
+        )
+
+        XCTAssertEqual(
+            VPNStatusResolver.status(serviceID: "interface:utun4", in: snapshot),
+            .up(isPrimary: true)
+        )
+    }
+
+    /// Туннель поднят, но маршрут по умолчанию всё ещё у Wi-Fi: это «поднят,
+    /// но трафик идёт мимо», и цели обязаны завершаться.
+    func test_interface_backed_candidate_without_the_route_is_up_but_not_primary() {
+        let snapshot = NetworkSnapshot(
+            services: [.fromInterface("utun4")],
+            primaryServiceUUID: "108E2488",
+            primaryInterface: "en0"
+        )
+
+        XCTAssertEqual(
+            VPNStatusResolver.status(serviceID: "interface:utun4", in: snapshot),
+            .up(isPrimary: false)
+        )
+    }
+
+    /// Имена `utun` не закреплены за приложением и меняются между запусками.
+    /// Исчезнувший интерфейс — это `down`, то есть fail-closed, а не «наверное,
+    /// это вон тот другой туннель».
+    func test_a_vanished_interface_is_down_not_guessed() {
+        let snapshot = NetworkSnapshot(
+            services: [.fromInterface("utun5")],
+            primaryServiceUUID: nil,
+            primaryInterface: "utun5"
+        )
+
+        XCTAssertEqual(VPNStatusResolver.status(serviceID: "interface:utun4", in: snapshot), .down)
+    }
+
+    /// Сервис, чей интерфейс держит маршрут, считается основным, даже когда
+    /// `PrimaryService` называет другой: у туннелей поверх сервиса так бывает.
+    func test_a_service_whose_interface_holds_the_route_is_primary() {
+        let snapshot = NetworkSnapshot(
+            services: [.init(uuid: "BC2D1D42", name: "Happ", activeInterface: "utun6", isVPN: true)],
+            primaryServiceUUID: "108E2488",
+            primaryInterface: "utun6"
+        )
+
+        XCTAssertEqual(
+            VPNStatusResolver.status(serviceID: "BC2D1D42", in: snapshot),
+            .up(isPrimary: true)
+        )
+    }
+
+    func test_interface_backed_candidates_are_told_apart_from_services() {
+        XCTAssertTrue(NetworkServiceSnapshot.fromInterface("utun4").isInterfaceBacked)
+        XCTAssertFalse(
+            NetworkServiceSnapshot(uuid: "BC2D1D42", name: "Happ", activeInterface: "utun6", isVPN: true)
+                .isInterfaceBacked
+        )
+    }
 }

@@ -53,6 +53,36 @@ final class NetworkSnapshotReaderTests: XCTestCase {
         }
     }
 
+    /// Туннель, которому досталась маршрутизация по умолчанию, обязан быть
+    /// выбираемым. Иначе пользователь видит работающий VPN и список, в котором
+    /// его нет, — так и было со сборками, поднимающими `utun` мимо сетевых
+    /// сервисов. Проверка идёт по живой машине: на ней и обнаружилось.
+    func test_the_tunnel_owning_the_default_route_is_selectable() throws {
+        let snapshot = NetworkSnapshotReader().snapshot()
+
+        guard let primary = snapshot.primaryInterface,
+              ["utun", "ppp", "ipsec"].contains(where: primary.hasPrefix)
+        else { throw XCTSkip("маршрут по умолчанию сейчас идёт не через туннель") }
+
+        XCTAssertTrue(
+            snapshot.vpnCandidates.contains { $0.activeInterface == primary },
+            "туннель \(primary) держит маршрут по умолчанию, но выбрать его нечем"
+        )
+    }
+
+    /// Один туннель — один кандидат: интерфейс, уже принадлежащий сервису,
+    /// не должен появиться в списке ещё и голым именем.
+    func test_interface_backed_candidates_do_not_duplicate_services() {
+        let snapshot = NetworkSnapshotReader().snapshot()
+        let claimed = Set(
+            snapshot.services.filter { !$0.isInterfaceBacked }.compactMap(\.activeInterface)
+        )
+
+        for candidate in snapshot.services where candidate.isInterfaceBacked {
+            XCTAssertFalse(claimed.contains(candidate.name), "\(candidate.name) уже занят сервисом")
+        }
+    }
+
     func test_wifi_service_is_not_classified_as_vpn() throws {
 
         let snapshot = NetworkSnapshotReader().snapshot()

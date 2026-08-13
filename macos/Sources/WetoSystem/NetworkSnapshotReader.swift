@@ -27,7 +27,47 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
             )
         }
 
-        return NetworkSnapshot(services: services, primaryServiceUUID: primaryService(store: store))
+        // Туннели без сервиса добавляются следом: клиент, поднявший `utun` сам,
+        // в конфигурацию сети не попадает и иначе остался бы невыбираемым.
+        // Интерфейс, уже принадлежащий сервису, вторым кандидатом не станет.
+        let claimed = Set(services.compactMap(\.activeInterface))
+        let orphans = liveInterfaces()
+            .filter(TunnelInterface.qualifies)
+            .map(\.name)
+            .filter { !claimed.contains($0) }
+            .map(NetworkServiceSnapshot.fromInterface)
+
+        return NetworkSnapshot(
+            services: services + orphans,
+            primaryServiceUUID: primaryService(store: store),
+            primaryInterface: primaryInterface(store: store)
+        )
+    }
+
+    /// Живые интерфейсы от ядра. `SCDynamicStore` о туннеле без сервиса не знает,
+    /// а `getifaddrs` перечисляет то, что есть на самом деле.
+    private func liveInterfaces() -> [InterfaceSnapshot] {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return [] }
+        defer { freeifaddrs(head) }
+
+        // Записей на интерфейс несколько — по одной на семейство адресов;
+        // собираем их в одну.
+        var found: [String: (isUp: Bool, hasIPv4: Bool)] = [:]
+
+        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let name = String(cString: entry.pointee.ifa_name)
+            let flags = Int32(entry.pointee.ifa_flags)
+            let isUp = (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0
+            let isIPv4 = entry.pointee.ifa_addr?.pointee.sa_family == UInt8(AF_INET)
+
+            let previous = found[name] ?? (isUp: false, hasIPv4: false)
+            found[name] = (isUp: previous.isUp || isUp, hasIPv4: previous.hasIPv4 || isIPv4)
+        }
+
+        return found
+            .map { InterfaceSnapshot(name: $0.key, isUp: $0.value.isUp, hasIPv4: $0.value.hasIPv4) }
+            .sorted { $0.name < $1.name }
     }
 
     private func serviceUUIDs(store: SCDynamicStore) -> [String] {
@@ -84,5 +124,13 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
         let key = "State:/Network/Global/IPv4" as CFString
         guard let dict = SCDynamicStoreCopyValue(store, key) as? [String: Any] else { return nil }
         return dict["PrimaryService"] as? String
+    }
+
+    /// Владелец маршрута по умолчанию по имени интерфейса. У туннеля без сервиса
+    /// `PrimaryService` назовёт подлежащий Wi-Fi, а `PrimaryInterface` — сам туннель.
+    private func primaryInterface(store: SCDynamicStore) -> String? {
+        let key = "State:/Network/Global/IPv4" as CFString
+        guard let dict = SCDynamicStoreCopyValue(store, key) as? [String: Any] else { return nil }
+        return dict["PrimaryInterface"] as? String
     }
 }

@@ -18,6 +18,28 @@ public struct NetworkServiceSnapshot: Equatable, Sendable, Identifiable {
         self.activeInterface = activeInterface
         self.isVPN = isVPN
     }
+
+    /// Приставка идентификатора кандидата, у которого сервиса нет вовсе:
+    /// клиент поднял туннель сам, и опознать его можно только по интерфейсу.
+    public static let interfacePrefix = "interface:"
+
+    /// Кандидат от живого интерфейса, а не от записи в настройках сети.
+    ///
+    /// Имя показывается как есть (`utun4`): выяснить, какое приложение владеет
+    /// туннелем, macOS не даёт, а выдумывать ему название значило бы врать.
+    /// На Linux в списке стоят имена интерфейсов по той же причине.
+    public static func fromInterface(_ name: String) -> NetworkServiceSnapshot {
+        NetworkServiceSnapshot(
+            uuid: interfacePrefix + name,
+            name: name,
+            activeInterface: name,
+            isVPN: true
+        )
+    }
+
+    public var isInterfaceBacked: Bool {
+        uuid.hasPrefix(Self.interfacePrefix)
+    }
 }
 
 public struct NetworkSnapshot: Equatable, Sendable {
@@ -25,9 +47,20 @@ public struct NetworkSnapshot: Equatable, Sendable {
 
     public let primaryServiceUUID: String?
 
-    public init(services: [NetworkServiceSnapshot], primaryServiceUUID: String?) {
+    /// Интерфейс, которому досталась маршрутизация по умолчанию.
+    ///
+    /// Спрашивается отдельно от сервиса: у туннеля, поднятого в пользовательском
+    /// пространстве, сервиса нет, и владельца маршрута по нему не определить.
+    public let primaryInterface: String?
+
+    public init(
+        services: [NetworkServiceSnapshot],
+        primaryServiceUUID: String?,
+        primaryInterface: String? = nil
+    ) {
         self.services = services
         self.primaryServiceUUID = primaryServiceUUID
+        self.primaryInterface = primaryInterface
     }
 
     /// Отпечаток снимка: меняется, как только меняется состав сервисов, их активность,
@@ -38,7 +71,10 @@ public struct NetworkSnapshot: Equatable, Sendable {
         let parts = services
             .sorted { $0.uuid < $1.uuid }
             .map { "\($0.uuid):\($0.activeInterface ?? "-"):\($0.isVPN ? "vpn" : "net")" }
-        return (parts + ["primary=\(primaryServiceUUID ?? "-")"]).joined(separator: "|")
+        return (parts + [
+            "primary=\(primaryServiceUUID ?? "-")",
+            "iface=\(primaryInterface ?? "-")",
+        ]).joined(separator: "|")
     }
 
     /// Одинаковые имена не склеиваются: выбор хранится по UUID, и два «Happ» — разные цели.
