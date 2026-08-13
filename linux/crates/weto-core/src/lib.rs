@@ -8,6 +8,7 @@
 
 pub mod geo;
 pub mod ip;
+pub mod launcher;
 pub mod network;
 pub mod policy;
 pub mod presentation;
