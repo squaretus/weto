@@ -18,6 +18,7 @@ use weto_config::settings::{Theme, POLL_INTERVAL_OPTIONS};
 use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
+use weto_sys::target_resolver::{applications_dirs, resolve_launch_target};
 use weto_ui::components as ui;
 use weto_ui::theme;
 
@@ -225,6 +226,16 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         pick.connect_clicked(move |_| {
             let dialog = gtk4::FileDialog::builder().title("Выбрать цель").build();
 
+            // Аналог `/Applications`: на macOS панель открывается там, и выбирать
+            // приходится из приложений, а не из файловой системы вообще. Здесь
+            // приложения представлены ярлыками — из них и выбираем.
+            for directory in applications_dirs() {
+                if directory.is_dir() {
+                    dialog.set_initial_folder(Some(&gtk4::gio::File::for_path(&directory)));
+                    break;
+                }
+            }
+
             let state = state.clone();
             let redraw = redraw.clone();
             dialog.open_multiple(
@@ -278,11 +289,7 @@ fn add_target(state: &Arc<AppState>, text: &str) {
         return;
     }
 
-    // Путь разворачивается сразу: цель обязана храниться разрешённой,
-    // иначе матчер не узнает процесс, запущенный через симлинк в PATH.
-    let resolved = std::fs::canonicalize(text)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| text.to_string());
+    let resolved = resolve_launch_target(text);
     let name = resolved.rsplit('/').next().unwrap_or(&resolved).to_string();
 
     state.settings.edit(|s| {

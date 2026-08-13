@@ -12,3 +12,4 @@ pub mod notifications;
 pub mod process_killer;
 pub mod process_registry;
 pub mod secret_store;
+pub mod target_resolver;
