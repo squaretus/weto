@@ -2,8 +2,14 @@
 # Поднимает машину OrbStack с рабочим столом и установленным weto —
 # чтобы проверять и глазами, и функционально в одном сеансе.
 #
-#   linux/scripts/desktop-machine.sh ubuntu:noble weto-ubuntu
+#   linux/scripts/desktop-machine.sh ubuntu       weto-ubuntu   # последняя
+#   linux/scripts/desktop-machine.sh ubuntu:noble weto-noble    # пол GTK 4.14
 #   linux/scripts/desktop-machine.sh arch         weto-arch
+#
+# Без версии OrbStack ставит последнюю Ubuntu — на ней и проверяем. Отдельно
+# стоит хотя бы раз пройтись по `ubuntu:noble`: 24.04 LTS несёт GTK 4.14,
+# заявленный пол проекта, и только там видно правила, которые на свежем GTK
+# работают, а на LTS молча отбрасываются.
 #
 # Почему KDE: у него StatusNotifierItem родной, без плагинов и расширений,
 # и это одна из двух целевых сред. На GNOME трей живёт через расширение,
@@ -14,7 +20,7 @@
 # Машина запустится через Rosetta и будет медленнее, но честнее.
 set -euo pipefail
 
-DISTRO="${1:-ubuntu:noble}"
+DISTRO="${1:-ubuntu}"
 MACHINE="${2:-weto-desktop}"
 ARCH="${WETO_MACHINE_ARCH:-amd64}"
 VNC_PORT="${WETO_VNC_PORT:-5901}"
@@ -50,7 +56,28 @@ else
             tigervnc-standalone-server xauth dbus-x11 \
             libgtk-4-dev libssl-dev pkg-config zstd \
             wireguard-tools iproute2 libnotify-bin \
-            build-essential curl git nano'
+            build-essential curl git nano
+
+         # Сеанс X11 в Plasma 6 (26.04) уехал в отдельный пакет: без него
+         # ставится только Wayland-сеанс, а VNC идёт по X11. На Plasma 5 (24.04)
+         # такого пакета нет — там сеанс приходит с plasma-workspace.
+         if apt-cache show plasma-session-x11 >/dev/null 2>&1; then
+             apt-get install -y --no-install-recommends plasma-session-x11
+         fi'
+fi
+
+# Половина рабочего стола хуже отсутствующего: без оконного менеджера сеанс
+# поднимается, показывает обои и выглядит вечной загрузкой. Имена пакетов
+# от выпуска к выпуску меняются, поэтому проверяем не установку, а результат.
+say "проверяю рабочий стол"
+missing=""
+for tool in kwin_x11 startplasma-x11 vncserver; do
+    orb -m "$MACHINE" bash -lc "command -v $tool >/dev/null" || missing="$missing $tool"
+done
+if [ -n "$missing" ]; then
+    echo "в машине не хватает:$missing" >&2
+    echo "имена пакетов в этом выпуске отличаются — поправьте список выше" >&2
+    exit 1
 fi
 
 # Пол проекта — Rust 1.82, а в репозиториях дистрибутивов он бывает старше.

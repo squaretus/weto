@@ -10,9 +10,20 @@
 ## Подготовка
 
 ```bash
-linux/scripts/desktop-machine.sh ubuntu:noble weto-ubuntu   # пол GTK 4.14
+linux/scripts/desktop-machine.sh ubuntu       weto-ubuntu   # последняя Ubuntu
 linux/scripts/desktop-machine.sh arch         weto-arch
 ```
+
+Без версии OrbStack ставит последнюю Ubuntu — на ней и проверяем. Отдельно стоит
+хотя бы раз пройтись по LTS:
+
+```bash
+linux/scripts/desktop-machine.sh ubuntu:noble weto-noble    # пол GTK 4.14
+```
+
+24.04 несёт GTK 4.14 — заявленный пол проекта. Только там видно правила, которые
+на свежем GTK работают, а на LTS молча отбрасываются: из-за этого в проекте нет
+CSS-переменных, и следующая такая находка обнаружится тем же способом.
 
 Скрипт создаёт машину, ставит KDE и зависимости, собирает weto из рабочего дерева
 (отдельным каталогом сборки, чтобы не мешать артефактам с Mac), устанавливает его,
