@@ -11,10 +11,15 @@
 # заявленный пол проекта, и только там видно правила, которые на свежем GTK
 # работают, а на LTS молча отбрасываются.
 #
-# Почему KDE: у него StatusNotifierItem родной, без плагинов и расширений,
-# и это одна из двух целевых сред. На GNOME трей живёт через расширение,
-# и проверять на нём стоит отдельно — как раз тот случай, ради которого
-# в приложении есть второй вход.
+# Почему KDE, а не привычная оболочка Ubuntu: с 26.04 сеанс GNOME существует
+# только под Wayland — пакет ubuntu-session несёт лишь wayland-sessions, каталога
+# xsessions в нём нет вовсе. VNC же работает по X11, и увидеть GNOME через него
+# нечем. У KDE сеанс X11 остался (kwin_x11), а трей там родной, без расширений.
+# Это выбор способа посмотреть на приложение, а не оболочки для продукта.
+#
+# Порталы ставятся не для красоты: без xdg-desktop-portal диалог выбора файла
+# в GTK4 рисуется запасным чузером — без боковой панели и закладок, и выглядит
+# так, будто приложение сломано.
 #
 # Почему amd64: релиз выпускается под x86_64, и проверять надо его.
 # Машина запустится через Rosetta и будет медленнее, но честнее.
@@ -53,7 +58,8 @@ else
          apt-get update
          apt-get install -y --no-install-recommends \
             kde-plasma-desktop plasma-desktop kwin-x11 \
-            tigervnc-standalone-server xauth dbus-x11 \
+            tigervnc-standalone-server xauth dbus-x11 x11-utils \
+            xdg-desktop-portal xdg-desktop-portal-kde xdg-desktop-portal-gtk \
             libgtk-4-dev libssl-dev pkg-config zstd \
             wireguard-tools iproute2 libnotify-bin \
             build-essential curl git nano
