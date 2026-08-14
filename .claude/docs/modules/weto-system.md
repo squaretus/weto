@@ -128,6 +128,28 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - **`FlagImageStore.image(for:)` is synchronous and returns `nil` until `prefetch` lands.**
   The UI must render a placeholder and re-read later; the store never blocks on the network.
 
+- **A tunnel with no network service is a candidate of its own.** A client that opens its
+  own `utun` in user space (Xray-based builds distributed outside the App Store) never
+  registers a service, so it is absent from `Setup:/Network/Service/…` and used to be
+  impossible to select. `NetworkSnapshotReader` merges such interfaces in with the id
+  `interface:<name>`, qualified the way Linux does it: device type plus an assigned IPv4
+  address. The address is mandatory — macOS keeps several housekeeping `utun` interfaces
+  (iCloud Private Relay, AirDrop) alive with nothing but a link-local IPv6, and without
+  that filter the picker fills up with tunnels the user never started.
+- **The route owner is asked of both the service and the interface** (`PrimaryService`
+  and `PrimaryInterface`). For a service-less tunnel the former names the underlying
+  Wi-Fi even though the default route has already moved into the tunnel, and the guard
+  would kill targets while the VPN is perfectly healthy.
+- **`utun` names are not tied to an application** and change between runs. A vanished
+  interface resolves to `.down` — fail-closed; guessing "probably that other tunnel"
+  is not allowed. The user of such a build pays for this by re-picking; an App Store
+  service keeps its UUID.
+- **The chosen VPN survives its interface disappearing.** A service-less tunnel exists
+  only while the connection is up, so a picker built from live candidates alone loses the
+  selection the moment the VPN is switched off. `VPNPicker.rows` keeps the stored choice
+  as its own row, labelled "(не подключён)"; the status stays `.down`, which is the
+  correct fail-closed answer.
+
 ## Failure hotspots
 <!-- generated, verify -->
 - **`NetworkEventSource` lifecycle and threading.** `SCDynamicStoreContext` holds
@@ -162,6 +184,6 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `prefetch` retries on the next call.
 
 ## Related docs
-- `.claude/rules/ARCHITECTURE.md` — module index, "Ключевые контракты", check ordering
+- `.claude/rules/ARCHITECTURE.md` — module index and the invariants shared by both platforms
 - `.claude/CLAUDE.md` — boundary invariant and the domain traps summarised above
 - No `features/`, `bugs/`, or `decisions/` entries reference this module yet.

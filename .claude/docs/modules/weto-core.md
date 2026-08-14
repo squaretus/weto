@@ -87,7 +87,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - **The check order in `GuardPolicy.decide` is the security contract**, not a style choice: blacklist
   before country, primary country before `confirmationUnavailable`, `countryConflict` last. Reordering
   compiles, keeps most tests green and silently weakens fail-closed. The canonical order is in
-  `.claude/rules/ARCHITECTURE.md` → "Ключевые контракты".
+  `.claude/rules/ARCHITECTURE.md` → "Инварианты, общие для обеих реализаций".
 - **`decide` has an unreachable branch:** the `geoUnavailable("нет данных")` fallback can only fire if
   `GeoOutcome` gains a third case. Adding one routes it into a generic reason instead of a compile error.
 - **`GeoFailure.other` is load-bearing, not a leftover:** it is the escape hatch for codes the
