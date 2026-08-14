@@ -158,10 +158,7 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
 /// Живые цели пилюлями, а когда их нет — строка с советом. Цвет и совет берём
 /// из состояния охраны, а не из самого факта «целей нет»: после срабатывания
 /// цели молчат именно потому, что VPN уже выключен.
-fn targets_view(
-    state: &Arc<AppState>,
-    snapshot: &weto_guard::controller::GuardSnapshot,
-) -> GtkBox {
+fn targets_view(state: &Arc<AppState>, snapshot: &weto_guard::controller::GuardSnapshot) -> GtkBox {
     let box_ = GtkBox::new(Orientation::Vertical, ui::SPACE2);
 
     if !snapshot.running.is_empty() {

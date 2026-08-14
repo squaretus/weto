@@ -21,11 +21,9 @@ fn script() -> Option<PathBuf> {
 
 pub fn run() -> Result<(), String> {
     let Some(script) = script() else {
-        return Err(
-            "не найден деинсталлятор рядом с установленной версией — \
+        return Err("не найден деинсталлятор рядом с установленной версией — \
              запустите uninstall.sh вручную"
-                .to_string(),
-        );
+            .to_string());
     };
 
     let output = std::process::Command::new("bash")

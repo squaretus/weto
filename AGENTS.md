@@ -18,6 +18,20 @@ macos/scripts/make-app.sh release                    # .app → macos/.build/app
 macos/scripts/build.sh 0.1.0                         # PKG → macos/.build/release_build/Weto-0.1.0.pkg
 ```
 
+Linux собирается и тестируется в контейнере: netlink, `/proc` и GTK4 на macOS отсутствуют,
+а кросс-компиляции мало — тесты обязаны идти на настоящем ядре. Дисплей поднимаем свой:
+`xvfb-run` в контейнере умеет повиснуть, стартовав Xvfb и не запустив команду.
+
+```bash
+linux/scripts/dev.sh cargo build --workspace         # сборка
+linux/scripts/dev.sh bash -c 'Xvfb :99 -screen 0 1280x1024x24 & sleep 2
+                              DISPLAY=:99 cargo test --workspace'      # тесты
+linux/scripts/dev.sh cargo clippy --workspace --all-targets -- -D warnings
+linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh      # инвариант границ ядра
+linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/
+linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабочим столом для проверки глазами
+```
+
 ## Документация
 
 - Карта проекта: `.claude/rules/ARCHITECTURE.md`

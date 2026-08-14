@@ -87,10 +87,10 @@ pub fn sibling_binary_from_launcher(script: &str) -> Option<String> {
         // подстановки, косая черта, имя соседа.
         let tail = match rest.rsplit_once(")/") {
             Some((head, tail)) if head.contains("dirname") => tail,
-            _ => match rest.strip_prefix("./") {
-                Some(tail) => tail,
-                None => return None,
-            },
+            // Вторая знакомая форма — сосед через `./`. Всё остальное разбору
+            // не поддаётся, и гадать нельзя: неверная догадка означала бы цель,
+            // совпадающую не с тем процессом.
+            _ => rest.strip_prefix("./")?,
         };
 
         let name: String = tail
@@ -115,7 +115,10 @@ Name=ChatGPT
 Exec=chatgpt %U
 Type=Application
 ";
-        assert_eq!(command_from_desktop_entry(entry).as_deref(), Some("chatgpt"));
+        assert_eq!(
+            command_from_desktop_entry(entry).as_deref(),
+            Some("chatgpt")
+        );
     }
 
     /// У ярлыка бывают действия со своими строками `Exec`. Взять чужую значило бы
@@ -147,7 +150,10 @@ Exec=/opt/app/app --new-window
 
     #[test]
     fn an_entry_without_exec_resolves_to_nothing() {
-        assert_eq!(command_from_desktop_entry("[Desktop Entry]\nName=X\n"), None);
+        assert_eq!(
+            command_from_desktop_entry("[Desktop Entry]\nName=X\n"),
+            None
+        );
     }
 
     /// Форма из пакета ChatGPT: симлинк ведёт на скрипт, скрипт `exec`-ает
