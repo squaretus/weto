@@ -162,14 +162,31 @@ impl GuardController {
             weto_core::network::resolve_vpn_status(&network, settings.vpn_interface.as_deref());
         let local = decide_local(settings.is_enabled, vpn, &config);
 
-        // Кнопка идёт в сеть даже при решённой локально судьбе целей,
-        // но локальное основание применяется сразу, до ответа сети:
-        // жизни целям кнопка не продлевает.
+        // Локальное основание применяется сразу, до ответа сети: жизни целям
+        // сетевой запрос не продлевает ни на такте, ни по кнопке.
         if let Some(decision) = local.clone() {
             self.apply(&settings, decision.clone(), None);
-            if trigger == ProbeTrigger::Manual {
+
+            // Показания обновляются и здесь. Экономия запросов относится
+            // к вердикту, а не к экрану: пока её распространяли и на показания,
+            // после падения VPN там навсегда оставались адрес и страна туннеля —
+            // то есть экран показывал защиту, которой уже нет.
+            //
+            // Один запрос на смену состояния сети, не чаще: отпечаток меняется
+            // редко, и лимит подтверждающего сервиса от этого не страдает.
+            //
+            // И только пока охрана на посту: выключенной охране и охране без
+            // целей сеть не нужна вовсе, а ходить к чужим сервисам без причины
+            // приложение не должно. Показания там просто гасятся.
+            let armed = settings.is_enabled && !config.targets.is_empty();
+            let stale = self.fresh_verdict(settings.revision, &fingerprint).is_none();
+            if stale {
+                self.forget_report();
+            }
+            if trigger == ProbeTrigger::Manual
+                || (armed && stale && self.coalescing_window_passed())
+            {
                 self.probe_and_store(&settings, &fingerprint);
-                self.publish_report_only();
             }
             return decision;
         }
@@ -260,6 +277,15 @@ impl GuardController {
         if let Some(verdict) = &inner.verdict {
             inner.snapshot.report = Some(verdict.report.clone());
         }
+    }
+
+    /// Забыть показания, снятые при другом состоянии сети.
+    ///
+    /// Прочерк честнее устаревшего ответа: адрес и страна упавшего туннеля,
+    /// оставшиеся на экране, читаются как «я всё ещё там», хотя пользователь
+    /// уже вышел в сеть напрямую.
+    fn forget_report(&self) {
+        self.inner.lock().expect("состояние охраны").snapshot.report = None;
     }
 
     fn apply(&self, settings: &Settings, decision: GuardDecision, report: Option<GeoProbeReport>) {

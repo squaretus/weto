@@ -220,8 +220,14 @@ public final class GuardVM {
         await controller.awaitPendingProbe()
     }
 
-    private func receive(_ report: GeoProbeReport) {
+    private func receive(_ report: GeoProbeReport?) {
         lastReport = report
+        guard let report else {
+            // Гасим и запасное чтение: попап падает на него, когда отчёта нет,
+            // и без этого на экране осталась бы всё та же чужая страна.
+            lastReading = nil
+            return
+        }
         guard case .resolved(let reading) = report.outcome else { return }
         lastReading = reading
         FlagImageStore.shared.prefetch(reading.primaryCountry)
