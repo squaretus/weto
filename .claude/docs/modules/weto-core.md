@@ -7,16 +7,16 @@ bulk of the project's tests stay synchronous and mock-free. Everything that talk
 in `WetoSystem`; everything that holds state lives in `WetoShared`.
 
 ## Key files
-- `Sources/WetoCore/GuardPolicy.swift` — `GuardConfig`, `GuardSignals`, `UnsafeReason`, `GuardDecision`, the three decision entry points
-- `Sources/WetoCore/VPNStatusResolver.swift` — snapshot → `VPNStatus`
-- `Sources/WetoCore/ProcessMatcher.swift` — rules × processes → pids to kill / rows to show
-- `Sources/WetoCore/ProcessTree.swift` — parent/child index shared by both matcher passes
-- `Sources/WetoCore/IPAddress.swift`, `IPRange.swift` — `inet_pton` parsing, CIDR containment
-- `Sources/WetoCore/GeoResponses.swift` — DTOs and decoding for ipinfo / freeipapi / geojs
-- `Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user
-- `Sources/WetoCore/VoidResult.swift`, `Constants.swift`
-- `Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`
-- Tests: `Tests/WetoCoreTests/` (8 files, ~100 cases; `ProcessMatcherTests` and `GuardPolicyTests` are the load-bearing ones)
+- `macos/Sources/WetoCore/GuardPolicy.swift` — `GuardConfig`, `GuardSignals`, `UnsafeReason`, `GuardDecision`, the three decision entry points
+- `macos/Sources/WetoCore/VPNStatusResolver.swift` — snapshot → `VPNStatus`
+- `macos/Sources/WetoCore/ProcessMatcher.swift` — rules × processes → pids to kill / rows to show
+- `macos/Sources/WetoCore/ProcessTree.swift` — parent/child index shared by both matcher passes
+- `macos/Sources/WetoCore/IPAddress.swift`, `IPRange.swift` — `inet_pton` parsing, CIDR containment
+- `macos/Sources/WetoCore/GeoResponses.swift` — DTOs and decoding for ipinfo / freeipapi / geojs
+- `macos/Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user
+- `macos/Sources/WetoCore/VoidResult.swift`, `Constants.swift`
+- `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`
+- Tests: `macos/Tests/WetoCoreTests/` (8 files, ~100 cases; `ProcessMatcherTests` and `GuardPolicyTests` are the load-bearing ones)
 
 ## Entry points
 - `GuardPolicy.decideLocal(isEnabled:vpn:config:) → GuardDecision?` — tri-state, see invariants
@@ -34,7 +34,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `ProcessTree` is `public` but has no call site outside `ProcessMatcher`
 
 ## Dependencies
-- Package deps: none. `Package.swift` declares `.target(name: "WetoCore")` with an empty dependency list.
+- Package deps: none. `macos/Package.swift` declares `.target(name: "WetoCore")` with an empty dependency list.
 - Imports: `Foundation` only, plus `Darwin` in `IPAddress.swift` and `IPRange.swift` for `inet_pton`.
 - Service / DB / queue / external API: none — the module never performs a request or a write.
 - Consumers: `WetoSystem` (`GeoProbe`, `ProcessRegistry`, `TargetResolver`, `NetworkSnapshotReader`),
@@ -87,7 +87,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - **The check order in `GuardPolicy.decide` is the security contract**, not a style choice: blacklist
   before country, primary country before `confirmationUnavailable`, `countryConflict` last. Reordering
   compiles, keeps most tests green and silently weakens fail-closed. The canonical order is in
-  `.claude/rules/ARCHITECTURE.md` → "Ключевые контракты".
+  `.claude/rules/ARCHITECTURE.md` → "Инварианты, общие для обеих реализаций".
 - **`decide` has an unreachable branch:** the `geoUnavailable("нет данных")` fallback can only fire if
   `GeoOutcome` gains a third case. Adding one routes it into a generic reason instead of a compile error.
 - **`GeoFailure.other` is load-bearing, not a leftover:** it is the escape hatch for codes the

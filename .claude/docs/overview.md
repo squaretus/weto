@@ -4,7 +4,7 @@
 
 ### Guard cycle: network event → verdict → kill
 
-1. **Trigger.** `Sources/WetoSystem/NetworkEventSource.swift` emits `.networkPath`
+1. **Trigger.** `macos/Sources/WetoSystem/NetworkEventSource.swift` emits `.networkPath`
    (`NWPathMonitor`), `.dynamicStore` (`SCDynamicStore` keys: global IPv4, per-service IPv4,
    interface link), `.wake` and `.appLaunched(bundleID:)` (`NSWorkspace`). Independently
    `GuardVM.startTicking` emits `.tick` every `settings.pollIntervalSeconds` (default 5 s),
@@ -61,15 +61,15 @@
    `com.weto.shared` UserDefaults suite. `UserNotificationKillNotifier` silently no-ops
    without a bundle id (`swift run`, tests).
 
-Files: `Sources/WetoSystem/NetworkEventSource.swift`, `Sources/WetoShared/GuardVM.swift`,
-`Sources/WetoShared/GuardController.swift`, `Sources/WetoCore/GuardPolicy.swift`,
-`Sources/WetoCore/Model/NetworkSnapshot.swift`, `Sources/WetoSystem/GeoProbe.swift`,
-`Sources/WetoShared/ProcessEnforcer.swift`, `Sources/WetoCore/ProcessMatcher.swift`,
-`Sources/WetoSystem/ProcessKiller.swift`, `Sources/WetoShared/EventLogStore.swift`.
+Files: `macos/Sources/WetoSystem/NetworkEventSource.swift`, `macos/Sources/WetoShared/GuardVM.swift`,
+`macos/Sources/WetoShared/GuardController.swift`, `macos/Sources/WetoCore/GuardPolicy.swift`,
+`macos/Sources/WetoCore/Model/NetworkSnapshot.swift`, `macos/Sources/WetoSystem/GeoProbe.swift`,
+`macos/Sources/WetoShared/ProcessEnforcer.swift`, `macos/Sources/WetoCore/ProcessMatcher.swift`,
+`macos/Sources/WetoSystem/ProcessKiller.swift`, `macos/Sources/WetoShared/EventLogStore.swift`.
 
 ### Update: HTTP check in the app, root install in the daemon
 
-The whole mechanism lives in `Packages/UpdateKit` and is driven by `UpdateFeedConfiguration`;
+The whole mechanism lives in `macos/Packages/UpdateKit` and is driven by `UpdateFeedConfiguration`;
 weto contributes the configuration value, the dialog theme and the daemon entry point.
 Module doc: `modules/update-kit.md`.
 
@@ -128,13 +128,13 @@ Module doc: `modules/update-kit.md`.
    reaches a success state. `postinstall` bootstraps both again, and the app's launch agent has
    `KeepAlive`, so launchd brings the app back — this is what makes silent auto-install viable.
 
-Files: `Packages/UpdateKit/Sources/UpdateKit/UpdateController.swift`, `HelperUpdateInstaller.swift`,
-`Packages/UpdateKit/Sources/UpdateKitCore/UpdatePolicy.swift`, `UpdateProgress.swift`,
+Files: `macos/Packages/UpdateKit/Sources/UpdateKit/UpdateController.swift`, `HelperUpdateInstaller.swift`,
+`macos/Packages/UpdateKit/Sources/UpdateKitCore/UpdatePolicy.swift`, `UpdateProgress.swift`,
 `UpdateDialogModel.swift`, `ReleasePackageURL.swift`,
-`Packages/UpdateKit/Sources/UpdateKitUI/UpdateWindowPresenter.swift`, `UpdateDialogView.swift`,
-`Packages/UpdateKit/Sources/UpdateKitXPC/`, `Packages/UpdateKit/Sources/UpdateKitHelper/`,
-`Sources/WetoCore/WetoUpdate.swift`, `Sources/WetoShared/WetoUpdateTheme.swift`,
-`Sources/WetoHelper/main.swift`, `scripts/preinstall`, `scripts/postinstall`.
+`macos/Packages/UpdateKit/Sources/UpdateKitUI/UpdateWindowPresenter.swift`, `UpdateDialogView.swift`,
+`macos/Packages/UpdateKit/Sources/UpdateKitXPC/`, `macos/Packages/UpdateKit/Sources/UpdateKitHelper/`,
+`macos/Sources/WetoCore/WetoUpdate.swift`, `macos/Sources/WetoShared/WetoUpdateTheme.swift`,
+`macos/Sources/WetoHelper/main.swift`, `macos/scripts/preinstall`, `macos/scripts/postinstall`.
 
 The XPC surface of this flow is exactly `performUpdate`, `installState`, `uninstallHelper` —
 every method has a caller, and only the read-only one was added for progress. The former
@@ -143,16 +143,16 @@ it had no callers while being executed by a root process.
 
 ### Install and autostart: PKG → launchd → running copy
 
-1. **Payload** (`scripts/build.sh`): `Applications/Weto.app`,
+1. **Payload** (`macos/scripts/build.sh`): `Applications/Weto.app`,
    `Library/PrivilegedHelperTools/com.weto.helper`,
    `Library/LaunchDaemons/com.weto.helper.plist`. The user agent plist is *not* packaged.
    A component plist pins `BundleIsRelocatable=false`, and the build verifies it by expanding
    the component pkg — otherwise Installer would drop the app next to an older copy.
-2. **`scripts/preinstall`** (`set -u`, best effort): boots out `gui/<uid>/com.weto.app` for the
+2. **`macos/scripts/preinstall`** (`set -u`, best effort): boots out `gui/<uid>/com.weto.app` for the
    console user, removes both `~/Library/LaunchAgents/com.weto.app.plist` and the legacy
    `/Library/LaunchAgents` one, boots out `system/com.weto.helper` (required before the binary
    is replaced), `killall WetoMenuBar`.
-3. **`scripts/postinstall`** (`set -euo pipefail` — every failure aborts the install loudly):
+3. **`macos/scripts/postinstall`** (`set -euo pipefail` — every failure aborts the install loudly):
    requires `/Applications/Weto.app/Contents/MacOS/WetoMenuBar` to be executable; resolves the
    console user from `stat -f '%Su' /dev/console` and the home directory from
    `dscl … NFSHomeDirectory` (never assembled as `/Users/<name>`); writes the agent plist
@@ -170,6 +170,6 @@ it had no callers while being executed by a root process.
    `SIGTERM` to itself, so `bootout` is reserved for `Maintenance.closeApp`, which does intend
    to quit.
 
-Files: `scripts/build.sh`, `scripts/preinstall`, `scripts/postinstall`,
-`Resources/com.weto.helper.plist`, `Sources/WetoMenuBar/WetoMenuBarApp.swift`,
-`Sources/WetoShared/LaunchAgentController.swift`, `Sources/WetoShared/AppCoordinator.swift`.
+Files: `macos/scripts/build.sh`, `macos/scripts/preinstall`, `macos/scripts/postinstall`,
+`macos/Resources/com.weto.helper.plist`, `macos/Sources/WetoMenuBar/WetoMenuBarApp.swift`,
+`macos/Sources/WetoShared/LaunchAgentController.swift`, `macos/Sources/WetoShared/AppCoordinator.swift`.

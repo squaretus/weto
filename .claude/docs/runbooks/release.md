@@ -1,16 +1,17 @@
 # Release
 
-Cutting a weto version: local `.app` for smoke runs, signed PKG installer, GitHub Release that feeds auto-update.
+Cutting a weto version: a macOS PKG and two Linux tarballs, published as one GitHub
+Release that feeds auto-update on both platforms.
 
 ## Steps
 
-1. **Local `.app` (no PKG).** `scripts/make-app.sh release` → `.build/app/Weto.app`.
+1. **Local `.app` (no PKG).** `macos/scripts/make-app.sh release` → `macos/.build/app/Weto.app`.
    Same layout as the PKG payload (`Contents/Resources`, nothing in the bundle root),
-   version stays whatever `Resources/Weto-Info.plist` carries (`0.1.0` today).
+   version stays whatever `macos/Resources/Weto-Info.plist` carries (`0.1.0` today).
    Use `debug` (default arg) for a faster build. Bundle-only features (Keychain,
    notifications, `Constants.appVersion`) need the `.app`, not `swift run`.
 
-2. **PKG locally.** `scripts/build.sh <X.Y.Z>` → `.build/release_build/Weto-<X.Y.Z>.pkg`.
+2. **PKG locally.** `macos/scripts/build.sh <X.Y.Z>` → `macos/.build/release_build/Weto-<X.Y.Z>.pkg`.
    Builds `WetoMenuBar` + `WetoHelper` in release, stages `_pkg-root`
    (`Applications/Weto.app`, `Library/PrivilegedHelperTools/com.weto.helper`,
    `Library/LaunchDaemons/com.weto.helper.plist`), runs the safety net below,
@@ -18,14 +19,14 @@ Cutting a weto version: local `.app` for smoke runs, signed PKG installer, GitHu
    `.pkg` remains.
 
 3. **Version handling.** The version is written by `PlistBuddy` into the *staging copy*
-   `_app/Weto.app/Contents/Info.plist` only. `Resources/Weto-Info.plist` and
-   `Sources/WetoCore/Constants.swift` are never touched — a release must leave the work
-   tree clean. `scripts/tests/build-artifact-contract.sh [version]` asserts exactly that
+   `_app/Weto.app/Contents/Info.plist` only. `macos/Resources/Weto-Info.plist` and
+   `macos/Sources/WetoCore/Constants.swift` are never touched — a release must leave the work
+   tree clean. `macos/scripts/tests/build-artifact-contract.sh [version]` asserts exactly that
    by comparing md5 of both files before/after a real build, and that the version landed
    in the bundle (not just in the file name).
 
 4. **Release contract check (slow, and already gated).**
-   `bash scripts/tests/build-artifact-contract.sh 9.9.9` — does a full build, so locally run it
+   `bash macos/scripts/tests/build-artifact-contract.sh 9.9.9` — does a full build, so locally run it
    in a separate worktree/copy. It is not called from `build.sh` (the reverse: it calls
    `build.sh`), but CI runs it on every PR and push to `master` as the "Packaging contracts" step
    of `pr-checks.yml`, which also drags in `launch-agent-contract.sh` and every `build.sh` guard
@@ -33,9 +34,9 @@ Cutting a weto version: local `.app` for smoke runs, signed PKG installer, GitHu
 
 5. **Publish.** Push a tag `vX.Y.Z` on `master`. `.github/workflows/release.yml`
    (runner `macos-26`) validates the tag matches `^[0-9]+\.[0-9]+\.[0-9]+$` after stripping
-   `v`, runs `swift test`, runs `scripts/build.sh "$VERSION"`, and publishes via
+   `v`, runs `swift test`, runs `macos/scripts/build.sh "$VERSION"`, and publishes via
    `softprops/action-gh-release@v2` with `generate_release_notes: true`, attaching
-   `.build/release_build/Weto-<VERSION>.pkg`. Release name: `weto <VERSION>`.
+   `macos/.build/release_build/Weto-<VERSION>.pkg`. Release name: `weto <VERSION>`.
    A mismatched tag fails the job before any build.
 
 6. **Verify auto-update sees it.** The release must have the `.pkg` among its assets
@@ -47,8 +48,8 @@ Cutting a weto version: local `.app` for smoke runs, signed PKG installer, GitHu
 Every check below exists because the corresponding breakage already shipped once. All of them
 run on every PR now (`pr-checks.yml` → "Packaging contracts"), not only when you cut a release.
 
-- **`Package.swift` declares `resources:` but no `.bundle` in `Contents/Resources`**
-  → `✗ Package.swift объявляет ресурсы, но в Contents/Resources нет ни одного .bundle`.
+- **`macos/Package.swift` declares `resources:` but no `.bundle` in `Contents/Resources`**
+  → `✗ macos/Package.swift объявляет ресурсы, но в Contents/Resources нет ни одного .bundle`.
   SPM did not emit the resource bundle (renamed target, resources dropped from the manifest).
   Shipping anyway means no icons/flags at runtime, because `DesignResources` looks in
   `Contents/Resources` and `Bundle.module` is deliberately not used.
@@ -59,12 +60,12 @@ run on every PR now (`pr-checks.yml` → "Packaging contracts"), not only when y
   refuses to seal ("unsealed contents present in the bundle root").
   `make-app.sh` fails the same way.
 
-- **`scripts/tests/launch-agent-contract.sh "$ROOT"`** runs against the payload root before
+- **`macos/scripts/tests/launch-agent-contract.sh "$ROOT"`** runs against the payload root before
   `pkgbuild`. It fails when: the payload contains a system agent
   `/Library/LaunchAgents/com.weto.app.plist` (or any non-empty `Library/LaunchAgents`);
   `Applications/Weto.app/Contents/MacOS/WetoMenuBar` is missing or non-executable;
   the update daemon or its LaunchDaemon plist is missing from the payload;
-  `postinstall`/`preinstall`/`Resources/uninstall-weto.sh` stopped agreeing on the agent path,
+  `postinstall`/`preinstall`/`macos/Resources/uninstall-weto.sh` stopped agreeing on the agent path,
   `bootout`, `NFSHomeDirectory`, `launchctl asuser`, `bootstrap`, the system-domain daemon
   load/unload, or the "no GUI session" hard failure; `NSSupportsAutomaticTermination` /
   `NSSupportsSuddenTermination` in the bundle `Info.plist` are not `false`; or
@@ -75,13 +76,13 @@ run on every PR now (`pr-checks.yml` → "Packaging contracts"), not only when y
 - **Bundle size budget.** `APP_BASELINE_KB=2000`, hard limit +10% (2200 KB). Failure:
   `✗ бандл вырос больше чем на 10% от базового размера`. Something leaked into the payload
   (docs, images, a stray resource) — or the app genuinely grew, in which case bump
-  `APP_BASELINE_KB` in `scripts/build.sh` deliberately, do not raise the tolerance.
+  `APP_BASELINE_KB` in `macos/scripts/build.sh` deliberately, do not raise the tolerance.
 
 - **`<relocate>` in the expanded `PackageInfo`** → `✗ Weto.app помечен relocatable`.
   The component plist (`BundleIsRelocatable=false`, `BundleHasStrictIdentifier=true`,
   `RootRelativeBundlePath=Applications/Weto.app`) was lost or ignored. Without it Installer
   finds any bundle with id `com.weto.app` in LaunchServices — e.g. a dev build in
-  `.build/app` — and installs over *that* instead of `/Applications`. The LaunchAgent then
+  `macos/.build/app` — and installs over *that* instead of `/Applications`. The LaunchAgent then
   points at nothing and launchd returns 78. `postinstall` also refuses to continue if
   `/Applications/Weto.app/Contents/MacOS/WetoMenuBar` is not executable.
 
@@ -94,9 +95,34 @@ run on every PR now (`pr-checks.yml` → "Packaging contracts"), not only when y
 are `pkgbuild` metadata carriers for the non-clearable `com.apple.provenance`; they never
 land on disk at install time. <!-- generated, verify -->
 
-Installer UI comes from `Resources/welcome.html` / `Resources/conclusion.html` via the
+Installer UI comes from `macos/Resources/welcome.html` / `macos/Resources/conclusion.html` via the
 generated `_distribution.xml`: `customize="never"`, `hostArchitectures="arm64"`,
 minimum OS `26.0`. Editing installer copy means editing those two files.
+
+## Linux artifacts
+
+The release workflow builds Linux natively on two runners — `ubuntu-24.04` (x86_64) and
+`ubuntu-24.04-arm` (aarch64); arm64 runners are free for public repositories, so there is
+no QEMU and no cross-compilation anywhere. Each job produces
+`weto-<X.Y.Z>-<arch>-linux.tar.zst` and uploads it under its own artifact name — a shared
+name would let the second job overwrite the first and ship one archive instead of two.
+
+Locally the same script does it: `linux/scripts/build.sh <X.Y.Z>`, which names the archive
+from `uname -m`. It also guards the binary size, with **a separate baseline per
+architecture** — the same code weighs noticeably differently on x86_64 and aarch64, and one
+shared number would check one of them by accident. An unknown architecture fails the build
+rather than skipping the check silently.
+
+**Publication waits for all three jobs.** A half release would mean auto-update on the
+other platform sees a release with no asset for it — and by contract such a release is not
+a find at all, so the app would go quiet instead of updating.
+
+**The app finds its own asset by suffix:** `ReleaseChecker` builds
+`-{std::env::consts::ARCH}-linux.tar.zst`, which matches what `uname -m` produced on the
+builder. Nothing hardcodes an architecture on either side; check both if either ever moves.
+
+**Not verified on real arm64 hardware.** The artifact builds and its install contract
+passes, but nobody has watched the tray or the windows on an arm64 desktop.
 
 ## Auto-update depends on the `.pkg` asset
 
@@ -169,13 +195,13 @@ trade-off (README, "Установка"). Consequences to keep in mind and to ke
 ## Where logs / metrics
 
 - CI: GitHub Actions → workflows `Release` (tags `v*`) and `PR Checks` (`master` PRs/pushes).
-- Local build output: `.build/release_build/` (`Weto-<version>.pkg`), `.build/app/Weto.app`.
-- Update daemon: `HelperLogger` (`Packages/UpdateKit/Sources/UpdateKitHelper/HelperLogger.swift`);
+- Local build output: `macos/.build/release_build/` (`Weto-<version>.pkg`), `macos/.build/app/Weto.app`.
+- Update daemon: `HelperLogger` (`macos/Packages/UpdateKit/Sources/UpdateKitHelper/HelperLogger.swift`);
   working directory `/var/db/weto`. The install phase and the last failure are additionally
   readable from the app itself (update window → progress or error text, via `installState`)
   while the daemon lives.
 - In-app journal: popup / Settings → Journal card (ring buffer of 10 entries in
   `UserDefaults(suiteName: "com.weto.shared")`).
-- Full removal for a clean re-test: `Resources/uninstall-weto.sh` (also shipped inside the
+- Full removal for a clean re-test: `macos/Resources/uninstall-weto.sh` (also shipped inside the
   app at `Contents/Resources/uninstall-weto.sh`) — drops the agent, daemon, `/var/db/weto`,
   the app, prefs, caches, the Keychain item, and `pkgutil --forget com.weto.pkg`.

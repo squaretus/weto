@@ -9,18 +9,18 @@ single-instance guard, residency declarations — and delegates every decision t
 parsing, validation and persistence happen in the stores.
 
 ## Key files
-- `Sources/WetoMenuBar/WetoMenuBarApp.swift` — `@main` scene, `AppDelegate`, `SingleInstanceGuard`
-- `Sources/WetoMenuBar/MenuBarLabel.swift`
-- `Sources/WetoMenuBar/StatusPopupView.swift`
-- `Sources/WetoMenuBar/JournalRow.swift`
-- `Sources/WetoMenuBar/Settings/SettingsWindow.swift`
-- `Sources/WetoMenuBar/Settings/TargetsCard.swift`
-- `Sources/WetoMenuBar/Settings/NetworkSettingsCard.swift`
-- `Sources/WetoMenuBar/Settings/BlacklistCard.swift`
-- `Sources/WetoMenuBar/Settings/MaintenanceCard.swift`
-- `Sources/WetoMenuBar/Settings/JournalCard.swift`
-- `Sources/WetoMenuBar/Settings/SettingsFooter.swift`
-- `Resources/Weto-Info.plist` — bundle identity plus residency flags (copied by `scripts/make-app.sh`)
+- `macos/Sources/WetoMenuBar/WetoMenuBarApp.swift` — `@main` scene, `AppDelegate`, `SingleInstanceGuard`
+- `macos/Sources/WetoMenuBar/MenuBarLabel.swift`
+- `macos/Sources/WetoMenuBar/StatusPopupView.swift`
+- `macos/Sources/WetoMenuBar/JournalRow.swift`
+- `macos/Sources/WetoMenuBar/Settings/SettingsWindow.swift`
+- `macos/Sources/WetoMenuBar/Settings/TargetsCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/NetworkSettingsCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/BlacklistCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/MaintenanceCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/JournalCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/SettingsFooter.swift`
+- `macos/Resources/Weto-Info.plist` — bundle identity plus residency flags (copied by `macos/scripts/make-app.sh`)
 
 ## Entry points
 - `WetoMenuBarApp` (`@main`) → `MenuBarExtra` with `.menuBarExtraStyle(.window)` +
@@ -41,7 +41,7 @@ parsing, validation and persistence happen in the stores.
   (`FlagImageStore` only)
 - Frameworks: SwiftUI, AppKit (`NSAlert`, `NSOpenPanel`, `NSWorkspace`, `NSApplication`,
   `NSViewRepresentable`), CoreFoundation (`CFMessagePortCreateLocal`)
-- No test target: `Tests/` has no `WetoMenuBarTests`
+- No test target: `macos/Tests/` has no `WetoMenuBarTests`
 
 ## Side effects
 <!-- generated, verify -->
@@ -90,6 +90,13 @@ parsing, validation and persistence happen in the stores.
 - VPN picker tags carry the service **UUID**, never the name: two services can share a name.
 - The ipinfo token is never displayed in full unless the field is focused; `maskedToken`
   is compared against the draft to avoid saving the mask itself.
+
+- **The app reaches the Dock only when it owns a window.** It is an accessory by default
+  (`LSUIElement` plus `.accessory`), but the settings and update windows are ordinary
+  windows, and without a Dock icon they cannot be found in Cmd+Tab or with the mouse.
+  `DockPresence` watches windows appear and close and flips the activation policy. The menu
+  bar popup does not count as a window (not titled, cannot become main) — otherwise the icon
+  would blink every time the menu opens.
 
 ## Failure hotspots
 <!-- generated, verify -->

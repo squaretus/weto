@@ -1,0 +1,265 @@
+{
+  "version": 1,
+  "about": [
+    "Голден-фикстуры политики охраны. Один и тот же набор случаев прогоняют обе",
+    "реализации: macOS/Tests/WetoCoreTests/GuardPolicyFixtureTests.swift и",
+    "linux/crates/weto-core/tests/policy_fixtures.rs.",
+    "",
+    "Случаи извлечены из действующих Swift-тестов, а не написаны заново: фикстуры",
+    "обязаны фиксировать существующее поведение, иначе они закрепят воображаемое.",
+    "",
+    "vpnID — идентификатор выбранного VPN: UUID сетевого сервиса на macOS,",
+    "имя интерфейса на Linux. Для политики это непрозрачная строка.",
+    "",
+    "function: decide | decideLocal | pendingVerification.",
+    "expect.decision: safe | kill | none (none — только для decideLocal, означает",
+    "«локальных оснований нет, нужен сетевой вердикт»)."
+  ],
+  "cases": [
+    {
+      "name": "всё сошлось — безопасно",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "safe" }
+    },
+    {
+      "name": "выключенная охрана безопасна даже при заблокированной стране",
+      "function": "decide",
+      "isEnabled": false,
+      "vpn": { "kind": "down" },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "RU", "confirmedCountry": "RU", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "safe" }
+    },
+    {
+      "name": "пустой список целей безопасен",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "down" },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": [] },
+      "expect": { "decision": "safe" }
+    },
+    {
+      "name": "VPN не выбран — цели завершаются",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
+      "config": { "vpnID": null, "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "vpnNotConfigured" } }
+    },
+    {
+      "name": "VPN не поднят — цели завершаются",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "down" },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "vpnDown" } }
+    },
+    {
+      "name": "VPN поднят, но не держит маршрут по умолчанию",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": false },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "vpnNotPrimary" } }
+    },
+    {
+      "name": "проверка VPN идёт раньше проверки гео — экономит запрос",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "down" },
+      "geo": { "kind": "unavailable", "detail": "timeout" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "vpnDown" } }
+    },
+    {
+      "name": "молчание ipinfo завершает цели и сохраняет текст причины",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "unavailable", "detail": "timeout" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "geoUnavailable", "detail": "timeout" } }
+    },
+    {
+      "name": "IP из чёрного списка убивает даже при разрешённой стране",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "198.51.100.231", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": ["198.51.100.0/22"], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "blacklistedIP", "ip": "198.51.100.231" } }
+    },
+    {
+      "name": "чёрный список IP идёт раньше проверки страны",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "198.51.100.231", "primaryCountry": "RU", "confirmedCountry": "RU", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": ["198.51.100.231"], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "blacklistedIP", "ip": "198.51.100.231" } }
+    },
+    {
+      "name": "IP вне всех диапазонов чёрный список не трогает",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": ["10.0.0.0/8"], "targets": ["com.example.target"] },
+      "expect": { "decision": "safe" }
+    },
+    {
+      "name": "заблокированная страна от ipinfo убивает",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "RU", "confirmedCountry": "RU", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "blockedCountry", "code": "RU", "source": "ipinfo" } }
+    },
+    {
+      "name": "заблокированная страна от подтверждающего убивает при разрешённой у ipinfo",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "RU", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "blockedCountry", "code": "RU", "source": "freeipapi" } }
+    },
+    {
+      "name": "сравнение стран не зависит от регистра",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "ru", "confirmedCountry": "ru", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "blockedCountry", "code": "RU", "source": "ipinfo" } }
+    },
+    {
+      "name": "нет подтверждения — цели умирают, хотя ipinfo назвал безопасную страну",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": null, "confirmSource": null },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "confirmationUnavailable" } }
+    },
+    {
+      "name": "заблокированная страна от ipinfo идёт раньше отсутствия подтверждения",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "RU", "confirmedCountry": null, "confirmSource": null },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "blockedCountry", "code": "RU", "source": "ipinfo" } }
+    },
+    {
+      "name": "расхождение стран убивает",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "DE", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "countryConflict", "primary": "KZ", "confirmed": "DE" } }
+    },
+    {
+      "name": "одинаковые страны в разном регистре не расхождение",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": { "kind": "resolved", "ip": "203.0.113.28", "primaryCountry": "KZ", "confirmedCountry": "kz", "confirmSource": "freeipapi" },
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "safe" }
+    },
+
+    {
+      "name": "локально: при исправном VPN решения нет, нужен сетевой вердикт",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": true },
+      "geo": null,
+      "config": { "vpnID": "Happ", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "none" }
+    },
+    {
+      "name": "локально: выключенная охрана обрывает проверку сразу",
+      "function": "decideLocal",
+      "isEnabled": false,
+      "vpn": { "kind": "down" },
+      "geo": null,
+      "config": { "vpnID": "Happ", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "safe" }
+    },
+    {
+      "name": "локально: пустой список целей обрывает проверку сразу",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": { "kind": "down" },
+      "geo": null,
+      "config": { "vpnID": "Happ", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": [] },
+      "expect": { "decision": "safe" }
+    },
+    {
+      "name": "локально: упавший VPN убивает, не касаясь сети",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": { "kind": "down" },
+      "geo": null,
+      "config": { "vpnID": "Happ", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "vpnDown" } }
+    },
+    {
+      "name": "локально: VPN без маршрута по умолчанию убивает",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": { "kind": "up", "isPrimary": false },
+      "geo": null,
+      "config": { "vpnID": "Happ", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "vpnNotPrimary" } }
+    },
+    {
+      "name": "локально: невыбранный VPN убивает",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": { "kind": "notConfigured" },
+      "geo": null,
+      "config": { "vpnID": null, "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "vpnNotConfigured" } }
+    },
+
+    {
+      "name": "ожидание проверки убивает при заряженной охране",
+      "function": "pendingVerification",
+      "isEnabled": true,
+      "vpn": null,
+      "geo": null,
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "kill", "reason": { "kind": "verificationPending" } }
+    },
+    {
+      "name": "ожидание проверки безвредно при выключенной охране",
+      "function": "pendingVerification",
+      "isEnabled": false,
+      "vpn": null,
+      "geo": null,
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": ["com.example.target"] },
+      "expect": { "decision": "safe" }
+    },
+    {
+      "name": "ожидание проверки безвредно без целей",
+      "function": "pendingVerification",
+      "isEnabled": true,
+      "vpn": null,
+      "geo": null,
+      "config": { "vpnID": "BC2D1D42", "blockedCountries": ["RU"], "blockedIPRanges": [], "targets": [] },
+      "expect": { "decision": "safe" }
+    }
+  ]
+}

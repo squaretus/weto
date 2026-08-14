@@ -9,12 +9,12 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build PKG & Publish Release
-    runs-on: macos-26
+  version:
+    name: Extract version
+    runs-on: ubuntu-24.04
+    outputs:
+      VERSION: ${{ steps.version.outputs.VERSION }}
     steps:
-      - uses: actions/checkout@v4
-
       # Имя тега подставляется через окружение, а не интерполяцией в run:
       # прямая подстановка в шелл — классический путь для инъекции команд.
       - name: Extract version from tag
@@ -29,21 +29,114 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
+  macos:
+    name: Build PKG
+    needs: version
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: macos
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Test
         run: swift test
 
       - name: Build release PKG
         env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
+          VERSION: ${{ needs.version.outputs.VERSION }}
         run: |
           chmod +x scripts/build.sh scripts/preinstall scripts/postinstall
           scripts/build.sh "$VERSION"
 
-      # Релиз в этот же репозиторий — источник автообновления:
-      # приложение опрашивает Releases API каждые 6 часов.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: macos/.build/release_build/*.pkg
+
+  linux:
+    name: Build tarball (${{ matrix.arch }})
+    needs: version
+    # Обе архитектуры собираются нативно: arm64-раннеры GitHub бесплатны
+    # для публичных репозиториев, и ни QEMU, ни кросс-компиляция не нужны.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      # Собираем на 24.04 намеренно: GTK там 4.14 — объявленный пол проекта.
+      # Сборка на более новом GTK слинковалась бы с символами, которых
+      # на целевой системе может не быть.
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libssl-dev pkg-config zstd xvfb
+
+      - name: Lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Boundary contract
+        run: bash scripts/tests/core-boundary-contract.sh
+
+      # Дисплей поднимаем сами, а не через xvfb-run: тот умеет зависнуть —
+      # стартует Xvfb и не запускает команду вовсе, а на CI это выглядит как
+      # молча висящая сборка до самого таймаута.
+      - name: Test
+        run: |
+          Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
+          sleep 2
+          DISPLAY=:99 cargo test --workspace
+
+      - name: Build
+        env:
+          VERSION: ${{ needs.version.outputs.VERSION }}
+        run: bash scripts/build.sh "$VERSION"
+
+      - name: Install contract
+        env:
+          VERSION: ${{ needs.version.outputs.VERSION }}
+        run: |
+          bash scripts/tests/install-contract.sh \
+            "target/release_build/weto-$VERSION-$(uname -m)-linux.tar.zst" "$VERSION"
+
+      # Имя артефакта своё у каждой архитектуры: с общим второй перезаписал бы
+      # первый, и в релиз ушёл бы один архив вместо двух.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: linux/target/release_build/*.tar.zst
+
+  publish:
+    name: Publish release
+    # Публикация только когда собрались обе платформы: половинчатый релиз
+    # означал бы, что автообновление на второй платформе видит релиз
+    # без своего артефакта.
+    needs: [version, macos, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Релиз в этот же репозиторий — источник автообновления обеих платформ.
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: .build/release_build/Weto-${{ steps.version.outputs.VERSION }}.pkg
-          name: weto ${{ steps.version.outputs.VERSION }}
+          files: |
+            artifacts/macos/*
+            artifacts/linux-*/*
+          name: weto ${{ needs.version.outputs.VERSION }}
           generate_release_notes: true

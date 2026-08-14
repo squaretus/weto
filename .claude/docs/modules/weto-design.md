@@ -8,17 +8,17 @@ AppKit image renderers built on them. It is the only target that owns visual lan
 application state — they take values and closures, never view models.
 
 ## Key files
-- `Sources/WetoDesign/Tokens/WetoTokens.swift` — `Color(hex:)`, `WetoColor`, `WetoTokens`, `StatusTone`
-- `Sources/WetoDesign/Components/WetoCard.swift` — `WetoCard`, `WetoRow`, `WetoDivider`, `WetoPanel`
-- `Sources/WetoDesign/Components/WetoControls.swift` — segmented control, button/field styles, `StatusShield`
-- `Sources/WetoDesign/Components/WetoBanner.swift`
-- `Sources/WetoDesign/Components/WetoProcessPill.swift`
-- `Sources/WetoDesign/Components/WetoDeleteRowAction.swift`
-- `Sources/WetoDesign/Components/MenuBarImageRenderer.swift`
-- `Sources/WetoDesign/TargetIconStore.swift`
-- `Sources/WetoDesign/DesignResources.swift`
-- `Sources/WetoDesign/Resources/cli-claude.svg`, `Resources/cli-codex.png`
-- Tests: `Tests/WetoDesignTests/DesignResourcesTests.swift`, `MenuBarImageRendererTests.swift`
+- `macos/Sources/WetoDesign/Tokens/WetoTokens.swift` — `Color(hex:)`, `WetoColor`, `WetoTokens`, `StatusTone`
+- `macos/Sources/WetoDesign/Components/WetoCard.swift` — `WetoCard`, `WetoRow`, `WetoDivider`, `WetoPanel`
+- `macos/Sources/WetoDesign/Components/WetoControls.swift` — segmented control, button/field styles, `StatusShield`
+- `macos/Sources/WetoDesign/Components/WetoBanner.swift`
+- `macos/Sources/WetoDesign/Components/WetoProcessPill.swift`
+- `macos/Sources/WetoDesign/Components/WetoDeleteRowAction.swift`
+- `macos/Sources/WetoDesign/Components/MenuBarImageRenderer.swift`
+- `macos/Sources/WetoDesign/TargetIconStore.swift`
+- `macos/Sources/WetoDesign/DesignResources.swift`
+- `macos/Sources/WetoDesign/Resources/cli-claude.svg`, `macos/Sources/WetoDesign/Resources/cli-codex.png`
+- Tests: `macos/Tests/WetoDesignTests/DesignResourcesTests.swift`, `MenuBarImageRendererTests.swift`
 
 ## Entry points
 - `WetoTokens.<token>` — palette (`shell`/`card`/`sunk`/`line`/`sunkLine`/`ink`/`dim`/`faint`/
@@ -43,7 +43,7 @@ application state — they take values and closures, never view models.
 - Bundled resources: `weto_WetoDesign.bundle` (brand CLI icons)
 - System: `NSWorkspace.shared.icon(forFile:)` for `.app` bundles and for the Terminal fallback
   (`/System/Applications/Utilities/Terminal.app`)
-- Consumers: `Sources/WetoMenuBar/**` only (`MenuBarLabel`, `StatusPopupView`, `Settings/*`,
+- Consumers: `macos/Sources/WetoMenuBar/**` only (`MenuBarLabel`, `StatusPopupView`, `Settings/*`,
   `JournalRow`)
 
 ## Side effects
@@ -69,8 +69,8 @@ application state — they take values and closures, never view models.
   SPM accessor looks only at the root of `Bundle.main` and at the build machine's absolute path.
   In the app that means a bundle copy in the root of `Weto.app`, and `codesign` refuses to seal
   that layout ("unsealed contents present in the bundle root") — the signature was silently not
-  produced. Resources therefore live in `Contents/Resources`; both `scripts/make-app.sh` and
-  `scripts/build.sh` copy `*.bundle` there, and `build.sh` fails the build if `Package.swift`
+  produced. Resources therefore live in `Contents/Resources`; both `macos/scripts/make-app.sh` and
+  `macos/scripts/build.sh` copy `*.bundle` there, and `build.sh` fails the build if `macos/Package.swift`
   declares resources but no `.bundle` landed in `Contents/Resources` (and again if it is missing
   from the assembled PKG payload).
 - `DesignResources.bundle` probe order is `Bundle.main.resourceURL` → `Bundle.main.bundleURL` →
@@ -96,6 +96,11 @@ application state — they take values and closures, never view models.
   colours and the status dot its tone, so macOS must not tint the image.
 - Menu bar canvas is fixed at 22×22 pt (menu bar height); the status dot sits at −45° on the
   flag ring.
+
+- **The app icon follows the theme** (`WetoAppIcon` + `AppCoordinator.applyAppIcon`): the
+  Dock, `NSAlert` and the update window all show it. The bundle ships a static `AppIcon.icns`;
+  both images and the `.icns` are generated from `shared/icon/*.icon` by
+  `macos/scripts/build-icon.sh`, so editing the PNGs by hand is pointless — they are output.
 
 ## Failure hotspots
 <!-- generated, verify -->
