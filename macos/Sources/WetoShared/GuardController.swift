@@ -30,7 +30,9 @@ final class GuardController {
     private let debounceInterval: TimeInterval
 
     private let onDecision: (GuardDecision) -> Void
-    private let onReport: (GeoProbeReport) -> Void
+    /// `nil` гасит показания: устаревшие адрес и страна на экране
+    /// читаются как «я всё ещё под VPN», хотя защиты уже нет.
+    private let onReport: (GeoProbeReport?) -> Void
 
     private(set) var revision = 0
     private var freshVerdict: Verdict?
@@ -42,7 +44,7 @@ final class GuardController {
         geoProbe: GeoProbing,
         debounceInterval: TimeInterval,
         onDecision: @escaping (GuardDecision) -> Void,
-        onReport: @escaping (GeoProbeReport) -> Void
+        onReport: @escaping (GeoProbeReport?) -> Void
     ) {
         self.settings = settings
         self.snapshotReader = snapshotReader
@@ -78,10 +80,27 @@ final class GuardController {
             vpn: vpn,
             config: config
         ) {
-            probeTask?.cancel()
-            probeTask = nil
+            // Экономия запросов относится к вердикту, а не к экрану. Пока её
+            // распространяли и на показания, после падения VPN там навсегда
+            // оставались адрес и страна туннеля — то есть экран показывал
+            // защиту, которой уже нет.
+            let isStale = freshVerdict
+                != Verdict(revision: revision, snapshotFingerprint: snapshot.fingerprint)
+            let isArmed = settings.isEnabled && !config.targets.isEmpty
+
+            if isStale { onReport(nil) }
+
             record(snapshot: snapshot)
             onDecision(local)
+
+            // Один запрос на смену состояния сети, и только пока охрана на посту:
+            // выключенной охране и охране без целей сеть не нужна вовсе.
+            if isArmed && isStale {
+                startProbe(after: debounceInterval)
+            } else {
+                probeTask?.cancel()
+                probeTask = nil
+            }
             return
         }
 

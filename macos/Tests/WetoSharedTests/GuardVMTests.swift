@@ -992,13 +992,36 @@ final class GuardVMTests: XCTestCase {
         h.vm.start()
         await h.vm.awaitPendingProbe()
 
+        // Число запросов не закрепляем: при выключенном VPN показания обновляются
+        // и сами. Важно, что нажатие добавляет свой.
+        let before = await h.probe.calls()
+
         h.vm.recheckNow()
         await h.vm.awaitPendingProbe()
 
         let calls = await h.probe.calls()
-        XCTAssertEqual(calls, 1, "кнопка обязана сходить в сеть и при выключенном VPN")
+        XCTAssertEqual(calls, before + 1, "кнопка обязана сходить в сеть и при выключенном VPN")
         XCTAssertEqual(h.vm.lastReport?.ipinfo, .answered("KZ"))
         XCTAssertEqual(h.vm.state, .unsafe(.vpnDown), "вердикт охраны кнопка не смягчает")
+    }
+
+    /// Показания обязаны обновляться и тогда, когда судьба целей решена локально.
+    ///
+    /// Экономия запросов относится к вердикту, а не к экрану: пока её
+    /// распространяли и на показания, после падения VPN там навсегда оставались
+    /// адрес и страна туннеля — то есть экран показывал защиту, которой уже нет.
+    func test_the_readout_refreshes_while_the_vpn_is_down() async {
+        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome(primary: "KZ"))
+
+        h.vm.start()
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(
+            h.vm.lastReport?.ipinfo,
+            .answered("KZ"),
+            "экран обязан сказать, где пользователь сейчас, а не где был под VPN"
+        )
+        XCTAssertEqual(h.vm.state, .unsafe(.vpnDown), "показания вердикт не смягчают")
     }
 
     /// Свежая установка: охрана выключена, целей нет — но узнать своё положение

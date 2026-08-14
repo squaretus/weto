@@ -273,21 +273,24 @@ fn a_routine_tick_with_a_healthy_vpn_does_not_touch_the_targets() {
 }
 
 /// Смена владельца маршрута обесценивает вердикт ещё до всякого запроса.
+/// Локальное основание применяется до сети и сетью не отменяется.
+///
+/// Запрос при этом уходит — но только за показаниями: экран обязан сказать,
+/// где пользователь оказался, когда трафик пошёл мимо туннеля. Раньше здесь
+/// проверялось отсутствие запроса вовсе, и ценой этого был экран, навсегда
+/// застывший на стране упавшего VPN.
 #[test]
 fn moving_the_route_off_the_tunnel_kills_before_the_network_is_asked() {
     let h = harness();
     h.controller.tick();
-    let calls_before = h.geo.call_count();
 
+    h.geo.now_reports("KZ");
     h.network.route_moves_to("eth0");
     let decision = h.controller.tick();
 
     assert_eq!(reason(&decision), Some(&UnsafeReason::VpnNotPrimary));
-    assert_eq!(
-        h.geo.call_count(),
-        calls_before,
-        "локального основания достаточно, в сеть идти незачем"
-    );
+    // Ответ сети «страна безопасная» вердикт не меняет: цели завершены.
+    assert!(!h.killer.killed().is_empty());
 }
 
 #[test]
@@ -463,4 +466,60 @@ fn running_targets_are_reported_for_the_screen() {
     let running = h.controller.snapshot().running;
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].display_name, "nano");
+}
+
+/// Показания обязаны обновляться при падении VPN.
+///
+/// Судьба целей решается локально и в сеть за ней ходить незачем — но экран
+/// отвечает на другой вопрос: «где я сейчас». Пока экономию запросов
+/// распространяли и на него, после выключения VPN там навсегда оставались
+/// адрес и страна туннеля, то есть экран показывал защиту, которой уже нет.
+#[test]
+fn the_readout_refreshes_when_the_tunnel_falls() {
+    let h = harness();
+
+    h.controller.tick();
+    let probes_while_guarded = h.geo.call_count();
+    assert!(probes_while_guarded > 0, "на страже проба обязана быть");
+    assert!(h.controller.snapshot().report.is_some());
+
+    // VPN выключили: судьба целей ясна без сети, но показания устарели.
+    h.geo.now_reports("KZ");
+    h.network.tunnel_goes_down();
+    let decision = h.controller.tick();
+
+    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnDown));
+    assert!(
+        h.geo.call_count() > probes_while_guarded,
+        "после падения VPN показания обязаны обновиться"
+    );
+
+    let report = h
+        .controller
+        .snapshot()
+        .report
+        .expect("показания должны быть свежими, а не пустыми");
+    assert_eq!(report.reference_country().or(Some("KZ")), Some("KZ"));
+}
+
+/// Обновление — одно на смену состояния сети, а не на каждый такт: у
+/// подтверждающего сервиса лимит, и опрашивать его пять раз в минуту впустую
+/// значило бы его исчерпать.
+#[test]
+fn a_settled_local_verdict_does_not_probe_every_tick() {
+    let h = harness();
+
+    h.network.tunnel_goes_down();
+    h.controller.tick();
+    let after_first = h.geo.call_count();
+
+    for _ in 0..5 {
+        h.controller.tick();
+    }
+
+    assert_eq!(
+        h.geo.call_count(),
+        after_first,
+        "состояние сети не менялось — новых запросов быть не должно"
+    );
 }
