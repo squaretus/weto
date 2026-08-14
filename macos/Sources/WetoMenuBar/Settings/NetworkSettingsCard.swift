@@ -13,6 +13,13 @@ struct NetworkSettingsCard: View {
 
     private var scheme: ColorScheme { coordinator.settings.appTheme.colorScheme }
 
+    private var pickerRows: [VPNPickerRow] {
+        VPNPicker.rows(
+            candidates: coordinator.guardVM.availableVPNs,
+            chosen: coordinator.settings.vpnServiceID
+        )
+    }
+
     private var maskedToken: String {
         let token = coordinator.settings.ipinfoToken
         guard token.count > 4 else { return String(repeating: "•", count: token.count) }
@@ -35,9 +42,11 @@ struct NetworkSettingsCard: View {
                         get: { coordinator.settings.vpnServiceID ?? "" },
                         set: { coordinator.settings.vpnServiceID = $0.isEmpty ? nil : $0 }
                     )) {
-                        Text("Не выбран").tag("")
-                        ForEach(coordinator.guardVM.availableVPNs) { service in
-                            Text(service.name).tag(service.uuid)
+                        // Выбранный туннель остаётся в списке, даже когда его
+                        // сейчас нет: у клиента, поднимающего utun сам, интерфейс
+                        // живёт ровно пока живо подключение.
+                        ForEach(pickerRows) { row in
+                            Text(row.label).tag(row.id)
                         }
                     }
                     .labelsHidden()
