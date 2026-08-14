@@ -55,9 +55,19 @@ jobs:
           path: macos/.build/release_build/*.pkg
 
   linux:
-    name: Build tarball
+    name: Build tarball (${{ matrix.arch }})
     needs: version
-    runs-on: ubuntu-24.04
+    # Обе архитектуры собираются нативно: arm64-раннеры GitHub бесплатны
+    # для публичных репозиториев, и ни QEMU, ни кросс-компиляция не нужны.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: linux
@@ -100,11 +110,13 @@ jobs:
           VERSION: ${{ needs.version.outputs.VERSION }}
         run: |
           bash scripts/tests/install-contract.sh \
-            "target/release_build/weto-$VERSION-x86_64-linux.tar.zst" "$VERSION"
+            "target/release_build/weto-$VERSION-$(uname -m)-linux.tar.zst" "$VERSION"
 
+      # Имя артефакта своё у каждой архитектуры: с общим второй перезаписал бы
+      # первый, и в релиз ушёл бы один архив вместо двух.
       - uses: actions/upload-artifact@v4
         with:
-          name: linux
+          name: linux-${{ matrix.arch }}
           path: linux/target/release_build/*.tar.zst
 
   publish:
@@ -125,6 +137,6 @@ jobs:
         with:
           files: |
             artifacts/macos/*
-            artifacts/linux/*
+            artifacts/linux-*/*
           name: weto ${{ needs.version.outputs.VERSION }}
           generate_release_notes: true

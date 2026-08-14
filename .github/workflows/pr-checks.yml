@@ -39,8 +39,19 @@ jobs:
           bash scripts/tests/build-artifact-contract.sh 9.9.9
 
   linux:
-    name: Build & Test (Linux)
-    runs-on: ubuntu-24.04
+    name: Build & Test (Linux ${{ matrix.arch }})
+    # Обе архитектуры проверяются здесь, а не только в релизе: иначе поломка
+    # на arm всплыла бы в момент выпуска — худший момент из возможных.
+    # arm64-раннеры GitHub бесплатны для публичных репозиториев.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: linux
@@ -87,7 +98,7 @@ jobs:
         run: |
           bash scripts/build.sh 9.9.9
           bash scripts/tests/install-contract.sh \
-            target/release_build/weto-9.9.9-x86_64-linux.tar.zst 9.9.9
+            "target/release_build/weto-9.9.9-$(uname -m)-linux.tar.zst" 9.9.9
 
   generators:
     name: Generators are idempotent
