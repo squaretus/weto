@@ -17,7 +17,10 @@ ARCHIVE="$OUT/weto-$VERSION-$ARCH-linux.tar.zst"
 # заехавшая в бинарник крупная зависимость.
 # История правок базы — чтобы рост был осознанным:
 #   8400  первая релизная сборка: GTK4, ureq с rustls, resvg, ksni.
-BINARY_BASELINE_KB=8400
+#   9670  самообновление (tar, zstd, filetime, xattr — распаковать релиз
+#         без них нечем) и порт интерфейса под macOS: пять карточек настроек,
+#         разрешение целей через ярлык и запускатор.
+BINARY_BASELINE_KB=9670
 
 echo "=== weto $VERSION ($ARCH) ==="
 

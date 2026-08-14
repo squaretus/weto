@@ -116,7 +116,10 @@ pub fn vpn_rows(candidates: &[String], chosen: Option<&str>) -> (Vec<VpnRow>, us
     }
 
     let selected = chosen
-        .and_then(|name| rows.iter().position(|row| row.value.as_deref() == Some(name)))
+        .and_then(|name| {
+            rows.iter()
+                .position(|row| row.value.as_deref() == Some(name))
+        })
         .unwrap_or(0);
 
     (rows, selected)
@@ -167,7 +170,12 @@ pub fn status_lines(report: &crate::geo::GeoProbeReport, checked_at: &str) -> Ve
     if !report.is_fully_answered() {
         lines.push(StatusLine {
             key: "сеть".to_string(),
-            value: if report.has_network_path { "есть" } else { "нет" }.to_string(),
+            value: if report.has_network_path {
+                "есть"
+            } else {
+                "нет"
+            }
+            .to_string(),
         });
     }
 
@@ -362,7 +370,12 @@ mod tests {
         let (rows, selected) = vpn_rows(&["wg0".into(), "tun0".into()], Some("wg0"));
         assert_eq!(rows.len(), 3);
         assert_eq!(selected, 1);
-        assert_eq!(rows.iter().filter(|r| r.value.as_deref() == Some("wg0")).count(), 1);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.value.as_deref() == Some("wg0"))
+                .count(),
+            1
+        );
     }
 
     #[test]

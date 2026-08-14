@@ -62,7 +62,7 @@ vpn_interface = "wg0"
 blocked_countries = ["RU"]
 blocked_ip_ranges = []
 theme = "dark"
-notify_on_kill = true
+poll_interval_seconds = 5.0
 revision = 1
 
 [[targets]]

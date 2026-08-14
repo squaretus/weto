@@ -179,7 +179,9 @@ impl GuardController {
             // целей сеть не нужна вовсе, а ходить к чужим сервисам без причины
             // приложение не должно. Показания там просто гасятся.
             let armed = settings.is_enabled && !config.targets.is_empty();
-            let stale = self.fresh_verdict(settings.revision, &fingerprint).is_none();
+            let stale = self
+                .fresh_verdict(settings.revision, &fingerprint)
+                .is_none();
             if stale {
                 self.forget_report();
             }
@@ -270,13 +272,6 @@ impl GuardController {
 
         self.probe_in_flight.store(false, Ordering::SeqCst);
         Some(outcome)
-    }
-
-    fn publish_report_only(&self) {
-        let mut inner = self.inner.lock().expect("состояние охраны");
-        if let Some(verdict) = &inner.verdict {
-            inner.snapshot.report = Some(verdict.report.clone());
-        }
     }
 
     /// Забыть показания, снятые при другом состоянии сети.

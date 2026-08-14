@@ -25,6 +25,10 @@ use weto_ui::theme;
 
 use crate::state::AppState;
 
+/// Перерисовка, которую могут позвать и виджеты, ею же созданные: кнопка
+/// удаления живёт внутри строки, а строки пересобираются целиком.
+type Redraw = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
 thread_local! {
     /// Окно одно: второе нажатие «Настройки» поднимает существующее,
     /// а не открывает копию.
@@ -237,25 +241,21 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 
             let state = state.clone();
             let redraw = redraw.clone();
-            dialog.open_multiple(
-                Some(&window),
-                gtk4::gio::Cancellable::NONE,
-                move |result| {
-                    // Отмена — не ошибка: пользователь передумал, и говорить
-                    // ему об этом нечего.
-                    let Ok(files) = result else { return };
-                    for index in 0..files.n_items() {
-                        if let Some(path) = files
-                            .item(index)
-                            .and_downcast::<gtk4::gio::File>()
-                            .and_then(|file| file.path())
-                        {
-                            add_target(&state, &path.to_string_lossy());
-                        }
+            dialog.open_multiple(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
+                // Отмена — не ошибка: пользователь передумал, и говорить
+                // ему об этом нечего.
+                let Ok(files) = result else { return };
+                for index in 0..files.n_items() {
+                    if let Some(path) = files
+                        .item(index)
+                        .and_downcast::<gtk4::gio::File>()
+                        .and_then(|file| file.path())
+                    {
+                        add_target(&state, &path.to_string_lossy());
                     }
-                    redraw();
-                },
-            );
+                }
+                redraw();
+            });
         });
     }
 
@@ -284,7 +284,14 @@ fn resolved_description(target: &weto_config::settings::Target) -> String {
 
 fn add_target(state: &Arc<AppState>, text: &str) {
     let text = text.trim();
-    if text.is_empty() || state.settings.current().targets.iter().any(|t| t.entry == text) {
+    if text.is_empty()
+        || state
+            .settings
+            .current()
+            .targets
+            .iter()
+            .any(|t| t.entry == text)
+    {
         return;
     }
 
@@ -492,7 +499,7 @@ fn blacklist_card(state: Arc<AppState>) -> GtkBox {
 
     // Перерисовка через `Rc`, чтобы её могли позвать и кнопки внутри строк,
     // которые она же и создаёт.
-    let redraw: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let redraw: Redraw = Rc::new(RefCell::new(None));
     {
         let state = state.clone();
         let list = list.clone();
@@ -560,7 +567,9 @@ fn blacklist_card(state: Arc<AppState>) -> GtkBox {
             let text = entry.text().to_string();
             // Разбор и проверка живут в настройках: экрану остаётся показать отказ.
             let mut outcome = Ok(());
-            state.settings.edit(|s| outcome = s.add_blocked_entry(&text));
+            state
+                .settings
+                .edit(|s| outcome = s.add_blocked_entry(&text));
 
             match outcome {
                 Ok(()) => {
@@ -775,11 +784,15 @@ fn confirm(
         .build();
 
     let window = anchor.root().and_downcast::<gtk4::Window>();
-    dialog.choose(window.as_ref(), gtk4::gio::Cancellable::NONE, move |answer| {
-        if answer == Ok(0) {
-            action();
-        }
-    });
+    dialog.choose(
+        window.as_ref(),
+        gtk4::gio::Cancellable::NONE,
+        move |answer| {
+            if answer == Ok(0) {
+                action();
+            }
+        },
+    );
 }
 
 // --- Подвал ---------------------------------------------------------------

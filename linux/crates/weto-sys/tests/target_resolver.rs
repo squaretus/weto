@@ -102,7 +102,10 @@ fn an_ordinary_binary_is_left_alone() {
 
     let resolved = resolve_launch_target(&binary.to_string_lossy());
 
-    assert_eq!(resolved, fs::canonicalize(&binary).unwrap().to_string_lossy());
+    assert_eq!(
+        resolved,
+        fs::canonicalize(&binary).unwrap().to_string_lossy()
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
