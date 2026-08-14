@@ -91,6 +91,13 @@ parsing, validation and persistence happen in the stores.
 - The ipinfo token is never displayed in full unless the field is focused; `maskedToken`
   is compared against the draft to avoid saving the mask itself.
 
+- **The app reaches the Dock only when it owns a window.** It is an accessory by default
+  (`LSUIElement` plus `.accessory`), but the settings and update windows are ordinary
+  windows, and without a Dock icon they cannot be found in Cmd+Tab or with the mouse.
+  `DockPresence` watches windows appear and close and flips the activation policy. The menu
+  bar popup does not count as a window (not titled, cannot become main) — otherwise the icon
+  would blink every time the menu opens.
+
 ## Failure hotspots
 <!-- generated, verify -->
 - Any new `onChange`/`onAppear` pair on synchronized state — the launchd self-boot-out class

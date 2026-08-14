@@ -81,6 +81,39 @@ Everything the policy decides is shared. What the system dictates is not:
   ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is needed.
 - **`appBundle` targets do not exist here.** A `.desktop` entry points at an ordinary
   binary, so it is a `Binary` target.
+- **CSS variables are not used:** `var()` arrived in GTK 4.16 and the project floor is 4.14
+  (Ubuntu 24.04 LTS), where such rules are silently dropped. Values are substituted by the
+  generator instead — one stylesheet per theme, and `css.rs` fails if a `var(--` survives.
+- **The stock theme paints buttons with a gradient.** Breeze and Adwaita put a
+  `background-image` on top of our `background-color`, so without an explicit
+  `background-image: none` the button stays light and light text on it disappears. The reset
+  is mandatory on every control we fill; `css.rs` fails the build if one is missing.
+- **The geo readout refreshes on every network change**, not only when the verdict needs the
+  network — same contract as `WetoShared`. One probe per (revision + fingerprint) pair, only
+  while the guard is armed, and the stale report is dropped first.
+- **The chosen tunnel survives going offline.** `vpn_rows` keeps the stored choice as a
+  "(не подключён)" row and separates rebuilding the list from a user's click; without that
+  separation switching the VPN off silently erased the setting, and the guard then reported
+  "VPN not selected" instead of "VPN down".
+
+## Self-update
+
+Checked at start-up and hourly, installed by the same process into the home directory.
+The decision comes from the same pure function as on macOS and is checked by the shared
+fixtures. A silent outcome hides both the window and the banner; auto-install runs without
+a dialog; the restart is an `exec` over itself, by which point the launch symlink already
+points at the new version.
+
+- **Rollback is built in:** a start attempt is marked before any window is created and
+  cleared after five seconds of life. Two failures in a row mean the version does not
+  start, and the app returns to the previous one by itself. macOS needs no such safety net —
+  there the system installer validates the package.
+- **A manual check ignores skip and deferral** — the only and sufficient way to bring back
+  a skipped version, which is why there is no "unskip" button.
+- **No root anywhere:** not for installing, updating, killing targets or reading routes.
+  There is no privileged helper in the Linux build at all. Download protection is the same
+  as on macOS — https plus the GitHub delivery host list; neither platform has a signature,
+  and splitting them over that would be a decision without a reason.
 
 ## Divergence control
 
@@ -92,7 +125,7 @@ that quietly stopped working on one OS.
 
 ## Testing
 
-156 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+179 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. Everything that cannot be
 faked — a real WireGuard tunnel, the look of the tray icon — is covered by the

@@ -149,6 +149,15 @@ this layer decides *when* to ask and *what to do* with the answer.
   everything because nobody held its handle. `installWatchTask` follows the same rule — it is
   cancelled in `stop()`, in `deinit` and as soon as a failure is shown.
 
+- **Request thrift applies to the verdict, not to the screen.** `GuardController.evaluate`
+  refreshes the geo readout even when a local reason already settled the targets' fate:
+  one probe per change of the (revision + network fingerprint) pair, and only while the
+  guard is armed (enabled and with targets). While the thrift covered the readout too, the
+  popup kept the fallen tunnel's address and country forever — it displayed protection that
+  no longer existed. A stale readout is cleared before the network answers (`onReport(nil)`,
+  which also clears `lastReading`, since the popup falls back to it): a dash is more honest
+  than someone else's country. Such a probe never softens the verdict.
+
 ## Failure hotspots
 <!-- generated, verify -->
 - `LaunchAgentController.enable/disable` — the self-bootout trap above; cost the project two

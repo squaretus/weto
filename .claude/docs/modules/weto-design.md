@@ -97,6 +97,11 @@ application state — they take values and closures, never view models.
 - Menu bar canvas is fixed at 22×22 pt (menu bar height); the status dot sits at −45° on the
   flag ring.
 
+- **The app icon follows the theme** (`WetoAppIcon` + `AppCoordinator.applyAppIcon`): the
+  Dock, `NSAlert` and the update window all show it. The bundle ships a static `AppIcon.icns`;
+  both images and the `.icns` are generated from `shared/icon/*.icon` by
+  `macos/scripts/build-icon.sh`, so editing the PNGs by hand is pointless — they are output.
+
 ## Failure hotspots
 <!-- generated, verify -->
 - **Resource lookup.** Any new `Bundle.module` call site works in `swift test` and breaks in the
