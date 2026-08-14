@@ -1,6 +1,7 @@
 # Release
 
-Cutting a weto version: local `.app` for smoke runs, signed PKG installer, GitHub Release that feeds auto-update.
+Cutting a weto version: a macOS PKG and two Linux tarballs, published as one GitHub
+Release that feeds auto-update on both platforms.
 
 ## Steps
 
@@ -97,6 +98,31 @@ land on disk at install time. <!-- generated, verify -->
 Installer UI comes from `macos/Resources/welcome.html` / `macos/Resources/conclusion.html` via the
 generated `_distribution.xml`: `customize="never"`, `hostArchitectures="arm64"`,
 minimum OS `26.0`. Editing installer copy means editing those two files.
+
+## Linux artifacts
+
+The release workflow builds Linux natively on two runners — `ubuntu-24.04` (x86_64) and
+`ubuntu-24.04-arm` (aarch64); arm64 runners are free for public repositories, so there is
+no QEMU and no cross-compilation anywhere. Each job produces
+`weto-<X.Y.Z>-<arch>-linux.tar.zst` and uploads it under its own artifact name — a shared
+name would let the second job overwrite the first and ship one archive instead of two.
+
+Locally the same script does it: `linux/scripts/build.sh <X.Y.Z>`, which names the archive
+from `uname -m`. It also guards the binary size, with **a separate baseline per
+architecture** — the same code weighs noticeably differently on x86_64 and aarch64, and one
+shared number would check one of them by accident. An unknown architecture fails the build
+rather than skipping the check silently.
+
+**Publication waits for all three jobs.** A half release would mean auto-update on the
+other platform sees a release with no asset for it — and by contract such a release is not
+a find at all, so the app would go quiet instead of updating.
+
+**The app finds its own asset by suffix:** `ReleaseChecker` builds
+`-{std::env::consts::ARCH}-linux.tar.zst`, which matches what `uname -m` produced on the
+builder. Nothing hardcodes an architecture on either side; check both if either ever moves.
+
+**Not verified on real arm64 hardware.** The artifact builds and its install contract
+passes, but nobody has watched the tray or the windows on an arm64 desktop.
 
 ## Auto-update depends on the `.pkg` asset
 
