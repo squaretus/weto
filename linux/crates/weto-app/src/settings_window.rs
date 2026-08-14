@@ -15,6 +15,7 @@ use gtk4::prelude::*;
 use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack};
 
 use weto_config::settings::{Theme, POLL_INTERVAL_OPTIONS};
+use weto_core::presentation::{vpn_rows, VpnRow};
 use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
@@ -23,8 +24,6 @@ use weto_ui::components as ui;
 use weto_ui::theme;
 
 use crate::state::AppState;
-
-const NOT_SELECTED: &str = "Не выбран";
 
 thread_local! {
     /// Окно одно: второе нажатие «Настройки» поднимает существующее,
@@ -312,36 +311,44 @@ fn network_card(state: Arc<AppState>) -> GtkBox {
     let vpn_row = ui::row(true);
     vpn_row.append(&ui::label("VPN-сервис"));
     vpn_row.append(&ui::spacer());
-    let picker = gtk4::DropDown::from_strings(&[NOT_SELECTED]);
+    let picker = gtk4::DropDown::from_strings(&[]);
     vpn_row.append(&picker);
     card.append(&vpn_row);
 
-    // Список туннелей приходит из снимка сети и меняется на глазах: туннель
-    // поднимают уже при открытых настройках. Перестраивается он только когда
-    // состав изменился — иначе выбор сбрасывался бы дважды в секунду.
+    // Значения строк держим рядом со списком: подпись выбранного, но отключённого
+    // туннеля отличается от его имени, и разбирать её обратно было бы гаданием.
+    let values: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
+    // Перестройка списка и установка выбора — не нажатие пользователя.
+    // Без этого различения выключенный VPN стирал бы настройку: список
+    // пересобирался, выбор соскакивал на «Не выбран», и обработчик записывал это.
+    let applying = Rc::new(std::cell::Cell::new(false));
+
     {
         let state = state.clone();
         let picker = picker.clone();
-        let mut known: Vec<String> = Vec::new();
+        let values = values.clone();
+        let applying = applying.clone();
+        let mut known: Vec<VpnRow> = Vec::new();
 
         let mut refresh = move || {
             let candidates = state.snapshot().vpn_candidates;
-            if candidates != known {
-                let mut items = vec![NOT_SELECTED.to_string()];
-                items.extend(candidates.iter().cloned());
-                let refs: Vec<&str> = items.iter().map(String::as_str).collect();
-                picker.set_model(Some(&gtk4::StringList::new(&refs)));
-                known = candidates.clone();
+            let chosen = state.settings.current().vpn_interface;
+            let (rows, selected) = vpn_rows(&candidates, chosen.as_deref());
+
+            if rows != known {
+                let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+                applying.set(true);
+                picker.set_model(Some(&gtk4::StringList::new(&labels)));
+                *values.borrow_mut() = rows.iter().map(|row| row.value.clone()).collect();
+                applying.set(false);
+                known = rows;
             }
 
-            let chosen = state.settings.current().vpn_interface;
-            let index = chosen
-                .as_ref()
-                .and_then(|name| candidates.iter().position(|c| c == name))
-                .map(|position| position + 1)
-                .unwrap_or(0) as u32;
-            if picker.selected() != index {
-                picker.set_selected(index);
+            let selected = selected as u32;
+            if picker.selected() != selected {
+                applying.set(true);
+                picker.set_selected(selected);
+                applying.set(false);
             }
         };
         refresh();
@@ -354,14 +361,17 @@ fn network_card(state: Arc<AppState>) -> GtkBox {
 
     {
         let state = state.clone();
+        let values = values.clone();
+        let applying = applying.clone();
         picker.connect_selected_notify(move |picker| {
-            let Some(list) = picker.model().and_downcast::<gtk4::StringList>() else {
+            if applying.get() {
                 return;
-            };
-            let Some(name) = list.string(picker.selected()) else {
-                return;
-            };
-            let chosen = (name != NOT_SELECTED).then(|| name.to_string());
+            }
+            let chosen = values
+                .borrow()
+                .get(picker.selected() as usize)
+                .cloned()
+                .flatten();
 
             // Правка поднимает ревизию и обесценивает прежний вердикт: смена
             // сервиса обязана заново пройти проверку, а не наследовать «безопасно».
