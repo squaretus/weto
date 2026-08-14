@@ -45,9 +45,10 @@ run() { orb -m "$MACHINE" -u root bash -lc "$1"; }
 user_run() { orb -m "$MACHINE" bash -lc "$1"; }
 
 say "ставлю рабочий стол и зависимости"
-# kwin назван явно: ставим без рекомендаций, а оконный менеджер у kde-plasma-desktop
-# именно в них. Без него сеанс поднимается наполовину — обои и панель есть,
-# рисовать окна некому, и снаружи это выглядит вечной загрузкой.
+# kwin и konsole названы явно: ставим без рекомендаций, а оконный менеджер
+# и терминал у kde-plasma-desktop именно в них. Без kwin сеанс поднимается
+# наполовину — обои и панель есть, рисовать окна некому, и снаружи это выглядит
+# вечной загрузкой; без konsole в сеансе нечем запустить терминальную цель.
 if orb -m "$MACHINE" bash -lc 'command -v pacman >/dev/null'; then
     run 'pacman -Syu --noconfirm --needed \
             plasma-desktop kwin tigervnc xorg-xauth \
@@ -57,7 +58,7 @@ else
     run 'export DEBIAN_FRONTEND=noninteractive
          apt-get update
          apt-get install -y --no-install-recommends \
-            kde-plasma-desktop plasma-desktop kwin-x11 \
+            kde-plasma-desktop plasma-desktop kwin-x11 konsole \
             tigervnc-standalone-server xauth dbus-x11 x11-utils \
             xdg-desktop-portal xdg-desktop-portal-kde xdg-desktop-portal-gtk \
             libgtk-4-dev libssl-dev pkg-config zstd \
