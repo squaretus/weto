@@ -2,32 +2,32 @@
 
 ## Purpose
 The whole update mechanism — hourly check, decision to show, the dialog, deferral, and the
-root install with live progress — packaged as a separate SPM package under `Packages/UpdateKit`
+root install with live progress — packaged as a separate SPM package under `macos/Packages/UpdateKit`
 so it can be moved to another project by copying the folder. The package knows no constant of
 any concrete application: repository, mach service name, install paths, defaults suite and
 intervals all arrive in `UpdateFeedConfiguration`. weto's glue is three places:
-`Sources/WetoCore/WetoUpdate.swift` (the configuration value),
-`Sources/WetoShared/WetoUpdateTheme.swift` (colors, fonts, button builders) and
-`Sources/WetoHelper/main.swift` (the daemon entry point).
+`macos/Sources/WetoCore/WetoUpdate.swift` (the configuration value),
+`macos/Sources/WetoShared/WetoUpdateTheme.swift` (colors, fonts, button builders) and
+`macos/Sources/WetoHelper/main.swift` (the daemon entry point).
 
 Five targets, split along linking boundaries: the root daemon links Core + XPC + Helper and
 never pulls SwiftUI; the app links Core + XPC + UpdateKit + UpdateKitUI and never pulls the
 root logic.
 
 ## Key files
-- `Packages/UpdateKit/Package.swift`
-- `Packages/UpdateKit/Sources/UpdateKitCore/UpdateFeedConfiguration.swift`
-- `Packages/UpdateKit/Sources/UpdateKitCore/UpdatePolicy.swift`, `UpdateDeferral.swift`
-- `Packages/UpdateKit/Sources/UpdateKitCore/UpdateProgress.swift`
-- `Packages/UpdateKit/Sources/UpdateKitCore/UpdateDialogModel.swift`, `UpdateStrings.swift`
-- `Packages/UpdateKit/Sources/UpdateKitCore/SemanticVersion.swift` (versions, `UpdateInfo`, `ReleaseParser`)
-- `Packages/UpdateKit/Sources/UpdateKitCore/ReleasePackageURL.swift` (download host allowlist)
-- `Packages/UpdateKit/Sources/UpdateKitXPC/UpdaterHelperProtocol.swift`, `UpdaterXPCClient.swift`, `UpdaterService.swift`
-- `Packages/UpdateKit/Sources/UpdateKit/UpdateController.swift`, `UpdateBoundaries.swift`
-- `Packages/UpdateKit/Sources/UpdateKit/UserDefaultsUpdateStore.swift`, `URLSessionReleaseFetcher.swift`, `HelperUpdateInstaller.swift`
-- `Packages/UpdateKit/Sources/UpdateKitUI/UpdateTheme.swift`, `UpdateDialogView.swift`, `UpdateWindowPresenter.swift`
-- `Packages/UpdateKit/Sources/UpdateKitHelper/UpdaterHelperService.swift`, `HelperUpdateFlow.swift`, `HelperInstallState.swift`, `PackageDownloader.swift`, `ReleaseChecker.swift`, `ClientAuthorization.swift`
-- `Packages/UpdateKit/Tests/…` — run with `swift test --package-path Packages/UpdateKit`
+- `macos/Packages/UpdateKit/Package.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKitCore/UpdateFeedConfiguration.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKitCore/UpdatePolicy.swift`, `UpdateDeferral.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKitCore/UpdateProgress.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKitCore/UpdateDialogModel.swift`, `UpdateStrings.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKitCore/SemanticVersion.swift` (versions, `UpdateInfo`, `ReleaseParser`)
+- `macos/Packages/UpdateKit/Sources/UpdateKitCore/ReleasePackageURL.swift` (download host allowlist)
+- `macos/Packages/UpdateKit/Sources/UpdateKitXPC/UpdaterHelperProtocol.swift`, `UpdaterXPCClient.swift`, `UpdaterService.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKit/UpdateController.swift`, `UpdateBoundaries.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKit/UserDefaultsUpdateStore.swift`, `URLSessionReleaseFetcher.swift`, `HelperUpdateInstaller.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKitUI/UpdateTheme.swift`, `UpdateDialogView.swift`, `UpdateWindowPresenter.swift`
+- `macos/Packages/UpdateKit/Sources/UpdateKitHelper/UpdaterHelperService.swift`, `HelperUpdateFlow.swift`, `HelperInstallState.swift`, `PackageDownloader.swift`, `ReleaseChecker.swift`, `ClientAuthorization.swift`
+- `macos/Packages/UpdateKit/Tests/…` — run with `swift test --package-path macos/Packages/UpdateKit`
 
 ## Entry points
 - `UpdateController.start()` — one immediate check plus the hourly loop; starting twice does

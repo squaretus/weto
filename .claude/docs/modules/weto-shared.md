@@ -8,18 +8,18 @@ view model and the two system-mutating helpers (launch agent, uninstall). All ty
 this layer decides *when* to ask and *what to do* with the answer.
 
 ## Key files
-- `Sources/WetoShared/AppCoordinator.swift` — composition root, wired once in `WetoMenuBarApp`
-- `Sources/WetoShared/GuardVM.swift` — observable facade for the UI, journal dedup, watchdog, tick loop
-- `Sources/WetoShared/GuardController.swift` — decision state machine, owns the network probe
-- `Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event
-- `Sources/WetoShared/SettingsStore.swift` — `UserDefaults` + Keychain, guard-config change bus
-- `Sources/WetoShared/EventLogStore.swift` — 10-entry ring buffer of `KillEvent`
-- `Sources/WetoShared/LaunchAgentController.swift` — `~/Library/LaunchAgents/com.weto.app.plist`
-- `Sources/WetoShared/Maintenance.swift` — `closeApp` and full `uninstall` plan
-- `Sources/WetoShared/WetoUpdateTheme.swift` — weto skin for the `UpdateKit` dialog
-- `Sources/WetoCore/WetoUpdate.swift` — the update configuration this module wires up
-- `Sources/WetoShared/StatusPresentation.swift`, `KillNotifying.swift`, `URLOpening.swift`
-- Tests: `Tests/WetoSharedTests/` (`GuardVMTests` is the behavioural bulk, 31 KB)
+- `macos/Sources/WetoShared/AppCoordinator.swift` — composition root, wired once in `WetoMenuBarApp`
+- `macos/Sources/WetoShared/GuardVM.swift` — observable facade for the UI, journal dedup, watchdog, tick loop
+- `macos/Sources/WetoShared/GuardController.swift` — decision state machine, owns the network probe
+- `macos/Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event
+- `macos/Sources/WetoShared/SettingsStore.swift` — `UserDefaults` + Keychain, guard-config change bus
+- `macos/Sources/WetoShared/EventLogStore.swift` — 10-entry ring buffer of `KillEvent`
+- `macos/Sources/WetoShared/LaunchAgentController.swift` — `~/Library/LaunchAgents/com.weto.app.plist`
+- `macos/Sources/WetoShared/Maintenance.swift` — `closeApp` and full `uninstall` plan
+- `macos/Sources/WetoShared/WetoUpdateTheme.swift` — weto skin for the `UpdateKit` dialog
+- `macos/Sources/WetoCore/WetoUpdate.swift` — the update configuration this module wires up
+- `macos/Sources/WetoShared/StatusPresentation.swift`, `KillNotifying.swift`, `URLOpening.swift`
+- Tests: `macos/Tests/WetoSharedTests/` (`GuardVMTests` is the behavioural bulk, 31 KB)
 
 ## Entry points
 - `AppCoordinator.init()` → wires real system adapters; `start()`, `stopForTermination()`
@@ -35,7 +35,7 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `EventLogStore.record(_)`, `clear()`
 - `LaunchAgentManaging.enable() / disable() / bootout()`, `isInstalled`, `pointsAtCurrentBundle`
 - `Maintenance.closeApp() → Result<Void, LaunchAgentError>`, `uninstall() → MaintenanceResult`
-- `AppCoordinator.update` — an `UpdateController` from `Packages/UpdateKit`, built from
+- `AppCoordinator.update` — an `UpdateController` from `macos/Packages/UpdateKit`, built from
   `WetoUpdate.configuration`; `AppCoordinator.updateWindow` owns the dialog presenter.
   The mechanism itself is documented in `modules/update-kit.md`
 - `WetoUpdateTheme.make(for:) → UpdateTheme` — the only weto-specific part of the dialog
@@ -148,6 +148,15 @@ this layer decides *when* to ask and *what to do* with the answer.
 - Every periodic task is stored so it can be cancelled: the update loop previously outlived
   everything because nobody held its handle. `installWatchTask` follows the same rule — it is
   cancelled in `stop()`, in `deinit` and as soon as a failure is shown.
+
+- **Request thrift applies to the verdict, not to the screen.** `GuardController.evaluate`
+  refreshes the geo readout even when a local reason already settled the targets' fate:
+  one probe per change of the (revision + network fingerprint) pair, and only while the
+  guard is armed (enabled and with targets). While the thrift covered the readout too, the
+  popup kept the fallen tunnel's address and country forever — it displayed protection that
+  no longer existed. A stale readout is cleared before the network answers (`onReport(nil)`,
+  which also clears `lastReading`, since the popup falls back to it): a dash is more honest
+  than someone else's country. Such a probe never softens the verdict.
 
 ## Failure hotspots
 <!-- generated, verify -->

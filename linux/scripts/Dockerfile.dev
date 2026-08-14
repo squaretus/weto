@@ -1,0 +1,21 @@
+# Окружение разработки Linux-версии weto.
+#
+# База — Debian trixie: там GTK4 новее пола, объявленного проектом (4.14 из
+# Ubuntu 24.04 LTS). Собирать на образе с GTK старше пола нельзя: бинарник
+# слинкуется с символами, которых на целевых системах может не быть.
+FROM rust:1-trixie
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgtk-4-dev \
+        libssl-dev \
+        pkg-config \
+        zstd \
+        iproute2 \
+        # GTK не поднимается без дисплея, а тесты обязаны идти без монитора.
+        xvfb \
+        xauth \
+        # Трей и уведомления живут на шине; для тестов нужна сессионная.
+        dbus-x11 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add clippy rustfmt

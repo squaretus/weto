@@ -1,0 +1,12 @@
+[package]
+name = "wetod"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+weto-core = { path = "../weto-core" }
+weto-sys = { path = "../weto-sys" }
+weto-config = { path = "../weto-config" }
+weto-guard = { path = "../weto-guard" }

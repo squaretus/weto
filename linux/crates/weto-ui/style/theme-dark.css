@@ -1,0 +1,336 @@
+/* Сгенерировано shared/tools/gen-tokens из shared/tokens/design-tokens.json.
+Править руками нельзя: правка канона значений живёт в JSON, иначе оттенки
+на macOS и Linux разъедутся. */
+
+/* Тема: тёмная. */
+
+/* Дизайн-система weto на GTK4.
+ *
+ * libadwaita не используется намеренно: он отвергает кастомные темы, а канон
+ * прямо требует явного выбора темы без следования системной. Голый GTK4
+ * красится своим провайдером на приоритете APPLICATION, и это ровно та модель,
+ * в которой дизайн-система и задумана.
+ *
+ * Значения сюда не пишутся: на их месте стоят подстановки в двойных фигурных
+ * скобках, которые
+ * заполняет shared/tools/gen-tokens из shared/tokens/design-tokens.json —
+ * по файлу на тему.
+ *
+ * Почему подстановка, а не CSS-переменные: var() появился в GTK 4.16, а пол
+ * проекта — 4.14 (Ubuntu 24.04 LTS). На целевой системе переменные молча
+ * не сработали бы, и приложение осталось бы в дефолтных цветах GTK.
+ */
+
+/* Базовый шрифт системный: переносить веб-шрифт мокапа в пакет не стали,
+   чтобы не терять покрытие кириллицы. */
+.weto-root {
+    font-family: sans-serif;
+    color: rgb(244, 242, 251);
+    background-color: rgb(23, 22, 29);
+}
+
+/* --- Панель ------------------------------------------------------------- */
+
+.weto-panel {
+    background-color: rgb(23, 22, 29);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 20px;
+    padding: 12px;
+}
+
+/* --- Карточка ----------------------------------------------------------- */
+
+.weto-card {
+    background-color: rgb(32, 31, 40);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 15px;
+    padding: 12px;
+}
+
+/* Капс обязателен: карточка без заголовка в каноне не используется. */
+.weto-caps {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: rgba(244, 242, 251, 0.4);
+    padding-bottom: 9px;
+}
+
+/* --- Строка ------------------------------------------------------------- */
+
+.weto-row {
+    padding-top: 6px;
+    padding-bottom: 6px;
+}
+
+/* Первая строка карточки идёт без линии сверху. */
+.weto-row.divided {
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Отказ ввода: красным и словами, рядом с полем, которое его вызвало. */
+.weto-error {
+    color: rgb(255, 107, 129);
+}
+
+/* Подсказка рядом со строкой состояния — приглушённая, смысл несёт текст слева. */
+.weto-hint {
+    color: rgba(244, 242, 251, 0.4);
+}
+
+/* Отдельная линия — там, где делить нужно не строки карточки, а блоки панели. */
+.weto-divider {
+    background-color: rgba(255, 255, 255, 0.08);
+    min-height: 1px;
+}
+
+/* Ссылка в подвале: цвет меняется наведением, подчёркивание тоже. */
+.weto-link {
+    font-size: 12px;
+    color: rgba(244, 242, 251, 0.4);
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    min-height: 0;
+}
+
+.weto-link:hover {
+    color: rgba(244, 242, 251, 0.66);
+    text-decoration: underline;
+}
+
+.weto-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgb(244, 242, 251);
+}
+
+.weto-value {
+    font-size: 13px;
+    font-weight: 400;
+    color: rgba(244, 242, 251, 0.66);
+}
+
+.weto-caption {
+    font-size: 12px;
+    color: rgba(244, 242, 251, 0.4);
+}
+
+/* --- Строка данных ------------------------------------------------------ */
+
+.weto-data-key {
+    font-size: 12px;
+    color: rgba(244, 242, 251, 0.4);
+    font-feature-settings: "tnum";
+}
+
+.weto-data-value {
+    font-size: 12px;
+    color: rgba(244, 242, 251, 0.66);
+    font-feature-settings: "tnum";
+}
+
+/* --- Сегменты ----------------------------------------------------------- */
+
+.weto-segments {
+    background-color: rgb(42, 40, 51);
+    border: 1px solid rgba(0, 0, 0, 0);
+    border-radius: 12px;
+    padding: 3px;
+}
+
+.weto-segments button {
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(244, 242, 251, 0.66);
+    background: none;
+    border: none;
+    box-shadow: none;
+    border-radius: 10px;
+    padding: 4px 12px;
+    min-height: 0;
+}
+
+.weto-segments button:checked {
+    background-color: rgb(139, 123, 255);
+    color: #ffffff;
+}
+
+/* --- Кнопки ------------------------------------------------------------- */
+
+.weto-primary,
+.weto-muted,
+.weto-destructive {
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 11px;
+    padding: 8px 15px;
+    min-height: 0;
+    box-shadow: none;
+    /* Штатная тема (Breeze, Adwaita) красит кнопку градиентом через
+       background-image, и он лежит поверх нашего background-color: без сброса
+       кнопка остаётся светлой, а светлый текст на ней исчезает. */
+    background-image: none;
+}
+
+.weto-primary {
+    background-color: rgb(139, 123, 255);
+    color: #ffffff;
+    border: none;
+}
+
+.weto-muted {
+    background-color: rgb(42, 40, 51);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: rgb(244, 242, 251);
+}
+
+.weto-destructive {
+    background-color: alpha(rgb(255, 107, 129), 0.16);
+    color: rgb(255, 107, 129);
+    border: none;
+}
+
+/* Нажатие — только непрозрачность заливки: геометрия не сдвигается. */
+.weto-primary:active,
+.weto-muted:active,
+.weto-destructive:active {
+    opacity: 0.82;
+}
+
+.weto-primary:focus-visible,
+.weto-muted:focus-visible,
+.weto-destructive:focus-visible,
+.weto-icon-button:focus-visible {
+    outline: 2px solid rgb(139, 123, 255);
+    outline-offset: 1px;
+}
+
+.weto-icon-button {
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: rgba(244, 242, 251, 0.4);
+    padding: 2px;
+    min-height: 0;
+    min-width: 0;
+}
+
+.weto-tile-button {
+    background-color: rgb(139, 123, 255);
+    background-image: none;
+    color: #ffffff;
+    border: none;
+    border-radius: 10px;
+    min-width: 30px;
+    min-height: 30px;
+    padding: 0;
+}
+
+/* --- Поле ввода --------------------------------------------------------- */
+
+.weto-entry {
+    background-color: rgb(42, 40, 51);
+    background-image: none;
+    border: 1px solid rgba(0, 0, 0, 0);
+    border-radius: 11px;
+    padding: 8px 11px;
+    font-size: 13px;
+    color: rgb(244, 242, 251);
+    min-height: 0;
+    box-shadow: none;
+}
+
+.weto-entry > text > placeholder {
+    color: rgba(244, 242, 251, 0.4);
+}
+
+/* --- Тумблер ------------------------------------------------------------ */
+
+.weto-switch {
+    min-width: 38px;
+    min-height: 22px;
+    border-radius: 12px;
+}
+
+.weto-switch:checked {
+    background-color: rgb(139, 123, 255);
+}
+
+/* --- Щит статуса -------------------------------------------------------- */
+
+/* Единственный элемент, меняющий цвет вместе со статусом. Рядом с ним
+   в каноне обязателен текст того же цвета — цвет не носит смысл в одиночку. */
+.weto-shield {
+    min-width: 32px;
+    min-height: 32px;
+    border-radius: 11px;
+    color: #ffffff;
+}
+
+.weto-shield.guarded { background-color: rgb(70, 208, 155); }
+.weto-shield.pending { background-color: rgb(242, 181, 68); }
+.weto-shield.killed  { background-color: rgb(255, 107, 129); }
+.weto-shield.disabled { background-color: rgba(244, 242, 251, 0.4); }
+
+.weto-status-title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.weto-status-title.guarded { color: rgb(70, 208, 155); }
+.weto-status-title.pending { color: rgb(242, 181, 68); }
+.weto-status-title.killed  { color: rgb(255, 107, 129); }
+.weto-status-title.disabled { color: rgba(244, 242, 251, 0.4); }
+
+/* --- Пилюля процесса ---------------------------------------------------- */
+
+.weto-pill {
+    background-color: rgb(42, 40, 51);
+    border: 1px solid rgba(0, 0, 0, 0);
+    border-radius: 15px;
+    padding-left: 6px;
+    padding-right: 12px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+}
+
+.weto-pill-extra {
+    font-size: 12px;
+    color: rgba(244, 242, 251, 0.4);
+    font-feature-settings: "tnum";
+}
+
+/* --- Запись журнала ----------------------------------------------------- */
+
+.weto-journal-diagnostics {
+    font-size: 11px;
+    color: rgba(244, 242, 251, 0.4);
+    font-feature-settings: "tnum";
+}
+
+/* --- Баннер ------------------------------------------------------------- */
+
+/* Не спорит с карточками: тот же фон и рамка, отличается иконкой и высотой. */
+.weto-banner {
+    background-color: rgb(32, 31, 40);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 6px 9px;
+}
+
+.weto-banner-icon.news { color: rgb(139, 123, 255); }
+.weto-banner-icon.warning { color: rgb(242, 181, 68); }
+
+/* --- Кнопка закрытия окна ----------------------------------------------- */
+
+.weto-close-button {
+    background-color: rgb(255, 95, 86);
+    background-image: none;
+    border: none;
+    border-radius: 6px;
+    min-width: 12px;
+    min-height: 12px;
+    padding: 0;
+}
