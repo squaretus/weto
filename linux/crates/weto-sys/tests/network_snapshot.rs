@@ -125,8 +125,8 @@ fn the_route_owner_comes_from_the_probe_and_lands_in_the_fingerprint() {
         Some("wg0")
     );
     assert_ne!(
-        through_tunnel.fingerprint(),
-        through_ethernet.fingerprint(),
+        through_tunnel.verdict_fingerprint(Some("wg0")),
+        through_ethernet.verdict_fingerprint(Some("wg0")),
         "смена владельца маршрута обязана обесценивать прежний вердикт"
     );
 }

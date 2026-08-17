@@ -22,14 +22,16 @@
    `GuardPolicy.decideLocal`. A local answer cancels any in-flight probe, records the verdict
    and is applied — VPN loss is visible from `SCDynamicStore` without any network call.
 4. **Fail-closed before the verdict.** With no local answer, `beginNetworkVerification`
-   compares `Verdict(revision, snapshot.fingerprint)` with `freshVerdict`. On mismatch
+   compares `Verdict(revision, snapshot.verdictFingerprint(forService:))` with `freshVerdict`. On mismatch
    (cold start, path change, settings edit) it applies `GuardPolicy.pendingVerification`
    — targets die *before* the first HTTP request. If the verdict is still fresh, the state is
    left untouched while the probe runs: otherwise the 5 s tick would re-enter
    `verificationPending` and kill targets on a perfectly healthy VPN. That is why freshness is
-   the pair «config revision + network snapshot fingerprint» (`NetworkSnapshot.fingerprint`:
-   service UUIDs, active interfaces, VPN qualification, owner of the default route) and not
-   plain snapshot equality. The 300 ms debounce (`Constants.networkEventDebounceSeconds`)
+   the pair «config revision + network snapshot fingerprint»
+   (`NetworkSnapshot.verdictFingerprint(forService:)`: the chosen service's active interface and
+   VPN qualification, plus the owner of the default route) and not plain snapshot equality. The
+   fingerprint is scoped to the chosen service on purpose — with the machine-wide one, a second
+   VPN reconnecting beside the chosen tunnel killed the targets. The 300 ms debounce (`Constants.networkEventDebounceSeconds`)
    that follows only coalesces outgoing requests — the state is already fail-closed.
 5. **Probe.** `GeoProbe.probe()`: Keychain token → ipinfo Lite (`v4.api.ipinfo.io`),
    `IPAddress.isValid` on the returned address *before* it goes into a URL, then confirmation

@@ -25,7 +25,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `VPNStatusResolver.status(serviceID:in:) → VPNStatus`
 - `ProcessMatcher.matches(in:rules:) → [MatchedProcess]`, `.pids(in:rules:) → [Int32]`
 - `ProcessMatcher.runningTargets(in:rules:) → [RunningTarget]` — UI rows, one per session
-- `NetworkSnapshot.fingerprint → String`, `.vpnCandidates → [NetworkServiceSnapshot]`
+- `NetworkSnapshot.verdictFingerprint(forService:) → String`, `.vpnCandidates → [NetworkServiceSnapshot]`
 - `IPAddress.isValid(_:)`, `IPRange.init?(_:)`, `IPRange.contains(_:)`
 - `GeoResponses.decodeIPInfo/decodeFreeIPAPI/decodeGeoJS/makeReading`
 - `ReleaseParser.parse(_:currentVersion:) → Result<UpdateInfo, Error>`, `ReleaseParser.latestReleaseURL`
@@ -77,9 +77,13 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - **Cycles in the process tree are assumed possible.** `ProcessTree.descendants` relies on a shared
   `seen` set plus `stepLimit = processes.count * 2`, and `topmostMatch` is bounded by the pid count.
   A snapshot where a parent points at its own descendant must terminate, not hang.
-- **`fingerprint` deliberately omits the service name.** It covers service set, active interface, VPN
-  qualification and default-route owner — renaming a VPN service must not invalidate a fresh verdict,
-  while losing the interface must.
+- **`verdictFingerprint` is scoped to the selected service, not to the whole network.** It covers the
+  chosen service's active interface and VPN qualification plus the default-route owner — the two things
+  the verdict actually depends on. The service name is omitted on purpose (a rename must not invalidate
+  a fresh verdict), and so is every *other* service and tunnel: a second VPN reconnecting on its own
+  used to change the machine-wide fingerprint and kill targets with `verificationPending` while the
+  chosen tunnel never moved. Losing the chosen interface, or the route moving off it, still must
+  invalidate — and a missing chosen service must not read the same as no selection at all.
 - **`ProcessSnapshot.arguments` stays an array.** A joined command line must never be used for matching.
 
 ## Failure hotspots
