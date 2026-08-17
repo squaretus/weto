@@ -39,30 +39,37 @@ pub enum VpnStatus {
 }
 
 impl NetworkSnapshot {
-    /// Отпечаток снимка: меняется, как только меняется состав интерфейсов,
-    /// их состояние, квалификация или владелец маршрута по умолчанию.
+    /// Отпечаток снимка: по нему видно, устарел ли прежний сетевой вердикт.
+    /// Сравнивать снимки целиком на горячем пути дороже, а нужен именно
+    /// дешёвый признак свежести.
     ///
-    /// По нему видно, устарел ли прежний сетевой вердикт. Сравнивать снимки
-    /// целиком на горячем пути дороже, а нужен именно дешёвый признак свежести.
-    pub fn fingerprint(&self) -> String {
-        let mut parts: Vec<String> = self
-            .interfaces
-            .iter()
-            .map(|i| {
-                format!(
-                    "{}:{}:{}",
-                    i.name,
-                    if i.is_up { "up" } else { "down" },
-                    if i.is_tunnel { "vpn" } else { "net" }
-                )
-            })
-            .collect();
-        parts.sort();
-        parts.push(format!(
-            "primary={}",
+    /// В отпечаток входит ровно то, от чего вердикт зависит: состояние
+    /// выбранного интерфейса и владелец маршрута по умолчанию, определяющий
+    /// выход в сеть. Чужие интерфейсы не входят намеренно.
+    ///
+    /// Отпечаток по всему снимку выглядел строже, а на деле подставлял: второй
+    /// VPN, живущий рядом, рвёт связь и поднимается сам — состав интерфейсов
+    /// меняется, прежний вердикт объявляется протухшим, и цели завершаются
+    /// с `VerificationPending` при полностью исправном выбранном туннеле.
+    pub fn verdict_fingerprint(&self, chosen: Option<&str>) -> String {
+        // Пропавший интерфейс и невыбранный VPN — разные состояния с разными
+        // вердиктами впереди (`Down` против `NotConfigured`), и отпечаток
+        // обязан их различать.
+        let part = match chosen.and_then(|name| self.interface(name)) {
+            Some(i) => format!(
+                "{}:{}:{}",
+                i.name,
+                if i.is_up { "up" } else { "down" },
+                if i.is_tunnel { "vpn" } else { "net" }
+            ),
+            None => format!("chosen={}", chosen.unwrap_or("-")),
+        };
+
+        format!(
+            "{}|primary={}",
+            part,
             self.default_route_interface.as_deref().unwrap_or("-")
-        ));
-        parts.join("|")
+        )
     }
 
     /// Кандидаты в VPN — только туннели, отсортированные по имени.
@@ -169,21 +176,51 @@ mod tests {
     fn fingerprint_changes_when_the_route_owner_changes() {
         let a = snapshot(&[("wg0", true, true), ("eth0", true, false)], Some("wg0"));
         let b = snapshot(&[("wg0", true, true), ("eth0", true, false)], Some("eth0"));
-        assert_ne!(a.fingerprint(), b.fingerprint());
+        assert_ne!(
+            a.verdict_fingerprint(Some("wg0")),
+            b.verdict_fingerprint(Some("wg0"))
+        );
     }
 
     #[test]
-    fn fingerprint_changes_when_a_tunnel_goes_down() {
+    fn fingerprint_changes_when_the_chosen_tunnel_goes_down() {
         let a = snapshot(&[("wg0", true, true)], Some("wg0"));
         let b = snapshot(&[("wg0", false, true)], Some("wg0"));
-        assert_ne!(a.fingerprint(), b.fingerprint());
+        assert_ne!(
+            a.verdict_fingerprint(Some("wg0")),
+            b.verdict_fingerprint(Some("wg0"))
+        );
     }
 
+    /// Второй VPN рвёт связь и поднимается сам — вердикт про выбранный туннель
+    /// от этого не устаревает.
     #[test]
-    fn fingerprint_ignores_the_order_of_interfaces() {
-        let a = snapshot(&[("wg0", true, true), ("eth0", true, false)], Some("wg0"));
-        let b = snapshot(&[("eth0", true, false), ("wg0", true, true)], Some("wg0"));
-        assert_eq!(a.fingerprint(), b.fingerprint());
+    fn a_foreign_tunnel_coming_and_going_leaves_the_fingerprint_alone() {
+        let alone = snapshot(&[("wg0", true, true), ("eth0", true, false)], Some("wg0"));
+        let with_corporate = snapshot(
+            &[
+                ("wg0", true, true),
+                ("eth0", true, false),
+                ("cscotun0", true, true),
+            ],
+            Some("wg0"),
+        );
+        assert_eq!(
+            alone.verdict_fingerprint(Some("wg0")),
+            with_corporate.verdict_fingerprint(Some("wg0")),
+            "чужой туннель не меняет ни выбранный, ни выход в сеть"
+        );
+    }
+
+    /// Пропавший интерфейс и невыбранный VPN ведут к разным вердиктам
+    /// (`Down` против `NotConfigured`), значит и отпечатки у них разные.
+    #[test]
+    fn a_missing_interface_is_not_the_same_as_no_choice() {
+        let s = snapshot(&[("eth0", true, false)], Some("eth0"));
+        assert_ne!(
+            s.verdict_fingerprint(Some("wg0")),
+            s.verdict_fingerprint(None)
+        );
     }
 
     #[test]

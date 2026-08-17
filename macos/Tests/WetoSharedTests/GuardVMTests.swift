@@ -3,8 +3,13 @@ import XCTest
 import WetoCore
 import WetoSystem
 
-private struct StubSnapshotReader: NetworkSnapshotReading {
-    let snapshotValue: NetworkSnapshot
+/// Снимок сети, который тест умеет менять на ходу: сеть под охраной живая,
+/// и половина случаев — как раз про её изменение.
+private final class StubSnapshotReader: NetworkSnapshotReading, @unchecked Sendable {
+    var snapshotValue: NetworkSnapshot
+
+    init(snapshotValue: NetworkSnapshot) { self.snapshotValue = snapshotValue }
+
     func snapshot() -> NetworkSnapshot { snapshotValue }
 }
 
@@ -242,6 +247,7 @@ final class GuardVMTests: XCTestCase {
         let events: ManualEventSource
         let settings: SettingsStore
         let log: EventLogStore
+        let network: StubSnapshotReader
     }
 
     private func makeHarness(
@@ -263,11 +269,12 @@ final class GuardVMTests: XCTestCase {
         let notifier = SpyNotifier()
         let events = ManualEventSource()
         let log = EventLogStore(defaults: defaults)
+        let network = StubSnapshotReader(snapshotValue: snapshot)
 
         let vm = GuardVM(
             settings: settings,
             eventLog: log,
-            snapshotReader: StubSnapshotReader(snapshotValue: snapshot),
+            snapshotReader: network,
             geoProbe: probe,
             locator: StubLocator(
                 bundlePaths: [targetBundleID: targetPath],
@@ -289,7 +296,7 @@ final class GuardVMTests: XCTestCase {
         )
 
         return Harness(vm: vm, killer: killer, probe: probe, notifier: notifier,
-                       events: events, settings: settings, log: log)
+                       events: events, settings: settings, log: log, network: network)
     }
 
     private struct DelayedHarness {
@@ -430,6 +437,50 @@ final class GuardVMTests: XCTestCase {
         )
         await h.vm.awaitPendingProbe()
         XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
+    }
+
+    /// Второй VPN, живущий рядом, — не событие для охраны.
+    ///
+    /// Корпоративный клиент рвёт связь и поднимается сам: его туннель уходит
+    /// из снимка и возвращается. Выбранный сервис и владелец маршрута при этом
+    /// не шелохнулись, значит и вердикт остался в силе.
+    func test_a_foreign_vpn_reconnecting_does_not_touch_the_targets() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        let batchesAfterFirstVerdict = h.killer.killedBatches.count
+
+        h.network.snapshotValue = NetworkSnapshot(
+            services: healthySnapshot().services + [.fromInterface("utun8")],
+            primaryServiceUUID: "HAPP"
+        )
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(
+            h.vm.state, .safe(h.vm.lastReading),
+            "чужой туннель не повод объявлять подключение непроверенным"
+        )
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
+    }
+
+    /// Обратная сторона: сам выбранный туннель, переехавший на другой интерфейс,
+    /// вердикт обесценивает — выход в сеть у него теперь другой.
+    func test_the_selected_vpn_reconnecting_still_demands_a_new_verdict() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        h.network.snapshotValue = NetworkSnapshot(
+            services: [
+                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun9", isVPN: true),
+            ],
+            primaryServiceUUID: "HAPP"
+        )
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
     }
 
     func test_manual_recheck_does_not_kill_targets_on_a_healthy_vpn() async {
