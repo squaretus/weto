@@ -37,6 +37,14 @@ impl FakeNetwork {
         self.0.lock().unwrap().default_route_interface = Some(name.to_string());
     }
 
+    fn foreign_tunnel_appears(&self, name: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .interfaces
+            .push(interface(name, true, true));
+    }
+
     fn tunnel_goes_down(&self) {
         let mut snapshot = self.0.lock().unwrap();
         snapshot.interfaces[0].is_up = false;
@@ -269,6 +277,29 @@ fn a_routine_tick_with_a_healthy_vpn_does_not_touch_the_targets() {
         h.geo.call_count(),
         1,
         "второй запрос не нужен: ничего не изменилось"
+    );
+}
+
+/// Второй VPN, живущий рядом, — не событие для охраны.
+///
+/// Корпоративный клиент рвёт связь и поднимается сам: его туннель уходит
+/// из снимка и возвращается. Выбранный интерфейс и владелец маршрута при этом
+/// не шелохнулись, значит и вердикт остался в силе.
+#[test]
+fn a_foreign_vpn_reconnecting_does_not_touch_the_targets() {
+    let h = harness();
+    h.controller.tick();
+    let killed_after_first = h.killer.killed().len();
+
+    h.network.foreign_tunnel_appears("cscotun0");
+    let decision = h.controller.tick();
+
+    assert_eq!(decision, GuardDecision::Safe);
+    assert_eq!(h.killer.killed().len(), killed_after_first);
+    assert_eq!(
+        h.geo.call_count(),
+        1,
+        "чужой туннель не повод ни завершать цели, ни тратить запрос"
     );
 }
 
