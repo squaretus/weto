@@ -156,7 +156,9 @@ impl GuardController {
         let settings = self.settings.settings();
         let network = self.network.snapshot();
         let config = settings.guard_config();
-        let fingerprint = network.fingerprint();
+        // Отпечаток берётся по выбранному интерфейсу, а не по всей сети: иначе
+        // чужой VPN, переподключившийся сам по себе, стоил бы пользователю целей.
+        let fingerprint = network.verdict_fingerprint(settings.vpn_interface.as_deref());
 
         let vpn =
             weto_core::network::resolve_vpn_status(&network, settings.vpn_interface.as_deref());

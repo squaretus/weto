@@ -15,7 +15,9 @@ import WetoSystem
 ///
 /// Свежесть вердикта считается по паре «ревизия конфигурации + отпечаток снимка сети».
 /// Без этого штатный тик поллинга каждые несколько секунд заново уходил бы
-/// в `verificationPending` и убивал цели при полностью исправном VPN.
+/// в `verificationPending` и убивал цели при полностью исправном VPN. Отпечаток
+/// берётся по выбранному сервису (`verdictFingerprint`), а не по всей сети: иначе
+/// чужой VPN, переподключившийся сам по себе, стоил бы пользователю целей.
 @MainActor
 final class GuardController {
 
@@ -84,13 +86,15 @@ final class GuardController {
             // распространяли и на показания, после падения VPN там навсегда
             // оставались адрес и страна туннеля — то есть экран показывал
             // защиту, которой уже нет.
-            let isStale = freshVerdict
-                != Verdict(revision: revision, snapshotFingerprint: snapshot.fingerprint)
+            let isStale = freshVerdict != Verdict(
+                revision: revision,
+                snapshotFingerprint: snapshot.verdictFingerprint(forService: config.vpnServiceID)
+            )
             let isArmed = settings.isEnabled && !config.targets.isEmpty
 
             if isStale { onReport(nil) }
 
-            record(snapshot: snapshot)
+            record(snapshot: snapshot, serviceID: config.vpnServiceID)
             onDecision(local)
 
             // Один запрос на смену состояния сети, и только пока охрана на посту:
@@ -128,7 +132,7 @@ final class GuardController {
             vpn: vpn,
             config: config
         ) {
-            record(snapshot: snapshot)
+            record(snapshot: snapshot, serviceID: config.vpnServiceID)
             onDecision(local)
         }
 
@@ -136,7 +140,9 @@ final class GuardController {
     }
 
     private func beginNetworkVerification(config: GuardConfig, snapshot: NetworkSnapshot) {
-        if freshVerdict != Verdict(revision: revision, snapshotFingerprint: snapshot.fingerprint) {
+        let fingerprint = snapshot.verdictFingerprint(forService: config.vpnServiceID)
+
+        if freshVerdict != Verdict(revision: revision, snapshotFingerprint: fingerprint) {
             onDecision(GuardPolicy.pendingVerification(
                 isEnabled: settings.isEnabled,
                 config: config
@@ -173,7 +179,7 @@ final class GuardController {
         // Отчёт отдаётся и при отказе: попап обязан показать, кто именно молчал.
         onReport(report)
 
-        record(snapshot: snapshot)
+        record(snapshot: snapshot, serviceID: config.vpnServiceID)
         onDecision(GuardPolicy.decide(GuardSignals(
             isEnabled: settings.isEnabled,
             vpn: vpn,
@@ -182,8 +188,11 @@ final class GuardController {
         )))
     }
 
-    private func record(snapshot: NetworkSnapshot) {
-        freshVerdict = Verdict(revision: revision, snapshotFingerprint: snapshot.fingerprint)
+    private func record(snapshot: NetworkSnapshot, serviceID: String?) {
+        freshVerdict = Verdict(
+            revision: revision,
+            snapshotFingerprint: snapshot.verdictFingerprint(forService: serviceID)
+        )
     }
 
     private func configurationChanged() {

@@ -106,7 +106,11 @@ this layer decides *when* to ask and *what to do* with the answer.
   settings toggle and the uninstaller must all address that same path; `/Library/LaunchAgents`
   is legacy only.
 - Verdict freshness = `(config revision, snapshot fingerprint)`. Without the pair, every routine
-  5 s tick re-entered `verificationPending` and killed targets over a perfectly healthy VPN.
+  5 s tick re-entered `verificationPending` and killed targets over a perfectly healthy VPN. The
+  fingerprint comes from `verdictFingerprint(forService: config.vpnServiceID)`, never from the
+  whole snapshot: with the machine-wide one, a second VPN living beside the chosen tunnel
+  (a corporate client dropping and reconnecting on its own) invalidated the verdict and killed
+  the targets, though neither the chosen service nor the default route had moved.
 - A stale probe never returns `safe`: `applyLatestNetworkOutcome` bails unless
   `revision == expected`, and re-reads settings + snapshot immediately before deciding.
 - `GuardController` subscribes to config changes in `init`, not in `start()` — a setting changed

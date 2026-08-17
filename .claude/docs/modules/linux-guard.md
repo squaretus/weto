@@ -8,7 +8,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | Crate | File | Responsibility |
 |---|---|---|
 | `weto-core` | `policy.rs` | `decide`, `decide_local`, `pending_verification` — port of `GuardPolicy` |
-| `weto-core` | `network.rs` | `NetworkSnapshot`, `fingerprint`, `resolve_vpn_status` |
+| `weto-core` | `network.rs` | `NetworkSnapshot`, `verdict_fingerprint`, `resolve_vpn_status` |
 | `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
 | `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
 | `weto-core` | `ip.rs` | address validation and CIDR |
@@ -90,7 +90,10 @@ Everything the policy decides is shared. What the system dictates is not:
   is mandatory on every control we fill; `css.rs` fails the build if one is missing.
 - **The geo readout refreshes on every network change**, not only when the verdict needs the
   network — same contract as `WetoShared`. One probe per (revision + fingerprint) pair, only
-  while the guard is armed, and the stale report is dropped first.
+  while the guard is armed, and the stale report is dropped first. The fingerprint is
+  `verdict_fingerprint(settings.vpn_interface)` — the chosen interface and the default-route
+  owner, never the whole interface list: a second tunnel appearing or vanishing beside the
+  chosen one must not cost the user their targets.
 - **The chosen tunnel survives going offline.** `vpn_rows` keeps the stored choice as a
   "(не подключён)" row and separates rebuilding the list from a user's click; without that
   separation switching the VPN off silently erased the setting, and the guard then reported
