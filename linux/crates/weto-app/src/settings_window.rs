@@ -318,7 +318,7 @@ fn network_card(state: Arc<AppState>) -> GtkBox {
     let vpn_row = ui::row(true);
     vpn_row.append(&ui::label("VPN-сервис"));
     vpn_row.append(&ui::spacer());
-    let picker = gtk4::DropDown::from_strings(&[]);
+    let picker = ui::dropdown();
     vpn_row.append(&picker);
     card.append(&vpn_row);
 

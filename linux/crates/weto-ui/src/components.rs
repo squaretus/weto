@@ -7,7 +7,9 @@
 //! на macOS. Им передают данные, они возвращают виджет.
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Entry, Label, Orientation, Switch, ToggleButton};
+use gtk4::{
+    Align, Box as GtkBox, Button, DropDown, Entry, Label, Orientation, Switch, ToggleButton,
+};
 
 use crate::theme::shield_class;
 use weto_core::presentation::ShieldState;
@@ -89,22 +91,35 @@ pub fn data_row(key: &str, text: Option<&str>) -> GtkBox {
     row
 }
 
-pub fn primary_button(text: &str) -> Button {
+/// Пилюля любого вида. Высота приходит из CSS, а вертикальное выравнивание —
+/// отсюда: в ряду с полем ввода и списком GTK по умолчанию растягивает кнопку
+/// на всю высоту строки, и ряд разъезжается.
+fn pill(text: &str, class: &str) -> Button {
     let button = Button::with_label(text);
-    button.add_css_class("weto-primary");
+    button.add_css_class(class);
+    button.set_valign(Align::Center);
     button
+}
+
+pub fn primary_button(text: &str) -> Button {
+    pill(text, "weto-primary")
 }
 
 pub fn muted_button(text: &str) -> Button {
-    let button = Button::with_label(text);
-    button.add_css_class("weto-muted");
-    button
+    pill(text, "weto-muted")
 }
 
 pub fn destructive_button(text: &str) -> Button {
-    let button = Button::with_label(text);
-    button.add_css_class("weto-destructive");
-    button
+    pill(text, "weto-destructive")
+}
+
+/// Выпадающий список. Тот же контрол, что и приглушённая кнопка: стоит с ней
+/// на одной высоте и по тому же центру.
+pub fn dropdown() -> DropDown {
+    let list = DropDown::from_strings(&[]);
+    list.add_css_class("weto-dropdown");
+    list.set_valign(Align::Center);
+    list
 }
 
 pub fn icon_button(icon_name: &str) -> Button {
@@ -151,6 +166,7 @@ pub fn entry(prompt: &str) -> Entry {
     // Подсказка описывает формат ввода и не заменяет подпись слева.
     entry.set_placeholder_text(Some(prompt));
     entry.set_hexpand(true);
+    entry.set_valign(Align::Center);
     entry
 }
 
@@ -298,6 +314,18 @@ pub fn banner(tone: BannerTone, text: &str, action: Option<&str>) -> (GtkBox, Op
     });
 
     (banner, button)
+}
+
+/// Ряд действий внизу окна: кнопки делят ширину поровну и стоят на одной линии.
+///
+/// `homogeneous`, а не `hexpand` у каждой: `hexpand` делит поровну только
+/// свободный остаток, а базовая ширина у подписей разная — кнопки выходили
+/// разного размера.
+pub fn action_row() -> GtkBox {
+    let row = GtkBox::new(Orientation::Horizontal, SPACE2);
+    row.set_homogeneous(true);
+    row.set_valign(Align::Center);
+    row
 }
 
 /// Панель верхнего уровня: попап статуса и окно настроек.

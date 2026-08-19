@@ -76,8 +76,11 @@ public struct WetoPillButtonStyle: ButtonStyle {
         configuration.label
             .font(WetoTokens.button)
             .foregroundStyle(foreground)
-            .padding(.vertical, 8)
             .padding(.horizontal, 15)
+            // Высота — из токена, а не из суммы шрифта и вертикального паддинга:
+            // подписи в ряду разной длины и с разными выносными, и кнопки
+            // выходили разной высоты. Ряд обязан стоять на одной линии.
+            .frame(height: WetoTokens.controlHeight)
             .frame(maxWidth: expands ? .infinity : nil)
             .background(
                 RoundedRectangle(cornerRadius: WetoTokens.radiusPill, style: .continuous)
@@ -114,6 +117,39 @@ public struct WetoPillButtonStyle: ButtonStyle {
     private func opacity(pressed: Bool) -> Double {
         if !isEnabled { return 0.4 }
         return pressed ? 0.7 : 1
+    }
+}
+
+/// Кнопка-пилюля, раскрывающая меню: «Напомнить позже» в окне обновления.
+///
+/// Меню, а не `Picker`: пункты — это действия с разным сроком, а не выбор
+/// значения. Системный индикатор погашен и заменён своей стрелкой: у
+/// `.borderlessButton` его рисует AppKit поверх текста, без подложки и без
+/// нашей высоты, и контрол выпадал из ряда кнопок.
+public struct WetoMenuButton<Items: View>: View {
+
+    private let title: String
+    private let items: () -> Items
+
+    public init(_ title: String, @ViewBuilder items: @escaping () -> Items) {
+        self.title = title
+        self.items = items
+    }
+
+    public var body: some View {
+        Menu {
+            items()
+        } label: {
+            HStack(spacing: WetoTokens.space2) {
+                Text(title)
+                Image(systemName: "chevron.down")
+                    .font(WetoTokens.segment)
+            }
+        }
+        .menuIndicator(.hidden)
+        .menuStyle(.button)
+        .buttonStyle(WetoPillButtonStyle(.ghost))
+        .fixedSize()
     }
 }
 
@@ -163,8 +199,9 @@ public struct WetoFieldStyle: TextFieldStyle {
             .textFieldStyle(.plain)
             .font(WetoTokens.value)
             .foregroundStyle(WetoTokens.ink.resolve(scheme))
-            .padding(.vertical, 8)
             .padding(.horizontal, 11)
+            // Поле стоит в строке рядом с кнопкой и обязано быть с ней одной высоты.
+            .frame(height: WetoTokens.controlHeight)
             .background(
                 RoundedRectangle(cornerRadius: WetoTokens.radiusPill, style: .continuous)
                     .fill(WetoTokens.sunk.resolve(scheme))
