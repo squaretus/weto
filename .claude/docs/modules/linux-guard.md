@@ -88,6 +88,17 @@ Everything the policy decides is shared. What the system dictates is not:
   `background-image` on top of our `background-color`, so without an explicit
   `background-image: none` the button stays light and light text on it disappears. The reset
   is mandatory on every control we fill; `css.rs` fails the build if one is missing.
+- **`min-height` in GTK is the content box, and the border adds to it.** Every pill, the
+  entry and the dropdown therefore declare `min-height: calc({{controlHeight}} - 2px)` plus
+  a 1px border — transparent on the primary and destructive kinds, coloured on the muted one.
+  Without that transparent border the primary button was 2px shorter than the muted one
+  standing next to it, and the update window's action row visibly tilted. `controls.rs`
+  measures live widgets rather than reading the CSS: the height is a sum of three
+  declarations and an error in any of them only shows in the total.
+- **A row of buttons is `homogeneous`, not three `hexpand` children.** `hexpand` splits only
+  the leftover space, and the natural width of the labels differs, so the buttons came out
+  different sizes. `ui::action_row()` owns both that and the vertical centring; a GTK button
+  fills the row height by default and needs `valign: Center` to stay a pill.
 - **The geo readout refreshes on every network change**, not only when the verdict needs the
   network — same contract as `WetoShared`. One probe per (revision + fingerprint) pair, only
   while the guard is armed, and the stale report is dropped first. The fingerprint is
