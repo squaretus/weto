@@ -48,17 +48,11 @@ public enum WetoUpdateTheme {
             },
             menuButton: { title, items in
                 AnyView(
-                    Menu {
+                    WetoMenuButton(title) {
                         ForEach(items) { item in
                             Button(item.title, action: item.action)
                         }
-                    } label: {
-                        Text(title)
-                            .font(WetoTokens.button)
-                            .foregroundStyle(WetoTokens.ink.resolve(scheme))
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
                     .environment(\.colorScheme, scheme)
                 )
             }

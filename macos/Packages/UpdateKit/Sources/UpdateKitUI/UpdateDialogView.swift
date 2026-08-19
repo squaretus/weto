@@ -76,9 +76,12 @@ public struct UpdateDialogView: View {
     }
 
     /// Кнопкам запрещено сжиматься: подпись целиком или окно шире, но не «Обн…».
+    ///
+    /// Выравнивание по центру задано явно: ряд смешивает пилюли и кнопку с меню,
+    /// и на умолчании они вставали по разным линиям.
     @ViewBuilder
     private func buttons(model: UpdateDialogModel) -> some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             if model.showsChoiceButtons {
                 theme.secondaryButton(controller.strings.skip) { controller.skipCurrentVersion() }
                     .fixedSize(horizontal: true, vertical: false)

@@ -240,7 +240,7 @@ fn render_swift(tokens: &Tokens) -> String {
     }
     out.push('\n');
 
-    for name in ["popupWidth", "windowWidth", "windowHeight"] {
+    for name in ["popupWidth", "windowWidth", "windowHeight", "controlHeight"] {
         out.push_str(&number(&tokens.sizes, name));
     }
     out.push('\n');

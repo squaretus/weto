@@ -66,7 +66,7 @@ let package = Package(
         .testTarget(
             name: "WetoSharedTests",
             dependencies: [
-                "WetoShared", "WetoCore", "WetoSystem",
+                "WetoShared", "WetoCore", "WetoSystem", "WetoDesign",
                 .product(name: "UpdateKitCore", package: "UpdateKit"),
                 .product(name: "UpdateKitXPC", package: "UpdateKit"),
                 .product(name: "UpdateKit", package: "UpdateKit"),
