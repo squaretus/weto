@@ -10,7 +10,7 @@ application state — they take values and closures, never view models.
 ## Key files
 - `macos/Sources/WetoDesign/Tokens/WetoTokens.swift` — `Color(hex:)`, `WetoColor`, `WetoTokens`, `StatusTone`
 - `macos/Sources/WetoDesign/Components/WetoCard.swift` — `WetoCard`, `WetoRow`, `WetoDivider`, `WetoPanel`
-- `macos/Sources/WetoDesign/Components/WetoControls.swift` — segmented control, button/field styles, `StatusShield`
+- `macos/Sources/WetoDesign/Components/WetoControls.swift` — segmented control, button/field styles, `WetoMenuButton`, `StatusShield`
 - `macos/Sources/WetoDesign/Components/WetoBanner.swift`
 - `macos/Sources/WetoDesign/Components/WetoProcessPill.swift`
 - `macos/Sources/WetoDesign/Components/WetoDeleteRowAction.swift`
@@ -28,7 +28,7 @@ application state — they take values and closures, never view models.
 - `WetoPanel(width:content:)`, `WetoCard(_ caption:content:)`, `WetoRow(content:)`, `WetoDivider()`
 - `WetoSegmentedControl(selection:options:)` — generic over `Value: Hashable`
 - `WetoPillButtonStyle(_ kind: .primary/.ghost/.danger, expands:)`, `WetoTileButtonStyle()`,
-  `WetoIconButtonStyle()`, `WetoFieldStyle()`
+  `WetoIconButtonStyle()`, `WetoFieldStyle()`, `WetoMenuButton(_ title:items:)`
 - `StatusShield(tone:)`, `WetoBanner(tone:systemImage:text:trailing:)`,
   `WetoProcessPill(icon:title:isCommandLine:childCount:)`,
   `WetoDeleteRowAction(label:hint:action:)`
@@ -84,6 +84,13 @@ application state — they take values and closures, never view models.
   imported here, so the module cannot depend on app state even by accident.
 - Every colour must be declared as a `WetoColor` pair (dark + light); a bare `Color` in a
   component means the light theme was not considered.
+- **Every control that can share a row is exactly `WetoTokens.controlHeight` tall.** The pill
+  button, the text field and `WetoMenuButton` set `.frame(height:)`; none of them derives its
+  height from font metrics plus vertical padding. That derivation is what tilted the update
+  window's action row: labels of different length and with different descenders produced
+  different heights, and `Menu` styled `.borderlessButton` had no pill at all — AppKit drew
+  bare text with its own indicator, half a line off the buttons beside it. A row that mixes
+  pills with `WetoMenuButton` also states `HStack(alignment: .center)` explicitly.
 - **`MenuBarImageRenderer`'s cache key is the drawn input itself, never a stand-in for it.**
   The flag is keyed by its `NSImage` (default `NSObject` identity, and the key holds a strong
   reference so a freed image's address cannot be reused), and the colour by rounded sRGB
@@ -119,6 +126,10 @@ application state — they take values and closures, never view models.
 - **Token drift from the spec.** Numbers duplicated between `docs/design-system.md` and
   `WetoTokens` can diverge; also `StatusShield` hardcodes `cornerRadius: 11` instead of
   `WetoTokens.radiusPill`, so a radius change to the token misses the shield.
+- **A new control that skips `controlHeight`.** Anything added with vertical padding instead of
+  the token looks right on its own and tilts the first row it lands in. `WetoUpdateThemeTests`
+  measures the update row through `NSHostingView`; the equivalent Linux check is
+  `linux/crates/weto-ui/tests/controls.rs`.
 - **User-facing text inside the design layer.** `WetoProcessPill` carries the literal
   `"terminal"` and a Russian accessibility label — copy changes have to be made here, not in
   `WetoMenuBar`, which is easy to miss.

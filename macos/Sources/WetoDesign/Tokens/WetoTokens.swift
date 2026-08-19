@@ -78,6 +78,7 @@ public enum WetoTokens {
     public static let popupWidth: CGFloat = 352
     public static let windowWidth: CGFloat = 500
     public static let windowHeight: CGFloat = 640
+    public static let controlHeight: CGFloat = 32
 
     public static let status: Font = .system(size: 15, weight: .semibold)
     public static let label: Font = .system(size: 13, weight: .medium)

@@ -97,13 +97,13 @@ fn build(app: &gtk4::Application, info: &UpdateInfo) -> ApplicationWindow {
     status.set_visible(false);
     panel.append(&status);
 
-    // Кнопки в один ряд делят ширину поровну.
-    let actions = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
-    let update = ui::primary_button("Обновить");
-    let later = ui::muted_button("Позже");
+    // Порядок и заполнение ряда — как на macOS: слева отказ от версии, справа
+    // главное действие. Ширину делит `action_row`, высоту — общий токен пилюли.
+    let actions = ui::action_row();
     let skip = ui::muted_button("Пропустить эту версию");
-    for button in [&update, &later, &skip] {
-        button.set_hexpand(true);
+    let later = ui::muted_button("Позже");
+    let update = ui::primary_button("Обновить");
+    for button in [&skip, &later, &update] {
         actions.append(button);
     }
     panel.append(&actions);

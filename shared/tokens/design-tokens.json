@@ -47,7 +47,8 @@
   "sizes": {
     "popupWidth": 352,
     "windowWidth": 500,
-    "windowHeight": 640
+    "windowHeight": 640,
+    "controlHeight": 32
   },
   "typography": {
     "status":      { "size": 15, "weight": "semibold" },
