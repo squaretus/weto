@@ -55,6 +55,9 @@ fn every_control_of_a_row_stands_at_one_height() {
     ];
 
     for (name, value) in measured {
-        assert_eq!(value, CONTROL_HEIGHT, "«{name}» выпадает из ряда: {measured:?}");
+        assert_eq!(
+            value, CONTROL_HEIGHT,
+            "«{name}» выпадает из ряда: {measured:?}"
+        );
     }
 }
