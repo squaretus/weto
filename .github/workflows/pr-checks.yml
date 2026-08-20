@@ -115,4 +115,5 @@ jobs:
           cargo run --manifest-path shared/tools/gen-tokens/Cargo.toml -- \
             --out-swift macos/Sources/WetoDesign/Tokens/WetoTokens.swift \
             --out-css-dir linux/crates/weto-ui/style
+          bash shared/tools/sync-flags.sh
           git diff --exit-code
