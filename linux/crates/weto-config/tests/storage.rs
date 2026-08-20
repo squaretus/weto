@@ -198,10 +198,6 @@ fn paths_follow_xdg_layout_under_a_given_home() {
         paths.journal_file(),
         std::path::Path::new("/дом/.local/state/weto/journal.json")
     );
-    assert_eq!(
-        paths.flags_cache_dir(),
-        std::path::Path::new("/дом/.cache/weto/flags-circle")
-    );
 }
 
 /// Разбор записи чёрного списка живёт в настройках, а не в окне: мусор

@@ -259,7 +259,6 @@ public final class GuardVM {
         }
         guard case .resolved(let reading) = report.outcome else { return }
         lastReading = reading
-        FlagImageStore.shared.prefetch(reading.primaryCountry)
     }
 
     private func apply(_ decision: GuardDecision) {
