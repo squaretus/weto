@@ -34,9 +34,8 @@ impl UnsafeReason {
     pub fn display_text(&self) -> String {
         match self {
             UnsafeReason::VerificationPending => "Подключение ещё не проверено".to_string(),
-            UnsafeReason::VpnNotConfigured => "VPN-сервис не выбран в настройках".to_string(),
-            UnsafeReason::VpnDown => "VPN не поднят".to_string(),
-            UnsafeReason::VpnNotPrimary => "VPN поднят, но трафик идёт мимо него".to_string(),
+            UnsafeReason::VpnAppNotChosen => "VPN-приложение не выбрано в настройках".to_string(),
+            UnsafeReason::VpnAppNotRunning => "VPN-приложение не запущено".to_string(),
             UnsafeReason::GeoUnavailable(detail) => {
                 format!("Не удалось определить внешний адрес: {detail}")
             }
@@ -75,57 +74,6 @@ impl UnsafeReason {
             UnsafeReason::ConfirmationUnavailable | UnsafeReason::GeoUnavailable(_)
         )
     }
-}
-
-/// Строка списка выбора VPN.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VpnRow {
-    pub label: String,
-    /// `None` — строка «не выбран».
-    pub value: Option<String>,
-}
-
-pub const VPN_NOT_SELECTED: &str = "Не выбран";
-
-/// Строки списка выбора и номер выбранной.
-///
-/// Выбранный туннель остаётся в списке, даже когда его сейчас нет в системе.
-/// Интерфейс существует только пока VPN поднят: выключил — исчез. Список,
-/// собранный из одних живых интерфейсов, в этот момент терял бы выбор,
-/// а вместе с ним и настройку — и после возвращения VPN охрана продолжала бы
-/// считать, что сервис не выбран, завершая цели уже без причины.
-pub fn vpn_rows(candidates: &[String], chosen: Option<&str>) -> (Vec<VpnRow>, usize) {
-    let mut rows = vec![VpnRow {
-        label: VPN_NOT_SELECTED.to_string(),
-        value: None,
-    }];
-
-    for candidate in candidates {
-        rows.push(VpnRow {
-            label: candidate.clone(),
-            value: Some(candidate.clone()),
-        });
-    }
-
-    // Выбранного нет среди живых — показываем его отдельной строкой и говорим
-    // почему. Молчаливое исчезновение выглядело бы как сбой настроек.
-    if let Some(name) = chosen {
-        if !candidates.iter().any(|c| c == name) {
-            rows.push(VpnRow {
-                label: format!("{name} (не подключён)"),
-                value: Some(name.to_string()),
-            });
-        }
-    }
-
-    let selected = chosen
-        .and_then(|name| {
-            rows.iter()
-                .position(|row| row.value.as_deref() == Some(name))
-        })
-        .unwrap_or(0);
-
-    (rows, selected)
 }
 
 /// Строка показаний: ключ слева, значение справа.
@@ -305,7 +253,8 @@ mod tests {
     #[test]
     fn every_state_has_words_not_just_a_colour() {
         let guarded = status_presentation(&state(GuardDecision::Safe));
-        let killed = status_presentation(&state(GuardDecision::Kill(UnsafeReason::VpnDown)));
+        let killed =
+            status_presentation(&state(GuardDecision::Kill(UnsafeReason::VpnAppNotRunning)));
 
         assert_eq!(guarded.title, "На страже");
         assert_eq!(killed.title, "Цели завершены");
@@ -355,45 +304,6 @@ mod tests {
         assert_eq!(disabled.title, "Охрана выключена");
         assert_eq!(targetless.title, "Целей нет");
         assert_eq!(disabled.shield, ShieldState::Disabled);
-    }
-
-    /// Интерфейс существует только пока VPN поднят. Выбор обязан пережить его
-    /// исчезновение: иначе выключенный туннель стирал бы настройку, и после
-    /// возвращения VPN охрана считала бы, что сервис не выбран.
-    #[test]
-    fn the_chosen_tunnel_survives_going_offline() {
-        let (rows, selected) = vpn_rows(&["wg0".into()], Some("wg0"));
-        assert_eq!(rows.len(), 2);
-        assert_eq!(selected, 1);
-        assert_eq!(rows[1].label, "wg0");
-
-        // VPN выключили — интерфейса нет, но строка осталась и всё ещё выбрана.
-        let (rows, selected) = vpn_rows(&[], Some("wg0"));
-        assert_eq!(selected, 1);
-        assert_eq!(rows[1].value.as_deref(), Some("wg0"));
-        assert_eq!(rows[1].label, "wg0 (не подключён)");
-    }
-
-    /// Вернувшийся туннель не должен раздваиваться: строка одна и та же.
-    #[test]
-    fn a_returning_tunnel_does_not_appear_twice() {
-        let (rows, selected) = vpn_rows(&["wg0".into(), "tun0".into()], Some("wg0"));
-        assert_eq!(rows.len(), 3);
-        assert_eq!(selected, 1);
-        assert_eq!(
-            rows.iter()
-                .filter(|r| r.value.as_deref() == Some("wg0"))
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn without_a_choice_the_first_row_is_selected() {
-        let (rows, selected) = vpn_rows(&["wg0".into()], None);
-        assert_eq!(selected, 0);
-        assert_eq!(rows[0].value, None);
-        assert_eq!(rows[0].label, "Не выбран");
     }
 
     /// Подпись строки — имя сервиса, который реально ответил: подтверждающих
@@ -452,7 +362,7 @@ mod tests {
     #[test]
     fn the_vpn_hint_appears_only_while_on_guard() {
         let guarded = idle_targets(&state(GuardDecision::Safe));
-        let killed = idle_targets(&state(GuardDecision::Kill(UnsafeReason::VpnDown)));
+        let killed = idle_targets(&state(GuardDecision::Kill(UnsafeReason::VpnAppNotRunning)));
         let off = idle_targets(&GuardState {
             is_enabled: false,
             ..state(GuardDecision::Safe)

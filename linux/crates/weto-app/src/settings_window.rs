@@ -14,8 +14,7 @@ use std::sync::Arc;
 use gtk4::prelude::*;
 use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack};
 
-use weto_config::settings::{Theme, POLL_INTERVAL_OPTIONS};
-use weto_core::presentation::{vpn_rows, VpnRow};
+use weto_config::settings::Theme;
 use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
@@ -314,77 +313,53 @@ fn add_target(state: &Arc<AppState>, text: &str) {
 fn network_card(state: Arc<AppState>) -> GtkBox {
     let card = ui::card("Сеть и гео");
 
-    // VPN-сервис.
+    // VPN-приложение: та же форма, что цель, — команда или путь. Список туннелей
+    // здесь стоял раньше и ушёл вместе с самим выбором туннеля: имена вида utun6
+    // и wg0 пользователю ничего не говорят и меняются при переподключении.
     let vpn_row = ui::row(true);
-    vpn_row.append(&ui::label("VPN-сервис"));
+    vpn_row.append(&ui::label("VPN-приложение"));
     vpn_row.append(&ui::spacer());
-    let picker = ui::dropdown();
-    vpn_row.append(&picker);
+    let vpn_value = ui::label("не выбрано");
+    vpn_row.append(&vpn_value);
+    let vpn_entry = ui::entry("Команда или путь");
+    let vpn_set = ui::primary_button("Выбрать");
+    let vpn_clear = ui::muted_button("Снять");
+    vpn_row.append(&vpn_entry);
+    vpn_row.append(&vpn_set);
+    vpn_row.append(&vpn_clear);
     card.append(&vpn_row);
-
-    // Значения строк держим рядом со списком: подпись выбранного, но отключённого
-    // туннеля отличается от его имени, и разбирать её обратно было бы гаданием.
-    let values: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
-    // Перестройка списка и установка выбора — не нажатие пользователя.
-    // Без этого различения выключенный VPN стирал бы настройку: список
-    // пересобирался, выбор соскакивал на «Не выбран», и обработчик записывал это.
-    let applying = Rc::new(std::cell::Cell::new(false));
 
     {
         let state = state.clone();
-        let picker = picker.clone();
-        let values = values.clone();
-        let applying = applying.clone();
-        let mut known: Vec<VpnRow> = Vec::new();
-
-        let mut refresh = move || {
-            let candidates = state.snapshot().vpn_candidates;
-            let chosen = state.settings.current().vpn_interface;
-            let (rows, selected) = vpn_rows(&candidates, chosen.as_deref());
-
-            if rows != known {
-                let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
-                applying.set(true);
-                picker.set_model(Some(&gtk4::StringList::new(&labels)));
-                *values.borrow_mut() = rows.iter().map(|row| row.value.clone()).collect();
-                applying.set(false);
-                known = rows;
-            }
-
-            let selected = selected as u32;
-            if picker.selected() != selected {
-                applying.set(true);
-                picker.set_selected(selected);
-                applying.set(false);
-            }
+        let vpn_value = vpn_value.clone();
+        let show = move || {
+            let chosen = state.settings.current().vpn_app;
+            vpn_value.set_text(&match chosen {
+                Some(app) => format!("{} — {}", app.display_name, resolved_description(&app)),
+                None => "не выбрано".to_string(),
+            });
         };
-        refresh();
+        show();
 
         gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-            refresh();
+            show();
             gtk4::glib::ControlFlow::Continue
         });
     }
 
     {
         let state = state.clone();
-        let values = values.clone();
-        let applying = applying.clone();
-        picker.connect_selected_notify(move |picker| {
-            if applying.get() {
-                return;
-            }
-            let chosen = values
-                .borrow()
-                .get(picker.selected() as usize)
-                .cloned()
-                .flatten();
+        let vpn_entry = vpn_entry.clone();
+        vpn_set.connect_clicked(move |_| {
+            set_vpn_app(&state, &vpn_entry.text());
+            vpn_entry.set_text("");
+        });
+    }
 
-            // Правка поднимает ревизию и обесценивает прежний вердикт: смена
-            // сервиса обязана заново пройти проверку, а не наследовать «безопасно».
-            if state.settings.current().vpn_interface != chosen {
-                state.settings.edit(|s| s.vpn_interface = chosen.clone());
-            }
+    {
+        let state = state.clone();
+        vpn_clear.connect_clicked(move |_| {
+            state.settings.edit(|s| s.set_vpn_app(None));
         });
     }
 
@@ -429,36 +404,6 @@ fn network_card(state: Arc<AppState>) -> GtkBox {
     }
 
     // Интервал опроса.
-    let interval_box = GtkBox::new(Orientation::Vertical, ui::SPACE2);
-    interval_box.add_css_class("weto-row");
-    interval_box.add_css_class("divided");
-    interval_box.append(&ui::label("Интервал опроса"));
-
-    let titles: Vec<String> = POLL_INTERVAL_OPTIONS
-        .iter()
-        .map(|seconds| format!("{} с", *seconds as i64))
-        .collect();
-    let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
-    let current = state.settings.current().poll_interval_seconds;
-    let selected = POLL_INTERVAL_OPTIONS
-        .iter()
-        .position(|option| (*option - current).abs() < f64::EPSILON)
-        .unwrap_or(0);
-
-    let (interval_segments, interval_buttons) = ui::segments(&refs, selected);
-    interval_box.append(&interval_segments);
-    card.append(&interval_box);
-
-    for (index, button) in interval_buttons.iter().enumerate() {
-        let state = state.clone();
-        let seconds = POLL_INTERVAL_OPTIONS[index];
-        button.connect_toggled(move |button| {
-            if button.is_active() {
-                state.settings.edit(|s| s.poll_interval_seconds = seconds);
-            }
-        });
-    }
-
     card
 }
 
@@ -948,4 +893,26 @@ fn clear(container: &GtkBox) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
+}
+
+/// Выбор VPN-приложения. Разрешается тем же путём, что цель: через симлинки
+/// и `PATH`, — иначе правило, записанное «как введено», не совпало бы с процессом.
+fn set_vpn_app(state: &Arc<AppState>, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+
+    let resolved = resolve_launch_target(text);
+    let name = resolved.rsplit('/').next().unwrap_or(&resolved).to_string();
+
+    state.settings.edit(|s| {
+        s.set_vpn_app(Some(weto_config::settings::Target {
+            entry: text.to_string(),
+            display_name: name,
+            kind: TargetKind::Binary,
+            path: resolved,
+            launch_paths: vec![text.to_string()],
+        }))
+    });
 }

@@ -31,7 +31,7 @@ final class StatusPresentationTests: XCTestCase {
     }
 
     func test_every_blocking_reason_reports_targets_terminated() {
-        XCTAssertEqual(StatusPresentation.title(for: .unsafe(.vpnDown)), "Цели завершены")
+        XCTAssertEqual(StatusPresentation.title(for: .unsafe(.vpnAppNotRunning)), "Цели завершены")
         XCTAssertEqual(
             StatusPresentation.title(for: .unsafe(.blockedCountry(code: "RU", source: "ipinfo"))),
             "Цели завершены"
@@ -143,14 +143,14 @@ final class StatusPresentationTests: XCTestCase {
     }
 
     func test_detail_is_nil_when_nothing_is_known() {
-        XCTAssertNil(StatusPresentation.detail(for: .unsafe(.vpnDown), reading: nil))
+        XCTAssertNil(StatusPresentation.detail(for: .unsafe(.vpnAppNotRunning), reading: nil))
     }
 
     func test_status_color_marks_geo_outage_as_degraded() {
         XCTAssertEqual(GuardState.safe(reading).statusColor, .green)
         XCTAssertEqual(GuardState.unsafe(.geoUnavailable("таймаут")).statusColor, .yellow)
         XCTAssertEqual(GuardState.unsafe(.confirmationUnavailable).statusColor, .yellow)
-        XCTAssertEqual(GuardState.unsafe(.vpnDown).statusColor, .red)
+        XCTAssertEqual(GuardState.unsafe(.vpnAppNotRunning).statusColor, .red)
     }
 
     // MARK: - Подсказка про незапущенные цели
@@ -167,7 +167,7 @@ final class StatusPresentationTests: XCTestCase {
     /// После срабатывания охраны цели молчат не потому, что всё хорошо:
     /// VPN уже выключен, и советовать выключить его — ложь.
     func test_idle_targets_hint_is_silent_after_the_kill_switch() {
-        let notice = StatusPresentation.idleTargets(for: .unsafe(.vpnDown))
+        let notice = StatusPresentation.idleTargets(for: .unsafe(.vpnAppNotRunning))
 
         XCTAssertEqual(notice.text, "Цели не запущены")
         XCTAssertNil(notice.hint, "выключенный VPN не повод советовать его выключить")

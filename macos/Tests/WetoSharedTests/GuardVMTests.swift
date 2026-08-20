@@ -209,6 +209,28 @@ final class GuardVMTests: XCTestCase {
     private let targetBundleID = "com.example.target"
     private let targetPath = "/Applications/Target.app"
 
+    /// Выбранное VPN-приложение — такая же цель по форме: bundle ID и путь.
+    private let vpnAppID = "su.ffg.happ"
+    private let vpnAppPath = "/Applications/Happ.app"
+
+    /// Процессы машины: цель, её потомок, чужое приложение и живой VPN-клиент.
+    private var defaultProcesses: [ProcessSnapshot] {
+        [
+            .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+            .init(
+                pid: 501,
+                executablePath: "\(targetPath)/Contents/Frameworks/Helper.app/Contents/MacOS/Helper"
+            ),
+            .init(pid: 900, executablePath: "/Applications/Other.app/Contents/MacOS/Other"),
+            .init(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+    }
+
+    /// Тот же набор, но VPN-клиент закрыт.
+    private var processesWithoutVPNApp: [ProcessSnapshot] {
+        defaultProcesses.filter { $0.pid != 700 }
+    }
+
     private var suiteName: String!
     private var defaults: UserDefaults!
 
@@ -222,25 +244,12 @@ final class GuardVMTests: XCTestCase {
     }
 
     private func healthySnapshot() -> NetworkSnapshot {
-        NetworkSnapshot(
-            services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6", isVPN: true),
-            ],
-            primaryServiceUUID: "HAPP",
-            outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
-        )
+        NetworkSnapshot(outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1"))
     }
 
-    private func vpnDownSnapshot() -> NetworkSnapshot {
-        NetworkSnapshot(
-            services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: nil, isVPN: true),
-            ],
-            primaryServiceUUID: "WIFI",
-            outgoing: OutgoingRoute(interface: "en0", address: "192.168.0.100")
-        )
+    /// Трафик ушёл мимо туннеля — для отпечатка это другое состояние сети.
+    private func directSnapshot() -> NetworkSnapshot {
+        NetworkSnapshot(outgoing: OutgoingRoute(interface: "en0", address: "192.168.0.100"))
     }
 
     private func geoOutcome(primary: String = "KZ", confirmed: String? = "KZ") -> GeoOutcome {
@@ -272,7 +281,7 @@ final class GuardVMTests: XCTestCase {
     ) -> Harness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = enabled
-        settings.vpnServiceID = "HAPP"
+        settings.vpnAppRule = vpnAppID
         settings.blockedCountryCodes = ["RU"]
         settings.targets = [targetBundleID]
         settings.targets += executables
@@ -290,15 +299,12 @@ final class GuardVMTests: XCTestCase {
             snapshotReader: network,
             geoProbe: probe,
             locator: StubLocator(
-                bundlePaths: [targetBundleID: targetPath],
-                processes: processes ?? [
-                    .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
-                    .init(pid: 501, executablePath: "\(targetPath)/Contents/Frameworks/Helper.app/Contents/MacOS/Helper"),
-                    .init(pid: 900, executablePath: "/Applications/Other.app/Contents/MacOS/Other"),
-                ]
+                bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+                processes: processes ?? defaultProcesses
             ),
             resolver: StubResolver(mapping: [
                 targetBundleID: targetPath,
+                vpnAppID: vpnAppPath,
                 "nano": "/usr/bin/pico",
                 "qwen": "/opt/homebrew/lib/qwen/cli.js",
             ]),
@@ -324,7 +330,7 @@ final class GuardVMTests: XCTestCase {
     private func makeDelayedHarness(snapshot: NetworkSnapshot) -> DelayedHarness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceID = "HAPP"
+        settings.vpnAppRule = vpnAppID
         settings.blockedCountryCodes = ["RU"]
         settings.targets = [targetBundleID]
 
@@ -339,14 +345,10 @@ final class GuardVMTests: XCTestCase {
             snapshotReader: network,
             geoProbe: probe,
             locator: StubLocator(
-                bundlePaths: [targetBundleID: targetPath],
-                processes: [
-                    .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
-                    .init(pid: 501, executablePath: "\(targetPath)/Contents/Frameworks/Helper.app/Contents/MacOS/Helper"),
-                    .init(pid: 900, executablePath: "/Applications/Other.app/Contents/MacOS/Other"),
-                ]
+                bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+                processes: defaultProcesses
             ),
-            resolver: StubResolver(mapping: [targetBundleID: targetPath]),
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
             killer: killer,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
@@ -408,7 +410,7 @@ final class GuardVMTests: XCTestCase {
 
     func test_adding_a_target_while_unsafe_kills_without_waiting_for_tick() {
         let h = makeHarness(
-            snapshot: vpnDownSnapshot(),
+            snapshot: healthySnapshot(),
             geo: geoOutcome(),
             processes: [
                 .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
@@ -428,15 +430,15 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.killer.killedBatches.last, [500, 600])
     }
 
-    func test_changing_selected_vpn_to_missing_service_kills_immediately() async {
+    func test_choosing_a_vpn_app_that_is_not_running_kills_immediately() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
         XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
 
-        h.settings.vpnServiceID = "GHOST"
+        h.settings.vpnAppRule = "com.example.absent"
 
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnDown))
+        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning))
         XCTAssertFalse(h.killer.killedBatches.isEmpty)
     }
 
@@ -504,9 +506,9 @@ final class GuardVMTests: XCTestCase {
 
     /// Второй VPN, живущий рядом, — не событие для охраны.
     ///
-    /// Корпоративный клиент рвёт связь и поднимается сам: его туннель уходит
-    /// из снимка и возвращается. Выбранный сервис и владелец маршрута при этом
-    /// не шелохнулись, значит и вердикт остался в силе.
+    /// Корпоративный клиент рвёт связь и поднимается сам. Носитель трафика при этом
+    /// не шелохнулся, значит и вердикт остался в силе: состава интерфейсов
+    /// в отпечатке нет вовсе.
     func test_a_foreign_vpn_reconnecting_does_not_touch_the_targets() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
@@ -514,8 +516,6 @@ final class GuardVMTests: XCTestCase {
         let batchesAfterFirstVerdict = h.killer.killedBatches.count
 
         h.network.snapshotValue = NetworkSnapshot(
-            services: healthySnapshot().services + [.fromInterface("utun8")],
-            primaryServiceUUID: "HAPP",
             outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
         )
         h.vm.handle(.networkPath)
@@ -528,19 +528,14 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
     }
 
-    /// Обратная сторона: сам выбранный туннель, переехавший на другой интерфейс,
-    /// вердикт обесценивает — выход в сеть у него теперь другой.
-    func test_the_selected_vpn_reconnecting_still_demands_a_new_verdict() async {
+    /// Обратная сторона: туннель переподключился и трафик уходит через другой
+    /// интерфейс — вердикт обесценен, выход в сеть теперь другой.
+    func test_the_tunnel_reconnecting_still_demands_a_new_verdict() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
 
         h.network.snapshotValue = NetworkSnapshot(
-            services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun9", isVPN: true),
-            ],
-            primaryServiceUUID: "HAPP",
             outgoing: OutgoingRoute(interface: "utun9", address: "198.18.0.1")
         )
         h.vm.handle(.networkPath)
@@ -719,11 +714,6 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
 
         h.network.snapshotValue = NetworkSnapshot(
-            services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun9", isVPN: true),
-            ],
-            primaryServiceUUID: "HAPP",
             outgoing: OutgoingRoute(interface: "utun9", address: "198.18.0.1")
         )
         h.vm.handle(.networkPath)
@@ -774,7 +764,7 @@ final class GuardVMTests: XCTestCase {
     ) -> (vm: GuardVM, locator: CountingLocator, settings: SettingsStore) {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceID = "HAPP"
+        settings.vpnAppRule = vpnAppID
         settings.targets = targets
 
         let locator = CountingLocator(
@@ -788,7 +778,7 @@ final class GuardVMTests: XCTestCase {
         let vm = GuardVM(
             settings: settings,
             eventLog: EventLogStore(defaults: defaults),
-            snapshotReader: StubSnapshotReader(snapshotValue: vpnDownSnapshot()),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: resolverMapping),
@@ -842,7 +832,7 @@ final class GuardVMTests: XCTestCase {
 
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceID = "HAPP"
+        settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
         var processes: [ProcessSnapshot] = (1...248).map { index in
@@ -857,10 +847,10 @@ final class GuardVMTests: XCTestCase {
         let vm = GuardVM(
             settings: settings,
             eventLog: EventLogStore(defaults: defaults),
-            snapshotReader: StubSnapshotReader(snapshotValue: vpnDownSnapshot()),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: StubLocator(bundlePaths: [targetBundleID: targetPath], processes: processes),
-            resolver: StubResolver(mapping: [targetBundleID: targetPath]),
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
             killer: SpyKiller(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
@@ -914,33 +904,87 @@ final class GuardVMTests: XCTestCase {
     }
 
     func test_vpn_down_kills_targets_without_probing_network() async {
-        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome())
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(),
+                            processes: processesWithoutVPNApp)
 
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnDown))
+        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning))
         XCTAssertEqual(h.killer.killedBatches, [[500, 501]], "убиты только процессы цели")
         let probeCalls = await h.probe.calls()
         XCTAssertEqual(probeCalls, 0, "сетевая проба не должна была запускаться")
     }
 
-    func test_vpn_not_primary_kills() async {
-        let snapshot = NetworkSnapshot(
-            services: [
-                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
-                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6", isVPN: true),
-            ],
-            primaryServiceUUID: "WIFI"
-        )
-        let h = makeHarness(snapshot: snapshot, geo: geoOutcome())
+    /// Трафик ушёл мимо туннеля — для охраны это смена состояния сети:
+    /// прежний вердикт недействителен, и цели завершаются до ответа сети.
+    func test_traffic_moving_off_the_tunnel_invalidates_the_verdict() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
 
+        h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnNotPrimary))
+        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+    }
+
+    /// Закрыли VPN-клиент — цели завершаются в ту же секунду, не дожидаясь тика:
+    /// событие о завершении приложения приходит сразу.
+    func test_closing_the_vpn_app_kills_at_once() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: defaultProcesses
+        )
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let killer = SpyKiller()
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(defaults: defaults),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: locator,
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
+            killer: killer,
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0.01
+        )
+
+        vm.handle(.networkPath)
+        await vm.awaitPendingProbe()
+        XCTAssertEqual(vm.state, .safe(vm.lastReading))
+
+        locator.processes = processesWithoutVPNApp
+        vm.handle(.appTerminated(bundleID: vpnAppID))
+
+        XCTAssertEqual(vm.state, .unsafe(.vpnAppNotRunning))
+        XCTAssertEqual(killer.killedBatches.last, [500, 501], "убиты цели, но не сам клиент")
+    }
+
+    /// Выбранное VPN-приложение не завершается никогда: охрана, убившая свой
+    /// источник защиты, оставила бы состояние необратимым.
+    func test_the_vpn_app_is_never_killed() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "RU"))
+
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
+        XCTAssertFalse(h.killer.killedBatches.isEmpty, "цели обязаны быть завершены")
+        XCTAssertFalse(
+            h.killer.killedBatches.flatMap { $0 }.contains(700),
+            "процесс VPN-клиента не должен попадать под нож"
+        )
     }
 
     func test_disabled_guard_never_kills() async {
-        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome(), enabled: false)
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(), enabled: false,
+                            processes: processesWithoutVPNApp)
 
         h.vm.handle(.networkPath)
 
@@ -1028,7 +1072,8 @@ final class GuardVMTests: XCTestCase {
     }
 
     func test_target_relaunch_while_unsafe_is_killed_again() async {
-        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome())
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(),
+                            processes: processesWithoutVPNApp)
         h.vm.handle(.networkPath)
         XCTAssertEqual(h.killer.killedBatches.count, 1)
 
@@ -1042,7 +1087,7 @@ final class GuardVMTests: XCTestCase {
 
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceID = "HAPP"
+        settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
         let killer = SpyKiller()
@@ -1055,10 +1100,10 @@ final class GuardVMTests: XCTestCase {
         let vm = GuardVM(
             settings: settings,
             eventLog: log,
-            snapshotReader: StubSnapshotReader(snapshotValue: vpnDownSnapshot()),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
-            resolver: StubResolver(mapping: [targetBundleID: targetPath]),
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
             killer: killer,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
@@ -1076,7 +1121,8 @@ final class GuardVMTests: XCTestCase {
     }
 
     func test_launch_of_unrelated_app_is_ignored() async {
-        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome())
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(),
+                            processes: processesWithoutVPNApp)
         h.vm.handle(.networkPath)
 
         h.vm.handle(.appLaunched(bundleID: "com.apple.TextEdit"))
@@ -1085,7 +1131,8 @@ final class GuardVMTests: XCTestCase {
     }
 
     func test_eperm_is_surfaced_instead_of_being_swallowed() async {
-        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome())
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(),
+                            processes: processesWithoutVPNApp)
         h.killer.setError(EPERM, forPID: 500)
 
         h.vm.handle(.networkPath)
@@ -1096,7 +1143,7 @@ final class GuardVMTests: XCTestCase {
 
     func test_no_targets_running_does_not_produce_an_event() async {
         let h = makeHarness(
-            snapshot: vpnDownSnapshot(),
+            snapshot: healthySnapshot(),
             geo: geoOutcome(),
             processes: [.init(pid: 900, executablePath: "/Applications/Other.app/Contents/MacOS/Other")]
         )
@@ -1105,13 +1152,13 @@ final class GuardVMTests: XCTestCase {
 
         XCTAssertTrue(h.killer.killedBatches.isEmpty)
         XCTAssertTrue(h.log.events.isEmpty)
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnDown), "состояние всё равно небезопасное")
+        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning), "состояние всё равно небезопасное")
     }
 
     func test_symlinked_command_is_matched_by_resolved_path() async {
 
         let h = makeHarness(
-            snapshot: vpnDownSnapshot(),
+            snapshot: healthySnapshot(),
             geo: geoOutcome(),
             processes: [
                 .init(pid: 700, executablePath: "/usr/bin/pico"),
@@ -1128,7 +1175,7 @@ final class GuardVMTests: XCTestCase {
     func test_script_target_is_matched_by_command_line_not_by_interpreter() async {
 
         let h = makeHarness(
-            snapshot: vpnDownSnapshot(),
+            snapshot: healthySnapshot(),
             geo: geoOutcome(),
             processes: [
                 .init(pid: 800, executablePath: "/opt/homebrew/bin/node",
@@ -1146,7 +1193,7 @@ final class GuardVMTests: XCTestCase {
 
     func test_unknown_command_matches_nothing() async {
         let h = makeHarness(
-            snapshot: vpnDownSnapshot(),
+            snapshot: healthySnapshot(),
             geo: geoOutcome(),
             processes: [.init(pid: 700, executablePath: "/usr/bin/pico")],
             executables: ["не-существует"]
@@ -1161,21 +1208,21 @@ final class GuardVMTests: XCTestCase {
 
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceID = "HAPP"
+        settings.vpnAppRule = vpnAppID
         settings.targets = []
         settings.targets = ["nano"]
 
         XCTAssertTrue(settings.guardConfig.hasTargets)
         XCTAssertEqual(
-            GuardPolicy.decideLocal(isEnabled: true, vpn: .down, config: settings.guardConfig),
-            .kill(.vpnDown)
+            GuardPolicy.decideLocal(isEnabled: true, vpn: .notRunning, config: settings.guardConfig),
+            .kill(.vpnAppNotRunning)
         )
     }
 
     func test_first_episode_event_is_termination_second_is_launch_block() async {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
-        settings.vpnServiceID = "HAPP"
+        settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
         let log = EventLogStore(defaults: defaults)
@@ -1186,10 +1233,10 @@ final class GuardVMTests: XCTestCase {
         let vm = GuardVM(
             settings: settings,
             eventLog: log,
-            snapshotReader: StubSnapshotReader(snapshotValue: vpnDownSnapshot()),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
-            resolver: StubResolver(mapping: [targetBundleID: targetPath]),
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
             killer: SpyKiller(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
@@ -1203,13 +1250,6 @@ final class GuardVMTests: XCTestCase {
         locator.processes = [.init(pid: 777, executablePath: "\(targetPath)/Contents/MacOS/Target")]
         vm.handle(.tick)
         XCTAssertEqual(log.events.first?.kind, .launchBlocked)
-    }
-
-    func test_only_qualified_vpns_are_offered_as_candidates() {
-
-        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
-        h.vm.refreshVPNCandidates()
-        XCTAssertEqual(h.vm.availableVPNs.map(\.name), ["Happ"])
     }
 
     func test_running_process_count_counts_only_target_bundle() {
@@ -1248,7 +1288,8 @@ final class GuardVMTests: XCTestCase {
     /// Кнопка отвечает на вопрос «где я сейчас», а не «нужна ли охране проверка».
     /// Выключенный VPN — основание завершить цели, но не повод молчать о стране.
     func test_manual_recheck_asks_geo_even_when_vpn_is_down() async {
-        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome(primary: "KZ"))
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ"),
+                            processes: processesWithoutVPNApp)
         h.vm.start()
         await h.vm.awaitPendingProbe()
 
@@ -1262,7 +1303,7 @@ final class GuardVMTests: XCTestCase {
         let calls = await h.probe.calls()
         XCTAssertEqual(calls, before + 1, "кнопка обязана сходить в сеть и при выключенном VPN")
         XCTAssertEqual(h.vm.lastReport?.ipinfo, .answered("KZ"))
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnDown), "вердикт охраны кнопка не смягчает")
+        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning), "вердикт охраны кнопка не смягчает")
     }
 
     /// Показания обязаны обновляться и тогда, когда судьба целей решена локально.
@@ -1271,7 +1312,8 @@ final class GuardVMTests: XCTestCase {
     /// распространяли и на показания, после падения VPN там навсегда оставались
     /// адрес и страна туннеля — то есть экран показывал защиту, которой уже нет.
     func test_the_readout_refreshes_while_the_vpn_is_down() async {
-        let h = makeHarness(snapshot: vpnDownSnapshot(), geo: geoOutcome(primary: "KZ"))
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ"),
+                            processes: processesWithoutVPNApp)
 
         h.vm.start()
         await h.vm.awaitPendingProbe()
@@ -1281,7 +1323,7 @@ final class GuardVMTests: XCTestCase {
             .answered("KZ"),
             "экран обязан сказать, где пользователь сейчас, а не где был под VPN"
         )
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnDown), "показания вердикт не смягчают")
+        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning), "показания вердикт не смягчают")
     }
 
     /// Свежая установка: охрана выключена, целей нет — но узнать своё положение

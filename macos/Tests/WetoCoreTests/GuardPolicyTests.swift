@@ -10,7 +10,7 @@ final class GuardPolicyTests: XCTestCase {
         targets: [String] = ["com.example.target"]
     ) -> GuardConfig {
         GuardConfig(
-            vpnServiceID: vpn,
+            vpnAppRule: vpn,
             blockedCountries: blocked,
             blockedIPRanges: ranges,
             targets: targets
@@ -33,7 +33,7 @@ final class GuardPolicyTests: XCTestCase {
 
     private func signals(
         enabled: Bool = true,
-        vpn: VPNStatus = .up(isPrimary: true),
+        vpn: VPNAppStatus = .running,
         geo geoOutcome: GeoOutcome? = nil,
         config configuration: GuardConfig? = nil
     ) -> GuardSignals {
@@ -81,33 +81,28 @@ final class GuardPolicyTests: XCTestCase {
     }
 
     func test_disabled_guard_is_always_safe_even_with_blocked_country() {
-        let s = signals(enabled: false, vpn: .down, geo: geo(primary: "RU", confirmed: "RU"))
+        let s = signals(enabled: false, vpn: .notRunning, geo: geo(primary: "RU", confirmed: "RU"))
         XCTAssertEqual(GuardPolicy.decide(s), .safe)
     }
 
     func test_empty_target_list_is_safe() {
-        let s = signals(vpn: .down, config: config(targets: []))
+        let s = signals(vpn: .notRunning, config: config(targets: []))
         XCTAssertEqual(GuardPolicy.decide(s), .safe)
     }
 
     func test_vpn_not_configured_kills() {
         let s = signals(config: config(vpn: nil))
-        XCTAssertEqual(GuardPolicy.decide(s), .kill(.vpnNotConfigured))
+        XCTAssertEqual(GuardPolicy.decide(s), .kill(.vpnAppNotChosen))
     }
 
-    func test_vpn_down_kills() {
-        XCTAssertEqual(GuardPolicy.decide(signals(vpn: .down)), .kill(.vpnDown))
+    func test_a_closed_vpn_app_kills() {
+        XCTAssertEqual(GuardPolicy.decide(signals(vpn: .notRunning)), .kill(.vpnAppNotRunning))
     }
 
-    func test_vpn_up_but_not_primary_kills() {
-        let s = signals(vpn: .up(isPrimary: false))
-        XCTAssertEqual(GuardPolicy.decide(s), .kill(.vpnNotPrimary))
-    }
+    func test_the_app_check_precedes_the_geo_check() {
 
-    func test_vpn_check_precedes_geo_check() {
-
-        let s = signals(vpn: .down, geo: .unavailable("timeout"))
-        XCTAssertEqual(GuardPolicy.decide(s), .kill(.vpnDown))
+        let s = signals(vpn: .notRunning, geo: .unavailable("timeout"))
+        XCTAssertEqual(GuardPolicy.decide(s), .kill(.vpnAppNotRunning))
     }
 
     func test_geo_unavailable_kills_with_reason_text() {

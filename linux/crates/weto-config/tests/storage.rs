@@ -27,7 +27,13 @@ fn settings_survive_a_round_trip() {
     let path = tmp.path().join("weto/config.toml");
 
     let settings = Settings {
-        vpn_interface: Some("wg0".to_string()),
+        vpn_app: Some(Target {
+            entry: "happ".to_string(),
+            display_name: "happ".to_string(),
+            kind: TargetKind::Binary,
+            path: "/usr/bin/happ".to_string(),
+            launch_paths: vec![],
+        }),
         blocked_countries: vec!["RU".to_string()],
         blocked_ip_ranges: vec!["10.0.0.0/8".to_string()],
         targets: vec![Target {
@@ -54,7 +60,13 @@ fn the_token_never_reaches_the_settings_file() {
     let path = tmp.path().join("config.toml");
 
     let settings = Settings {
-        vpn_interface: Some("wg0".to_string()),
+        vpn_app: Some(Target {
+            entry: "happ".to_string(),
+            display_name: "happ".to_string(),
+            kind: TargetKind::Binary,
+            path: "/usr/bin/happ".to_string(),
+            launch_paths: vec![],
+        }),
         ..Default::default()
     };
     settings.save(&path).unwrap();
@@ -233,19 +245,40 @@ fn removing_a_blacklist_entry_does_not_care_which_list_it_came_from() {
     assert!(settings.blocked_entries().is_empty());
 }
 
-/// Испорченный интервал в файле — правка руками. Охрана берёт умолчание,
-/// а не крутится вхолостую и не засыпает навсегда.
+/// Выбор VPN-приложения снимает его же из целей: охрана не имеет права
+/// завершать собственный источник защиты.
 #[test]
-fn a_broken_poll_interval_falls_back_to_the_default() {
-    let mut settings = Settings::default();
-    assert_eq!(settings.poll_interval().as_secs(), 5);
+fn choosing_a_vpn_app_removes_it_from_the_targets() {
+    let app = Target {
+        entry: "happ".to_string(),
+        display_name: "happ".to_string(),
+        kind: TargetKind::Binary,
+        path: "/usr/bin/happ".to_string(),
+        launch_paths: vec![],
+    };
+    let mut settings = Settings {
+        targets: vec![
+            Target {
+                entry: "nano".to_string(),
+                display_name: "nano".to_string(),
+                kind: TargetKind::Binary,
+                path: "/usr/bin/nano".to_string(),
+                launch_paths: vec![],
+            },
+            app.clone(),
+        ],
+        ..Default::default()
+    };
 
-    settings.poll_interval_seconds = 0.0;
-    assert_eq!(settings.poll_interval().as_secs(), 5);
+    settings.set_vpn_app(Some(app));
 
-    settings.poll_interval_seconds = -1.0;
-    assert_eq!(settings.poll_interval().as_secs(), 5);
-
-    settings.poll_interval_seconds = 15.0;
-    assert_eq!(settings.poll_interval().as_secs(), 15);
+    assert_eq!(
+        settings
+            .targets
+            .iter()
+            .map(|t| t.entry.as_str())
+            .collect::<Vec<_>>(),
+        vec!["nano"]
+    );
+    assert!(settings.vpn_app_rule().is_some());
 }

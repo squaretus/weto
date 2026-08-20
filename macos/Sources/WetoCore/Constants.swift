@@ -15,9 +15,10 @@ public enum Constants {
         return version
     }()
 
-    public static let defaultPollIntervalSeconds: TimeInterval = 5
-
-    public static let pollIntervalOptions: [TimeInterval] = [5, 10, 15]
+    /// Опрос системы: процессы, VPN-приложение, носитель трафика. Настройкой
+    /// не является — он бесплатный (полный обход 230 процессов занимает 5 мс),
+    /// а платит за частоту не он, а расписание гео.
+    public static let tickIntervalSeconds: TimeInterval = 1
 
     /// Как часто уходит запрос к гео-сервисам. Отдельно от опроса системы: опрос
     /// бесплатный и частый, обращение к чужим сервисам платное и редкое, и учащение

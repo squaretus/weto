@@ -1,12 +1,18 @@
 import Foundation
 
-public enum VPNStatus: Equatable, Sendable {
+/// Состояние VPN-приложения — того, что выбрал пользователь.
+///
+/// Выбирается приложение, а не туннель, потому что вопрос «какой из `utunN` твой»
+/// пользователю задать нельзя: имена ничего не значат, меняются при каждом
+/// переподключении и у сборок мимо App Store не имеют за собой сетевого сервиса.
+/// Вопрос «какое приложение поднимает тебе VPN» — отвечаемый.
+public enum VPNAppStatus: Equatable, Sendable {
 
-    case notConfigured
+    case notChosen
 
-    case down
+    case notRunning
 
-    case up(isPrimary: Bool)
+    case running
 }
 
 public enum ConfirmSource: String, Equatable, Codable, Sendable {

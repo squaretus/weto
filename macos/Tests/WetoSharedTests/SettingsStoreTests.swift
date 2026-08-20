@@ -59,9 +59,11 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(makeStore().appTheme, .light)
     }
 
-    func test_poll_interval_options_start_at_five_seconds() {
-        XCTAssertEqual(Constants.pollIntervalOptions, [5, 10, 15])
-        XCTAssertTrue(Constants.pollIntervalOptions.contains(makeStore().pollIntervalSeconds))
+    /// Частота опроса больше не настройка: опрос системы бесплатный, а платит
+    /// за частоту расписание гео, и крутить его пользователю незачем.
+    func test_polling_is_a_constant_not_a_setting() {
+        XCTAssertEqual(Constants.tickIntervalSeconds, 1)
+        XCTAssertEqual(Constants.geoProbeIntervalSeconds, 5)
     }
 
     func test_enabled_guard_without_targets_is_harmless() {
@@ -69,18 +71,17 @@ final class SettingsStoreTests: XCTestCase {
         let store = makeStore()
         XCTAssertFalse(store.guardConfig.hasTargets)
         XCTAssertEqual(
-            GuardPolicy.decideLocal(isEnabled: true, vpn: .down, config: store.guardConfig),
+            GuardPolicy.decideLocal(isEnabled: true, vpn: .notRunning, config: store.guardConfig),
             .safe
         )
     }
 
     func test_nothing_is_preconfigured_out_of_the_box() {
         let store = makeStore()
-        XCTAssertNil(store.vpnServiceID)
+        XCTAssertNil(store.vpnAppRule)
         XCTAssertTrue(store.targets.isEmpty)
 
         XCTAssertTrue(store.blockedCountryCodes.isEmpty)
-        XCTAssertEqual(store.pollIntervalSeconds, 5)
     }
 
     func test_no_preconfigured_data_of_any_kind() {
@@ -89,7 +90,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(store.blockedCountryCodes.isEmpty)
         XCTAssertTrue(store.blockedIPRangeTexts.isEmpty)
         XCTAssertTrue(store.ipinfoToken.isEmpty)
-        XCTAssertNil(store.vpnServiceID)
+        XCTAssertNil(store.vpnAppRule)
         XCTAssertNil(store.tokenBox.value)
     }
 
@@ -103,19 +104,17 @@ final class SettingsStoreTests: XCTestCase {
     func test_values_survive_a_new_store_over_same_defaults() {
         let first = makeStore()
         first.isEnabled = true
-        first.vpnServiceID = "BC2D1D42"
+        first.vpnAppRule = "su.ffg.happ"
         first.targets = ["com.example.a", "com.example.b"]
         first.blockedCountryCodes = ["RU", "BY"]
         first.blockedIPRangeTexts = ["198.51.100.0/22"]
-        first.pollIntervalSeconds = 15
 
         let second = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         XCTAssertTrue(second.isEnabled)
-        XCTAssertEqual(second.vpnServiceID, "BC2D1D42")
+        XCTAssertEqual(second.vpnAppRule, "su.ffg.happ")
         XCTAssertEqual(second.targets, ["com.example.a", "com.example.b"])
         XCTAssertEqual(second.blockedCountryCodes, ["BY", "RU"])
         XCTAssertEqual(second.blockedIPRangeTexts, ["198.51.100.0/22"])
-        XCTAssertEqual(second.pollIntervalSeconds, 15)
     }
 
     func test_country_codes_are_normalized_to_uppercase() {
@@ -126,13 +125,13 @@ final class SettingsStoreTests: XCTestCase {
 
     func test_guard_config_reflects_current_settings() {
         let store = makeStore()
-        store.vpnServiceID = "BC2D1D42"
+        store.vpnAppRule = "su.ffg.happ"
         store.targets = ["com.example.a"]
         store.blockedCountryCodes = ["RU"]
         store.blockedIPRangeTexts = ["10.0.0.0/8", "мусор"]
 
         let config = store.guardConfig
-        XCTAssertEqual(config.vpnServiceID, "BC2D1D42")
+        XCTAssertEqual(config.vpnAppRule, "su.ffg.happ")
         XCTAssertEqual(config.targets, ["com.example.a"])
         XCTAssertEqual(config.blockedCountries, ["RU"])
         XCTAssertEqual(config.blockedIPRanges.count, 1, "неразобранные строки отбрасываются")
@@ -161,58 +160,24 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertNil(secrets.read(account: "token"))
     }
 
-    private func snapshot(
-        services: [NetworkServiceSnapshot] = [
-            .init(uuid: "108E2488", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
-            .init(uuid: "BC2D1D42", name: "Happ", activeInterface: "utun6", isVPN: true),
-        ]
-    ) -> NetworkSnapshot {
-        NetworkSnapshot(services: services, primaryServiceUUID: "BC2D1D42")
-    }
-
-    func test_legacy_vpn_name_migrates_to_the_single_matching_service() {
-        defaults.set("Happ", forKey: "vpnServiceName")
-
+    /// Охрана не должна завершать собственный источник защиты: выбранное
+    /// VPN-приложение снимается из целей, иначе первый же вердикт «небезопасно»
+    /// закрыл бы клиент и сделал состояние необратимым.
+    func test_choosing_a_vpn_app_removes_it_from_the_targets() {
         let store = makeStore()
-        store.migrateLegacyVPNSelection(in: snapshot())
+        store.targets = ["com.example.a", "su.ffg.happ", "com.example.b"]
 
-        XCTAssertEqual(store.vpnServiceID, "BC2D1D42")
-        XCTAssertNil(defaults.string(forKey: "vpnServiceName"), "legacy-ключ должен исчезнуть")
+        store.vpnAppRule = "su.ffg.happ"
+
+        XCTAssertEqual(store.targets, ["com.example.a", "com.example.b"])
+        XCTAssertEqual(store.vpnAppRule, "su.ffg.happ")
     }
 
-    func test_ambiguous_legacy_vpn_name_is_cleared_instead_of_guessed() {
-
-        defaults.set("Happ", forKey: "vpnServiceName")
-
+    func test_blank_vpn_app_rule_is_stored_as_no_choice() {
         let store = makeStore()
-        store.migrateLegacyVPNSelection(in: snapshot(services: [
-            .init(uuid: "vpn-a", name: "Happ", activeInterface: nil, isVPN: true),
-            .init(uuid: "vpn-b", name: "Happ", activeInterface: "utun6", isVPN: true),
-        ]))
+        store.vpnAppRule = "   "
 
-        XCTAssertNil(store.vpnServiceID)
-        XCTAssertNil(defaults.string(forKey: "vpnServiceName"))
-    }
-
-    func test_legacy_name_of_a_non_vpn_service_is_cleared() {
-
-        defaults.set("Wi-Fi", forKey: "vpnServiceName")
-
-        let store = makeStore()
-        store.migrateLegacyVPNSelection(in: snapshot())
-
-        XCTAssertNil(store.vpnServiceID)
-    }
-
-    func test_migration_never_overwrites_an_explicit_service_id() {
-        let first = makeStore()
-        first.vpnServiceID = "BC2D1D42"
-        defaults.set("Wi-Fi", forKey: "vpnServiceName")
-
-        let second = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
-        second.migrateLegacyVPNSelection(in: snapshot())
-
-        XCTAssertEqual(second.vpnServiceID, "BC2D1D42")
+        XCTAssertNil(store.vpnAppRule, "пробелы — это не выбор")
     }
 
     func test_failed_token_write_is_reported_and_not_advertised_as_persisted() {
