@@ -15,6 +15,11 @@ public enum GuardTrigger: Equatable, Sendable {
     case appLaunched(bundleID: String)
 
     case tick
+
+    /// Расписание гео: единственный триггер, который сам по себе идёт в сеть.
+    /// Отделён от `tick` намеренно — опрос системы бесплатный и частый, обращение
+    /// к чужим сервисам платное и редкое.
+    case geoSchedule
 }
 
 public protocol NetworkEventSourcing: AnyObject {

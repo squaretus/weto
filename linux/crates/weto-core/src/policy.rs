@@ -101,10 +101,10 @@ pub fn decide(signals: &GuardSignals) -> GuardDecision {
         return local;
     }
 
-    let GeoOutcome::Resolved(reading) = &signals.geo else {
+    let Some(reading) = signals.geo.reading() else {
         let detail = match &signals.geo {
             GeoOutcome::Unavailable(detail) => detail.clone(),
-            GeoOutcome::Resolved(_) => unreachable!(),
+            GeoOutcome::Resolved(_) | GeoOutcome::Degraded { .. } => unreachable!(),
         };
         return GuardDecision::Kill(UnsafeReason::GeoUnavailable(detail));
     };

@@ -45,6 +45,37 @@ final class GuardPolicyTests: XCTestCase {
         )
     }
 
+    /// `degraded` — «ipinfo молчит, но адрес доказанно тот же». Прошлое чтение
+    /// прогоняется через все те же проверки: адрес не менялся, значит и страна та же,
+    /// а вот чёрный список и блокировка стран обязаны работать без поблажек.
+    func test_degraded_reading_passes_the_same_checks() {
+        let previous = GeoReading(
+            ip: "203.0.113.28",
+            primaryCountry: "KZ",
+            confirmedCountry: "KZ",
+            confirmSource: .freeipapi
+        )
+
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(geo: .degraded(previous: previous, detail: "ipinfo молчит"))),
+            .safe
+        )
+    }
+
+    func test_degraded_reading_with_blocked_country_still_kills() {
+        let previous = GeoReading(
+            ip: "203.0.113.28",
+            primaryCountry: "RU",
+            confirmedCountry: "RU",
+            confirmSource: .freeipapi
+        )
+
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(geo: .degraded(previous: previous, detail: "ipinfo молчит"))),
+            .kill(.blockedCountry(code: "RU", source: "ipinfo"))
+        )
+    }
+
     func test_everything_aligned_is_safe() {
         XCTAssertEqual(GuardPolicy.decide(signals()), .safe)
     }

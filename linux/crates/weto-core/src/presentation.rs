@@ -14,6 +14,9 @@ pub enum ShieldState {
     Disabled,
     /// Всё сошлось, цели живут.
     Guarded,
+    /// Цели живут, но защита держится на доказанной неизменности адреса, а не на свежем
+    /// ответе ipinfo. Цвет тот же жёлтый, что у ожидания: полноценной зелёной защиты нет.
+    Degraded,
     /// Вердикта пока нет: цели завершены до выяснения.
     Pending,
     /// Цели завершены по установленной причине.
@@ -239,6 +242,8 @@ pub struct GuardState {
     pub decision: GuardDecision,
     /// Страна, которую показываем, даже когда вердикта нет.
     pub country: Option<String>,
+    /// Вердикт держится на прошлом чтении: ipinfo молчит, адрес доказанно тот же.
+    pub is_degraded: bool,
 }
 
 pub fn status_presentation(state: &GuardState) -> StatusPresentation {
@@ -265,7 +270,11 @@ pub fn status_presentation(state: &GuardState) -> StatusPresentation {
                 Some(country) => format!("Трафик идёт через VPN, страна {country}"),
                 None => "Трафик идёт через VPN".to_string(),
             },
-            shield: ShieldState::Guarded,
+            shield: if state.is_degraded {
+                ShieldState::Degraded
+            } else {
+                ShieldState::Guarded
+            },
         },
         GuardDecision::Kill(reason) => StatusPresentation {
             title: reason.status_title().to_string(),
@@ -288,6 +297,7 @@ mod tests {
             has_targets: true,
             decision,
             country: Some("NL".to_string()),
+            is_degraded: false,
         }
     }
 

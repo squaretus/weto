@@ -11,22 +11,37 @@ public actor GeoProbe: GeoProbing {
     private let confirmationFetcher: HTTPFetching
     private let networkPath: NetworkPathReporting
     private let token: @Sendable () -> String?
+    private let now: @Sendable () -> Date
+
+    /// Последний годный ответ подтверждающего сервиса. Ключ — адрес: подтверждение
+    /// отвечает «в какой стране вот этот адрес», и к другому адресу оно не относится.
+    /// Только в памяти: холодный старт и без того fail-closed до первого ответа.
+    private var cachedConfirmation: CachedConfirmation?
+
+    private struct CachedConfirmation {
+        let ip: String
+        let country: String
+        let source: ConfirmSource
+        let at: Date
+    }
 
     public init(
         fetcher: HTTPFetching,
         confirmationFetcher: HTTPFetching? = nil,
         networkPath: NetworkPathReporting = NetworkPathReporter(),
-        token: @escaping @Sendable () -> String?
+        token: @escaping @Sendable () -> String?,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.fetcher = fetcher
         self.confirmationFetcher = confirmationFetcher ?? fetcher
         self.networkPath = networkPath
         self.token = token
+        self.now = now
     }
 
     public func probe() async -> GeoProbeReport {
         guard let token = token(), !token.isEmpty else {
-            return await referenceOnlyReport()
+            return await fallbackReport(ipinfo: .failed(.other("не задан токен ipinfo")))
         }
         guard let url = URL(string: Constants.ipinfoLiteURL) else {
             return report(ipinfo: .failed(.other("некорректный URL ipinfo")))
@@ -37,17 +52,18 @@ public actor GeoProbe: GeoProbing {
             let data = try await fetcher.data(from: url, headers: ["Authorization": "Bearer \(token)"])
             ipinfo = try GeoResponses.decodeIPInfo(data)
         } catch {
-            return report(ipinfo: .failed(GeoFailure(error)))
+            return await fallbackReport(ipinfo: .failed(GeoFailure(error)))
         }
 
         // Адрес идёт в URL подтверждающих сервисов, поэтому проверяется до запроса.
         guard IPAddress.isValid(ipinfo.ip) else {
-            return report(ipinfo: .failed(.other("ipinfo вернул некорректный адрес")))
+            return await fallbackReport(ipinfo: .failed(.other("ipinfo вернул некорректный адрес")))
         }
 
-        // Ни адрес, ни страна, ни подтверждение не кэшируются: решение о завершении
-        // целей принимается только по данным, полученным в этой пробе.
-        let confirmation = await confirm(ip: ipinfo.ip)
+        // Адрес и основная страна не кэшируются никогда: ipinfo и есть детектор смены
+        // страны, и спрашивается он каждый круг. Кэшируется только подтверждение,
+        // и только про тот же самый адрес.
+        let confirmation = await confirmation(for: ipinfo.ip)
 
         return GeoProbeReport(
             ip: ipinfo.ip,
@@ -59,13 +75,20 @@ public actor GeoProbe: GeoProbing {
         )
     }
 
-    /// Проба без токена ipinfo: справочно спрашиваем единственный сервис, который
-    /// отвечает про звонящего сам. Вердикт от этого не меняется — `outcome` требует
-    /// ответа ipinfo и остаётся `.unavailable`, то есть fail-closed. Нужен этот путь
-    /// ради свежей установки: пользователь должен узнать, где он, ещё до настройки
-    /// токена, а раньше проба выходила молча и не показывала ничего.
-    private func referenceOnlyReport() async -> GeoProbeReport {
-        let noToken = GeoProbeReport.SourceOutcome.failed(.other("не задан токен ipinfo"))
+    /// ipinfo молчит — спрашиваем единственный сервис, который отвечает про звонящего сам.
+    ///
+    /// Вердикт от этого не становится безопасным: `outcome` требует ответа ipinfo
+    /// и остаётся `.unavailable`, то есть fail-closed. Ценность в адресе. Совпал он
+    /// с адресом прошлого вердикта — перепроверять страну не нужно, тот же адрес означает
+    /// ту же страну; решает это охрана, у которой прошлое чтение и есть. Другой адрес
+    /// или молчание обоих сервисов оставляют вердикт недоказанным, и цели завершаются.
+    ///
+    /// Этим же путём идёт проба без токена: на свежей установке пользователь должен узнать,
+    /// где он, ещё до настройки ipinfo.
+    private func fallbackReport(
+        ipinfo noAnswer: GeoProbeReport.SourceOutcome
+    ) async -> GeoProbeReport {
+        let noToken = noAnswer
 
         guard let url = URL(string: Constants.geojsSelfURL) else {
             return report(ipinfo: noToken)
@@ -103,6 +126,32 @@ public actor GeoProbe: GeoProbing {
             hasNetworkPath: networkPath.hasPath,
             checkedAt: Date()
         )
+    }
+
+    /// Подтверждение про адрес: из кэша, пока держится мягкий потолок, иначе с попыткой
+    /// обновиться. Неудачное обновление в пределах жёсткого потолка оставляет прошлый ответ:
+    /// расход по этому сервису делится с соседями по выходу VPN, и его 429 не должен
+    /// завершать цели при исправном VPN.
+    private func confirmation(
+        for ip: String
+    ) async -> (outcome: GeoProbeReport.SourceOutcome, source: ConfirmSource?) {
+        let cached = cachedConfirmation.flatMap { $0.ip == ip ? $0 : nil }
+        let age = cached.map { now().timeIntervalSince($0.at) }
+
+        if let cached, let age, age < Constants.confirmationSoftTTLSeconds {
+            return (.answered(cached.country), cached.source)
+        }
+
+        let fresh = await confirm(ip: ip)
+        if case .answered(let country) = fresh.outcome, let source = fresh.source {
+            cachedConfirmation = CachedConfirmation(ip: ip, country: country, source: source, at: now())
+            return fresh
+        }
+
+        if let cached, let age, age < Constants.confirmationHardTTLSeconds {
+            return (.answered(cached.country), cached.source)
+        }
+        return fresh
     }
 
     /// Отказ первичного подтверждающего сервиса запоминается: когда молчат оба,

@@ -26,6 +26,17 @@ private func stubReport(_ outcome: GeoOutcome) -> GeoProbeReport {
             hasNetworkPath: true,
             checkedAt: Date()
         )
+    case .degraded(let previous, let detail):
+        // Ровно та форма, которую даёт резервный путь пробы: ipinfo молчит,
+        // адрес назвал резервный сервис.
+        return GeoProbeReport(
+            ip: previous.ip,
+            ipinfo: .failed(.other(detail)),
+            confirmation: previous.confirmedCountry.map { .answered($0) } ?? .failed(.unreachable),
+            confirmSource: .geojs,
+            hasNetworkPath: true,
+            checkedAt: Date()
+        )
     case .unavailable(let detail):
         return GeoProbeReport(
             ip: nil,
@@ -305,6 +316,7 @@ final class GuardVMTests: XCTestCase {
         let probe: DelayedGeoProbe
         let settings: SettingsStore
         let log: EventLogStore
+        let network: StubSnapshotReader
     }
 
     private func makeDelayedHarness(snapshot: NetworkSnapshot) -> DelayedHarness {
@@ -317,11 +329,12 @@ final class GuardVMTests: XCTestCase {
         let killer = SpyKiller()
         let probe = DelayedGeoProbe()
         let log = EventLogStore(defaults: defaults)
+        let network = StubSnapshotReader(snapshotValue: snapshot)
 
         let vm = GuardVM(
             settings: settings,
             eventLog: log,
-            snapshotReader: StubSnapshotReader(snapshotValue: snapshot),
+            snapshotReader: network,
             geoProbe: probe,
             locator: StubLocator(
                 bundlePaths: [targetBundleID: targetPath],
@@ -338,7 +351,9 @@ final class GuardVMTests: XCTestCase {
             debounceInterval: 0
         )
 
-        return DelayedHarness(vm: vm, killer: killer, probe: probe, settings: settings, log: log)
+        return DelayedHarness(
+            vm: vm, killer: killer, probe: probe, settings: settings, log: log, network: network
+        )
     }
 
     /// Даёт отменённым задачам добежать до своих проверок, не привязываясь ко времени.
@@ -439,6 +454,52 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
     }
 
+    /// Штатный тик — локальная работа: процессы, статус, отпечаток. В сеть он не ходит,
+    /// иначе частота опроса системы и частота обращений к чужим сервисам оказываются
+    /// одним и тем же числом, и учащение первого жжёт лимиты второго.
+    func test_routine_tick_does_not_spend_a_request_while_the_verdict_is_fresh() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        let callsAfterVerdict = await h.probe.calls()
+
+        h.vm.handle(.tick)
+        await h.vm.awaitPendingProbe()
+
+        let callsAfterTick = await h.probe.calls()
+        XCTAssertEqual(callsAfterTick, callsAfterVerdict, "тик в сеть не ходит")
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+    }
+
+    /// А расписание гео — ходит: страна выхода может смениться и на неизменном пути.
+    func test_geo_schedule_asks_the_services_again() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        let callsAfterVerdict = await h.probe.calls()
+
+        h.vm.handle(.geoSchedule)
+        await h.vm.awaitPendingProbe()
+
+        let callsAfterSchedule = await h.probe.calls()
+        XCTAssertEqual(callsAfterSchedule, callsAfterVerdict + 1)
+    }
+
+    /// Таймаут ipinfo равен периоду расписания, поэтому пробы обязаны не накладываться.
+    func test_geo_schedule_does_not_stack_requests_while_one_is_in_flight() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted()
+        h.vm.handle(.geoSchedule)
+        h.vm.handle(.geoSchedule)
+        await settle()
+
+        let starts = await h.probe.starts()
+        XCTAssertEqual(starts, 1, "новая проба не стартует, пока прошлая в полёте")
+        h.vm.stop()
+    }
+
     /// Второй VPN, живущий рядом, — не событие для охраны.
     ///
     /// Корпоративный клиент рвёт связь и поднимается сам: его туннель уходит
@@ -532,6 +593,149 @@ final class GuardVMTests: XCTestCase {
             h.vm.state, .safe(h.vm.lastReading),
             "восстановившийся сервис снимает блокировку сразу, а не через тик поллинга"
         )
+        h.vm.stop()
+    }
+
+    // MARK: - Отказ ipinfo при доказанно том же адресе
+
+    /// Молчание ipinfo — не повод завершать цели, если резервный сервис назвал наш адрес
+    /// и он совпал с адресом прошлого вердикта. Тот же адрес — та же страна.
+    /// Ровно из-за этого у пользователя умирал `claude` при полностью исправном VPN:
+    /// квота подтверждающего сервиса делится с соседями по выходу VPN, и его 429
+    /// приходил регулярно.
+    func test_silent_ipinfo_with_the_same_address_keeps_the_targets() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        let batchesAfterVerdict = h.killer.killedBatches.count
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: .degraded(
+            previous: GeoReading(
+                ip: "203.0.113.28",
+                primaryCountry: "KZ",
+                confirmedCountry: "KZ",
+                confirmSource: .freeipapi
+            ),
+            detail: "HTTP 429"
+        ))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "адрес тот же — перепроверять нечего")
+        XCTAssertEqual(h.killer.killedBatches.count, batchesAfterVerdict)
+        h.vm.stop()
+    }
+
+    /// Адрес сменился, а страны для него никто не назвал — вердикта нет, и снисхождения тоже.
+    func test_silent_ipinfo_with_a_new_address_kills() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: .degraded(
+            previous: GeoReading(
+                ip: "198.51.100.231",
+                primaryCountry: "KZ",
+                confirmedCountry: "KZ",
+                confirmSource: .freeipapi
+            ),
+            detail: "HTTP 429"
+        ))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(
+            h.vm.state,
+            .unsafe(.geoUnavailable("адрес сменился, страна не проверена")),
+            "новый адрес не наследует страну прошлого"
+        )
+        h.vm.stop()
+    }
+
+    /// Молчат оба сервиса — адреса нет вовсе, доказывать нечем.
+    func test_silence_from_both_services_kills() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("таймаут запроса")))
+        h.vm.stop()
+    }
+
+    /// Цели живут, но защита держится на том, что адрес не менялся, а не на свежем
+    /// ответе ipinfo. Глаз обязан это видеть: зелёный тут врал бы.
+    func test_grace_shows_yellow_while_ipinfo_stays_silent() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.statusColor, .green)
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: .degraded(
+            previous: GeoReading(
+                ip: "203.0.113.28",
+                primaryCountry: "KZ",
+                confirmedCountry: "KZ",
+                confirmSource: .freeipapi
+            ),
+            detail: "HTTP 429"
+        ))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.statusColor, .yellow)
+        h.vm.stop()
+    }
+
+    /// Сменился путь в сеть — снисхождение отменяется, даже когда адрес совпал:
+    /// вердикт при смене пути недействителен по построению.
+    func test_route_change_cancels_the_grace_even_on_the_same_address() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+
+        h.network.snapshotValue = NetworkSnapshot(
+            services: [
+                .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
+                .init(uuid: "HAPP", name: "Happ", activeInterface: "utun9", isVPN: true),
+            ],
+            primaryServiceUUID: "HAPP"
+        )
+        h.vm.handle(.networkPath)
+
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: .degraded(
+            previous: GeoReading(
+                ip: "203.0.113.28",
+                primaryCountry: "KZ",
+                confirmedCountry: "KZ",
+                confirmSource: .freeipapi
+            ),
+            detail: "HTTP 429"
+        ))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("HTTP 429")))
         h.vm.stop()
     }
 

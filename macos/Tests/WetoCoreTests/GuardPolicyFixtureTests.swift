@@ -110,14 +110,16 @@ final class GuardPolicyFixtureTests: XCTestCase {
         func asOutcome() throws -> GeoOutcome {
             if kind == "unavailable" { return .unavailable(detail ?? "") }
             guard let ip, let primaryCountry else {
-                throw Failure("resolved без ip или страны")
+                throw Failure("\(kind) без ip или страны")
             }
-            return .resolved(GeoReading(
+            let reading = GeoReading(
                 ip: ip,
                 primaryCountry: primaryCountry,
                 confirmedCountry: confirmedCountry,
                 confirmSource: confirmSource.flatMap(ConfirmSource.init(rawValue:))
-            ))
+            )
+            if kind == "degraded" { return .degraded(previous: reading, detail: detail ?? "") }
+            return .resolved(reading)
         }
     }
 

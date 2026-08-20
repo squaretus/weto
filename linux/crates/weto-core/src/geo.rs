@@ -43,9 +43,28 @@ pub struct GeoReading {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GeoOutcome {
     Resolved(GeoReading),
+    /// ipinfo молчит, но резервный сервис назвал наш адрес, и он совпал с адресом
+    /// прошлого вердикта. Тот же адрес — та же страна, поэтому круг гео не нужен:
+    /// в дело идёт прошлое чтение, и проверки по нему прогоняются полностью.
+    /// Снисхождение выдаётся за доказательство неизменности адреса, а не за давность.
+    Degraded {
+        previous: GeoReading,
+        detail: String,
+    },
     /// Текст объясняет, кто именно промолчал: «Ipinfo недоступен» полезнее,
     /// чем «сервис недоступен».
     Unavailable(String),
+}
+
+impl GeoOutcome {
+    /// Чтение, по которому принимается решение. `None` — вердикта нет вовсе.
+    pub fn reading(&self) -> Option<&GeoReading> {
+        match self {
+            GeoOutcome::Resolved(reading) => Some(reading),
+            GeoOutcome::Degraded { previous, .. } => Some(previous),
+            GeoOutcome::Unavailable(_) => None,
+        }
+    }
 }
 
 /// Отчего гео-сервис не ответил — в терминах, понятных владельцу приложения.
