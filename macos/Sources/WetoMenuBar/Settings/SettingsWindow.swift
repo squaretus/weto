@@ -63,10 +63,7 @@ struct SettingsWindow: View {
         .environment(\.colorScheme, scheme)
         .preferredColorScheme(scheme)
         .background(SettingsWindowConfigurator())
-        .onAppear {
-            coordinator.guardVM.refreshVPNCandidates()
-            coordinator.guardVM.refreshRunningTargets()
-        }
+        .onAppear { coordinator.guardVM.refreshRunningTargets() }
     }
 
     private var appearanceCard: some View {

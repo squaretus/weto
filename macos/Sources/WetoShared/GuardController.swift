@@ -31,6 +31,10 @@ final class GuardController {
     private let geoProbe: GeoProbing
     private let debounceInterval: TimeInterval
 
+    /// Статус выбранного VPN-приложения. Приходит снаружи: процессы обходит
+    /// `GuardVM` — у него уже есть скан, и второй обход был бы лишним.
+    private let vpnAppStatus: () -> VPNAppStatus
+
     private let onDecision: (GuardDecision) -> Void
     /// `nil` гасит показания: устаревшие адрес и страна на экране
     /// читаются как «я всё ещё под VPN», хотя защиты уже нет.
@@ -56,6 +60,7 @@ final class GuardController {
         snapshotReader: NetworkSnapshotReading,
         geoProbe: GeoProbing,
         debounceInterval: TimeInterval,
+        vpnAppStatus: @escaping () -> VPNAppStatus,
         onDecision: @escaping (GuardDecision) -> Void,
         onReport: @escaping (GeoProbeReport?) -> Void
     ) {
@@ -63,6 +68,7 @@ final class GuardController {
         self.snapshotReader = snapshotReader
         self.geoProbe = geoProbe
         self.debounceInterval = debounceInterval
+        self.vpnAppStatus = vpnAppStatus
         self.onDecision = onDecision
         self.onReport = onReport
 
@@ -86,7 +92,7 @@ final class GuardController {
     func evaluate() {
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
-        let vpn = VPNStatusResolver.status(serviceID: config.vpnServiceID, in: snapshot)
+        let vpn = vpnAppStatus()
 
         if let local = GuardPolicy.decideLocal(
             isEnabled: settings.isEnabled,
@@ -99,13 +105,13 @@ final class GuardController {
             // защиту, которой уже нет.
             let isStale = freshVerdict != Verdict(
                 revision: revision,
-                snapshotFingerprint: snapshot.verdictFingerprint(forService: config.vpnServiceID)
+                snapshotFingerprint: snapshot.verdictFingerprint
             )
             let isArmed = settings.isEnabled && !config.targets.isEmpty
 
             if isStale { onReport(nil) }
 
-            record(snapshot: snapshot, serviceID: config.vpnServiceID)
+            record(snapshot: snapshot)
             onDecision(local)
 
             // Один запрос на смену состояния сети, и только пока охрана на посту:
@@ -134,7 +140,7 @@ final class GuardController {
     func probeNow() {
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
-        let vpn = VPNStatusResolver.status(serviceID: config.vpnServiceID, in: snapshot)
+        let vpn = vpnAppStatus()
 
         // Локальное основание применяем сразу: ответ гео-сервисов не должен
         // ни продлевать целям жизнь, ни задерживать их завершение.
@@ -143,7 +149,7 @@ final class GuardController {
             vpn: vpn,
             config: config
         ) {
-            record(snapshot: snapshot, serviceID: config.vpnServiceID)
+            record(snapshot: snapshot)
             onDecision(local)
         }
 
@@ -156,13 +162,13 @@ final class GuardController {
     /// обращений к чужим сервисам — одно и то же число, и учащение первого жжёт лимиты
     /// второго: при такте в 5 секунд это больше полумиллиона запросов в месяц.
     private func beginNetworkVerification(config: GuardConfig, snapshot: NetworkSnapshot) {
-        let fingerprint = snapshot.verdictFingerprint(forService: config.vpnServiceID)
+        let fingerprint = snapshot.verdictFingerprint
 
         guard freshVerdict != Verdict(revision: revision, snapshotFingerprint: fingerprint) else {
             guard let established, established.fingerprint == fingerprint else { return }
             onDecision(GuardPolicy.decide(GuardSignals(
                 isEnabled: settings.isEnabled,
-                vpn: VPNStatusResolver.status(serviceID: config.vpnServiceID, in: snapshot),
+                vpn: vpnAppStatus(),
                 geo: .resolved(established.reading),
                 config: config
             )))
@@ -214,8 +220,8 @@ final class GuardController {
 
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
-        let vpn = VPNStatusResolver.status(serviceID: config.vpnServiceID, in: snapshot)
-        let fingerprint = snapshot.verdictFingerprint(forService: config.vpnServiceID)
+        let vpn = vpnAppStatus()
+        let fingerprint = snapshot.verdictFingerprint
 
         // Отчёт отдаётся и при отказе: попап обязан показать, кто именно молчал.
         onReport(report)
@@ -225,7 +231,7 @@ final class GuardController {
             established = EstablishedReading(reading: reading, fingerprint: fingerprint)
         }
 
-        record(snapshot: snapshot, serviceID: config.vpnServiceID)
+        record(snapshot: snapshot)
         onDecision(GuardPolicy.decide(GuardSignals(
             isEnabled: settings.isEnabled,
             vpn: vpn,
@@ -260,11 +266,8 @@ final class GuardController {
         return .degraded(previous: established.reading, detail: detail)
     }
 
-    private func record(snapshot: NetworkSnapshot, serviceID: String?) {
-        freshVerdict = Verdict(
-            revision: revision,
-            snapshotFingerprint: snapshot.verdictFingerprint(forService: serviceID)
-        )
+    private func record(snapshot: NetworkSnapshot) {
+        freshVerdict = Verdict(revision: revision, snapshotFingerprint: snapshot.verdictFingerprint)
     }
 
     private func configurationChanged() {

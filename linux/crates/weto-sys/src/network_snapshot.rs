@@ -33,11 +33,10 @@
 //! Спрашивать надо про тот адрес, до которого реально пойдёт вердиктный запрос.
 
 use std::net::{ToSocketAddrs, UdpSocket};
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use weto_core::network::{NetworkInterfaceSnapshot, NetworkSnapshot, OutgoingRoute};
+use weto_core::network::{NetworkSnapshot, OutgoingRoute};
 
 pub trait NetworkSnapshotReading: Send + Sync {
     fn snapshot(&self) -> NetworkSnapshot;
@@ -146,104 +145,37 @@ fn route_to(destination: &str, bind: &str) -> Option<OutgoingRoute> {
         })
 }
 
-pub struct SysfsNetworkReader {
-    sys_root: PathBuf,
+/// Читатель снимка: один вопрос к ядру и ничего больше.
+///
+/// Раньше здесь читался `/sys/class/net`: состав интерфейсов, их флаги и `DEVTYPE`
+/// для квалификации «туннель или нет». Всё это было нужно списку выбора туннеля.
+/// Выбирается приложение, поэтому от снимка остался признак свежести вердикта.
+pub struct KernelNetworkReader {
     route_probe: Box<dyn RouteProbing>,
 }
 
-impl SysfsNetworkReader {
-    pub fn new() -> SysfsNetworkReader {
-        SysfsNetworkReader {
-            sys_root: PathBuf::from("/sys/class/net"),
+impl KernelNetworkReader {
+    pub fn new() -> KernelNetworkReader {
+        KernelNetworkReader {
             route_probe: Box::new(KernelRouteProbe::default()),
         }
     }
 
-    pub fn with_parts(sys_root: PathBuf, route_probe: Box<dyn RouteProbing>) -> SysfsNetworkReader {
-        SysfsNetworkReader {
-            sys_root,
-            route_probe,
-        }
+    pub fn with_probe(route_probe: Box<dyn RouteProbing>) -> KernelNetworkReader {
+        KernelNetworkReader { route_probe }
     }
 }
 
-impl Default for SysfsNetworkReader {
+impl Default for KernelNetworkReader {
     fn default() -> Self {
-        Self::new()
+        KernelNetworkReader::new()
     }
 }
 
-impl NetworkSnapshotReading for SysfsNetworkReader {
+impl NetworkSnapshotReading for KernelNetworkReader {
     fn snapshot(&self) -> NetworkSnapshot {
-        let mut interfaces: Vec<NetworkInterfaceSnapshot> = std::fs::read_dir(&self.sys_root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name().to_str()?.to_string();
-                let dir = entry.path();
-                Some(NetworkInterfaceSnapshot {
-                    index: read_number(&dir.join("ifindex")).unwrap_or(0) as u32,
-                    is_up: is_up(&dir),
-                    is_tunnel: is_tunnel(&dir),
-                    name,
-                })
-            })
-            .collect();
-        interfaces.sort_by(|a, b| a.name.cmp(&b.name));
-
         NetworkSnapshot {
-            interfaces,
             outgoing: self.route_probe.outgoing_route(),
         }
     }
-}
-
-/// IFF_UP, и только он.
-///
-/// IFF_RUNNING в sysfs не отражается (проверено: у работающего eth0 флаги
-/// `0x1003`, бита `0x40` там нет), а для туннелей понятие «несёт линк» и вовсе
-/// не определено — у wireguard и tun `operstate` обычно `unknown`. На вопрос
-/// «идёт ли через него трафик» отвечает проба маршрута, и отвечает достовернее.
-fn is_up(dir: &Path) -> bool {
-    read_flags(&dir.join("flags"))
-        .map(|f| f & 0x1 != 0)
-        .unwrap_or(false)
-}
-
-/// Квалификация туннеля по данным ядра. Имя в ней не участвует: «VPN»
-/// пользователь напишет на чём угодно, включая Wi-Fi.
-fn is_tunnel(dir: &Path) -> bool {
-    // Драйвер объявляет себя сам — самый надёжный признак.
-    if let Ok(uevent) = std::fs::read_to_string(dir.join("uevent")) {
-        for line in uevent.lines() {
-            if let Some(devtype) = line.strip_prefix("DEVTYPE=") {
-                if matches!(devtype, "wireguard" | "tun" | "vti" | "gre" | "ipip") {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // TUN/TAP: openvpn и всё, что живёт через /dev/net/tun.
-    if dir.join("tun_flags").exists() {
-        return true;
-    }
-
-    // ARPHRD: NONE у wireguard и tun, отдельные значения у ip-туннелей.
-    matches!(
-        read_number(&dir.join("type")),
-        Some(65534) | Some(768) | Some(769) | Some(776) | Some(778) | Some(823)
-    )
-}
-
-fn read_number(path: &Path) -> Option<i64> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-fn read_flags(path: &Path) -> Option<u32> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let trimmed = text.trim();
-    let digits = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-    u32::from_str_radix(digits, 16).ok()
 }

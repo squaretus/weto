@@ -1,15 +1,18 @@
 {
-  "version": 1,
+  "version": 2,
   "about": [
     "Голден-фикстуры политики охраны. Один и тот же набор случаев прогоняют обе",
     "реализации: macOS/Tests/WetoCoreTests/GuardPolicyFixtureTests.swift и",
     "linux/crates/weto-core/tests/policy_fixtures.rs.",
     "",
-    "Случаи извлечены из действующих Swift-тестов, а не написаны заново: фикстуры",
+    "Случаи извлечены из действующих тестов, а не написаны заново: фикстуры",
     "обязаны фиксировать существующее поведение, иначе они закрепят воображаемое.",
     "",
-    "vpnID — идентификатор выбранного VPN: UUID сетевого сервиса на macOS,",
-    "имя интерфейса на Linux. Для политики это непрозрачная строка.",
+    "vpnApp — правило выбранного VPN-приложения: bundle ID или путь. Для политики",
+    "это непрозрачная строка, важно лишь, выбрано ли что-нибудь.",
+    "",
+    "vpn.kind: notChosen | notRunning | running. Выбирается приложение, а не туннель:",
+    "вопрос «какой из utunN твой» пользователю задать нельзя.",
     "",
     "geo.kind: resolved | degraded | unavailable. degraded — «ipinfo молчит,",
     "но резервный сервис подтвердил, что адрес тот же»: решает прошлое чтение,",
@@ -25,8 +28,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -36,7 +38,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -54,7 +56,7 @@
       "function": "decide",
       "isEnabled": false,
       "vpn": {
-        "kind": "down"
+        "kind": "notRunning"
       },
       "geo": {
         "kind": "resolved",
@@ -64,7 +66,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -82,7 +84,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "down"
+        "kind": "notRunning"
       },
       "geo": {
         "kind": "resolved",
@@ -92,7 +94,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -104,12 +106,11 @@
       }
     },
     {
-      "name": "VPN не выбран — цели завершаются",
+      "name": "VPN-приложение не выбрано — цели завершаются",
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -119,7 +120,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": null,
+        "vpnApp": null,
         "blockedCountries": [
           "RU"
         ],
@@ -131,16 +132,16 @@
       "expect": {
         "decision": "kill",
         "reason": {
-          "kind": "vpnNotConfigured"
+          "kind": "vpnAppNotChosen"
         }
       }
     },
     {
-      "name": "VPN не поднят — цели завершаются",
+      "name": "VPN-приложение не запущено — цели завершаются",
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "down"
+        "kind": "notRunning"
       },
       "geo": {
         "kind": "resolved",
@@ -150,7 +151,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -162,55 +163,23 @@
       "expect": {
         "decision": "kill",
         "reason": {
-          "kind": "vpnDown"
+          "kind": "vpnAppNotRunning"
         }
       }
     },
     {
-      "name": "VPN поднят, но не держит маршрут по умолчанию",
+      "name": "проверка приложения идёт раньше проверки гео — экономит запрос",
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": false
-      },
-      "geo": {
-        "kind": "resolved",
-        "ip": "203.0.113.28",
-        "primaryCountry": "KZ",
-        "confirmedCountry": "KZ",
-        "confirmSource": "freeipapi"
-      },
-      "config": {
-        "vpnID": "BC2D1D42",
-        "blockedCountries": [
-          "RU"
-        ],
-        "blockedIPRanges": [],
-        "targets": [
-          "com.example.target"
-        ]
-      },
-      "expect": {
-        "decision": "kill",
-        "reason": {
-          "kind": "vpnNotPrimary"
-        }
-      }
-    },
-    {
-      "name": "проверка VPN идёт раньше проверки гео — экономит запрос",
-      "function": "decide",
-      "isEnabled": true,
-      "vpn": {
-        "kind": "down"
+        "kind": "notRunning"
       },
       "geo": {
         "kind": "unavailable",
         "detail": "timeout"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -222,7 +191,7 @@
       "expect": {
         "decision": "kill",
         "reason": {
-          "kind": "vpnDown"
+          "kind": "vpnAppNotRunning"
         }
       }
     },
@@ -231,15 +200,14 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "unavailable",
         "detail": "timeout"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -261,8 +229,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -272,7 +239,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -296,8 +263,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -307,7 +273,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -331,8 +297,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -342,7 +307,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -362,8 +327,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -373,7 +337,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -396,8 +360,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -407,7 +370,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -430,8 +393,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -441,7 +403,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -464,8 +426,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -475,7 +436,7 @@
         "confirmSource": null
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -496,8 +457,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -507,7 +467,7 @@
         "confirmSource": null
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -530,8 +490,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -541,7 +500,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -564,8 +523,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "resolved",
@@ -575,7 +533,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -593,12 +551,11 @@
       "function": "decideLocal",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": null,
       "config": {
-        "vpnID": "Happ",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -616,11 +573,11 @@
       "function": "decideLocal",
       "isEnabled": false,
       "vpn": {
-        "kind": "down"
+        "kind": "notRunning"
       },
       "geo": null,
       "config": {
-        "vpnID": "Happ",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -638,11 +595,11 @@
       "function": "decideLocal",
       "isEnabled": true,
       "vpn": {
-        "kind": "down"
+        "kind": "notRunning"
       },
       "geo": null,
       "config": {
-        "vpnID": "Happ",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -658,11 +615,11 @@
       "function": "decideLocal",
       "isEnabled": true,
       "vpn": {
-        "kind": "down"
+        "kind": "notRunning"
       },
       "geo": null,
       "config": {
-        "vpnID": "Happ",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -674,33 +631,7 @@
       "expect": {
         "decision": "kill",
         "reason": {
-          "kind": "vpnDown"
-        }
-      }
-    },
-    {
-      "name": "локально: VPN без маршрута по умолчанию убивает",
-      "function": "decideLocal",
-      "isEnabled": true,
-      "vpn": {
-        "kind": "up",
-        "isPrimary": false
-      },
-      "geo": null,
-      "config": {
-        "vpnID": "Happ",
-        "blockedCountries": [
-          "RU"
-        ],
-        "blockedIPRanges": [],
-        "targets": [
-          "com.example.target"
-        ]
-      },
-      "expect": {
-        "decision": "kill",
-        "reason": {
-          "kind": "vpnNotPrimary"
+          "kind": "vpnAppNotRunning"
         }
       }
     },
@@ -709,11 +640,11 @@
       "function": "decideLocal",
       "isEnabled": true,
       "vpn": {
-        "kind": "notConfigured"
+        "kind": "notChosen"
       },
       "geo": null,
       "config": {
-        "vpnID": null,
+        "vpnApp": null,
         "blockedCountries": [
           "RU"
         ],
@@ -725,7 +656,7 @@
       "expect": {
         "decision": "kill",
         "reason": {
-          "kind": "vpnNotConfigured"
+          "kind": "vpnAppNotChosen"
         }
       }
     },
@@ -736,7 +667,7 @@
       "vpn": null,
       "geo": null,
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -759,7 +690,7 @@
       "vpn": null,
       "geo": null,
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -779,7 +710,7 @@
       "vpn": null,
       "geo": null,
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -795,8 +726,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "degraded",
@@ -807,7 +737,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -825,8 +755,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "degraded",
@@ -837,7 +766,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],
@@ -860,8 +789,7 @@
       "function": "decide",
       "isEnabled": true,
       "vpn": {
-        "kind": "up",
-        "isPrimary": true
+        "kind": "running"
       },
       "geo": {
         "kind": "degraded",
@@ -872,7 +800,7 @@
         "confirmSource": "freeipapi"
       },
       "config": {
-        "vpnID": "BC2D1D42",
+        "vpnApp": "su.ffg.happ",
         "blockedCountries": [
           "RU"
         ],

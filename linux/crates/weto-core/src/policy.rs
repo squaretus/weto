@@ -9,13 +9,14 @@ use std::collections::HashSet;
 
 use crate::geo::GeoOutcome;
 use crate::ip::IpRange;
-use crate::network::VpnStatus;
+use crate::network::VpnAppStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuardConfig {
-    /// Идентификатор выбранного VPN: имя интерфейса на Linux, UUID сервиса
-    /// на macOS. Для политики это непрозрачная строка.
-    pub vpn_id: Option<String>,
+    /// Правило выбранного VPN-приложения в том же виде, что цели: команда,
+    /// путь или бандл. Для политики это непрозрачная строка — важно лишь,
+    /// выбрано ли что-нибудь.
+    pub vpn_app: Option<String>,
     pub blocked_countries: HashSet<String>,
     pub blocked_ip_ranges: Vec<IpRange>,
     pub targets: Vec<String>,
@@ -30,7 +31,7 @@ impl GuardConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuardSignals {
     pub is_enabled: bool,
-    pub vpn: VpnStatus,
+    pub vpn: VpnAppStatus,
     pub geo: GeoOutcome,
     pub config: GuardConfig,
 }
@@ -38,9 +39,8 @@ pub struct GuardSignals {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsafeReason {
     VerificationPending,
-    VpnNotConfigured,
-    VpnDown,
-    VpnNotPrimary,
+    VpnAppNotChosen,
+    VpnAppNotRunning,
     GeoUnavailable(String),
     BlacklistedIp(String),
     BlockedCountry { code: String, source: String },
@@ -73,26 +73,27 @@ pub fn pending_verification(is_enabled: bool, config: &GuardConfig) -> GuardDeci
 /// здесь ничего не нашлось.
 pub fn decide_local(
     is_enabled: bool,
-    vpn: VpnStatus,
+    vpn: VpnAppStatus,
     config: &GuardConfig,
 ) -> Option<GuardDecision> {
     if !is_enabled || !config.has_targets() {
         return Some(GuardDecision::Safe);
     }
-    if config.vpn_id.is_none() {
-        return Some(GuardDecision::Kill(UnsafeReason::VpnNotConfigured));
+
+    // Пустой выбор в настройках убивает сам по себе, не спрашивая статус.
+    // Статус считает вызывающий, и разойтись с настройками он не должен —
+    // но если разойдётся, ошибка обязана быть в сторону fail-closed.
+    if config.vpn_app.is_none() {
+        return Some(GuardDecision::Kill(UnsafeReason::VpnAppNotChosen));
     }
 
     match vpn {
-        VpnStatus::NotConfigured => Some(GuardDecision::Kill(UnsafeReason::VpnNotConfigured)),
-        VpnStatus::Down => Some(GuardDecision::Kill(UnsafeReason::VpnDown)),
-        VpnStatus::Up { is_primary } => {
-            if is_primary {
-                None
-            } else {
-                Some(GuardDecision::Kill(UnsafeReason::VpnNotPrimary))
-            }
-        }
+        VpnAppStatus::NotChosen => Some(GuardDecision::Kill(UnsafeReason::VpnAppNotChosen)),
+        VpnAppStatus::NotRunning => Some(GuardDecision::Kill(UnsafeReason::VpnAppNotRunning)),
+        // Запущенное приложение — ещё не доказательство, что трафик идёт через VPN:
+        // клиент умеет висеть в трее с выключенным подключением. Отвечает на это
+        // гео, и ответ обязателен.
+        VpnAppStatus::Running => None,
     }
 }
 

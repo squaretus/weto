@@ -2,7 +2,9 @@ import Foundation
 
 public struct GuardConfig: Equatable, Sendable {
 
-    public let vpnServiceID: String?
+    /// Правило выбранного VPN-приложения в том же виде, что элементы `targets`:
+    /// bundle ID или путь к бинарнику.
+    public let vpnAppRule: String?
 
     public let blockedCountries: Set<String>
     public let blockedIPRanges: [IPRange]
@@ -12,12 +14,12 @@ public struct GuardConfig: Equatable, Sendable {
     public var hasTargets: Bool { !targets.isEmpty }
 
     public init(
-        vpnServiceID: String?,
+        vpnAppRule: String?,
         blockedCountries: Set<String>,
         blockedIPRanges: [IPRange],
         targets: [String]
     ) {
-        self.vpnServiceID = vpnServiceID
+        self.vpnAppRule = vpnAppRule
         self.blockedCountries = blockedCountries
         self.blockedIPRanges = blockedIPRanges
         self.targets = targets
@@ -26,11 +28,11 @@ public struct GuardConfig: Equatable, Sendable {
 
 public struct GuardSignals: Equatable, Sendable {
     public let isEnabled: Bool
-    public let vpn: VPNStatus
+    public let vpn: VPNAppStatus
     public let geo: GeoOutcome
     public let config: GuardConfig
 
-    public init(isEnabled: Bool, vpn: VPNStatus, geo: GeoOutcome, config: GuardConfig) {
+    public init(isEnabled: Bool, vpn: VPNAppStatus, geo: GeoOutcome, config: GuardConfig) {
         self.isEnabled = isEnabled
         self.vpn = vpn
         self.geo = geo
@@ -40,9 +42,8 @@ public struct GuardSignals: Equatable, Sendable {
 
 public enum UnsafeReason: Equatable, Sendable {
     case verificationPending
-    case vpnNotConfigured
-    case vpnDown
-    case vpnNotPrimary
+    case vpnAppNotChosen
+    case vpnAppNotRunning
     case geoUnavailable(String)
     case blacklistedIP(String)
     case blockedCountry(code: String, source: String)
@@ -70,19 +71,26 @@ public enum GuardPolicy {
 
     public static func decideLocal(
         isEnabled: Bool,
-        vpn: VPNStatus,
+        vpn: VPNAppStatus,
         config: GuardConfig
     ) -> GuardDecision? {
         guard isEnabled, config.hasTargets else { return .safe }
-        guard config.vpnServiceID != nil else { return .kill(.vpnNotConfigured) }
+
+        // Пустой выбор в настройках убивает сам по себе, не спрашивая статус.
+        // Статус считает вызывающий, и разойтись с настройками он не должен —
+        // но если разойдётся, ошибка обязана быть в сторону fail-closed.
+        guard config.vpnAppRule != nil else { return .kill(.vpnAppNotChosen) }
 
         switch vpn {
-        case .notConfigured:
-            return .kill(.vpnNotConfigured)
-        case .down:
-            return .kill(.vpnDown)
-        case .up(let isPrimary):
-            return isPrimary ? nil : .kill(.vpnNotPrimary)
+        case .notChosen:
+            return .kill(.vpnAppNotChosen)
+        case .notRunning:
+            return .kill(.vpnAppNotRunning)
+        case .running:
+            // Запущенное приложение — ещё не доказательство, что трафик идёт
+            // через VPN: клиент умеет висеть в менюбаре с выключенным подключением.
+            // Отвечает на это гео, и ответ обязателен.
+            return nil
         }
     }
 

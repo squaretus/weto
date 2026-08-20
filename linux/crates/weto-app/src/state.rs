@@ -24,15 +24,18 @@ use weto_guard::controller::{GuardController, GuardSnapshot, KillReporting, Sett
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
-use weto_sys::network_snapshot::SysfsNetworkReader;
+use weto_sys::network_snapshot::KernelNetworkReader;
 use weto_sys::notifications::{KillNotifying, PortalNotifier};
 use weto_sys::process_killer::SigtermKiller;
 use weto_sys::process_registry::ProcRegistry;
 use weto_sys::secret_store::FileSecretStore;
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
-/// Шаг штатного тика задаётся в настройках, как на macOS.
 const TICK_UNSAFE: Duration = Duration::from_millis(250);
+
+/// Штатный тик — раз в секунду и константой, а не настройкой: опрос системы
+/// бесплатный, а платит за частоту расписание гео внутри охраны.
+const TICK_SAFE: Duration = Duration::from_secs(1);
 
 /// Настройки читаются из файла при каждом обращении охраны — так правка
 /// из окна настроек применяется к следующему же тику без всякой рассылки.
@@ -151,7 +154,7 @@ impl AppState {
         };
 
         let controller = Arc::new(GuardController::new(
-            Box::new(SysfsNetworkReader::new()),
+            Box::new(KernelNetworkReader::new()),
             Box::new(HttpGeoProbe::new(
                 GeoEndpoints::default(),
                 Box::new(RouteNetworkPath),
@@ -250,7 +253,6 @@ impl AppState {
     /// Здесь та же ловушка ждала бы с окном, которое может не открыться никогда.
     pub fn start_guard(self: &Arc<Self>) {
         let controller = self.controller.clone();
-        let settings = self.settings.clone();
         std::thread::Builder::new()
             .name("weto-guard".to_string())
             .spawn(move || {
@@ -260,7 +262,7 @@ impl AppState {
                     // Шаг штатного тика перечитывается каждый раз: правка
                     // в настройках применяется со следующего же круга.
                     let interval = match decision {
-                        GuardDecision::Safe => settings.current().poll_interval(),
+                        GuardDecision::Safe => TICK_SAFE,
                         GuardDecision::Kill(_) => TICK_UNSAFE,
                     };
                     // Событие сети прерывает ожидание: реакция на падение

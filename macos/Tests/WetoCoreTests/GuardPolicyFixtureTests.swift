@@ -90,11 +90,11 @@ final class GuardPolicyFixtureTests: XCTestCase {
         let kind: String
         let isPrimary: Bool?
 
-        var asStatus: VPNStatus {
+        var asStatus: VPNAppStatus {
             switch kind {
-            case "down": return .down
-            case "up": return .up(isPrimary: isPrimary ?? false)
-            default: return .notConfigured
+            case "running": return .running
+            case "notRunning": return .notRunning
+            default: return .notChosen
             }
         }
     }
@@ -124,7 +124,7 @@ final class GuardPolicyFixtureTests: XCTestCase {
     }
 
     private struct Config: Decodable {
-        let vpnID: String?
+        let vpnApp: String?
         let blockedCountries: [String]
         let blockedIPRanges: [String]
         let targets: [String]
@@ -138,7 +138,7 @@ final class GuardPolicyFixtureTests: XCTestCase {
                 ranges.append(range)
             }
             return GuardConfig(
-                vpnServiceID: vpnID,
+                vpnAppRule: vpnApp,
                 blockedCountries: Set(blockedCountries),
                 blockedIPRanges: ranges,
                 targets: targets
@@ -171,9 +171,8 @@ final class GuardPolicyFixtureTests: XCTestCase {
         var asUnsafeReason: UnsafeReason {
             switch kind {
             case "verificationPending": return .verificationPending
-            case "vpnNotConfigured": return .vpnNotConfigured
-            case "vpnDown": return .vpnDown
-            case "vpnNotPrimary": return .vpnNotPrimary
+            case "vpnAppNotChosen": return .vpnAppNotChosen
+            case "vpnAppNotRunning": return .vpnAppNotRunning
             case "geoUnavailable": return .geoUnavailable(detail ?? "")
             case "blacklistedIP": return .blacklistedIP(ip ?? "")
             case "blockedCountry": return .blockedCountry(code: code ?? "", source: source ?? "")

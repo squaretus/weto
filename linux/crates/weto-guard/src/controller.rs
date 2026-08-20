@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use weto_config::settings::Settings;
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading, SourceOutcome};
+use weto_core::network::VpnAppStatus;
 use weto_core::policy::{decide, decide_local, pending_verification, GuardDecision, GuardSignals};
 use weto_core::presentation::{status_presentation, GuardState, StatusPresentation};
 use weto_core::process::RunningTarget;
@@ -75,7 +76,6 @@ pub struct GuardSnapshot {
     pub presentation: Option<StatusPresentation>,
     pub report: Option<GeoProbeReport>,
     pub running: Vec<RunningTarget>,
-    pub vpn_candidates: Vec<String>,
 }
 
 struct Inner {
@@ -174,10 +174,8 @@ impl GuardController {
         let config = settings.guard_config();
         // Отпечаток берётся по выбранному интерфейсу, а не по всей сети: иначе
         // чужой VPN, переподключившийся сам по себе, стоил бы пользователю целей.
-        let fingerprint = network.verdict_fingerprint(settings.vpn_interface.as_deref());
-
-        let vpn =
-            weto_core::network::resolve_vpn_status(&network, settings.vpn_interface.as_deref());
+        let fingerprint = network.verdict_fingerprint();
+        let vpn = self.vpn_app_status(&settings);
         let local = decide_local(settings.is_enabled, vpn, &config);
 
         // Локальное основание применяется сразу, до ответа сети: жизни целям
@@ -327,6 +325,22 @@ impl GuardController {
         Some(outcome)
     }
 
+    /// Запущено ли выбранное VPN-приложение.
+    ///
+    /// Обход `/proc` тот же, что у целей: правило приложения приходит из настроек
+    /// уже разрешённым, а в список целей не попадает никогда — завершать свой
+    /// источник защиты охрана не имеет права.
+    fn vpn_app_status(&self, settings: &Settings) -> VpnAppStatus {
+        let Some(rule) = settings.vpn_app_rule() else {
+            return VpnAppStatus::NotChosen;
+        };
+        if self.enforcer.is_running(&rule) {
+            VpnAppStatus::Running
+        } else {
+            VpnAppStatus::NotRunning
+        }
+    }
+
     /// Что из отчёта годится в основание вердикта.
     ///
     /// ipinfo ответил — берём его ответ. ipinfo молчит — смотрим, назвал ли резервный
@@ -408,19 +422,10 @@ impl GuardController {
             is_degraded,
         });
 
-        let candidates = self
-            .network
-            .snapshot()
-            .vpn_candidates()
-            .iter()
-            .map(|i| i.name.clone())
-            .collect();
-
         let mut inner = self.inner.lock().expect("состояние охраны");
         inner.snapshot.decision = Some(decision);
         inner.snapshot.presentation = Some(presentation);
         inner.snapshot.running = running;
-        inner.snapshot.vpn_candidates = candidates;
         if report.is_some() {
             inner.snapshot.report = report;
         }

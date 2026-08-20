@@ -50,7 +50,7 @@ public struct GuardConfigurationChange: Equatable, Sendable {
     public enum Field: Equatable, Sendable {
         case guardEnabled
         case targets
-        case vpnService
+        case vpnApp
         case ipinfoToken
         case blacklist
     }
@@ -69,15 +69,16 @@ public final class SettingsStore {
     private enum Key {
         static let isEnabled = "isEnabled"
         static let appTheme = "appTheme"
-        static let vpnServiceID = "vpnServiceID"
+        /// Ключ новый: смысл выбора изменился с «идентификатор туннеля» на «правило
+        /// приложения», и переносить прежнее значение нельзя — оно называет `utunN`
+        /// или UUID сервиса, а не приложение.
+        static let vpnAppRule = "vpnAppRule"
         static let targets = "targets"
 
-        static let legacyVPNServiceName = "vpnServiceName"
         static let legacyBundleIDs = "targetBundleIDs"
         static let legacyExecutables = "targetExecutables"
         static let blockedCountryCodes = "blockedCountryCodes"
         static let blockedIPRangeTexts = "blockedIPRangeTexts"
-        static let pollIntervalSeconds = "pollIntervalSeconds"
     }
 
     private static let tokenAccount = "token"
@@ -97,12 +98,10 @@ public final class SettingsStore {
         self._isEnabled = defaults.object(forKey: Key.isEnabled) as? Bool ?? true
         self._appTheme = defaults.string(forKey: Key.appTheme)
             .flatMap(AppTheme.init(rawValue:)) ?? .dark
-        self._vpnServiceID = defaults.string(forKey: Key.vpnServiceID)
+        self._vpnAppRule = defaults.string(forKey: Key.vpnAppRule)
         self._targets = Self.loadTargets(from: defaults)
         self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
         self._blockedIPRangeTexts = defaults.stringArray(forKey: Key.blockedIPRangeTexts) ?? []
-        let interval = defaults.double(forKey: Key.pollIntervalSeconds)
-        self._pollIntervalSeconds = interval > 0 ? interval : Constants.defaultPollIntervalSeconds
         self._ipinfoToken = secrets.read(account: Self.tokenAccount) ?? ""
         self.tokenBox.value = _ipinfoToken.isEmpty ? nil : _ipinfoToken
     }
@@ -130,29 +129,23 @@ public final class SettingsStore {
         set { _appTheme = newValue; defaults.set(newValue.rawValue, forKey: Key.appTheme) }
     }
 
-    private var _vpnServiceID: String?
-    public var vpnServiceID: String? {
-        get { _vpnServiceID }
+    private var _vpnAppRule: String?
+
+    /// Выбранное VPN-приложение — тем же правилом, что цели: bundle ID или путь.
+    public var vpnAppRule: String? {
+        get { _vpnAppRule }
         set {
-            _vpnServiceID = newValue
-            defaults.set(newValue, forKey: Key.vpnServiceID)
-            emit(.vpnService)
+            let cleaned = newValue?.trimmingCharacters(in: .whitespaces)
+            _vpnAppRule = (cleaned?.isEmpty ?? true) ? nil : cleaned
+            defaults.set(_vpnAppRule, forKey: Key.vpnAppRule)
+
+            // Охрана не должна завершать собственный источник защиты: цель,
+            // совпавшая с VPN-приложением, снимается вместе с выбором.
+            if let rule = _vpnAppRule, targets.contains(rule) {
+                targets = targets.filter { $0 != rule }
+            }
+            emit(.vpnApp)
         }
-    }
-
-    /// Переносит выбор, сделанный прежней версией по имени сервиса, на устойчивый UUID.
-    /// Неоднозначное имя (два сервиса зовутся одинаково) и имя сервиса, не прошедшего
-    /// квалификацию VPN, не угадываем — выбор очищается, и охрана остаётся fail-closed
-    /// до явного выбора пользователем.
-    public func migrateLegacyVPNSelection(in snapshot: NetworkSnapshot) {
-        guard let legacyName = defaults.string(forKey: Key.legacyVPNServiceName) else { return }
-        defer { defaults.removeObject(forKey: Key.legacyVPNServiceName) }
-
-        guard vpnServiceID == nil else { return }
-
-        let matches = snapshot.vpnCandidates.filter { $0.name == legacyName }
-        guard matches.count == 1 else { return }
-        vpnServiceID = matches[0].uuid
     }
 
     private var _targets: [String]
@@ -195,12 +188,6 @@ public final class SettingsStore {
             defaults.set(newValue, forKey: Key.blockedIPRangeTexts)
             emit(.blacklist)
         }
-    }
-
-    private var _pollIntervalSeconds: TimeInterval
-    public var pollIntervalSeconds: TimeInterval {
-        get { _pollIntervalSeconds }
-        set { _pollIntervalSeconds = newValue; defaults.set(newValue, forKey: Key.pollIntervalSeconds) }
     }
 
     private var _ipinfoToken: String
@@ -269,7 +256,7 @@ public final class SettingsStore {
 
     public var guardConfig: GuardConfig {
         GuardConfig(
-            vpnServiceID: vpnServiceID,
+            vpnAppRule: vpnAppRule,
             blockedCountries: Set(blockedCountryCodes),
             blockedIPRanges: blockedIPRangeTexts.compactMap(IPRange.init),
             targets: targets

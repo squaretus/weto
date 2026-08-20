@@ -36,7 +36,6 @@ public final class GuardVM {
     public private(set) var isProbing = false
 
     public private(set) var permissionFailure: String?
-    public private(set) var availableVPNs: [NetworkServiceSnapshot] = []
     public private(set) var runningTargets: [RunningTarget] = []
 
     @ObservationIgnored private let settings: SettingsStore
@@ -103,6 +102,7 @@ public final class GuardVM {
             snapshotReader: snapshotReader,
             geoProbe: geoProbe,
             debounceInterval: debounceInterval,
+            vpnAppStatus: { [weak self] in self?.vpnAppStatus() ?? .notChosen },
             onDecision: { [weak self] decision in self?.apply(decision) },
             onReport: { [weak self] report in self?.receive(report) }
         )
@@ -115,10 +115,6 @@ public final class GuardVM {
     }
 
     public func start() {
-        // Миграция выбора «по имени» на UUID выполняется до первого решения:
-        // иначе прежний выбор выглядел бы как «VPN не выбран» и цели ушли бы зря.
-        settings.migrateLegacyVPNSelection(in: snapshotReader.snapshot())
-        refreshVPNCandidates()
         refreshRunningTargets()
         events.start { [weak self] trigger in
             Task { @MainActor [weak self] in self?.handle(trigger) }
@@ -156,7 +152,7 @@ public final class GuardVM {
             return reading?.primaryCountry
         case .unsafe(let reason):
             switch reason {
-            case .vpnNotConfigured, .vpnDown, .vpnNotPrimary, .geoUnavailable:
+            case .vpnAppNotChosen, .vpnAppNotRunning, .geoUnavailable:
                 return nil
             default:
                 return lastReading?.primaryCountry
@@ -170,8 +166,19 @@ public final class GuardVM {
         return launchAgent.disable()
     }
 
-    public func refreshVPNCandidates() {
-        availableVPNs = snapshotReader.snapshot().vpnCandidates
+    /// Запущено ли выбранное VPN-приложение.
+    ///
+    /// Считается по уже снятому скану: обход процессов идёт раз в тик и один,
+    /// а правило приложения разрешается тем же путём, что цели, — с симлинками,
+    /// версионными путями и скриптами по argv.
+    private func vpnAppStatus() -> VPNAppStatus {
+        guard settings.vpnAppRule != nil else { return .notChosen }
+        guard let rule = enforcer.vpnAppRule() else { return .notRunning }
+
+        let scan = currentScan ?? enforcer.scan(includingVPNApp: true)
+        return ProcessMatcher.pids(in: scan.processes, rules: [rule]).isEmpty
+            ? .notRunning
+            : .running
     }
 
     public func refreshRunningTargets() {
@@ -200,7 +207,7 @@ public final class GuardVM {
     }
 
     public func handle(_ trigger: GuardTrigger) {
-        let scan = enforcer.scan()
+        let scan = enforcer.scan(includingVPNApp: true)
         currentScan = scan
         defer { currentScan = nil }
 
@@ -347,10 +354,7 @@ public final class GuardVM {
         tickTask?.cancel()
         tickTask = Task { [weak self] in
             while !Task.isCancelled {
-                let interval = await MainActor.run { [weak self] in
-                    self?.settings.pollIntervalSeconds ?? Constants.defaultPollIntervalSeconds
-                }
-                try? await Task.sleep(for: .seconds(interval))
+                try? await Task.sleep(for: .seconds(Constants.tickIntervalSeconds))
                 guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in self?.handle(.tick) }
             }

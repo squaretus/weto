@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use weto_core::geo::{ConfirmSource, GeoOutcome, GeoReading};
 use weto_core::ip::IpRange;
-use weto_core::network::VpnStatus;
+use weto_core::network::VpnAppStatus;
 use weto_core::policy::{
     decide, decide_local, pending_verification, GuardConfig, GuardDecision, GuardSignals,
     UnsafeReason,
@@ -105,18 +105,14 @@ struct Case {
 #[derive(Deserialize)]
 struct Vpn {
     kind: String,
-    #[serde(rename = "isPrimary")]
-    is_primary: Option<bool>,
 }
 
 impl Vpn {
-    fn as_status(&self) -> VpnStatus {
+    fn as_status(&self) -> VpnAppStatus {
         match self.kind.as_str() {
-            "down" => VpnStatus::Down,
-            "up" => VpnStatus::Up {
-                is_primary: self.is_primary.unwrap_or(false),
-            },
-            _ => VpnStatus::NotConfigured,
+            "running" => VpnAppStatus::Running,
+            "notRunning" => VpnAppStatus::NotRunning,
+            _ => VpnAppStatus::NotChosen,
         }
     }
 }
@@ -162,8 +158,8 @@ impl Geo {
 
 #[derive(Deserialize)]
 struct Config {
-    #[serde(rename = "vpnID")]
-    vpn_id: Option<String>,
+    #[serde(rename = "vpnApp")]
+    vpn_app: Option<String>,
     #[serde(rename = "blockedCountries")]
     blocked_countries: Vec<String>,
     #[serde(rename = "blockedIPRanges")]
@@ -174,7 +170,7 @@ struct Config {
 impl Config {
     fn as_guard_config(&self) -> GuardConfig {
         GuardConfig {
-            vpn_id: self.vpn_id.clone(),
+            vpn_app: self.vpn_app.clone(),
             blocked_countries: self
                 .blocked_countries
                 .iter()
@@ -228,9 +224,8 @@ impl Reason {
         let text = |value: &Option<String>| value.clone().unwrap_or_default();
         match self.kind.as_str() {
             "verificationPending" => UnsafeReason::VerificationPending,
-            "vpnNotConfigured" => UnsafeReason::VpnNotConfigured,
-            "vpnDown" => UnsafeReason::VpnDown,
-            "vpnNotPrimary" => UnsafeReason::VpnNotPrimary,
+            "vpnAppNotChosen" => UnsafeReason::VpnAppNotChosen,
+            "vpnAppNotRunning" => UnsafeReason::VpnAppNotRunning,
             "geoUnavailable" => UnsafeReason::GeoUnavailable(text(&self.detail)),
             "blacklistedIP" => UnsafeReason::BlacklistedIp(text(&self.ip)),
             "blockedCountry" => UnsafeReason::BlockedCountry {
