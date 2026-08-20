@@ -42,7 +42,10 @@ linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабо�
 ## Соглашения
 
 - **Инвариант границ:** `WetoCore` не импортирует `Network`, `SystemConfiguration`, `AppKit`,
-  `SwiftUI` и не использует `URLSession`. Он держит основную массу тестов синхронной
+  `SwiftUI` и не использует `URLSession`. Проверяется машинно —
+  `macos/scripts/tests/module-boundary-contract.sh` (там же запрет `WetoSystem` зависеть
+  от UI-модулей: тёплый кэш SwiftPM прячет незаявленную зависимость, и `swift build`
+  в рабочем дереве проходит там, где чистая сборка падает). Он держит основную массу тестов синхронной
   и свободной от моков. Нарушение этого инварианта — самая дорогая ошибка в проекте.
 - **Пакет обновления переносится целиком.** `macos/Packages/UpdateKit` не знает ни одной константы
   weto: репозиторий, пути, имя mach-сервиса и интервалы приходят `UpdateFeedConfiguration`.

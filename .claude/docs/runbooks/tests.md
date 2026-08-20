@@ -18,6 +18,7 @@ Test targets declared in `macos/Package.swift` (`macos/Tests/<name>/`):
 
 | Target | Depends on | Covers |
 | --- | --- | --- |
+| `module-boundary-contract.sh` | все модули macOS | разрешённые импорты по слоям: ядро без системы, `WetoSystem` без UI |
 | `WetoCoreTests` | `WetoCore` | policy decisions (`GuardPolicy`, `GuardPolicyLocal`), `ProcessMatcher`, `IPRange`, geo response parsing |
 | `WetoSystemTests` | `WetoSystem`, `WetoCore` | boundary adapters: `GeoProbe`, `KeychainStore`, `NetworkEventSource`, `NetworkSnapshotReader`, process listing |
 | `WetoSharedTests` | `WetoShared`, `WetoCore`, `WetoSystem`, `UpdateKit*` | VM layer: `GuardVM`, `SettingsStore`, `EventLogStore`, `LaunchAgentController`, `Maintenance`, `StatusPresentation`, `WetoUpdateTheme`, update banner texts |
