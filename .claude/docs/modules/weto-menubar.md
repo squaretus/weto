@@ -47,6 +47,10 @@ parsing, validation and persistence happen in the stores.
 <!-- generated, verify -->
 - Creates a Mach message port `com.weto.app.singleton`; failure to create it terminates
   the process immediately (second copy loses)
+- Holds an `NSObjectProtocol` activity token for the whole process lifetime
+  (`beginActivity(.userInitiatedAllowingIdleSystemSleep)`) — App Nap would otherwise coalesce
+  the guard's one-second timers into minutes, and a windowless `LSUIElement` app is exactly its
+  target profile. Releasing the token brings the throttling back
 - Mutates persisted state through stores on user input: `settings.targets`,
   `settings.vpnAppRule`, `settings.appTheme`,
   `settings.addBlockedEntry` / `removeBlockedEntry`, `settings.setIPInfoToken`
