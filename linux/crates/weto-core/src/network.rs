@@ -23,8 +23,17 @@ pub struct NetworkInterfaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkSnapshot {
     pub interfaces: Vec<NetworkInterfaceSnapshot>,
-    /// Интерфейс, через который уходит маршрут по умолчанию с наименьшей метрикой.
-    pub default_route_interface: Option<String>,
+    /// Кто выпускает трафик наружу — по ответу ядра, а не по дампу маршрутов.
+    pub outgoing: Option<OutgoingRoute>,
+}
+
+/// Носитель трафика: имя интерфейса и локальный адрес, который ядро выберет
+/// источником. Адрес входит в отпечаток вместе с именем — туннель умеет сохранить
+/// имя и сменить адрес, и это смена состояния сети.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutgoingRoute {
+    pub interface: String,
+    pub address: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,8 +53,8 @@ impl NetworkSnapshot {
     /// дешёвый признак свежести.
     ///
     /// В отпечаток входит ровно то, от чего вердикт зависит: состояние
-    /// выбранного интерфейса и владелец маршрута по умолчанию, определяющий
-    /// выход в сеть. Чужие интерфейсы не входят намеренно.
+    /// выбранного интерфейса и то, через кого ядро выпускает трафик наружу.
+    /// Чужие интерфейсы не входят намеренно.
     ///
     /// Отпечаток по всему снимку выглядел строже, а на деле подставлял: второй
     /// VPN, живущий рядом, рвёт связь и поднимается сам — состав интерфейсов
@@ -65,11 +74,13 @@ impl NetworkSnapshot {
             None => format!("chosen={}", chosen.unwrap_or("-")),
         };
 
-        format!(
-            "{}|primary={}",
-            part,
-            self.default_route_interface.as_deref().unwrap_or("-")
-        )
+        let out = self
+            .outgoing
+            .as_ref()
+            .map(|o| format!("{}/{}", o.interface, o.address))
+            .unwrap_or_else(|| "-".to_string());
+
+        format!("{part}|out={out}")
     }
 
     /// Кандидаты в VPN — только туннели, отсортированные по имени.
@@ -104,7 +115,7 @@ pub fn resolve_vpn_status(snapshot: &NetworkSnapshot, chosen: Option<&str>) -> V
     }
 
     VpnStatus::Up {
-        is_primary: snapshot.default_route_interface.as_deref() == Some(name),
+        is_primary: snapshot.outgoing.as_ref().map(|o| o.interface.as_str()) == Some(name),
     }
 }
 
@@ -126,7 +137,10 @@ mod tests {
                     },
                 )
                 .collect(),
-            default_route_interface: default_route.map(str::to_string),
+            outgoing: default_route.map(|name| OutgoingRoute {
+                interface: name.to_string(),
+                address: "10.7.0.2".to_string(),
+            }),
         }
     }
 

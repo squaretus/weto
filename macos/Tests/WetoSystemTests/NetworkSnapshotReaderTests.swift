@@ -4,6 +4,23 @@ import WetoCore
 
 final class NetworkSnapshotReaderTests: XCTestCase {
 
+    /// Снимок с уже разрешённым адресом гео-сервиса.
+    ///
+    /// Имя разрешается в стороне от опроса — блокировать им охрану нельзя, — поэтому
+    /// первый снимок после старта носителя трафика ещё не знает. Живым проверкам
+    /// нужно дождаться разрешения, а не ловить эту секунду.
+    private func snapshotWithRoute(within seconds: TimeInterval = 3) -> NetworkSnapshot {
+        let reader = NetworkSnapshotReader()
+        var snapshot = reader.snapshot()
+        let deadline = Date().addingTimeInterval(seconds)
+
+        while snapshot.outgoing == nil, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+            snapshot = reader.snapshot()
+        }
+        return snapshot
+    }
+
     func test_every_service_has_non_empty_uuid_and_name() {
         for service in NetworkSnapshotReader().snapshot().services {
             XCTAssertFalse(service.uuid.isEmpty, "пустой UUID у сервиса \(service.name)")
@@ -53,20 +70,35 @@ final class NetworkSnapshotReaderTests: XCTestCase {
         }
     }
 
-    /// Туннель, которому досталась маршрутизация по умолчанию, обязан быть
-    /// выбираемым. Иначе пользователь видит работающий VPN и список, в котором
-    /// его нет, — так и было со сборками, поднимающими `utun` мимо сетевых
-    /// сервисов. Проверка идёт по живой машине: на ней и обнаружилось.
-    func test_the_tunnel_owning_the_default_route_is_selectable() throws {
-        let snapshot = NetworkSnapshotReader().snapshot()
+    /// Туннель, через который ядро выпускает трафик, обязан быть выбираемым.
+    /// Иначе пользователь видит работающий VPN и список, в котором его нет, —
+    /// так и было со сборками, поднимающими `utun` мимо сетевых сервисов.
+    /// Проверка идёт по живой машине: на ней это и обнаружилось.
+    func test_the_tunnel_carrying_the_traffic_is_selectable() throws {
+        let snapshot = snapshotWithRoute()
 
-        guard let primary = snapshot.primaryInterface,
-              ["utun", "ppp", "ipsec"].contains(where: primary.hasPrefix)
-        else { throw XCTSkip("маршрут по умолчанию сейчас идёт не через туннель") }
+        guard let carrier = snapshot.outgoing?.interface,
+              ["utun", "ppp", "ipsec"].contains(where: carrier.hasPrefix)
+        else { throw XCTSkip("трафик сейчас уходит не через туннель") }
 
         XCTAssertTrue(
-            snapshot.vpnCandidates.contains { $0.activeInterface == primary },
-            "туннель \(primary) держит маршрут по умолчанию, но выбрать его нечем"
+            snapshot.vpnCandidates.contains { $0.activeInterface == carrier },
+            "туннель \(carrier) выпускает трафик, но выбрать его нечем"
+        )
+    }
+
+    /// Носитель трафика в снимке — тот же, что назовёт `route -n get` для адреса
+    /// гео-сервиса. Единственная машинная сверка с системой, какая тут возможна.
+    func test_the_carrier_matches_what_the_kernel_says() throws {
+        let snapshot = snapshotWithRoute()
+        guard let outgoing = snapshot.outgoing else {
+            throw XCTSkip("наружу сейчас никто не выпускает")
+        }
+
+        let addresses = try XCTUnwrap(InterfaceAddresses.all()[outgoing.interface])
+        XCTAssertTrue(
+            addresses.contains(outgoing.address),
+            "адрес \(outgoing.address) не принадлежит \(outgoing.interface)"
         )
     }
 

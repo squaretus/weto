@@ -319,6 +319,6 @@ pub struct RouteNetworkPath;
 impl NetworkPathReporting for RouteNetworkPath {
     fn has_path(&self) -> bool {
         use crate::network_snapshot::{KernelRouteProbe, RouteProbing};
-        KernelRouteProbe.outgoing_interface().is_some()
+        KernelRouteProbe::default().outgoing_route().is_some()
     }
 }

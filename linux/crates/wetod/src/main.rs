@@ -86,8 +86,12 @@ fn dump_network(paths: &Paths) {
     let snapshot = SysfsNetworkReader::new().snapshot();
 
     println!(
-        "маршрут наружу: {}",
-        snapshot.default_route_interface.as_deref().unwrap_or("нет")
+        "трафик наружу:  {}",
+        snapshot
+            .outgoing
+            .as_ref()
+            .map(|o| format!("{} (адрес {})", o.interface, o.address))
+            .unwrap_or_else(|| "никто".to_string())
     );
     println!(
         "выбранный VPN:  {}",

@@ -227,7 +227,8 @@ final class GuardVMTests: XCTestCase {
                 .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
                 .init(uuid: "HAPP", name: "Happ", activeInterface: "utun6", isVPN: true),
             ],
-            primaryServiceUUID: "HAPP"
+            primaryServiceUUID: "HAPP",
+            outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
         )
     }
 
@@ -237,7 +238,8 @@ final class GuardVMTests: XCTestCase {
                 .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
                 .init(uuid: "HAPP", name: "Happ", activeInterface: nil, isVPN: true),
             ],
-            primaryServiceUUID: "WIFI"
+            primaryServiceUUID: "WIFI",
+            outgoing: OutgoingRoute(interface: "en0", address: "192.168.0.100")
         )
     }
 
@@ -513,7 +515,8 @@ final class GuardVMTests: XCTestCase {
 
         h.network.snapshotValue = NetworkSnapshot(
             services: healthySnapshot().services + [.fromInterface("utun8")],
-            primaryServiceUUID: "HAPP"
+            primaryServiceUUID: "HAPP",
+            outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
         )
         h.vm.handle(.networkPath)
 
@@ -537,7 +540,8 @@ final class GuardVMTests: XCTestCase {
                 .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
                 .init(uuid: "HAPP", name: "Happ", activeInterface: "utun9", isVPN: true),
             ],
-            primaryServiceUUID: "HAPP"
+            primaryServiceUUID: "HAPP",
+            outgoing: OutgoingRoute(interface: "utun9", address: "198.18.0.1")
         )
         h.vm.handle(.networkPath)
 
@@ -719,7 +723,8 @@ final class GuardVMTests: XCTestCase {
                 .init(uuid: "WIFI", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
                 .init(uuid: "HAPP", name: "Happ", activeInterface: "utun9", isVPN: true),
             ],
-            primaryServiceUUID: "HAPP"
+            primaryServiceUUID: "HAPP",
+            outgoing: OutgoingRoute(interface: "utun9", address: "198.18.0.1")
         )
         h.vm.handle(.networkPath)
 

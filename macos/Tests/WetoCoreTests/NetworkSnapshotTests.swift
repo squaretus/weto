@@ -16,9 +16,14 @@ final class NetworkSnapshotTests: XCTestCase {
     private func snapshot(
         _ services: [NetworkServiceSnapshot],
         primary: String? = "HAPP",
-        iface: String? = "utun7"
+        iface: String? = "utun7",
+        address: String = "198.18.0.1"
     ) -> NetworkSnapshot {
-        NetworkSnapshot(services: services, primaryServiceUUID: primary, primaryInterface: iface)
+        NetworkSnapshot(
+            services: services,
+            primaryServiceUUID: primary,
+            outgoing: iface.map { OutgoingRoute(interface: $0, address: address) }
+        )
     }
 
     func test_a_foreign_tunnel_coming_and_going_leaves_the_fingerprint_alone() {

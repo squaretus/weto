@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use weto_config::settings::{Settings, Target};
 use weto_core::geo::{ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
-use weto_core::network::{NetworkInterfaceSnapshot, NetworkSnapshot};
+use weto_core::network::{NetworkInterfaceSnapshot, NetworkSnapshot, OutgoingRoute};
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::process::{ProcessSnapshot, TargetKind};
 use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
@@ -29,12 +29,18 @@ impl FakeNetwork {
     fn healthy_tunnel() -> FakeNetwork {
         FakeNetwork(Arc::new(Mutex::new(NetworkSnapshot {
             interfaces: vec![interface("wg0", true, true), interface("eth0", true, false)],
-            default_route_interface: Some("wg0".to_string()),
+            outgoing: Some(OutgoingRoute {
+                interface: "wg0".to_string(),
+                address: "10.7.0.2".to_string(),
+            }),
         })))
     }
 
     fn route_moves_to(&self, name: &str) {
-        self.0.lock().unwrap().default_route_interface = Some(name.to_string());
+        self.0.lock().unwrap().outgoing = Some(OutgoingRoute {
+            interface: name.to_string(),
+            address: "10.7.0.2".to_string(),
+        });
     }
 
     fn foreign_tunnel_appears(&self, name: &str) {
@@ -48,7 +54,10 @@ impl FakeNetwork {
     fn tunnel_goes_down(&self) {
         let mut snapshot = self.0.lock().unwrap();
         snapshot.interfaces[0].is_up = false;
-        snapshot.default_route_interface = Some("eth0".to_string());
+        snapshot.outgoing = Some(OutgoingRoute {
+            interface: "eth0".to_string(),
+            address: "192.168.1.10".to_string(),
+        });
     }
 }
 

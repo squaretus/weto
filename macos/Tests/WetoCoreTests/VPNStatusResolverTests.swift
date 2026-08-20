@@ -12,7 +12,8 @@ final class VPNStatusResolverTests: XCTestCase {
             .init(uuid: "9BA5C511", name: "iPhone", activeInterface: nil, isVPN: false),
             .init(uuid: "13102BC0", name: "Thunderbolt Bridge", activeInterface: nil, isVPN: false),
         ],
-        primaryServiceUUID: "BC2D1D42"
+        primaryServiceUUID: "BC2D1D42",
+        outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
     )
 
     private var duplicateNameSnapshot: NetworkSnapshot {
@@ -21,7 +22,8 @@ final class VPNStatusResolverTests: XCTestCase {
                 .init(uuid: "vpn-a", name: "Happ", activeInterface: nil, isVPN: true),
                 .init(uuid: "vpn-b", name: "Happ", activeInterface: "utun6", isVPN: true),
             ],
-            primaryServiceUUID: "vpn-b"
+            primaryServiceUUID: "vpn-b",
+            outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
         )
     }
 
@@ -62,11 +64,31 @@ final class VPNStatusResolverTests: XCTestCase {
         )
     }
 
-    func test_no_primary_service_means_not_primary() {
-        let orphan = NetworkSnapshot(services: snapshot.services, primaryServiceUUID: nil)
+    /// Наружу никто не выпускает — значит и туннель трафика не несёт.
+    /// Это `up(isPrimary: false)`: интерфейс есть, а трафика через него нет.
+    func test_without_an_outgoing_route_nothing_is_primary() {
+        let orphan = NetworkSnapshot(
+            services: snapshot.services,
+            primaryServiceUUID: "BC2D1D42",
+            outgoing: nil
+        )
         XCTAssertEqual(
             VPNStatusResolver.status(serviceID: "BC2D1D42", in: orphan),
             .up(isPrimary: false)
+        )
+    }
+
+    /// `PrimaryService` из конфигурации сети на вердикт больше не влияет:
+    /// у туннеля мимо NetworkExtension сервиса нет вовсе, а спрашивать надо ядро.
+    func test_the_configured_primary_service_does_not_decide() {
+        let wifiIsPrimaryService = NetworkSnapshot(
+            services: snapshot.services,
+            primaryServiceUUID: "108E2488",
+            outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
+        )
+        XCTAssertEqual(
+            VPNStatusResolver.status(serviceID: "BC2D1D42", in: wifiIsPrimaryService),
+            .up(isPrimary: true)
         )
     }
 
@@ -108,9 +130,10 @@ final class VPNStatusResolverTests: XCTestCase {
                 .init(uuid: "108E2488", name: "Wi-Fi", activeInterface: "en0", isVPN: false),
                 .fromInterface("utun4"),
             ],
-            // Сервисом остаётся Wi-Fi: у туннеля сервиса нет вовсе.
+            // Сервисом остаётся Wi-Fi: у туннеля сервиса нет вовсе, и ядро —
+            // единственный, кто знает, что трафик уходит в туннель.
             primaryServiceUUID: "108E2488",
-            primaryInterface: "utun4"
+            outgoing: OutgoingRoute(interface: "utun4", address: "172.18.0.1")
         )
 
         XCTAssertEqual(
@@ -125,7 +148,7 @@ final class VPNStatusResolverTests: XCTestCase {
         let snapshot = NetworkSnapshot(
             services: [.fromInterface("utun4")],
             primaryServiceUUID: "108E2488",
-            primaryInterface: "en0"
+            outgoing: OutgoingRoute(interface: "en0", address: "192.168.0.100")
         )
 
         XCTAssertEqual(
@@ -141,19 +164,19 @@ final class VPNStatusResolverTests: XCTestCase {
         let snapshot = NetworkSnapshot(
             services: [.fromInterface("utun5")],
             primaryServiceUUID: nil,
-            primaryInterface: "utun5"
+            outgoing: OutgoingRoute(interface: "utun5", address: "172.18.0.1")
         )
 
         XCTAssertEqual(VPNStatusResolver.status(serviceID: "interface:utun4", in: snapshot), .down)
     }
 
-    /// Сервис, чей интерфейс держит маршрут, считается основным, даже когда
+    /// Сервис, чей интерфейс выпускает трафик, считается основным, даже когда
     /// `PrimaryService` называет другой: у туннелей поверх сервиса так бывает.
     func test_a_service_whose_interface_holds_the_route_is_primary() {
         let snapshot = NetworkSnapshot(
             services: [.init(uuid: "BC2D1D42", name: "Happ", activeInterface: "utun6", isVPN: true)],
             primaryServiceUUID: "108E2488",
-            primaryInterface: "utun6"
+            outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
         )
 
         XCTAssertEqual(

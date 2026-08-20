@@ -24,11 +24,20 @@
 //! адрес и `getsockname`. `connect` для UDP не отправляет ни байта — он лишь
 //! заставляет ядро выполнить полный поиск маршрута с учётом правил и вернуть
 //! выбранный локальный адрес. Остаётся сопоставить адрес с интерфейсом.
+//!
+//! # Почему адрес назначения — хост ipinfo
+//!
+//! Фиксированный публичный адрес не годится: клиенты исключают отдельные адреса
+//! из туннеля. На живой машине владельца `1.1.1.1` уведён в обычный интерфейс
+//! отдельным маршрутом, и проба по нему объявляла бы исправный туннель нерабочим.
+//! Спрашивать надо про тот адрес, до которого реально пойдёт вердиктный запрос.
 
-use std::net::UdpSocket;
+use std::net::{ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use weto_core::network::{NetworkInterfaceSnapshot, NetworkSnapshot};
+use weto_core::network::{NetworkInterfaceSnapshot, NetworkSnapshot, OutgoingRoute};
 
 pub trait NetworkSnapshotReading: Send + Sync {
     fn snapshot(&self) -> NetworkSnapshot;
@@ -37,33 +46,104 @@ pub trait NetworkSnapshotReading: Send + Sync {
 /// Кто выпускает трафик наружу. Отдельным трейтом, потому что подделать
 /// таблицу маршрутов в тесте нельзя, а проверить остальную сборку снимка нужно.
 pub trait RouteProbing: Send + Sync {
-    fn outgoing_interface(&self) -> Option<String>;
+    fn outgoing_route(&self) -> Option<OutgoingRoute>;
 }
 
-/// Адреса, к которым «ходит» проба. Пакеты не отправляются: `connect` на UDP —
-/// операция чисто локальная. Адреса публичных резолверов взяты как заведомо
-/// маршрутизируемые снаружи; отвечать они не обязаны.
-const PROBE_V4: &str = "1.1.1.1:53";
-const PROBE_V6: &str = "[2606:4700:4700::1111]:53";
+/// Хост, до которого «ходит» проба, — тот же, у которого спрашивается вердикт.
+/// Держится рядом с адресами гео-сервисов: поменяется endpoint — поменяется и он.
+pub const PROBE_HOST: &str = "v4.api.ipinfo.io";
 
-pub struct KernelRouteProbe;
+/// Как часто разрешать имя заново, пока адреса нет. Разрешение блокирует поток,
+/// а снимок снимается каждый тик, поэтому в штатном режиме DNS не спрашивается вовсе.
+const RESOLVE_RETRY: Duration = Duration::from_secs(30);
 
-impl RouteProbing for KernelRouteProbe {
-    fn outgoing_interface(&self) -> Option<String> {
-        interface_for(PROBE_V4, "0.0.0.0:0").or_else(|| interface_for(PROBE_V6, "[::]:0"))
+pub struct KernelRouteProbe {
+    host: String,
+    state: Mutex<ResolvedDestination>,
+}
+
+#[derive(Default)]
+struct ResolvedDestination {
+    address: Option<String>,
+    last_attempt: Option<Instant>,
+}
+
+impl Default for KernelRouteProbe {
+    fn default() -> Self {
+        KernelRouteProbe::new(PROBE_HOST)
     }
 }
 
-fn interface_for(target: &str, bind: &str) -> Option<String> {
+impl KernelRouteProbe {
+    pub fn new(host: &str) -> KernelRouteProbe {
+        KernelRouteProbe {
+            host: host.to_string(),
+            state: Mutex::new(ResolvedDestination::default()),
+        }
+    }
+
+    /// Маршрут до заданного адреса. Открыто наружу ради живых проверок: контракт
+    /// `policy-routing-contract.sh` сверяет ответ пробы с `ip route get` по тому же
+    /// адресу, и подставлять туда DNS-зависимый хост нельзя — в контейнере его нет.
+    pub fn route_to(&self, destination: &str) -> Option<OutgoingRoute> {
+        route_to(destination, "0.0.0.0:0").or_else(|| route_to(destination, "[::]:0"))
+    }
+
+    /// Последний известный адрес назначения. Моргнувший резольвер не должен
+    /// объявлять вердикт несвежим, поэтому прошлый адрес переживает отказ DNS.
+    pub fn destination(&self) -> Option<String> {
+        let mut state = self.state.lock().expect("адрес пробы");
+        if let Some(known) = state.address.clone() {
+            return Some(known);
+        }
+
+        let due = state
+            .last_attempt
+            .map(|at| at.elapsed() >= RESOLVE_RETRY)
+            .unwrap_or(true);
+        if !due {
+            return None;
+        }
+
+        state.last_attempt = Some(Instant::now());
+        let resolved = resolve(&self.host);
+        state.address = resolved.clone();
+        resolved
+    }
+}
+
+impl RouteProbing for KernelRouteProbe {
+    fn outgoing_route(&self) -> Option<OutgoingRoute> {
+        self.route_to(&self.destination()?)
+    }
+}
+
+/// Имя в адрес. IPv4 предпочитается: у ipinfo для вердикта используется
+/// именно `v4.api.ipinfo.io`.
+fn resolve(host: &str) -> Option<String> {
+    let mut fallback = None;
+    for address in (host, 53).to_socket_addrs().ok()? {
+        if address.is_ipv4() {
+            return Some(address.ip().to_string());
+        }
+        fallback = fallback.or_else(|| Some(address.ip().to_string()));
+    }
+    fallback
+}
+
+fn route_to(destination: &str, bind: &str) -> Option<OutgoingRoute> {
     let socket = UdpSocket::bind(bind).ok()?;
-    socket.connect(target).ok()?;
+    socket.connect((destination, 53)).ok()?;
     let local = socket.local_addr().ok()?.ip();
 
     if_addrs::get_if_addrs()
         .ok()?
         .into_iter()
         .find(|interface| interface.addr.ip() == local)
-        .map(|interface| interface.name)
+        .map(|interface| OutgoingRoute {
+            interface: interface.name,
+            address: local.to_string(),
+        })
 }
 
 pub struct SysfsNetworkReader {
@@ -75,7 +155,7 @@ impl SysfsNetworkReader {
     pub fn new() -> SysfsNetworkReader {
         SysfsNetworkReader {
             sys_root: PathBuf::from("/sys/class/net"),
-            route_probe: Box::new(KernelRouteProbe),
+            route_probe: Box::new(KernelRouteProbe::default()),
         }
     }
 
@@ -114,7 +194,7 @@ impl NetworkSnapshotReading for SysfsNetworkReader {
 
         NetworkSnapshot {
             interfaces,
-            default_route_interface: self.route_probe.outgoing_interface(),
+            outgoing: self.route_probe.outgoing_route(),
         }
     }
 }
