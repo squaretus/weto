@@ -48,7 +48,7 @@ parsing, validation and persistence happen in the stores.
 - Creates a Mach message port `com.weto.app.singleton`; failure to create it terminates
   the process immediately (second copy loses)
 - Mutates persisted state through stores on user input: `settings.targets`,
-  `settings.vpnServiceID`, `settings.pollIntervalSeconds`, `settings.appTheme`,
+  `settings.vpnAppRule`, `settings.appTheme`,
   `settings.addBlockedEntry` / `removeBlockedEntry`, `settings.setIPInfoToken`
   (Keychain write), `eventLog.clear()`
 - `MaintenanceCard` writes/removes `~/Library/LaunchAgents/com.weto.app.plist` via
