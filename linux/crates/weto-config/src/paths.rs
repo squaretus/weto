@@ -48,7 +48,6 @@ impl Paths {
     pub fn journal_file(&self) -> PathBuf {
         self.state_dir.join("journal.json")
     }
-
 }
 
 fn xdg(variable: &str, home: &std::path::Path, fallback: &str) -> PathBuf {

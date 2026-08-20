@@ -17,9 +17,15 @@ The ring buffer lives in `UserDefaults(suiteName: "com.weto.shared")` under `eve
   `network.rs::verdict_fingerprint`). Anything entering the fingerprint that the verdict does
   not actually depend on shows up exactly like this — that is how a second VPN reconnecting
   beside the chosen tunnel used to kill the targets.
-- **`vpnDown` / `vpnNotPrimary`** — a local reason, no network involved. The snapshot itself
-  is the suspect: `NetworkSnapshotReader` (`SCDynamicStore` + `getifaddrs`) and
-  `VPNStatusResolver`. A user-space tunnel with no network service is the usual trap: the
-  route owner has to be read by interface, not only by service.
+- **`vpnAppNotChosen` / `vpnAppNotRunning`** — a local reason, no network involved. The suspects
+  are the process scan and the rule: `ProcessEnforcer.vpnAppRule` (resolution follows symlinks and
+  version-numbered paths, and is refreshed every 2 s) and `ProcessMatcher`. A client that updated
+  itself and moved to a new path is the usual trap.
+- **`verificationPending` right after the tunnel came up or went down** — the traffic carrier
+  changed, so the fingerprint changed. Suspects: `KernelRouteProbe` (is the ipinfo host resolved?
+  `out=-` means it is not) and the `PF_ROUTE` subscription.
 - **`geoUnavailable` / `confirmationUnavailable`** — the boundary answered badly. `GeoProbe`,
   `GeoFailure`, and the rate limits in `decisions/geo-confirmation-services.md`.
+
+Past failures worth reading before guessing: `bugs/tunnel-without-network-service.md`
+(a healthy tunnel reported as bypassed, and third-party 429s killing targets).

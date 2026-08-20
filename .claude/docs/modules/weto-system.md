@@ -10,7 +10,8 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 `WetoShared` is ever substituted.
 
 ## Key files
-- `macos/Sources/WetoSystem/NetworkSnapshotReader.swift`
+- `macos/Sources/WetoSystem/NetworkSnapshotReader.swift` — one question: who carries the traffic
+- `macos/Sources/WetoSystem/RouteProbe.swift` — `RouteProbing`, `KernelRouteProbe`, `InterfaceAddresses`
 - `macos/Sources/WetoSystem/NetworkEventSource.swift`
 - `macos/Sources/WetoSystem/GeoProbe.swift`
 - `macos/Sources/WetoSystem/NetworkPathReporter.swift` (also `NetworkPathReporting`)
@@ -20,12 +21,13 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `macos/Sources/WetoSystem/TargetResolver.swift`
 - `macos/Sources/WetoSystem/KeychainStore.swift` (also `SecretStoring`, `SecretStoreError`, `TokenBox`)
 - `macos/Sources/WetoSystem/FlagImageStore.swift`
-- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,ProcessTests,KeychainStoreTests}.swift`
+- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests}.swift`
 
 ## Entry points
-- `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; `SCDynamicStore`.
+- `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; kernel route probe.
 - `NetworkEventSourcing.start(handler: @Sendable (GuardTrigger) -> Void)` / `.stop()`
-- `GuardTrigger` — `.networkPath`, `.dynamicStore`, `.wake`, `.appLaunched(bundleID:)`, `.tick`
+- `GuardTrigger` — `.networkPath`, `.dynamicStore`, `.route`, `.wake`, `.appLaunched(bundleID:)`,
+  `.appTerminated(bundleID:)`, `.tick`, `.geoSchedule`
 - `GeoProbing.probe() async → GeoProbeReport` (`GeoProbe` is an `actor`); the guard verdict is
   `report.outcome`, the popup reads the per-service breakdown
 - `NetworkPathReporting.hasPath → Bool` — `NWPathMonitor.currentPath`, no request of its own
@@ -37,7 +39,8 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `SecretStoring.read(account:) → String?`,
   `.write(_:account:) → Result<Void, SecretStoreError>`
 - `TokenBox.value` — lock-guarded `String?`, the bridge that lets `GeoProbe` read a live token
-- `FlagImageStore.shared.image(for:) → NSImage?`, `.prefetch(_:)`
+- `FlagImageStore.shared.image(for:) → NSImage?` — reads the bundled set, no network
+- `KernelRouteProbe.outgoingRoute() → OutgoingRoute?`, `InterfaceAddresses.all()/.owner(of:)`
 
 ## Dependencies
 - System frameworks: `SystemConfiguration` (`SCDynamicStore`), `Network` (`NWPathMonitor`),
@@ -45,9 +48,9 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - libproc/sysctl calls: `proc_listallpids`, `proc_pidpath`, `proc_pidinfo`+`PROC_PIDTBSDINFO`,
   `CTL_KERN`/`KERN_PROCARGS2`
 - External APIs: `v4.api.ipinfo.io/lite/me` (Bearer token), `free.freeipapi.com`,
-  `get.geojs.io`, `cdn.jsdelivr.net` (HatScripts/circle-flags SVG)
+  `get.geojs.io`. The ipinfo host is also the route probe's destination.
 - Keychain: service `com.weto.ipinfo`, account `token` (service injected by caller)
-- Filesystem: `~/Library/Caches/com.weto.app/flags-circle/`
+- Filesystem: none on the geo/flag path — flags come from the app bundle (`shared/flags`)
 - Internal: `WetoCore` only (`NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `GeoOutcome`,
   `IPAddress`, `GeoResponses`, `Constants`). No dependency on `WetoShared` — direction is one-way.
 - Consumers: `AppCoordinator` (wires the production set), `GuardVM`/`GuardController`/
@@ -56,8 +59,9 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 ## Side effects
 <!-- generated, verify -->
 - Sends SIGKILL (no SIGTERM stage) to arbitrary pids via `ProcessKiller`.
-- Network calls on every `GeoProbe.probe()`: one ipinfo request plus one confirmation request
-  (freeipapi, then geojs on failure). Nothing is cached, by design.
+- Network calls per `GeoProbe.probe()`: one ipinfo request, plus a confirmation request only when
+  the address is new or the soft ceiling (60 s) has passed. When ipinfo refuses, one request to the
+  geojs "who am I" endpoint instead — the address is what proves the verdict may be reused.
 - Registers a `CFRunLoopSource` on the **main** run loop, an `NWPathMonitor` on private queue
   `com.weto.events`, and two `NSWorkspace` notification observers (`didWake`,
   `didLaunchApplication`). All are torn down in `stop()`, which `start()` calls first and
@@ -125,30 +129,28 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   entered as an absolute path.
 - **Keychain writes report failures.** `write` returns `Result`, and a swallowed error used to
   present an in-memory-only token as saved; `errSecItemNotFound` on delete is success.
-- **`FlagImageStore.image(for:)` is synchronous and returns `nil` until `prefetch` lands.**
-  The UI must render a placeholder and re-read later; the store never blocks on the network.
-
-- **A tunnel with no network service is a candidate of its own.** A client that opens its
-  own `utun` in user space (Xray-based builds distributed outside the App Store) never
-  registers a service, so it is absent from `Setup:/Network/Service/…` and used to be
-  impossible to select. `NetworkSnapshotReader` merges such interfaces in with the id
-  `interface:<name>`, qualified the way Linux does it: device type plus an assigned IPv4
-  address. The address is mandatory — macOS keeps several housekeeping `utun` interfaces
-  (iCloud Private Relay, AirDrop) alive with nothing but a link-local IPv6, and without
-  that filter the picker fills up with tunnels the user never started.
-- **The route owner is asked of both the service and the interface** (`PrimaryService`
-  and `PrimaryInterface`). For a service-less tunnel the former names the underlying
-  Wi-Fi even though the default route has already moved into the tunnel, and the guard
-  would kill targets while the VPN is perfectly healthy.
-- **`utun` names are not tied to an application** and change between runs. A vanished
-  interface resolves to `.down` — fail-closed; guessing "probably that other tunnel"
-  is not allowed. The user of such a build pays for this by re-picking; an App Store
-  service keeps its UUID.
-- **The chosen VPN survives its interface disappearing.** A service-less tunnel exists
-  only while the connection is up, so a picker built from live candidates alone loses the
-  selection the moment the VPN is switched off. `VPNPicker.rows` keeps the stored choice
-  as its own row, labelled "(не подключён)"; the status stays `.down`, which is the
-  correct fail-closed answer.
+- **`FlagImageStore.image(for:)` is synchronous and never touches the network.** The set ships
+  in the bundle, so the first country renders without a round trip. The store used to fetch from
+  a CDN and cache to disk: `cdn.jsdelivr.net` is blocked in Russia, and the download woke nobody —
+  a flag sat in the cache unshown until the next observable state change.
+- **The traffic carrier is asked of the kernel, never of the network configuration.**
+  `State:/Network/Global/IPv4` is computed by `configd` from *network services*, and a tunnel
+  opened outside NetworkExtension has no service at all: `scutil --nc list` is empty for it,
+  `Setup:/Network/Service/…` has no entry, and `PrimaryInterface` names the underlying Wi-Fi while
+  every public packet already leaves through `utun6`. Verified on a live machine. Dumping the
+  default route is no better — such a client may not claim the default route at all, laying down
+  prefix routes instead (`route get default → en0`, `route get 8.8.8.8 → utun6`).
+- **The probe destination is the ipinfo host, not a fixed public address.** Clients exclude
+  individual addresses from the tunnel: on the owner's machine `1.1.1.1` is pinned to `en0` by an
+  explicit route, so probing it would declare a healthy tunnel broken. Ask about the address the
+  verdict request will actually travel to.
+- **Name resolution never blocks the guard.** The snapshot is taken every tick and DNS answers in
+  seconds, so resolution runs on its own queue; the last known address survives a resolver outage,
+  and `unresolved` is reported only when no address was ever obtained. A blinking resolver must not
+  invalidate the verdict and kill targets.
+- **Route changes are only visible on `PF_ROUTE`.** A client that edits routes directly touches
+  neither `Global/IPv4` nor any service, so `SCDynamicStore` notifications stay silent. Bringing up
+  a tunnel adds routes by the hundred, so the burst is coalesced into one event.
 
 ## Failure hotspots
 <!-- generated, verify -->
@@ -174,16 +176,20 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - **Keychain is unavailable in unbundled runs** (`swift run WetoMenuBar`, and partly under
   `xctest`): `read` returns `nil`, so the token looks unset and the probe reports
   "no ipinfo token".
-- **`NetworkSnapshotReaderTests` read the live machine.** They assert structural invariants
-  (uniqueness, non-empty names, VPN qualification) rather than fixed values; adding an
-  assertion about a specific service makes the suite machine-dependent.
+- **`RouteProbeTests` and `NetworkSnapshotReaderTests` read the live machine.** The route table
+  cannot be faked, so they compare the probe against `/sbin/route -n get` and check that the
+  outgoing address belongs to the named interface. They skip — never fail — when the machine has
+  no route out; asserting a specific interface would make the suite machine-dependent.
 - **`GeoProbe` confirmation order** (freeipapi first, geojs as fallback) is a measured choice,
   not an arbitrary one — see the rate-limit reasoning in `ARCHITECTURE.md`.
-- **`FlagImageStore` uses `URLSession.shared`** (unlike the geo fetchers) and dedupes concurrent
-  downloads through an `inFlight` set; a download that fails leaves no negative cache, so
-  `prefetch` retries on the next call.
+- **The flag set must cover every two-letter code a geo service can name.** A gap shows up as a
+  blank menu bar icon, not as a red test — `FlagImageStoreTests` walks the system's region list for
+  exactly that reason. The set is regenerated by `shared/tools/sync-flags.sh`; the copy under
+  `macos/Sources/WetoDesign/Flags` is generated and must not be edited by hand.
 
 ## Related docs
 - `.claude/rules/ARCHITECTURE.md` — module index and the invariants shared by both platforms
-- `.claude/CLAUDE.md` — boundary invariant and the domain traps summarised above
-- No `features/`, `bugs/`, or `decisions/` entries reference this module yet.
+- `AGENTS.md` — boundary invariant and the domain traps summarised above
+- `bugs/tunnel-without-network-service.md` — why the route owner is asked of the kernel
+- `decisions/vpn-app-instead-of-tunnel.md` — why there is no tunnel picker any more
+- `decisions/geo-confirmation-services.md` — the request budget this module spends
