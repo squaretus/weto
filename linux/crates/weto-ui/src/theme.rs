@@ -80,6 +80,7 @@ pub fn mark_root(root: &impl IsA<gtk4::Widget>) {
 pub fn shield_class(state: ShieldState) -> &'static str {
     match state {
         ShieldState::Guarded => "guarded",
+        ShieldState::Degraded => "pending",
         ShieldState::Pending => "pending",
         ShieldState::Killed => "killed",
         ShieldState::Disabled => "disabled",

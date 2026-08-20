@@ -5,10 +5,10 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use weto_config::settings::{Settings, Target};
-use weto_core::geo::{ConfirmSource, GeoProbeReport, SourceOutcome};
+use weto_core::geo::{ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
 use weto_core::network::{NetworkInterfaceSnapshot, NetworkSnapshot};
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::process::{ProcessSnapshot, TargetKind};
@@ -71,6 +71,8 @@ impl NetworkSnapshotReading for FakeNetwork {
 struct FakeGeo {
     country: Arc<Mutex<String>>,
     calls: Arc<AtomicUsize>,
+    /// Адрес, который называет резервный сервис, когда ipinfo молчит.
+    silent_ipinfo: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeGeo {
@@ -78,11 +80,18 @@ impl FakeGeo {
         FakeGeo {
             country: Arc::new(Mutex::new("NL".to_string())),
             calls: Arc::new(AtomicUsize::new(0)),
+            silent_ipinfo: Arc::new(Mutex::new(None)),
         }
     }
 
     fn now_reports(&self, country: &str) {
         *self.country.lock().unwrap() = country.to_string();
+    }
+
+    /// ipinfo молчит, а адрес называет резервный сервис — та самая форма отчёта,
+    /// которую отдаёт проба при 429 от ipinfo.
+    fn ipinfo_goes_silent(&self, address_from_reference: &str) {
+        *self.silent_ipinfo.lock().unwrap() = Some(address_from_reference.to_string());
     }
 
     fn call_count(&self) -> usize {
@@ -94,6 +103,18 @@ impl GeoProbing for FakeGeo {
     fn probe(&self, _token: Option<&str>) -> GeoProbeReport {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let country = self.country.lock().unwrap().clone();
+
+        if let Some(address) = self.silent_ipinfo.lock().unwrap().clone() {
+            return GeoProbeReport {
+                ip: Some(address),
+                ipinfo: SourceOutcome::Failed(GeoFailure::RateLimited(429)),
+                confirmation: SourceOutcome::Answered(country),
+                confirm_source: Some(ConfirmSource::Geojs),
+                has_network_path: true,
+                checked_at: SystemTime::now(),
+            };
+        }
+
         GeoProbeReport {
             ip: Some("203.0.113.7".to_string()),
             ipinfo: SourceOutcome::Answered(country.clone()),
@@ -552,5 +573,63 @@ fn a_settled_local_verdict_does_not_probe_every_tick() {
         h.geo.call_count(),
         after_first,
         "состояние сети не менялось — новых запросов быть не должно"
+    );
+}
+
+/// Молчание ipinfo — не повод завершать цели, если адрес доказанно тот же.
+/// Тот же адрес — та же страна.
+#[test]
+fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
+    let h = harness();
+    assert_eq!(h.controller.tick(), GuardDecision::Safe);
+    // Первый круг всегда fail-closed до ответа сети, и его завершения уже в списке.
+    let killed_before = h.killer.killed().len();
+
+    h.geo.ipinfo_goes_silent("203.0.113.7");
+    std::thread::sleep(Duration::from_millis(20));
+
+    assert_eq!(
+        h.controller.probe_now(),
+        GuardDecision::Safe,
+        "адрес тот же — перепроверять нечего"
+    );
+    assert_eq!(
+        h.killer.killed().len(),
+        killed_before,
+        "молчание ipinfo при неизменном адресе целей не стоит"
+    );
+}
+
+/// Адрес другой, страны для него никто не назвал — вердикта нет, и снисхождения тоже.
+#[test]
+fn silent_ipinfo_with_a_new_address_kills() {
+    let h = harness();
+    assert_eq!(h.controller.tick(), GuardDecision::Safe);
+
+    h.geo.ipinfo_goes_silent("198.51.100.231");
+    let decision = h.controller.probe_now();
+
+    assert_eq!(
+        reason(&decision),
+        Some(&UnsafeReason::GeoUnavailable(
+            "адрес сменился, страна не проверена".to_string()
+        ))
+    );
+}
+
+/// Расписание гео: страна выхода меняется и на неизменном пути, поэтому запрос
+/// уходит и без событий сети.
+#[test]
+fn geo_schedule_asks_again_on_an_unchanged_path() {
+    let h = harness();
+    h.controller.tick();
+    let calls_after_verdict = h.geo.call_count();
+
+    // Тик сразу за первым: расписание ещё не подошло, в сеть идти незачем.
+    h.controller.tick();
+    assert_eq!(
+        h.geo.call_count(),
+        calls_after_verdict,
+        "частота запросов не равна частоте тиков"
     );
 }

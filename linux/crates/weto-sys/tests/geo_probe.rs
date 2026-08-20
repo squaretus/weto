@@ -11,7 +11,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use weto_core::geo::{GeoFailure, GeoOutcome, SourceOutcome};
-use weto_sys::geo_probe::{GeoEndpoints, GeoProbing, HttpGeoProbe, NetworkPathReporting};
+use weto_sys::geo_probe::{
+    GeoEndpoints, GeoProbing, HttpGeoProbe, NetworkPathReporting, CONFIRMATION_HARD_TTL,
+    CONFIRMATION_SOFT_TTL,
+};
 
 /// Ответ, который сервер отдаёт на путь.
 #[derive(Clone)]
@@ -24,6 +27,8 @@ struct FakeGeoService {
     port: u16,
     routes: Arc<Mutex<HashMap<String, Canned>>>,
     requests: Arc<AtomicUsize>,
+    /// Обращения по путям: кэш подтверждения проверяется именно счётом запросов.
+    hits: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl FakeGeoService {
@@ -35,10 +40,12 @@ impl FakeGeoService {
 
         let served = routes.clone();
         let counted = requests.clone();
+        let hits: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let tallied = hits.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 counted.fetch_add(1, Ordering::SeqCst);
-                serve(stream, &served);
+                serve(stream, &served, &tallied);
             }
         });
 
@@ -46,6 +53,7 @@ impl FakeGeoService {
             port,
             routes,
             requests,
+            hits,
         }
     }
 
@@ -73,9 +81,28 @@ impl FakeGeoService {
     fn request_count(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
     }
+
+    /// Ответ по ходу теста: сервис отвечает иначе, чем в начале.
+    fn answers_now(&self, path: &str, status: u16, body: &str) {
+        self.routes.lock().unwrap().insert(
+            path.to_string(),
+            Canned {
+                status,
+                body: body.to_string(),
+            },
+        );
+    }
+
+    fn hits(&self, path: &str) -> usize {
+        self.hits.lock().unwrap().get(path).copied().unwrap_or(0)
+    }
 }
 
-fn serve(mut stream: TcpStream, routes: &Arc<Mutex<HashMap<String, Canned>>>) {
+fn serve(
+    mut stream: TcpStream,
+    routes: &Arc<Mutex<HashMap<String, Canned>>>,
+    hits: &Arc<Mutex<HashMap<String, usize>>>,
+) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() {
@@ -99,6 +126,7 @@ fn serve(mut stream: TcpStream, routes: &Arc<Mutex<HashMap<String, Canned>>>) {
         .nth(1)
         .unwrap_or("/")
         .to_string();
+    *hits.lock().unwrap().entry(path.clone()).or_insert(0) += 1;
     let canned = routes.lock().unwrap().get(&path).cloned();
 
     let response = match canned {
@@ -126,6 +154,26 @@ impl NetworkPathReporting for HasPath {
 fn probe_of(service: &FakeGeoService, has_path: bool) -> HttpGeoProbe {
     HttpGeoProbe::new(service.endpoints(), Box::new(HasPath(has_path)))
         .with_timeout(std::time::Duration::from_secs(2))
+}
+
+/// Время — граница системы: потолки кэша иначе пришлось бы ждать по-настоящему.
+#[derive(Clone)]
+struct MovableClock(Arc<Mutex<std::time::Instant>>);
+
+impl MovableClock {
+    fn start() -> MovableClock {
+        MovableClock(Arc::new(Mutex::new(std::time::Instant::now())))
+    }
+
+    fn advance(&self, by: std::time::Duration) {
+        let mut now = self.0.lock().unwrap();
+        *now += by;
+    }
+}
+
+fn probe_with_clock(service: &FakeGeoService, clock: &MovableClock) -> HttpGeoProbe {
+    let handle = clock.0.clone();
+    probe_of(service, true).with_clock(Box::new(move || *handle.lock().unwrap()))
 }
 
 #[test]
@@ -219,9 +267,13 @@ fn rejected_token_is_named_by_its_status() {
         SourceOutcome::Failed(GeoFailure::Unauthorized(401))
     );
     assert_eq!(
-        report.confirmation,
-        SourceOutcome::NotRequested,
-        "молчащий ipinfo не должен тратить лимит подтверждающего"
+        service.hits("/freeipapi/{ip}"),
+        0,
+        "лимит подтверждающего сервиса не тратится: подтверждать нечего, адреса нет"
+    );
+    assert!(
+        matches!(report.outcome(), GeoOutcome::Unavailable(_)),
+        "отвергнутый токен оставляет вердикт fail-closed"
     );
 }
 
@@ -263,8 +315,15 @@ fn malformed_address_from_ipinfo_stops_the_probe() {
     let report = probe_of(&service, true).probe(Some("token"));
 
     assert!(matches!(report.ipinfo, SourceOutcome::Failed(_)));
-    assert_eq!(report.confirmation, SourceOutcome::NotRequested);
-    assert_eq!(service.request_count(), 1, "второго запроса быть не должно");
+    assert!(
+        matches!(report.outcome(), GeoOutcome::Unavailable(_)),
+        "мусорный адрес не может стать вердиктом"
+    );
+    assert_eq!(
+        service.hits("/freeipapi/203.0.113.7/../../admin"),
+        0,
+        "мусорная строка не уезжает в URL чужого сервиса"
+    );
 }
 
 #[test]
@@ -287,5 +346,137 @@ fn absence_of_a_network_path_is_recorded_in_the_report() {
     assert!(
         !report.has_network_path,
         "попап обязан отличать «сервис молчит» от «сети нет»"
+    );
+}
+
+/// Отказ ipinfo не оставляет нас без адреса: он и есть то, чем потом доказывают,
+/// что перепроверять страну не нужно.
+#[test]
+fn when_ipinfo_refuses_the_probe_asks_the_reference_source_for_its_own_address() {
+    let service = FakeGeoService::start().answers("/ipinfo", 429, "").answers(
+        "/geojs-self",
+        200,
+        r#"{"country":"NL","ip":"203.0.113.7"}"#,
+    );
+
+    let report = probe_of(&service, true).probe(Some("token"));
+
+    assert_eq!(
+        report.ipinfo,
+        SourceOutcome::Failed(GeoFailure::RateLimited(429))
+    );
+    assert_eq!(report.ip.as_deref(), Some("203.0.113.7"));
+    assert_eq!(report.reference_country(), Some("NL"));
+    assert!(
+        matches!(report.outcome(), GeoOutcome::Unavailable(_)),
+        "без ответа ipinfo вердикт обязан остаться fail-closed"
+    );
+}
+
+/// Подтверждение отвечает «в какой стране вот этот адрес». У неизменного адреса
+/// ответ не меняется каждые пять секунд, а квота сервиса считается на адрес выхода
+/// VPN и делится с соседями по узлу.
+#[test]
+fn confirmation_is_not_asked_again_for_the_same_address() {
+    let service = FakeGeoService::start()
+        .answers(
+            "/ipinfo",
+            200,
+            r#"{"ip":"203.0.113.7","country_code":"NL"}"#,
+        )
+        .answers("/freeipapi/203.0.113.7", 200, r#"{"countryCode":"NL"}"#);
+    let probe = probe_of(&service, true);
+
+    for _ in 0..5 {
+        assert!(matches!(
+            probe.probe(Some("token")).outcome(),
+            GeoOutcome::Resolved(_)
+        ));
+    }
+
+    assert_eq!(
+        service.hits("/freeipapi/203.0.113.7"),
+        1,
+        "адрес тот же — подтверждать нечего"
+    );
+    assert_eq!(
+        service.hits("/ipinfo"),
+        5,
+        "ipinfo и есть детектор смены страны"
+    );
+}
+
+#[test]
+fn confirmation_is_refreshed_after_the_soft_ceiling() {
+    let service = FakeGeoService::start()
+        .answers(
+            "/ipinfo",
+            200,
+            r#"{"ip":"203.0.113.7","country_code":"NL"}"#,
+        )
+        .answers("/freeipapi/203.0.113.7", 200, r#"{"countryCode":"NL"}"#);
+    let clock = MovableClock::start();
+    let probe = probe_with_clock(&service, &clock);
+
+    let _ = probe.probe(Some("token"));
+    clock.advance(CONFIRMATION_SOFT_TTL + std::time::Duration::from_secs(1));
+    service.answers_now("/freeipapi/203.0.113.7", 200, r#"{"countryCode":"RU"}"#);
+
+    let GeoOutcome::Resolved(reading) = probe.probe(Some("token")).outcome() else {
+        panic!("ожидался разрешённый вердикт");
+    };
+    assert_eq!(reading.confirmed_country.as_deref(), Some("RU"));
+}
+
+/// Неудачное обновление в пределах жёсткого потолка ничего не меняет: годный ответ
+/// про этот адрес у нас есть, и чужой 429 не повод завершать цели.
+#[test]
+fn failed_refresh_keeps_the_previous_confirmation() {
+    let service = FakeGeoService::start()
+        .answers(
+            "/ipinfo",
+            200,
+            r#"{"ip":"203.0.113.7","country_code":"NL"}"#,
+        )
+        .answers("/freeipapi/203.0.113.7", 200, r#"{"countryCode":"NL"}"#);
+    let clock = MovableClock::start();
+    let probe = probe_with_clock(&service, &clock);
+
+    let _ = probe.probe(Some("token"));
+    clock.advance(CONFIRMATION_SOFT_TTL + std::time::Duration::from_secs(1));
+    service.answers_now("/freeipapi/203.0.113.7", 429, "");
+    service.answers_now("/geojs/203.0.113.7", 503, "");
+
+    let report = probe.probe(Some("token"));
+
+    assert_eq!(
+        report.confirmation,
+        SourceOutcome::Answered("NL".to_string())
+    );
+}
+
+#[test]
+fn after_the_hard_ceiling_a_failed_refresh_drops_the_confirmation() {
+    let service = FakeGeoService::start()
+        .answers(
+            "/ipinfo",
+            200,
+            r#"{"ip":"203.0.113.7","country_code":"NL"}"#,
+        )
+        .answers("/freeipapi/203.0.113.7", 200, r#"{"countryCode":"NL"}"#);
+    let clock = MovableClock::start();
+    let probe = probe_with_clock(&service, &clock);
+
+    let _ = probe.probe(Some("token"));
+    clock.advance(CONFIRMATION_HARD_TTL + std::time::Duration::from_secs(1));
+    service.answers_now("/freeipapi/203.0.113.7", 429, "");
+    service.answers_now("/geojs/203.0.113.7", 503, "");
+
+    let report = probe.probe(Some("token"));
+
+    assert_eq!(
+        report.confirmation,
+        SourceOutcome::Failed(GeoFailure::RateLimited(429)),
+        "вечно доверять одному подтверждению нельзя: у переприсвоенных диапазонов страна меняется"
     );
 }

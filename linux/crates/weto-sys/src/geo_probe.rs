@@ -4,13 +4,24 @@
 //! намеренно: у приложения уже есть свой цикл событий (GTK), и смешивать два
 //! планировщика ради трёх запросов подряд — цена без выгоды.
 //!
-//! Кэша нет нигде на этом пути. Решение о завершении целей принимается только
-//! по данным текущей пробы — то же правило, что на macOS.
+//! Адрес и основная страна не кэшируются никогда: ipinfo и есть детектор смены
+//! страны, и спрашивается он каждый круг. Кэшируется только подтверждение,
+//! и только про тот же самый адрес — то же правило, что на macOS.
 
-use std::time::{Duration, SystemTime};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 use weto_core::geo::{responses, ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
 use weto_core::ip::is_valid_address;
+
+/// Мягкий потолок ответа подтверждающего сервиса: по нему делается попытка
+/// переспросить про тот же адрес. Неудача ничего не меняет — годный ответ у нас
+/// уже есть, и отказ чужого сервиса не повод завершать цели.
+pub const CONFIRMATION_SOFT_TTL: Duration = Duration::from_secs(60);
+
+/// Жёсткий потолок: дольше этого доверять одному ответу нельзя. У переприсвоенных
+/// диапазонов страна регистрации меняется.
+pub const CONFIRMATION_HARD_TTL: Duration = Duration::from_secs(900);
 
 pub trait GeoProbing: Send + Sync {
     fn probe(&self, token: Option<&str>) -> GeoProbeReport;
@@ -51,6 +62,19 @@ pub struct HttpGeoProbe {
     endpoints: GeoEndpoints,
     timeout: Duration,
     network_path: Box<dyn NetworkPathReporting>,
+    /// Часы — граница системы: потолки кэша иначе не проверить, не ожидая по-настоящему.
+    clock: Box<dyn Fn() -> Instant + Send + Sync>,
+    /// Последний годный ответ подтверждающего сервиса. Ключ — адрес: подтверждение
+    /// отвечает «в какой стране вот этот адрес», и к другому адресу не относится.
+    confirmation: Mutex<Option<CachedConfirmation>>,
+}
+
+#[derive(Clone)]
+struct CachedConfirmation {
+    ip: String,
+    country: String,
+    source: ConfirmSource,
+    at: Instant,
 }
 
 impl HttpGeoProbe {
@@ -59,11 +83,18 @@ impl HttpGeoProbe {
             endpoints,
             timeout: Duration::from_secs(5),
             network_path,
+            clock: Box::new(Instant::now),
+            confirmation: Mutex::new(None),
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_clock(mut self, clock: Box<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -78,14 +109,17 @@ impl HttpGeoProbe {
         }
     }
 
-    /// Проба без токена: справочно спрашиваем единственный сервис, который
-    /// отвечает про звонящего сам.
+    /// ipinfo молчит — спрашиваем единственный сервис, который отвечает про звонящего сам.
     ///
-    /// Вердикт от этого не меняется — `outcome` требует ответа ipinfo и остаётся
-    /// `Unavailable`, то есть fail-closed. Путь нужен ради свежей установки:
-    /// пользователь должен узнать, где он, ещё до настройки токена.
-    fn reference_only_report(&self) -> GeoProbeReport {
-        let no_token = SourceOutcome::Failed(GeoFailure::Other("не задан токен ipinfo".into()));
+    /// Вердикт от этого не становится безопасным: `outcome` требует ответа ipinfo
+    /// и остаётся `Unavailable`, то есть fail-closed. Ценность в адресе. Совпал он
+    /// с адресом прошлого вердикта — перепроверять страну не нужно, тот же адрес
+    /// означает ту же страну; решает это охрана, у которой прошлое чтение и есть.
+    ///
+    /// Этим же путём идёт проба без токена: на свежей установке пользователь должен
+    /// узнать, где он, ещё до настройки ipinfo.
+    fn fallback_report(&self, no_answer: SourceOutcome) -> GeoProbeReport {
+        let no_token = no_answer;
 
         match self.fetch(&self.endpoints.geojs_self, None) {
             Ok(body) => match responses::decode_geojs_self(&body) {
@@ -115,6 +149,52 @@ impl HttpGeoProbe {
             has_network_path: self.network_path.has_path(),
             checked_at: SystemTime::now(),
         }
+    }
+
+    /// Подтверждение про адрес: из кэша, пока держится мягкий потолок, иначе
+    /// с попыткой обновиться. Неудачное обновление в пределах жёсткого потолка
+    /// оставляет прошлый ответ: расход по этому сервису делится с соседями
+    /// по выходу VPN, и его 429 не должен завершать цели при исправном VPN.
+    fn confirmation(&self, ip: &str) -> (SourceOutcome, Option<ConfirmSource>) {
+        let cached = self
+            .confirmation
+            .lock()
+            .expect("кэш подтверждения")
+            .clone()
+            .filter(|c| c.ip == ip);
+        let age = cached
+            .as_ref()
+            .map(|c| (self.clock)().saturating_duration_since(c.at));
+
+        if let (Some(cached), Some(age)) = (&cached, age) {
+            if age < CONFIRMATION_SOFT_TTL {
+                return (
+                    SourceOutcome::Answered(cached.country.clone()),
+                    Some(cached.source),
+                );
+            }
+        }
+
+        let fresh = self.confirm(ip);
+        if let (SourceOutcome::Answered(country), Some(source)) = (&fresh.0, fresh.1) {
+            *self.confirmation.lock().expect("кэш подтверждения") = Some(CachedConfirmation {
+                ip: ip.to_string(),
+                country: country.clone(),
+                source,
+                at: (self.clock)(),
+            });
+            return fresh;
+        }
+
+        if let (Some(cached), Some(age)) = (&cached, age) {
+            if age < CONFIRMATION_HARD_TTL {
+                return (
+                    SourceOutcome::Answered(cached.country.clone()),
+                    Some(cached.source),
+                );
+            }
+        }
+        fresh
     }
 
     /// Отказ первичного подтверждающего сервиса запоминается: когда молчат оба,
@@ -187,7 +267,9 @@ fn translate_transport(error: &ureq::Transport) -> GeoFailure {
 impl GeoProbing for HttpGeoProbe {
     fn probe(&self, token: Option<&str>) -> GeoProbeReport {
         let Some(token) = token.filter(|value| !value.is_empty()) else {
-            return self.reference_only_report();
+            return self.fallback_report(SourceOutcome::Failed(GeoFailure::Other(
+                "не задан токен ipinfo".into(),
+            )));
         };
 
         // Токен уезжает в заголовок, а туда можно только печатный ASCII.
@@ -201,23 +283,23 @@ impl GeoProbing for HttpGeoProbe {
 
         let body = match self.fetch(&self.endpoints.ipinfo, Some(token)) {
             Ok(body) => body,
-            Err(failure) => return self.report(SourceOutcome::Failed(failure)),
+            Err(failure) => return self.fallback_report(SourceOutcome::Failed(failure)),
         };
 
         let Ok(answer) = responses::decode_ipinfo(&body) else {
-            return self.report(SourceOutcome::Failed(GeoFailure::Other(
+            return self.fallback_report(SourceOutcome::Failed(GeoFailure::Other(
                 "непонятный ответ сервиса".into(),
             )));
         };
 
         // Адрес идёт в URL подтверждающих сервисов, поэтому проверяется до запроса.
         if !is_valid_address(&answer.ip) {
-            return self.report(SourceOutcome::Failed(GeoFailure::Other(
+            return self.fallback_report(SourceOutcome::Failed(GeoFailure::Other(
                 "ipinfo вернул некорректный адрес".into(),
             )));
         }
 
-        let (confirmation, confirm_source) = self.confirm(&answer.ip);
+        let (confirmation, confirm_source) = self.confirmation(&answer.ip);
 
         GeoProbeReport {
             ip: Some(answer.ip),

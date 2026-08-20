@@ -95,7 +95,7 @@ public enum GuardPolicy {
             return local
         }
 
-        guard case .resolved(let reading) = signals.geo else {
+        guard let reading = signals.geo.reading else {
             if case .unavailable(let detail) = signals.geo {
                 return .kill(.geoUnavailable(detail))
             }

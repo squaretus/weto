@@ -139,15 +139,24 @@ impl Geo {
         if self.kind == "unavailable" {
             return GeoOutcome::Unavailable(self.detail.clone().unwrap_or_default());
         }
-        GeoOutcome::Resolved(GeoReading {
-            ip: self.ip.clone().expect("resolved без ip"),
-            primary_country: self.primary_country.clone().expect("resolved без страны"),
+
+        let reading = GeoReading {
+            ip: self.ip.clone().expect("чтение без ip"),
+            primary_country: self.primary_country.clone().expect("чтение без страны"),
             confirmed_country: self.confirmed_country.clone(),
             confirm_source: self
                 .confirm_source
                 .as_deref()
                 .and_then(ConfirmSource::parse),
-        })
+        };
+
+        if self.kind == "degraded" {
+            return GeoOutcome::Degraded {
+                previous: reading,
+                detail: self.detail.clone().unwrap_or_default(),
+            };
+        }
+        GeoOutcome::Resolved(reading)
     }
 }
 

@@ -16,6 +16,7 @@ use std::time::Duration;
 use weto_config::journal::{Journal, KillEvent, KillEventKind};
 use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
+use weto_core::geo::SourceOutcome;
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::presentation::GuardState;
 use weto_core::process::MatchedProcess;
@@ -206,13 +207,23 @@ impl AppState {
     /// то же fail-closed, что применяется к целям.
     pub fn guard_state(&self) -> GuardState {
         let settings = self.settings.current();
+        let snapshot = self.snapshot();
+        let decision = snapshot
+            .decision
+            .clone()
+            .unwrap_or(GuardDecision::Kill(UnsafeReason::VerificationPending));
+
         GuardState {
             is_enabled: settings.is_enabled,
             has_targets: !settings.targets.is_empty(),
-            decision: self
-                .snapshot()
-                .decision
-                .unwrap_or(GuardDecision::Kill(UnsafeReason::VerificationPending)),
+            // Цели живут, но ipinfo молчит: защита держится на доказанной
+            // неизменности адреса, и щит обязан быть жёлтым, а не зелёным.
+            is_degraded: matches!(decision, GuardDecision::Safe)
+                && snapshot
+                    .report
+                    .as_ref()
+                    .is_some_and(|r| matches!(r.ipinfo, SourceOutcome::Failed(_))),
+            decision,
             country: None,
         }
     }

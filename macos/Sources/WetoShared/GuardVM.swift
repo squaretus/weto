@@ -64,6 +64,7 @@ public final class GuardVM {
     // обязано убивать по нему же, а не запускать второй обход.
     @ObservationIgnored private var currentScan: ProcessEnforcer.Scan?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
+    @ObservationIgnored private var geoTickTask: Task<Void, Never>?
     @ObservationIgnored private var watchdogTask: Task<Void, Never>?
 
     public init(
@@ -109,6 +110,7 @@ public final class GuardVM {
 
     deinit {
         tickTask?.cancel()
+        geoTickTask?.cancel()
         watchdogTask?.cancel()
     }
 
@@ -122,6 +124,7 @@ public final class GuardVM {
             Task { @MainActor [weak self] in self?.handle(trigger) }
         }
         startTicking()
+        startGeoTicking()
         handle(.tick)
     }
 
@@ -129,7 +132,20 @@ public final class GuardVM {
         events.stop()
         controller.stop()
         tickTask?.cancel(); tickTask = nil
+        geoTickTask?.cancel(); geoTickTask = nil
         watchdogTask?.cancel(); watchdogTask = nil
+    }
+
+    /// Цвет статуса для глаза.
+    ///
+    /// Отдельно от `state.statusColor`: «на страже, но ipinfo молчит» для целей —
+    /// по-прежнему safe, потому что адрес доказанно тот же, а для пользователя это
+    /// не полноценная зелёная защита. Зелёный тут врал бы.
+    public var statusColor: GuardStatusColor {
+        guard case .safe(let reading) = state, reading != nil,
+              let report = lastReport, case .failed = report.ipinfo
+        else { return state.statusColor }
+        return .yellow
     }
 
     public var currentCountryCode: String? {
@@ -189,6 +205,12 @@ public final class GuardVM {
         defer { currentScan = nil }
 
         runningTargets = enforcer.runningTargets(in: scan)
+
+        // Расписание гео — единственный триггер, который сам идёт в сеть.
+        if case .geoSchedule = trigger {
+            controller.probeOnSchedule()
+            return
+        }
 
         if case .appLaunched(let bundleID) = trigger {
 
@@ -304,6 +326,19 @@ public final class GuardVM {
                     guard let self, case .unsafe(let reason) = self.state else { return }
                     self.enforce(reason: reason)
                 }
+            }
+        }
+    }
+
+    /// Расписание обращений к гео-сервисам. Свой таймер, а не общий тик: опрос системы
+    /// частый и бесплатный, запрос к чужим сервисам редкий и платный.
+    private func startGeoTicking() {
+        geoTickTask?.cancel()
+        geoTickTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Constants.geoProbeIntervalSeconds))
+                guard !Task.isCancelled else { return }
+                await MainActor.run { [weak self] in self?.handle(.geoSchedule) }
             }
         }
     }
