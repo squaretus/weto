@@ -38,7 +38,10 @@ let package = Package(
         .target(
             name: "WetoDesign",
             path: "Sources/WetoDesign",
-            resources: [.process("Resources")]
+            // Флаги — `copy`, а не `process`: их 265, они не нуждаются
+            // ни в какой обработке, и раскладка каталогом читается дешевле,
+            // чем 265 файлов в корне ресурсного бандла.
+            resources: [.process("Resources"), .copy("Flags")]
         ),
         .executableTarget(
             name: "WetoMenuBar",
