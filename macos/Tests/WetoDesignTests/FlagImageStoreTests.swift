@@ -1,7 +1,6 @@
 import XCTest
 import AppKit
-@testable import WetoSystem
-import WetoDesign
+@testable import WetoDesign
 
 /// Флаги лежат в бандле, а не тянутся из сети.
 ///
