@@ -35,7 +35,9 @@ ip rule add not fwmark "$TABLE" table "$TABLE" priority 32764
 
 MAIN="$(ip route show table main | awk '/^default/ {print $NF; exit}')"
 KERNEL="$(ip route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1); exit}')"
-PROBED="$(cargo run -q --example route_owner -p weto-sys)"
+# Адрес передаём явно: у пробы по умолчанию адрес гео-сервиса, а в контейнере
+# DNS может не быть — сверять надо один и тот же адрес, а не два разных.
+PROBED="$(cargo run -q --example route_owner -p weto-sys -- 1.1.1.1)"
 
 echo "главная таблица: ${MAIN:-нет}"
 echo "выбор ядра:      $KERNEL"

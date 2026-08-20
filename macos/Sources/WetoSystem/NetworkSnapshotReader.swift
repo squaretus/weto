@@ -10,11 +10,17 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
 
     private static let servicePattern = "Setup:/Network/Service/[^/]+/IPv4"
 
-    public init() {}
+    private let routeProbe: RouteProbing
+
+    public init(routeProbe: RouteProbing = KernelRouteProbe()) {
+        self.routeProbe = routeProbe
+    }
 
     public func snapshot() -> NetworkSnapshot {
+        let outgoing = routeProbe.outgoingRoute()
+
         guard let store = SCDynamicStoreCreate(nil, "com.weto.app" as CFString, nil, nil) else {
-            return NetworkSnapshot(services: [], primaryServiceUUID: nil)
+            return NetworkSnapshot(services: [], primaryServiceUUID: nil, outgoing: outgoing)
         }
 
         let services = serviceUUIDs(store: store).compactMap { uuid -> NetworkServiceSnapshot? in
@@ -40,7 +46,7 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
         return NetworkSnapshot(
             services: services + orphans,
             primaryServiceUUID: primaryService(store: store),
-            primaryInterface: primaryInterface(store: store)
+            outgoing: outgoing
         )
     }
 
@@ -68,6 +74,12 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
         return found
             .map { InterfaceSnapshot(name: $0.key, isUp: $0.value.isUp, hasIPv4: $0.value.hasIPv4) }
             .sorted { $0.name < $1.name }
+    }
+
+    private func primaryService(store: SCDynamicStore) -> String? {
+        let key = "State:/Network/Global/IPv4" as CFString
+        guard let dict = SCDynamicStoreCopyValue(store, key) as? [String: Any] else { return nil }
+        return dict["PrimaryService"] as? String
     }
 
     private func serviceUUIDs(store: SCDynamicStore) -> [String] {
@@ -120,17 +132,4 @@ public struct NetworkSnapshotReader: NetworkSnapshotReading {
         return dict["InterfaceName"] as? String
     }
 
-    private func primaryService(store: SCDynamicStore) -> String? {
-        let key = "State:/Network/Global/IPv4" as CFString
-        guard let dict = SCDynamicStoreCopyValue(store, key) as? [String: Any] else { return nil }
-        return dict["PrimaryService"] as? String
-    }
-
-    /// Владелец маршрута по умолчанию по имени интерфейса. У туннеля без сервиса
-    /// `PrimaryService` назовёт подлежащий Wi-Fi, а `PrimaryInterface` — сам туннель.
-    private func primaryInterface(store: SCDynamicStore) -> String? {
-        let key = "State:/Network/Global/IPv4" as CFString
-        guard let dict = SCDynamicStoreCopyValue(store, key) as? [String: Any] else { return nil }
-        return dict["PrimaryInterface"] as? String
-    }
 }

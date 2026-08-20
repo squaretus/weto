@@ -15,14 +15,16 @@ public enum VPNStatusResolver {
 
         guard let interface = service.activeInterface else { return .down }
 
-        // Владельца маршрута спрашиваем и по сервису, и по интерфейсу.
-        // У туннеля, поднятого в пользовательском пространстве, сервиса нет
-        // вовсе, и `PrimaryService` назовёт подлежащий Wi-Fi, хотя маршрут
-        // по умолчанию уже ушёл в туннель. Тогда охрана завершала бы цели
-        // при исправном VPN — то же, что на Linux решает опрос ядра.
-        let isPrimary = snapshot.primaryServiceUUID == service.uuid
-            || snapshot.primaryInterface == interface
-
-        return .up(isPrimary: isPrimary)
+        // Владельца трафика спрашиваем у ядра, а не у конфигурации сети.
+        //
+        // `PrimaryService` и `PrimaryInterface` из `SCDynamicStore` считает `configd`,
+        // ранжируя сетевые сервисы. У туннеля, поднятого мимо NetworkExtension,
+        // сервиса нет вовсе — и там оставался подлежащий Wi-Fi, хотя весь публичный
+        // трафик уходил в туннель. Охрана завершала цели при исправном VPN, и это
+        // не теория: проверено на живой машине с такой сборкой клиента.
+        //
+        // Дамп маршрута по умолчанию не помог бы: тот же клиент маршрут
+        // по умолчанию не забирает вовсе, а раскладывает маршруты префиксами.
+        return .up(isPrimary: snapshot.outgoing?.interface == interface)
     }
 }

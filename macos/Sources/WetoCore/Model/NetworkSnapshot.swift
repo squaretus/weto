@@ -42,33 +42,51 @@ public struct NetworkServiceSnapshot: Equatable, Sendable, Identifiable {
     }
 }
 
+/// Кто выпускает трафик наружу, по ответу ядра: имя интерфейса и локальный адрес,
+/// который ядро выберет источником. Адрес входит в отпечаток не для красоты —
+/// туннель может сохранить имя и сменить адрес, и это смена состояния сети.
+public struct OutgoingRoute: Equatable, Sendable {
+    public let interface: String
+    public let address: String
+
+    public init(interface: String, address: String) {
+        self.interface = interface
+        self.address = address
+    }
+}
+
 public struct NetworkSnapshot: Equatable, Sendable {
     public let services: [NetworkServiceSnapshot]
 
     public let primaryServiceUUID: String?
 
-    /// Интерфейс, которому досталась маршрутизация по умолчанию.
+    /// Кто выпускает трафик наружу — по ответу ядра, а не по конфигурации сети.
     ///
-    /// Спрашивается отдельно от сервиса: у туннеля, поднятого в пользовательском
-    /// пространстве, сервиса нет, и владельца маршрута по нему не определить.
-    public let primaryInterface: String?
+    /// `PrimaryInterface` из `SCDynamicStore` для этого не годится: его считает
+    /// `configd`, ранжируя сетевые сервисы, а у туннеля, поднятого мимо
+    /// NetworkExtension, сервиса нет вовсе. На живой машине с таким клиентом
+    /// там стоял `en0`, пока весь публичный трафик уходил в `utun6`.
+    public let outgoing: OutgoingRoute?
 
     public init(
         services: [NetworkServiceSnapshot],
         primaryServiceUUID: String?,
-        primaryInterface: String? = nil
+        outgoing: OutgoingRoute? = nil
     ) {
         self.services = services
         self.primaryServiceUUID = primaryServiceUUID
-        self.primaryInterface = primaryInterface
+        self.outgoing = outgoing
     }
 
     /// Отпечаток снимка: по нему видно, устарел ли прежний сетевой вердикт.
     /// Сравнивать сами снимки на равенство недостаточно дёшево для горячего пути.
     ///
     /// В отпечаток входит ровно то, от чего вердикт зависит: состояние выбранного
-    /// сервиса и владелец маршрута по умолчанию, определяющий выход в сеть.
-    /// Чужие сервисы и туннели не входят намеренно.
+    /// сервиса и то, через кого ядро выпускает трафик наружу. Чужие сервисы
+    /// и туннели не входят намеренно.
+    ///
+    /// Локальный адрес исходящего маршрута входит вместе с именем интерфейса:
+    /// туннель умеет сохранить имя и сменить адрес, и это смена состояния сети.
     ///
     /// Отпечаток по всему снимку выглядел строже, а на деле подставлял: второй VPN,
     /// живущий рядом, рвёт связь и поднимается сам — состав интерфейсов меняется,
@@ -87,7 +105,7 @@ public struct NetworkSnapshot: Equatable, Sendable {
         return [
             part,
             "primary=\(primaryServiceUUID ?? "-")",
-            "iface=\(primaryInterface ?? "-")",
+            "out=\(outgoing.map { "\($0.interface)/\($0.address)" } ?? "-")",
         ].joined(separator: "|")
     }
 

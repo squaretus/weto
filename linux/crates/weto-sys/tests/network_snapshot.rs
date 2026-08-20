@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::Path;
 
+use weto_core::network::OutgoingRoute;
 use weto_sys::network_snapshot::{
     KernelRouteProbe, NetworkSnapshotReading, RouteProbing, SysfsNetworkReader,
 };
@@ -47,8 +48,11 @@ enum Kind {
 struct FixedRoute(Option<&'static str>);
 
 impl RouteProbing for FixedRoute {
-    fn outgoing_interface(&self) -> Option<String> {
-        self.0.map(str::to_string)
+    fn outgoing_route(&self) -> Option<OutgoingRoute> {
+        self.0.map(|name| OutgoingRoute {
+            interface: name.to_string(),
+            address: "10.7.0.2".to_string(),
+        })
     }
 }
 
@@ -121,7 +125,10 @@ fn the_route_owner_comes_from_the_probe_and_lands_in_the_fingerprint() {
     let through_ethernet = reader(tmp.path(), Some("eth0")).snapshot();
 
     assert_eq!(
-        through_tunnel.default_route_interface.as_deref(),
+        through_tunnel
+            .outgoing
+            .as_ref()
+            .map(|o| o.interface.as_str()),
         Some("wg0")
     );
     assert_ne!(
@@ -135,10 +142,13 @@ fn the_route_owner_comes_from_the_probe_and_lands_in_the_fingerprint() {
 /// нечем, поэтому тест идёт к настоящей таблице маршрутов.
 #[test]
 fn the_kernel_probe_agrees_with_the_kernel() {
-    let Some(probed) = KernelRouteProbe.outgoing_interface() else {
+    // Адрес фиксированный: у пробы по умолчанию адрес гео-сервиса, а в контейнере
+    // DNS может не быть вовсе. Проверяется здесь согласие с ядром, а не разрешение имени.
+    let Some(probed) = KernelRouteProbe::default().route_to("1.1.1.1") else {
         // Машина без внешнего маршрута — проверять нечего, и это не провал.
         return;
     };
+    let probed = probed.interface;
 
     let reference = std::process::Command::new("ip")
         .args(["route", "get", "1.1.1.1"])
