@@ -106,6 +106,15 @@ public final class GuardVM {
             onDecision: { [weak self] decision in self?.apply(decision) },
             onReport: { [weak self] report in self?.receive(report) }
         )
+
+        // Список живых целей обновляется на правку настроек, а не на следующем тике.
+        // Вердикт контроллер пересчитывает сам, но пользователь смотрит на другое:
+        // добавил цель — и до тика в интерфейсе не менялось ничего, отчего казалось,
+        // что цель подхватится только после перезапуска приложения.
+        settings.onGuardConfigurationChange { [weak self] change in
+            guard change.field == .targets || change.field == .vpnApp else { return }
+            self?.refreshRunningTargets()
+        }
     }
 
     deinit {

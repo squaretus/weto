@@ -982,6 +982,135 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
+    /// Цель, добавленную на ходу, охрана обязана подхватить без перезапуска
+    /// приложения: пользователь добавляет её именно потому, что она уже запущена.
+    func test_a_target_added_while_running_is_guarded_without_a_restart() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: defaultProcesses + [.init(pid: 601, executablePath: "/usr/bin/pico")]
+        )
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let killer = SpyKiller()
+        let probe = StubGeoProbe(geoOutcome())
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(defaults: defaults),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: probe,
+            locator: locator,
+            resolver: StubResolver(mapping: [
+                targetBundleID: targetPath,
+                vpnAppID: vpnAppPath,
+                "nano": "/usr/bin/pico",
+            ]),
+            killer: killer,
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0.01
+        )
+
+        vm.handle(.networkPath)
+        await vm.awaitPendingProbe()
+        XCTAssertEqual(vm.state, .safe(vm.lastReading))
+        XCTAssertFalse(
+            vm.runningTargets.contains { $0.entry == "nano" },
+            "цели ещё нет в списке — проверяем именно её появление"
+        )
+
+        settings.targets += ["nano"]
+
+        XCTAssertTrue(
+            vm.runningTargets.contains { $0.entry == "nano" },
+            "добавленная цель обязана появиться в живых сразу, не дожидаясь тика"
+        )
+        await vm.awaitPendingProbe()
+    }
+
+    /// И под красным статусом добавленная цель завершается сразу, не дожидаясь
+    /// ни тика, ни повторного запуска приложения.
+    func test_a_target_added_while_unsafe_is_killed_at_once() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: processesWithoutVPNApp + [.init(pid: 601, executablePath: "/usr/bin/pico")]
+        )
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let killer = SpyKiller()
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(defaults: defaults),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: locator,
+            resolver: StubResolver(mapping: [
+                targetBundleID: targetPath,
+                vpnAppID: vpnAppPath,
+                "nano": "/usr/bin/pico",
+            ]),
+            killer: killer,
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0.01
+        )
+
+        vm.handle(.networkPath)
+        XCTAssertEqual(vm.state, .unsafe(.vpnAppNotRunning))
+
+        settings.targets += ["nano"]
+
+        XCTAssertTrue(
+            killer.killedBatches.flatMap { $0 }.contains(601),
+            "цель, добавленная под красным статусом, обязана быть завершена сразу"
+        )
+    }
+
+    /// То же самое, но без подмен на границе: настоящее разрешение цели
+    /// (`TargetResolver`) и настоящий обход процессов (`ProcessRegistry`).
+    /// Подменён только убийца — завершать чужие процессы тест не имеет права.
+    func test_a_live_process_added_as_a_target_is_seen_without_a_restart() async throws {
+        let victim = Process()
+        victim.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        victim.arguments = ["30"]
+        try victim.run()
+        defer { victim.terminate() }
+
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = []
+
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(defaults: defaults),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: ProcessRegistry(),
+            resolver: TargetResolver(),
+            killer: SpyKiller(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0.01
+        )
+
+        vm.handle(.tick)
+        XCTAssertTrue(vm.runningTargets.isEmpty, "целей ещё нет")
+
+        settings.targets = ["/bin/sleep"]
+        vm.handle(.tick)
+
+        XCTAssertTrue(
+            vm.runningTargets.contains { $0.entry == "/bin/sleep" },
+            "живой процесс, добавленный целью, обязан найтись без перезапуска: \(vm.runningTargets)"
+        )
+    }
+
     func test_disabled_guard_never_kills() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(), enabled: false,
                             processes: processesWithoutVPNApp)
