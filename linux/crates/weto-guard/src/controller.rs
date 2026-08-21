@@ -59,6 +59,11 @@ pub trait SettingsProviding: Send + Sync {
 
 pub trait KillReporting: Send + Sync {
     fn report(&self, killed: &[weto_core::process::MatchedProcess], reason: &str);
+
+    /// Причина эпизода, ставшая известной. Приёмник, ведущий журнал, дописывает
+    /// её в запись эпизода: вызов приходит и тогда, когда завершать больше нечего,
+    /// то есть ровно в том случае, где записи иначе не появится вовсе.
+    fn refine(&self, _reason: &str) {}
 }
 
 /// Вердикт вместе с признаком, при каких условиях он был получен.
@@ -393,9 +398,13 @@ impl GuardController {
         let running = match &decision {
             GuardDecision::Safe => self.enforcer.running(&rules),
             GuardDecision::Kill(reason) => {
+                let text = reason.display_text();
+                // Сначала уточнение, потом завершение: иначе уточнённая причина
+                // считалась бы новой и завела бы вторую запись про то же падение.
+                self.reporter.refine(&text);
                 let result = self.enforcer.enforce(&rules);
                 if !result.killed.is_empty() {
-                    self.reporter.report(&result.killed, &reason.display_text());
+                    self.reporter.report(&result.killed, &text);
                 }
                 result.running
             }

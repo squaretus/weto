@@ -107,8 +107,8 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - **Confirmation gets its own fetcher with a shorter timeout** (`geoConfirmationTimeoutSeconds`,
   2.5s vs 5s): it extends the fail-closed window, so it must not wait as long as ipinfo.
 - **argv is opt-in.** `allProcesses(includeArguments: false)` is the default; `ProcessEnforcer`
-  asks for argv only when at least one rule is `.script`. The full sweep of ~230 processes is
-  ~5 ms and runs every 250 ms while unsafe, so this is a hot path.
+  asks for argv only when at least one rule is `.script`. The full sweep of ~820 processes is
+  ~2 ms (~5 ms with argv) and runs every 250 ms while unsafe, so this is a hot path.
 - **argv is kept as separate elements, never joined.** Script targets are matched by exact
   equality of one argv element (`ProcessMatcher` uses set disjointness against `launchPaths`);
   substring matching killed look-alike wrappers and processes that merely mentioned the path.
@@ -169,6 +169,13 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - **`KERN_PROCARGS2` parsing.** argc is decoded byte-wise little-endian from the first 4 bytes,
   the first NUL-separated chunk (the exec path) is dropped, then `argc` chunks are taken. Any
   change to the drop/prefix arithmetic silently shifts argv and breaks script matching.
+- **`proc_listallpids` counts pids, it does not count bytes.** The `buffersize` argument is in
+  bytes, but the return value is already divided by `sizeof(int)` inside libproc. Dividing it
+  again left exactly a quarter of the list — and the *newest* quarter, because the kernel walks
+  `allproc` from newest to oldest. Anything older than the last ~200 launches was invisible:
+  a long-lived target was never killed and never listed as running, and a VPN app opened a week
+  ago read as closed. Every existing test spawned its process moments before the sweep, so none
+  of them saw it; the guard is `launchd` (pid 1), which must always be in the list.
 - **`proc_listallpids` races.** Capacity is queried, then over-allocated by 64 slots; processes
   spawning between the two calls can still be missed on that sweep.
 - **`kill` returning `EPERM`** (root-owned target) is a genuine, unrecoverable failure that must

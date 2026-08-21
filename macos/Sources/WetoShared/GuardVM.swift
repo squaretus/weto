@@ -56,6 +56,10 @@ public final class GuardVM {
     // pid те же, а дедупликация была только по ним.
     @ObservationIgnored private var recordedReasons: Set<String> = []
 
+    // Запись эпизода, сделанная до вердикта: причина в ней — «ещё не проверено»,
+    // и её положено уточнить, как только вердикт станет известен.
+    @ObservationIgnored private var pendingEventID: UUID?
+
     @ObservationIgnored private var controller: GuardController!
     @ObservationIgnored private var enforcer: ProcessEnforcer!
 
@@ -277,15 +281,40 @@ public final class GuardVM {
             permissionFailure = nil
             recordedPIDs.removeAll()
             recordedReasons.removeAll()
+            pendingEventID = nil
             state = settings.isEnabled && settings.guardConfig.hasTargets
                 ? .safe(lastReading)
                 : .disabled
 
         case .kill(let reason):
             state = .unsafe(reason)
+            refineEpisodeReason(to: reason)
             enforce(reason: reason)
             startWatchdog()
         }
+    }
+
+    /// Причина эпизода, ставшая известной, дописывается в его запись.
+    ///
+    /// Ключ причины в `recordedReasons` подменяется вместе с текстом: иначе
+    /// уточнённая причина считалась бы новой и завела бы вторую запись про то же
+    /// самое падение.
+    private func refineEpisodeReason(to reason: UnsafeReason) {
+        if case .verificationPending = reason { return }
+        guard let id = pendingEventID else { return }
+
+        pendingEventID = nil
+        recordedReasons.remove(UnsafeReason.verificationPending.displayText)
+        recordedReasons.insert(reason.displayText)
+
+        eventLog.refine(
+            id: id,
+            reasonText: reason.displayText,
+            ip: lastReading?.ip,
+            country: lastReading?.primaryCountry,
+            confirmedCountry: lastReading?.confirmedCountry,
+            confirmSource: lastReading?.confirmSource?.rawValue
+        )
     }
 
     private func enforce(reason: UnsafeReason) {
@@ -314,7 +343,7 @@ public final class GuardVM {
         var names: [String] = []
         for name in fresh.map(\.targetName) where !names.contains(name) { names.append(name) }
 
-        eventLog.record(KillEvent(
+        let event = KillEvent(
             date: Date(),
             targetNames: names,
             kind: kind,
@@ -324,7 +353,9 @@ public final class GuardVM {
             confirmedCountry: lastReading?.confirmedCountry,
             confirmSource: lastReading?.confirmSource?.rawValue,
             killedPIDs: fresh.map(\.pid)
-        ))
+        )
+        eventLog.record(event)
+        if case .verificationPending = reason { pendingEventID = event.id }
         notifier.notify(
             reasonText: "\(names.joined(separator: ", ")): \(reason.displayText)",
             killedCount: fresh.count

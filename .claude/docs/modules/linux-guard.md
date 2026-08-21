@@ -111,6 +111,13 @@ Everything the policy decides is shared. What the system dictates is not:
 - **The confirmation cache and the reference-address fallback are identical to macOS**, down to the
   60 s / 15 min ceilings: the freeipapi quota counts per exit address and is shared with everyone
   else on that node, so its 429 must not kill targets.
+- **The journal keeps one entry per episode and refines its reason**, same contract as
+  `WetoShared`. `KillReporting` gained `refine(reason)` with an empty default implementation:
+  `report` fires only when something was actually killed, and by the time the verdict is known
+  the targets are already dead — so without a separate call the entry would keep saying
+  "not verified yet" forever. `apply` offers the settled reason before enforcing, and
+  `Journal::refine_last_reason` rewrites the last entry. Unlike macOS, entries here carry no
+  ip/country at all — a pre-existing gap, not part of this contract.
 
 ## Self-update
 

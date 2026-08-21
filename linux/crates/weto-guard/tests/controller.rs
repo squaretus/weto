@@ -203,11 +203,15 @@ impl SettingsProviding for FakeSettings {
 }
 
 #[derive(Clone, Default)]
-struct RecordingReporter(Arc<Mutex<Vec<String>>>);
+struct RecordingReporter(Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>);
 
 impl KillReporting for RecordingReporter {
     fn report(&self, _killed: &[weto_core::process::MatchedProcess], reason: &str) {
         self.0.lock().unwrap().push(reason.to_string());
+    }
+
+    fn refine(&self, reason: &str) {
+        self.1.lock().unwrap().push(reason.to_string());
     }
 }
 
@@ -471,6 +475,29 @@ fn a_blocked_country_kills_and_names_the_source() {
         .unwrap()
         .iter()
         .any(|r| r.contains("RU")));
+}
+
+/// Причина эпизода уточняется у приёмника даже тогда, когда завершать уже
+/// нечего: цели умерли на fail-closed, и записи с настоящей причиной иначе
+/// не появится вовсе — в журнале навсегда остаётся «ещё не проверено».
+#[test]
+fn the_settled_reason_is_offered_for_refinement() {
+    let h = harness();
+    h.controller.tick();
+
+    h.geo.now_reports("RU");
+    h.settings.edit(|_| {});
+    h.controller.tick();
+
+    let refinements = h.reporter.1.lock().unwrap().clone();
+    assert!(
+        refinements.contains(&"Подключение ещё не проверено".to_string()),
+        "первый такт fail-closed: {refinements:?}"
+    );
+    assert!(
+        refinements.iter().any(|r| r.contains("RU")),
+        "настоящая причина обязана дойти до журнала: {refinements:?}"
+    );
 }
 
 /// Кнопка спрашивает «где я», а не «нужна ли проверка»: запрос уходит даже

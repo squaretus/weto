@@ -80,9 +80,10 @@ impl SettingsProviding for SettingsSource {
     }
 }
 
-/// Журнал пишет каждый новый pid и каждую новую причину в рамках эпизода.
-/// Без этого запись «подключение ещё не проверено» съедала бы настоящую
-/// причину: она приходит первой, а интересна последняя.
+/// Журнал пишет каждый новый pid в рамках эпизода, а причину у записи держит
+/// одну — ту, что выяснилась последней. «Подключение ещё не проверено» приходит
+/// первым, потому что fail-closed срабатывает раньше вердикта, и уточняется
+/// на месте: новой записи не будет, завершать уже нечего.
 struct JournalWriter {
     paths: Paths,
     journal: Mutex<Journal>,
@@ -91,6 +92,25 @@ struct JournalWriter {
 }
 
 impl KillReporting for JournalWriter {
+    /// Причина эпизода, ставшая известной, дописывается в его запись.
+    fn refine(&self, reason: &str) {
+        let mut last = self.last_reason.lock().expect("журнал");
+        let pending = UnsafeReason::VerificationPending.display_text();
+        if last.as_deref() != Some(pending.as_str()) || reason == pending {
+            return;
+        }
+        *last = Some(reason.to_string());
+        drop(last);
+
+        let mut journal = self.journal.lock().expect("журнал");
+        if !journal.refine_last_reason(reason) {
+            return;
+        }
+        if let Err(error) = journal.save(&self.paths.journal_file()) {
+            eprintln!("weto: журнал не сохранился: {error}");
+        }
+    }
+
     fn report(&self, killed: &[MatchedProcess], reason: &str) {
         let mut last = self.last_reason.lock().expect("журнал");
         let same_episode = last.as_deref() == Some(reason);
