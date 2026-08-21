@@ -134,6 +134,14 @@ this layer decides *when* to ask and *what to do* with the answer.
   last known rule instead of disappearing. Both are fail-closed by intent and pinned by
   `ProcessEnforcerTests`.
 - Journal dedup is by pid **and** by reason within an episode; both sets are cleared only on `safe`.
+- **One episode, one entry: the reason is refined, not appended.** Fail-closed kills before the
+  verdict exists, so the first thing written is `verificationPending` — "don't know yet". A second
+  later the real reason is known, but on a live machine nothing gets killed again (the targets are
+  already dead), so no second entry would ever appear and the journal kept the excuse instead of
+  the cause. `GuardVM` remembers the id of that entry and `EventLogStore.refine` rewrites its
+  reason and geo readout in place; the reason key inside `recordedReasons` is swapped along with
+  it, otherwise the refined reason counts as new and produces a duplicate entry. Linux mirrors
+  this through `KillReporting.refine` — see `linux-guard`.
 - Boundary calls return `Result<Void, Error>`, never `Bool`: a silent Keychain or `launchctl`
   failure used to be reported as success.
 - `SettingsStore.migrateLegacyVPNSelection` runs before the first decision and refuses to guess:

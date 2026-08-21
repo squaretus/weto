@@ -758,6 +758,48 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
+    /// Fail-closed срабатывает раньше вердикта, поэтому в журнал первым попадает
+    /// «подключение ещё не проверено» — ответ «пока не знаю». Через миг причина
+    /// известна, и запись эпизода обязана назвать её: иначе журнал навсегда
+    /// сохраняет отговорку вместо того, из-за чего цели и умерли.
+    func test_journal_entry_of_an_episode_gets_the_settled_reason() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "RU"))
+
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+        XCTAssertEqual(h.log.events.count, 1)
+        XCTAssertEqual(h.log.events[0].reasonText, "Подключение ещё не проверено")
+
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
+        XCTAssertEqual(h.log.events.count, 1, "эпизод остаётся одной записью, а не двумя")
+        XCTAssertEqual(h.log.events[0].reasonText, "Обнаружена страна RU по данным ipinfo")
+        XCTAssertEqual(h.log.events[0].country, "RU", "показания вердикта тоже дописываются")
+        XCTAssertEqual(h.log.events[0].ip, "203.0.113.28")
+    }
+
+    /// Уточнение — про один эпизод. Новое падение после возврата к жизни обязано
+    /// заводить свою запись, а не переписывать прошлую.
+    func test_a_new_episode_does_not_rewrite_the_previous_entry() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.log.events.count, 1)
+        let first = h.log.events[0]
+
+        h.network.snapshotValue = directSnapshot()
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.log.events.count, 2, "второй эпизод — вторая запись")
+        XCTAssertEqual(h.log.events.last?.id, first.id)
+        XCTAssertEqual(h.log.events.last?.reasonText, first.reasonText)
+    }
+
     private func makeCountingHarness(
         targets: [String],
         resolverMapping: [String: String]
@@ -1150,15 +1192,17 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
         XCTAssertEqual(h.killer.killedBatches, [[500, 501], [500, 501]])
 
-        // Первая запись — завершение на время проверки, вторая — настоящая причина.
-        XCTAssertEqual(h.log.events.count, 2)
+        // Одно падение — одна запись: причина в ней уточняется с «ещё не проверено»
+        // на настоящую, как только вердикт готов. Двумя записями это выглядело как
+        // два разных события, а на живой машине второй записи не было вовсе —
+        // цели к тому моменту уже мертвы, завершать нечего.
+        XCTAssertEqual(h.log.events.count, 1)
         XCTAssertEqual(h.log.events.first?.country, "RU")
         XCTAssertEqual(
             h.log.events.first?.reasonText,
             UnsafeReason.blockedCountry(code: "RU", source: "ipinfo").displayText
         )
-        XCTAssertEqual(h.log.events.last?.reasonText, UnsafeReason.verificationPending.displayText)
-        XCTAssertEqual(h.notifier.messages.count, 2)
+        XCTAssertEqual(h.notifier.messages.count, 1)
     }
 
     func test_missing_confirmation_kills_and_shows_yellow() async {

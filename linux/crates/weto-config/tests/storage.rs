@@ -144,6 +144,31 @@ fn journal_keeps_the_last_ten_entries() {
     assert_eq!(journal.entries()[9].killed_pids, vec![14]);
 }
 
+/// Причина эпизода, ставшая известной, дописывается в его запись: fail-closed
+/// пишет «ещё не проверено» раньше вердикта, а второй записи не будет — цели
+/// к тому моменту уже мертвы.
+#[test]
+fn journal_refines_the_reason_of_the_last_entry() {
+    let mut journal = Journal::default();
+    journal.append(event(7, "Подключение ещё не проверено"));
+
+    assert!(journal.refine_last_reason("Адрес 185.228.113.231 в чёрном списке"));
+
+    assert_eq!(journal.entries().len(), 1);
+    assert_eq!(
+        journal.entries()[0].reason_text,
+        "Адрес 185.228.113.231 в чёрном списке"
+    );
+    assert_eq!(journal.entries()[0].killed_pids, vec![7]);
+}
+
+#[test]
+fn refining_an_empty_journal_changes_nothing() {
+    let mut journal = Journal::default();
+    assert!(!journal.refine_last_reason("Адрес в чёрном списке"));
+    assert!(journal.entries().is_empty());
+}
+
 #[test]
 fn journal_survives_a_round_trip() {
     let tmp = tempfile::tempdir().unwrap();
