@@ -28,6 +28,15 @@ public enum DesignResources {
         return .module
     }()
 
+    /// Флаг страны по коду ISO 3166-1 alpha-2. Набор лежит в бандле:
+    /// сеть на этом пути не нужна и вредна — `cdn.jsdelivr.net` в России
+    /// блокируется, а флаг показывается ровно тогда, когда пользователь под VPN.
+    public static func flagURL(forCountry code: String) -> URL? {
+        let code = code.lowercased()
+        guard code.count == 2, code.allSatisfy({ $0.isLetter }) else { return nil }
+        return bundle.url(forResource: code, withExtension: "svg", subdirectory: "Flags")
+    }
+
     public static func url(forResource name: String) -> URL? {
         bundle.url(forResource: name, withExtension: nil)
             ?? bundle.urlForImageResource(name)

@@ -14,7 +14,21 @@ public enum GuardTrigger: Equatable, Sendable {
 
     case appLaunched(bundleID: String)
 
+    /// Приложение закрыли. Для VPN-клиента это самое надёжное известие о том,
+    /// что защиты больше нет: ждать секунду до тика незачем.
+    case appTerminated(bundleID: String)
+
+    /// Таблица маршрутов изменилась. Единственный сигнал, которым видно клиента,
+    /// правящего маршруты напрямую: ни `State:/Network/Global/IPv4`, ни сетевые
+    /// сервисы такие правки не задевают.
+    case route
+
     case tick
+
+    /// Расписание гео: единственный триггер, который сам по себе идёт в сеть.
+    /// Отделён от `tick` намеренно — опрос системы бесплатный и частый, обращение
+    /// к чужим сервисам платное и редкое.
+    case geoSchedule
 }
 
 public protocol NetworkEventSourcing: AnyObject {
@@ -29,6 +43,9 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
 
     private var pathMonitor: NWPathMonitor?
     private var dynamicStore: SCDynamicStore?
+    private var routeSource: DispatchSourceRead?
+    private var routeSocket: Int32?
+    private var routeEmitPending = false
     private var runLoopSource: CFRunLoopSource?
     private var observerTokens: [NSObjectProtocol] = []
     private var handler: (@Sendable (GuardTrigger) -> Void)?
@@ -45,7 +62,47 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
 
         startPathMonitor()
         startDynamicStore()
+        startRouteSocket()
         startWorkspaceObservers()
+    }
+
+    /// Правки таблицы маршрутов от ядра.
+    ///
+    /// `PF_ROUTE` — единственный способ увидеть клиента, который поднимает туннель
+    /// сам и раскладывает маршруты префиксами: сетевого сервиса он не создаёт,
+    /// `State:/Network/Global/IPv4` не меняет, и подписки на конфигурацию сети
+    /// про него молчат. Проверено на живой машине с такой сборкой клиента.
+    private func startRouteSocket() {
+        let descriptor = socket(PF_ROUTE, SOCK_RAW, AF_UNSPEC)
+        guard descriptor >= 0 else { return }
+
+        let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
+        source.setEventHandler { [weak self] in
+            var buffer = [UInt8](repeating: 0, count: 2048)
+            let read = recv(descriptor, &buffer, buffer.count, 0)
+            guard read > 0 else { return }
+            self?.emitRouteChange()
+        }
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
+
+        routeSocket = descriptor
+        routeSource = source
+    }
+
+    /// Подъём туннеля добавляет маршруты пачками — десятками и сотнями сообщений.
+    /// Каждое из них означает одно и то же «сеть изменилась», а на другом конце
+    /// у нас обход процессов и решение охраны, поэтому пачка схлопывается в одно
+    /// событие.
+    private func emitRouteChange() {
+        guard !routeEmitPending else { return }
+        routeEmitPending = true
+
+        queue.asyncAfter(deadline: .now() + Constants.networkEventDebounceSeconds) { [weak self] in
+            guard let self else { return }
+            self.routeEmitPending = false
+            self.emit(.route)
+        }
     }
 
     public func stop() {
@@ -61,6 +118,11 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
         }
         runLoopSource = nil
         dynamicStore = nil
+
+        routeSource?.cancel()
+        routeSource = nil
+        routeSocket = nil
+        routeEmitPending = false
 
         for token in observerTokens {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
@@ -130,11 +192,25 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
         observerTokens.append(center.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: nil
         ) { [weak self] notification in
-            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
-                    as? NSRunningApplication,
-                  let bundleID = app.bundleIdentifier
-            else { return }
+            guard let bundleID = Self.bundleID(from: notification) else { return }
             self?.emit(.appLaunched(bundleID: bundleID))
         })
+
+        // Закрытие приложения — известие не хуже запуска, а для VPN-клиента оно
+        // и есть главное: подписки на завершение раньше не было вовсе, и уход
+        // клиента замечался только следующим тиком.
+        observerTokens.append(center.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil
+        ) { [weak self] notification in
+            guard let bundleID = Self.bundleID(from: notification) else { return }
+            self?.emit(.appTerminated(bundleID: bundleID))
+        })
+    }
+
+    private static func bundleID(from notification: Notification) -> String? {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+        else { return nil }
+        return app.bundleIdentifier
     }
 }

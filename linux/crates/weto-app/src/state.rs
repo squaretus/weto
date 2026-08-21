@@ -16,6 +16,7 @@ use std::time::Duration;
 use weto_config::journal::{Journal, KillEvent, KillEventKind};
 use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
+use weto_core::geo::SourceOutcome;
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::presentation::GuardState;
 use weto_core::process::MatchedProcess;
@@ -23,15 +24,18 @@ use weto_guard::controller::{GuardController, GuardSnapshot, KillReporting, Sett
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
-use weto_sys::network_snapshot::SysfsNetworkReader;
+use weto_sys::network_snapshot::KernelNetworkReader;
 use weto_sys::notifications::{KillNotifying, PortalNotifier};
 use weto_sys::process_killer::SigtermKiller;
 use weto_sys::process_registry::ProcRegistry;
 use weto_sys::secret_store::FileSecretStore;
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
-/// Шаг штатного тика задаётся в настройках, как на macOS.
 const TICK_UNSAFE: Duration = Duration::from_millis(250);
+
+/// Штатный тик — раз в секунду и константой, а не настройкой: опрос системы
+/// бесплатный, а платит за частоту расписание гео внутри охраны.
+const TICK_SAFE: Duration = Duration::from_secs(1);
 
 /// Настройки читаются из файла при каждом обращении охраны — так правка
 /// из окна настроек применяется к следующему же тику без всякой рассылки.
@@ -76,9 +80,10 @@ impl SettingsProviding for SettingsSource {
     }
 }
 
-/// Журнал пишет каждый новый pid и каждую новую причину в рамках эпизода.
-/// Без этого запись «подключение ещё не проверено» съедала бы настоящую
-/// причину: она приходит первой, а интересна последняя.
+/// Журнал пишет каждый новый pid в рамках эпизода, а причину у записи держит
+/// одну — ту, что выяснилась последней. «Подключение ещё не проверено» приходит
+/// первым, потому что fail-closed срабатывает раньше вердикта, и уточняется
+/// на месте: новой записи не будет, завершать уже нечего.
 struct JournalWriter {
     paths: Paths,
     journal: Mutex<Journal>,
@@ -87,6 +92,25 @@ struct JournalWriter {
 }
 
 impl KillReporting for JournalWriter {
+    /// Причина эпизода, ставшая известной, дописывается в его запись.
+    fn refine(&self, reason: &str) {
+        let mut last = self.last_reason.lock().expect("журнал");
+        let pending = UnsafeReason::VerificationPending.display_text();
+        if last.as_deref() != Some(pending.as_str()) || reason == pending {
+            return;
+        }
+        *last = Some(reason.to_string());
+        drop(last);
+
+        let mut journal = self.journal.lock().expect("журнал");
+        if !journal.refine_last_reason(reason) {
+            return;
+        }
+        if let Err(error) = journal.save(&self.paths.journal_file()) {
+            eprintln!("weto: журнал не сохранился: {error}");
+        }
+    }
+
     fn report(&self, killed: &[MatchedProcess], reason: &str) {
         let mut last = self.last_reason.lock().expect("журнал");
         let same_episode = last.as_deref() == Some(reason);
@@ -150,7 +174,7 @@ impl AppState {
         };
 
         let controller = Arc::new(GuardController::new(
-            Box::new(SysfsNetworkReader::new()),
+            Box::new(KernelNetworkReader::new()),
             Box::new(HttpGeoProbe::new(
                 GeoEndpoints::default(),
                 Box::new(RouteNetworkPath),
@@ -206,13 +230,23 @@ impl AppState {
     /// то же fail-closed, что применяется к целям.
     pub fn guard_state(&self) -> GuardState {
         let settings = self.settings.current();
+        let snapshot = self.snapshot();
+        let decision = snapshot
+            .decision
+            .clone()
+            .unwrap_or(GuardDecision::Kill(UnsafeReason::VerificationPending));
+
         GuardState {
             is_enabled: settings.is_enabled,
             has_targets: !settings.targets.is_empty(),
-            decision: self
-                .snapshot()
-                .decision
-                .unwrap_or(GuardDecision::Kill(UnsafeReason::VerificationPending)),
+            // Цели живут, но ipinfo молчит: защита держится на доказанной
+            // неизменности адреса, и щит обязан быть жёлтым, а не зелёным.
+            is_degraded: matches!(decision, GuardDecision::Safe)
+                && snapshot
+                    .report
+                    .as_ref()
+                    .is_some_and(|r| matches!(r.ipinfo, SourceOutcome::Failed(_))),
+            decision,
             country: None,
         }
     }
@@ -239,7 +273,6 @@ impl AppState {
     /// Здесь та же ловушка ждала бы с окном, которое может не открыться никогда.
     pub fn start_guard(self: &Arc<Self>) {
         let controller = self.controller.clone();
-        let settings = self.settings.clone();
         std::thread::Builder::new()
             .name("weto-guard".to_string())
             .spawn(move || {
@@ -249,7 +282,7 @@ impl AppState {
                     // Шаг штатного тика перечитывается каждый раз: правка
                     // в настройках применяется со следующего же круга.
                     let interval = match decision {
-                        GuardDecision::Safe => settings.current().poll_interval(),
+                        GuardDecision::Safe => TICK_SAFE,
                         GuardDecision::Kill(_) => TICK_UNSAFE,
                     };
                     // Событие сети прерывает ожидание: реакция на падение

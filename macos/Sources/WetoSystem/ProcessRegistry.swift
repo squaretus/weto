@@ -26,10 +26,20 @@ public struct ProcessRegistry: ProcessLocating {
             .path
     }
 
+    /// Все процессы машины.
+    ///
+    /// `proc_listallpids` принимает размер буфера **в байтах**, а возвращает
+    /// **количество** pid — libproc делит на `sizeof(int)` сам. Лишнее деление
+    /// на стороне вызывающего оставляло от списка четверть, и именно свежую:
+    /// ядро перечисляет процессы от новых к старым. Из-за этого цель, живущая
+    /// дольше двух сотен последних запусков, не находилась вовсе — ни для охраны,
+    /// ни для строки «запущено», — а VPN-приложение, открытое неделю назад,
+    /// считалось закрытым.
     public func allProcesses(includeArguments: Bool) -> [ProcessSnapshot] {
         let capacity = Int(proc_listallpids(nil, 0))
         guard capacity > 0 else { return [] }
 
+        // Запас на процессы, появившиеся между двумя вызовами.
         var pids = [pid_t](repeating: 0, count: capacity + 64)
         let byteCount = Int32(pids.count * MemoryLayout<pid_t>.size)
         let written = pids.withUnsafeMutableBufferPointer { buffer in
@@ -37,7 +47,7 @@ public struct ProcessRegistry: ProcessLocating {
         }
         guard written > 0 else { return [] }
 
-        let count = Int(written) / MemoryLayout<pid_t>.size
+        let count = min(Int(written), pids.count)
         var result: [ProcessSnapshot] = []
         result.reserveCapacity(count)
 

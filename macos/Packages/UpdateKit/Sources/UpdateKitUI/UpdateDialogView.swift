@@ -79,6 +79,10 @@ public struct UpdateDialogView: View {
     ///
     /// Выравнивание по центру задано явно: ряд смешивает пилюли и кнопку с меню,
     /// и на умолчании они вставали по разным линиям.
+    ///
+    /// Свободная ширина делится между кнопками поровну — по распорке на каждый
+    /// промежуток. С одной распоркой ряд читался как две группы: слева «Пропустить
+    /// версию», справа прижатые друг к другу «Напомнить позже» и «Обновить».
     @ViewBuilder
     private func buttons(model: UpdateDialogModel) -> some View {
         HStack(alignment: .center, spacing: 8) {
@@ -101,6 +105,8 @@ public struct UpdateDialogView: View {
                     .fixedSize(horizontal: true, vertical: false)
 
                 if model.canInstall {
+                    Spacer(minLength: 8)
+
                     theme.primaryButton(controller.strings.install) { controller.install() }
                         .fixedSize(horizontal: true, vertical: false)
                 }

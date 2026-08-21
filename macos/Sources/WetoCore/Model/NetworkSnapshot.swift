@@ -1,100 +1,44 @@
 import Foundation
 
-public struct NetworkServiceSnapshot: Equatable, Sendable, Identifiable {
-    public let uuid: String
-    public let name: String
+/// Кто выпускает трафик наружу, по ответу ядра: имя интерфейса и локальный адрес,
+/// который ядро выберет источником. Адрес входит в отпечаток вместе с именем —
+/// туннель умеет сохранить имя и сменить адрес, и это смена состояния сети.
+public struct OutgoingRoute: Equatable, Sendable {
+    public let interface: String
+    public let address: String
 
-    public let activeInterface: String?
-
-    /// Квалификация с границы системы: сервис объявлен туннелем в конфигурации сети.
-    /// Выводить это из имени нельзя — «Happ» или «Wi-Fi» пользователь переименует как угодно.
-    public let isVPN: Bool
-
-    public var id: String { uuid }
-
-    public init(uuid: String, name: String, activeInterface: String?, isVPN: Bool) {
-        self.uuid = uuid
-        self.name = name
-        self.activeInterface = activeInterface
-        self.isVPN = isVPN
-    }
-
-    /// Приставка идентификатора кандидата, у которого сервиса нет вовсе:
-    /// клиент поднял туннель сам, и опознать его можно только по интерфейсу.
-    public static let interfacePrefix = "interface:"
-
-    /// Кандидат от живого интерфейса, а не от записи в настройках сети.
-    ///
-    /// Имя показывается как есть (`utun4`): выяснить, какое приложение владеет
-    /// туннелем, macOS не даёт, а выдумывать ему название значило бы врать.
-    /// На Linux в списке стоят имена интерфейсов по той же причине.
-    public static func fromInterface(_ name: String) -> NetworkServiceSnapshot {
-        NetworkServiceSnapshot(
-            uuid: interfacePrefix + name,
-            name: name,
-            activeInterface: name,
-            isVPN: true
-        )
-    }
-
-    public var isInterfaceBacked: Bool {
-        uuid.hasPrefix(Self.interfacePrefix)
+    public init(interface: String, address: String) {
+        self.interface = interface
+        self.address = address
     }
 }
 
+/// Снимок сети сведён к одному вопросу: через кого ядро выпускает вердиктный
+/// запрос.
+///
+/// Больше в снимке ничего нет и быть не должно. Список сетевых сервисов,
+/// кандидаты в VPN и владелец маршрута по конфигурации сети ушли вместе с выбором
+/// туннеля: пользователь выбирает приложение, а состояние подключения проверяется
+/// гео-запросом. Снимок остался только признаком свежести вердикта.
 public struct NetworkSnapshot: Equatable, Sendable {
-    public let services: [NetworkServiceSnapshot]
 
-    public let primaryServiceUUID: String?
+    public let outgoing: OutgoingRoute?
 
-    /// Интерфейс, которому досталась маршрутизация по умолчанию.
-    ///
-    /// Спрашивается отдельно от сервиса: у туннеля, поднятого в пользовательском
-    /// пространстве, сервиса нет, и владельца маршрута по нему не определить.
-    public let primaryInterface: String?
-
-    public init(
-        services: [NetworkServiceSnapshot],
-        primaryServiceUUID: String?,
-        primaryInterface: String? = nil
-    ) {
-        self.services = services
-        self.primaryServiceUUID = primaryServiceUUID
-        self.primaryInterface = primaryInterface
+    public init(outgoing: OutgoingRoute?) {
+        self.outgoing = outgoing
     }
 
     /// Отпечаток снимка: по нему видно, устарел ли прежний сетевой вердикт.
     /// Сравнивать сами снимки на равенство недостаточно дёшево для горячего пути.
     ///
-    /// В отпечаток входит ровно то, от чего вердикт зависит: состояние выбранного
-    /// сервиса и владелец маршрута по умолчанию, определяющий выход в сеть.
-    /// Чужие сервисы и туннели не входят намеренно.
+    /// Входит ровно то, от чего вердикт зависит: интерфейс, через который уходит
+    /// вердиктный запрос, и его локальный адрес. Чужие интерфейсы не входят
+    /// намеренно — второй VPN, живущий рядом и переподключающийся сам, маршрут
+    /// не забирает, и обесценивать вердикт ему нечем.
     ///
-    /// Отпечаток по всему снимку выглядел строже, а на деле подставлял: второй VPN,
-    /// живущий рядом, рвёт связь и поднимается сам — состав интерфейсов меняется,
-    /// прежний вердикт объявляется протухшим, и цели завершаются с
-    /// `verificationPending` при полностью исправном выбранном туннеле.
-    public func verdictFingerprint(forService serviceID: String?) -> String {
-        let selected = serviceID.flatMap { id in services.first { $0.uuid == id } }
-
-        // Пропавший сервис и невыбранный VPN — разные состояния с разными
-        // вердиктами впереди (`vpnDown` против `vpnNotConfigured`), и отпечаток
-        // обязан их различать.
-        let part = selected.map {
-            "\($0.uuid):\($0.activeInterface ?? "-"):\($0.isVPN ? "vpn" : "net")"
-        } ?? "selected=\(serviceID ?? "-")"
-
-        return [
-            part,
-            "primary=\(primaryServiceUUID ?? "-")",
-            "iface=\(primaryInterface ?? "-")",
-        ].joined(separator: "|")
-    }
-
-    /// Одинаковые имена не склеиваются: выбор хранится по UUID, и два «Happ» — разные цели.
-    public var vpnCandidates: [NetworkServiceSnapshot] {
-        services.filter(\.isVPN).sorted {
-            $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }
+    /// `-` означает «наружу никто не выпускает или адрес гео-сервиса ещё
+    /// не разрешён»: состояние, в котором вердикта быть не может.
+    public var verdictFingerprint: String {
+        outgoing.map { "out=\($0.interface)/\($0.address)" } ?? "out=-"
     }
 }

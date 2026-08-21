@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import WetoSystem
 import WetoCore
 
@@ -17,6 +18,32 @@ final class ProcessRegistryTests: XCTestCase {
         for process in ProcessRegistry().allProcesses() {
             XCTAssertFalse(process.executablePath.isEmpty)
         }
+    }
+
+    /// `proc_listallpids` возвращает **количество** pid, а не число байт: делённое
+    /// на `sizeof(pid_t)`, оно отдавало четверть списка — и именно свежую четверть,
+    /// потому что ядро перечисляет процессы от новых к старым. Все прежние тесты
+    /// порождали процесс за миг до обхода и потому проходили; невидимым оставалось
+    /// то, что живёт с загрузки машины.
+    func test_all_processes_include_the_oldest_process_on_the_machine() {
+        let processes = ProcessRegistry().allProcesses()
+        let launchd = processes.first { $0.pid == 1 }
+        XCTAssertEqual(
+            launchd?.executablePath, "/sbin/launchd",
+            "launchd не найден среди \(processes.count) перечисленных процессов"
+        )
+    }
+
+    /// Тот же обрез, увиденный со стороны количества: перечислено должно быть
+    /// столько процессов, сколько их у ядра, а не четверть.
+    func test_all_processes_cover_the_whole_kernel_list() {
+        let expected = Int(proc_listallpids(nil, 0))
+        let actual = ProcessRegistry().allProcesses().count
+        XCTAssertGreaterThan(expected, 0)
+        XCTAssertGreaterThan(
+            Double(actual), Double(expected) * 0.5,
+            "перечислено \(actual) из \(expected) — список обрезан"
+        )
     }
 
     func test_spawned_process_is_discovered() throws {

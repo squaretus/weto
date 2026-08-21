@@ -2,94 +2,84 @@ import XCTest
 @testable import WetoSystem
 import WetoCore
 
+/// Снимок сети сведён к одному вопросу — через кого ядро выпускает вердиктный
+/// запрос, — поэтому проверок здесь ровно столько же: ответ ядра и его согласие
+/// с системой. Живая машина, потому что подделать таблицу маршрутов нечем.
 final class NetworkSnapshotReaderTests: XCTestCase {
 
-    func test_every_service_has_non_empty_uuid_and_name() {
-        for service in NetworkSnapshotReader().snapshot().services {
-            XCTAssertFalse(service.uuid.isEmpty, "пустой UUID у сервиса \(service.name)")
-            XCTAssertFalse(service.name.isEmpty, "пустое имя у сервиса \(service.uuid)")
+    /// Снимок с уже разрешённым адресом гео-сервиса.
+    ///
+    /// Имя разрешается в стороне от опроса — блокировать им охрану нельзя, — поэтому
+    /// первый снимок после старта носителя трафика ещё не знает. Живым проверкам
+    /// нужно дождаться разрешения, а не ловить эту секунду.
+    private func snapshotWithRoute(within seconds: TimeInterval = 3) -> NetworkSnapshot {
+        let reader = NetworkSnapshotReader()
+        var snapshot = reader.snapshot()
+        let deadline = Date().addingTimeInterval(seconds)
+
+        while snapshot.outgoing == nil, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+            snapshot = reader.snapshot()
         }
-    }
-
-    func test_primary_service_when_present_exists_among_services() {
-        let snapshot = NetworkSnapshotReader().snapshot()
-        guard let primary = snapshot.primaryServiceUUID else { return }
-        XCTAssertTrue(
-            snapshot.services.contains { $0.uuid == primary },
-            "PrimaryService \(primary) отсутствует в списке сервисов"
-        )
-    }
-
-    func test_active_interface_names_are_non_empty_when_present() {
-        for service in NetworkSnapshotReader().snapshot().services {
-            guard let iface = service.activeInterface else { continue }
-            XCTAssertFalse(iface.isEmpty)
-        }
-    }
-
-    func test_service_uuids_are_unique() {
-        let services = NetworkSnapshotReader().snapshot().services
-        XCTAssertEqual(Set(services.map(\.uuid)).count, services.count)
+        return snapshot
     }
 
     func test_repeated_reads_are_stable() {
         let reader = NetworkSnapshotReader()
-        XCTAssertEqual(reader.snapshot().services.count, reader.snapshot().services.count)
+        XCTAssertEqual(reader.snapshot(), reader.snapshot())
     }
 
-    func test_resolver_consumes_reader_output_end_to_end() {
-
-        let snapshot = NetworkSnapshotReader().snapshot()
-        for candidate in snapshot.vpnCandidates {
-            let status = VPNStatusResolver.status(serviceID: candidate.uuid, in: snapshot)
-            XCTAssertNotEqual(status, .notConfigured, "\(candidate.name) не должен давать notConfigured")
+    /// Носитель трафика в снимке — тот, чьему интерфейсу принадлежит выбранный
+    /// ядром исходящий адрес. Иначе отпечаток склеивал бы разные состояния сети.
+    func test_the_carrier_owns_the_outgoing_address() throws {
+        let snapshot = snapshotWithRoute()
+        guard let outgoing = snapshot.outgoing else {
+            throw XCTSkip("наружу сейчас никто не выпускает")
         }
-    }
 
-    func test_every_candidate_is_qualified_as_vpn() {
-
-        for candidate in NetworkSnapshotReader().snapshot().vpnCandidates {
-            XCTAssertTrue(candidate.isVPN, "\(candidate.name) попал в кандидаты без квалификации")
-        }
-    }
-
-    /// Туннель, которому досталась маршрутизация по умолчанию, обязан быть
-    /// выбираемым. Иначе пользователь видит работающий VPN и список, в котором
-    /// его нет, — так и было со сборками, поднимающими `utun` мимо сетевых
-    /// сервисов. Проверка идёт по живой машине: на ней и обнаружилось.
-    func test_the_tunnel_owning_the_default_route_is_selectable() throws {
-        let snapshot = NetworkSnapshotReader().snapshot()
-
-        guard let primary = snapshot.primaryInterface,
-              ["utun", "ppp", "ipsec"].contains(where: primary.hasPrefix)
-        else { throw XCTSkip("маршрут по умолчанию сейчас идёт не через туннель") }
-
+        let addresses = try XCTUnwrap(
+            InterfaceAddresses.all()[outgoing.interface],
+            "интерфейс \(outgoing.interface) не найден среди живых"
+        )
         XCTAssertTrue(
-            snapshot.vpnCandidates.contains { $0.activeInterface == primary },
-            "туннель \(primary) держит маршрут по умолчанию, но выбрать его нечем"
+            addresses.contains(outgoing.address),
+            "адрес \(outgoing.address) не принадлежит \(outgoing.interface)"
         )
     }
 
-    /// Один туннель — один кандидат: интерфейс, уже принадлежащий сервису,
-    /// не должен появиться в списке ещё и голым именем.
-    func test_interface_backed_candidates_do_not_duplicate_services() {
-        let snapshot = NetworkSnapshotReader().snapshot()
-        let claimed = Set(
-            snapshot.services.filter { !$0.isInterfaceBacked }.compactMap(\.activeInterface)
-        )
-
-        for candidate in snapshot.services where candidate.isInterfaceBacked {
-            XCTAssertFalse(claimed.contains(candidate.name), "\(candidate.name) уже занят сервисом")
+    /// Отпечаток обязан отличать «наружу никто не выпускает» от любого рабочего
+    /// состояния: в первом вердикта быть не может.
+    func test_the_fingerprint_names_the_carrier() throws {
+        let snapshot = snapshotWithRoute()
+        guard let outgoing = snapshot.outgoing else {
+            throw XCTSkip("наружу сейчас никто не выпускает")
         }
+
+        XCTAssertTrue(snapshot.verdictFingerprint.contains(outgoing.interface))
+        XCTAssertNotEqual(snapshot.verdictFingerprint, "out=-")
     }
 
-    func test_wifi_service_is_not_classified_as_vpn() throws {
+    /// Проба подменяется — остальная сборка снимка проверяется без сети.
+    func test_the_snapshot_carries_whatever_the_probe_answered() {
+        let route = OutgoingRoute(interface: "utun9", address: "10.7.0.2")
+        let snapshot = NetworkSnapshotReader(routeProbe: FixedRoute(route)).snapshot()
 
-        let snapshot = NetworkSnapshotReader().snapshot()
-        guard let wifi = snapshot.services.first(where: { $0.name == "Wi-Fi" }) else {
-            throw XCTSkip("на машине нет сервиса с именем Wi-Fi")
-        }
-        XCTAssertFalse(wifi.isVPN)
-        XCTAssertFalse(snapshot.vpnCandidates.contains { $0.uuid == wifi.uuid })
+        XCTAssertEqual(snapshot.outgoing, route)
+        XCTAssertEqual(snapshot.verdictFingerprint, "out=utun9/10.7.0.2")
     }
+
+    func test_without_a_route_the_snapshot_is_empty() {
+        let snapshot = NetworkSnapshotReader(routeProbe: FixedRoute(nil)).snapshot()
+
+        XCTAssertNil(snapshot.outgoing)
+        XCTAssertEqual(snapshot.verdictFingerprint, "out=-")
+    }
+}
+
+private struct FixedRoute: RouteProbing {
+    let route: OutgoingRoute?
+
+    init(_ route: OutgoingRoute?) { self.route = route }
+
+    func outgoingRoute() -> OutgoingRoute? { route }
 }

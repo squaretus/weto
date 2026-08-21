@@ -27,8 +27,8 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `GuardVM.recheckNow()` — user-driven probe from the popup; `isProbing`, `lastReport` back it
 - `GuardVM.refreshVPNCandidates()`, `refreshRunningTargets()`, `runningProcessCount(forTarget:)`,
   `displayName(forTarget:)`, `resolvedDescription(forTarget:)`, `unloadCompletely() → Result<Void, LaunchAgentError>`
-- `SettingsStore` setters (`isEnabled`, `targets`, `vpnServiceID`, `blockedCountryCodes`,
-  `blockedIPRangeTexts`, `pollIntervalSeconds`, `appTheme`),
+- `SettingsStore` setters (`isEnabled`, `targets`, `vpnAppRule`, `blockedCountryCodes`,
+  `blockedIPRangeTexts`, `appTheme`),
   `setIPInfoToken(_) → Result<Void, SettingsPersistenceError>`,
   `addBlockedEntry(_) → Result<Void, BlacklistEntryError>`, `removeBlockedEntry(_)`,
   `migrateLegacyVPNSelection(in:)`, `onGuardConfigurationChange(_)`, `guardConfig`
@@ -45,7 +45,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   `detail(for:reading:)`
 
 ## Dependencies
-- `WetoCore`: `GuardPolicy`, `VPNStatusResolver`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`
+- `WetoCore`: `GuardPolicy`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`
 - `WetoSystem` protocols (injected, mocked in tests): `NetworkSnapshotReading`, `NetworkEventSourcing`,
   `GeoProbing`, `ProcessLocating`, `ProcessKilling`, `TargetResolving`, `SecretStoring`, `HTTPFetching`
 - `UpdateKit` / `UpdateKitUI`: `UpdateController`, `HelperUpdateInstaller`, `UserDefaultsUpdateStore`,
@@ -66,11 +66,11 @@ this layer decides *when* to ask and *what to do* with the answer.
   cache directory, spawns a detached `bash` that `rm -rf`s the `.app` after our pid exits.
 - Spawns `launchctl bootout/bootstrap` for `gui/<uid>/com.weto.app`.
 - Network: ipinfo + confirmation probes via `GeoProbing`; GitHub releases API every hour
-  (`UpdateFeedConfiguration.checkInterval`), plus flag SVG prefetch on each new reading.
+  (`UpdateFeedConfiguration.checkInterval`). Flags come from the bundle, so no network there.
 - XPC to `com.weto.helper` for install, for polling the progress of a started install
   (`installState`, every 0.4 s while the install is in flight) and for helper self-uninstall.
 - User notifications on each newly recorded kill; authorization requested in `start()`.
-- Long-lived `Task`s: tick loop (`pollIntervalSeconds`, default 5 s), watchdog (0.25 s),
+- Long-lived `Task`s: tick loop (1 s), geo schedule (5 s), watchdog (0.25 s),
   probe task (300 ms debounce), update periodic task, install-outcome watch task (5 s, only
   between `.started` and either a reported failure or process death).
   All stored and cancelled — see invariants.
@@ -107,10 +107,12 @@ this layer decides *when* to ask and *what to do* with the answer.
   is legacy only.
 - Verdict freshness = `(config revision, snapshot fingerprint)`. Without the pair, every routine
   5 s tick re-entered `verificationPending` and killed targets over a perfectly healthy VPN. The
-  fingerprint comes from `verdictFingerprint(forService: config.vpnServiceID)`, never from the
-  whole snapshot: with the machine-wide one, a second VPN living beside the chosen tunnel
-  (a corporate client dropping and reconnecting on its own) invalidated the verdict and killed
-  the targets, though neither the chosen service nor the default route had moved.
+  fingerprint covers the traffic carrier and its local address, never the whole snapshot: with a
+  machine-wide one, a second VPN living beside the working tunnel (a corporate client dropping and
+  reconnecting on its own) invalidated the verdict and killed the targets, though the traffic never
+  moved.
+- The VPN app's rule never enters `Scan.rules`. `enforce` kills everything in that list, and killing
+  the client would make the unsafe state irreversible; choosing an app also drops it from `targets`.
 - A stale probe never returns `safe`: `applyLatestNetworkOutcome` bails unless
   `revision == expected`, and re-reads settings + snapshot immediately before deciding.
 - `GuardController` subscribes to config changes in `init`, not in `start()` — a setting changed
@@ -132,6 +134,14 @@ this layer decides *when* to ask and *what to do* with the answer.
   last known rule instead of disappearing. Both are fail-closed by intent and pinned by
   `ProcessEnforcerTests`.
 - Journal dedup is by pid **and** by reason within an episode; both sets are cleared only on `safe`.
+- **One episode, one entry: the reason is refined, not appended.** Fail-closed kills before the
+  verdict exists, so the first thing written is `verificationPending` — "don't know yet". A second
+  later the real reason is known, but on a live machine nothing gets killed again (the targets are
+  already dead), so no second entry would ever appear and the journal kept the excuse instead of
+  the cause. `GuardVM` remembers the id of that entry and `EventLogStore.refine` rewrites its
+  reason and geo readout in place; the reason key inside `recordedReasons` is swapped along with
+  it, otherwise the refined reason counts as new and produces a duplicate entry. Linux mirrors
+  this through `KillReporting.refine` — see `linux-guard`.
 - Boundary calls return `Result<Void, Error>`, never `Bool`: a silent Keychain or `launchctl`
   failure used to be reported as success.
 - `SettingsStore.migrateLegacyVPNSelection` runs before the first decision and refuses to guess:

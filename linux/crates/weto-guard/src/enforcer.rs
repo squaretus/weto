@@ -34,6 +34,14 @@ impl ProcessEnforcer {
         running_targets(&self.registry.snapshot(), rules)
     }
 
+    /// Живо ли хоть одно совпадение с правилом. Нужен для VPN-приложения:
+    /// его запущенность и есть локальное основание вердикта, а завершать его
+    /// нельзя — поэтому отдельный вопрос, а не часть `enforce`.
+    pub fn is_running(&self, rule: &TargetRule) -> bool {
+        !weto_core::process::matches(&self.registry.snapshot(), std::slice::from_ref(rule))
+            .is_empty()
+    }
+
     /// Завершает всё, что подходит под правила, и сообщает, кому сигнал
     /// действительно ушёл.
     pub fn enforce(&self, rules: &[TargetRule]) -> EnforcementResult {

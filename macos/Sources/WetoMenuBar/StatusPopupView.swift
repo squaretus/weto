@@ -103,7 +103,7 @@ struct StatusPopupView: View {
     }
 
     private var tone: StatusTone {
-        StatusTone(coordinator.guardVM.state.statusColor)
+        StatusTone(coordinator.guardVM.statusColor)
     }
 
     private var header: some View {

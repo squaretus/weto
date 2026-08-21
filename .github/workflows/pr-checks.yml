@@ -31,6 +31,11 @@ jobs:
       # прошлых сбоя («приложение не появилось» и «попап падал при клике») были
       # именно про упаковку, а CI до сих пор их не видел. Контракт делает
       # настоящую релизную сборку и заодно прогоняет launch-agent-contract.sh.
+      # Границы модулей: тёплый кэш SwiftPM прячет незаявленную зависимость,
+      # и `swift build` в рабочем дереве проходит там, где чистая сборка падает.
+      - name: Module boundaries
+        run: bash scripts/tests/module-boundary-contract.sh
+
       - name: Packaging contracts
         run: |
           chmod +x scripts/build.sh scripts/preinstall scripts/postinstall \
@@ -115,4 +120,5 @@ jobs:
           cargo run --manifest-path shared/tools/gen-tokens/Cargo.toml -- \
             --out-swift macos/Sources/WetoDesign/Tokens/WetoTokens.swift \
             --out-css-dir linux/crates/weto-ui/style
+          bash shared/tools/sync-flags.sh
           git diff --exit-code

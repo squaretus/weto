@@ -1,12 +1,18 @@
 import Foundation
 
-public enum VPNStatus: Equatable, Sendable {
+/// Состояние VPN-приложения — того, что выбрал пользователь.
+///
+/// Выбирается приложение, а не туннель, потому что вопрос «какой из `utunN` твой»
+/// пользователю задать нельзя: имена ничего не значат, меняются при каждом
+/// переподключении и у сборок мимо App Store не имеют за собой сетевого сервиса.
+/// Вопрос «какое приложение поднимает тебе VPN» — отвечаемый.
+public enum VPNAppStatus: Equatable, Sendable {
 
-    case notConfigured
+    case notChosen
 
-    case down
+    case notRunning
 
-    case up(isPrimary: Bool)
+    case running
 }
 
 public enum ConfirmSource: String, Equatable, Codable, Sendable {
@@ -35,5 +41,21 @@ public struct GeoReading: Equatable, Sendable {
 
 public enum GeoOutcome: Equatable, Sendable {
     case resolved(GeoReading)
+
+    /// ipinfo молчит, но резервный сервис назвал наш адрес, и он совпал с адресом
+    /// прошлого вердикта. Тот же адрес — та же страна, поэтому круг гео не нужен:
+    /// в дело идёт прошлое чтение, и проверки по нему прогоняются полностью.
+    /// Снисхождение выдаётся за доказательство неизменности адреса, а не за давность.
+    case degraded(previous: GeoReading, detail: String)
+
     case unavailable(String)
+
+    /// Чтение, по которому принимается решение. `nil` — вердикта нет вовсе.
+    public var reading: GeoReading? {
+        switch self {
+        case .resolved(let reading): return reading
+        case .degraded(let previous, _): return previous
+        case .unavailable: return nil
+        }
+    }
 }

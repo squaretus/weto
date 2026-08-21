@@ -19,7 +19,7 @@ use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
-use weto_sys::network_snapshot::{NetworkSnapshotReading, SysfsNetworkReader};
+use weto_sys::network_snapshot::{KernelNetworkReader, NetworkSnapshotReading};
 use weto_sys::process_killer::SigtermKiller;
 use weto_sys::process_registry::ProcRegistry;
 use weto_sys::secret_store::FileSecretStore;
@@ -53,7 +53,7 @@ impl KillReporting for PrintingReporter {
 
 fn build_controller(paths: &Paths) -> GuardController {
     GuardController::new(
-        Box::new(SysfsNetworkReader::new()),
+        Box::new(KernelNetworkReader::new()),
         Box::new(HttpGeoProbe::new(
             GeoEndpoints::default(),
             Box::new(RouteNetworkPath),
@@ -83,34 +83,24 @@ fn main() {
 
 fn dump_network(paths: &Paths) {
     let settings = Settings::load(&paths.settings_file()).unwrap_or_default();
-    let snapshot = SysfsNetworkReader::new().snapshot();
+    let snapshot = KernelNetworkReader::new().snapshot();
 
     println!(
-        "маршрут наружу: {}",
-        snapshot.default_route_interface.as_deref().unwrap_or("нет")
+        "трафик наружу:  {}",
+        snapshot
+            .outgoing
+            .as_ref()
+            .map(|o| format!("{} (адрес {})", o.interface, o.address))
+            .unwrap_or_else(|| "никто".to_string())
     );
     println!(
-        "выбранный VPN:  {}",
-        settings.vpn_interface.as_deref().unwrap_or("не выбран")
+        "VPN-приложение: {}",
+        settings
+            .vpn_app
+            .as_ref()
+            .map(|app| format!("{} ({})", app.display_name, app.path))
+            .unwrap_or_else(|| "не выбрано".to_string())
     );
-    println!(
-        "статус:         {:?}",
-        weto_core::network::resolve_vpn_status(&snapshot, settings.vpn_interface.as_deref())
-    );
-    println!();
-    println!("{:<16} {:<6} {:<8}", "интерфейс", "поднят", "туннель");
-    for interface in &snapshot.interfaces {
-        println!(
-            "{:<16} {:<6} {:<8}",
-            interface.name,
-            if interface.is_up { "да" } else { "нет" },
-            if interface.is_tunnel {
-                "да"
-            } else {
-                "нет"
-            }
-        );
-    }
 }
 
 fn check(paths: &Paths) {
@@ -129,14 +119,6 @@ fn check(paths: &Paths) {
         println!(
             "адрес:         {}",
             report.ip.as_deref().unwrap_or("неизвестен")
-        );
-        println!(
-            "сеть есть:     {}",
-            if report.has_network_path {
-                "да"
-            } else {
-                "нет"
-            }
         );
     }
     println!();
