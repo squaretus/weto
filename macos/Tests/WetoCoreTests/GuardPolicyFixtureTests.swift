@@ -90,11 +90,11 @@ final class GuardPolicyFixtureTests: XCTestCase {
         let kind: String
         let isPrimary: Bool?
 
-        var asStatus: VPNStatus {
+        var asStatus: VPNAppStatus {
             switch kind {
-            case "down": return .down
-            case "up": return .up(isPrimary: isPrimary ?? false)
-            default: return .notConfigured
+            case "running": return .running
+            case "notRunning": return .notRunning
+            default: return .notChosen
             }
         }
     }
@@ -110,19 +110,21 @@ final class GuardPolicyFixtureTests: XCTestCase {
         func asOutcome() throws -> GeoOutcome {
             if kind == "unavailable" { return .unavailable(detail ?? "") }
             guard let ip, let primaryCountry else {
-                throw Failure("resolved без ip или страны")
+                throw Failure("\(kind) без ip или страны")
             }
-            return .resolved(GeoReading(
+            let reading = GeoReading(
                 ip: ip,
                 primaryCountry: primaryCountry,
                 confirmedCountry: confirmedCountry,
                 confirmSource: confirmSource.flatMap(ConfirmSource.init(rawValue:))
-            ))
+            )
+            if kind == "degraded" { return .degraded(previous: reading, detail: detail ?? "") }
+            return .resolved(reading)
         }
     }
 
     private struct Config: Decodable {
-        let vpnID: String?
+        let vpnApp: String?
         let blockedCountries: [String]
         let blockedIPRanges: [String]
         let targets: [String]
@@ -136,7 +138,7 @@ final class GuardPolicyFixtureTests: XCTestCase {
                 ranges.append(range)
             }
             return GuardConfig(
-                vpnServiceID: vpnID,
+                vpnAppRule: vpnApp,
                 blockedCountries: Set(blockedCountries),
                 blockedIPRanges: ranges,
                 targets: targets
@@ -169,9 +171,8 @@ final class GuardPolicyFixtureTests: XCTestCase {
         var asUnsafeReason: UnsafeReason {
             switch kind {
             case "verificationPending": return .verificationPending
-            case "vpnNotConfigured": return .vpnNotConfigured
-            case "vpnDown": return .vpnDown
-            case "vpnNotPrimary": return .vpnNotPrimary
+            case "vpnAppNotChosen": return .vpnAppNotChosen
+            case "vpnAppNotRunning": return .vpnAppNotRunning
             case "geoUnavailable": return .geoUnavailable(detail ?? "")
             case "blacklistedIP": return .blacklistedIP(ip ?? "")
             case "blockedCountry": return .blockedCountry(code: code ?? "", source: source ?? "")

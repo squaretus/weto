@@ -7,32 +7,21 @@ use weto_core::ip::IpRange;
 use weto_core::policy::GuardConfig;
 use weto_core::process::{TargetKind, TargetRule};
 
-// `Eq` здесь нет намеренно: интервал опроса — число с плавающей точкой,
-// и полного равенства у него не бывает.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub is_enabled: bool,
-    /// Имя интерфейса. `None` — VPN не выбран, и это отдельная причина
-    /// завершения, а не «любой сойдёт».
-    pub vpn_interface: Option<String>,
+    /// Выбранное VPN-приложение — такая же цель по форме. `None` — не выбрано,
+    /// и это отдельная причина завершения, а не «любое сойдёт».
+    pub vpn_app: Option<Target>,
     pub blocked_countries: Vec<String>,
     pub blocked_ip_ranges: Vec<String>,
     pub targets: Vec<Target>,
     pub theme: Theme,
-    /// Шаг штатного тика охраны. Значение из дорожки сегментов в настройках;
-    /// испорченное или неположительное читается как умолчание.
-    pub poll_interval_seconds: f64,
     /// Ревизия растёт на каждое сохранение: по ней охрана понимает, что прежний
     /// вердикт больше не свеж.
     pub revision: u64,
 }
-
-/// Варианты интервала опроса и умолчание — те же, что на macOS
-/// (`Constants.pollIntervalOptions`), и по той же причине: дорожка сегментов
-/// в каноне не длиннее четырёх пунктов.
-pub const POLL_INTERVAL_OPTIONS: [f64; 3] = [5.0, 10.0, 15.0];
-pub const DEFAULT_POLL_INTERVAL_SECONDS: f64 = 5.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -58,12 +47,11 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             is_enabled: true,
-            vpn_interface: None,
+            vpn_app: None,
             blocked_countries: Vec::new(),
             blocked_ip_ranges: Vec::new(),
             targets: Vec::new(),
             theme: Theme::Dark,
-            poll_interval_seconds: DEFAULT_POLL_INTERVAL_SECONDS,
             revision: 0,
         }
     }
@@ -155,23 +143,12 @@ impl Settings {
         self.blocked_ip_ranges.retain(|r| r != entry);
     }
 
-    /// Шаг штатного тика охраны. Ноль и отрицательное значение попадают в файл
-    /// только правкой руками; охрана тогда берёт умолчание, а не крутится вхолостую.
-    pub fn poll_interval(&self) -> std::time::Duration {
-        let seconds = if self.poll_interval_seconds > 0.0 {
-            self.poll_interval_seconds
-        } else {
-            DEFAULT_POLL_INTERVAL_SECONDS
-        };
-        std::time::Duration::from_secs_f64(seconds)
-    }
-
     /// Правила целей для матчера. Неразбираемые диапазоны отбрасываются молча:
     /// в настройках они уже проверены при вводе, а падать из-за правки файла
     /// руками охрана не должна — она должна продолжать охранять.
     pub fn guard_config(&self) -> GuardConfig {
         GuardConfig {
-            vpn_id: self.vpn_interface.clone(),
+            vpn_app: self.vpn_app.as_ref().map(|app| app.entry.clone()),
             blocked_countries: self.blocked_countries.iter().cloned().collect(),
             blocked_ip_ranges: self
                 .blocked_ip_ranges
@@ -183,23 +160,40 @@ impl Settings {
     }
 
     pub fn target_rules(&self) -> Vec<TargetRule> {
-        self.targets
-            .iter()
-            .map(|target| TargetRule {
-                entry: target.entry.clone(),
-                display_name: target.display_name.clone(),
-                kind: target.kind,
-                path: target.path.clone(),
-                launch_paths: {
-                    let mut paths = vec![target.path.clone()];
-                    for extra in &target.launch_paths {
-                        if !paths.contains(extra) {
-                            paths.push(extra.clone());
-                        }
-                    }
-                    paths
-                },
-            })
-            .collect()
+        self.targets.iter().map(rule_of).collect()
+    }
+
+    /// Правило выбранного VPN-приложения. В списке целей оно не появляется никогда:
+    /// охрана, завершившая свой источник защиты, оставила бы состояние необратимым.
+    pub fn vpn_app_rule(&self) -> Option<TargetRule> {
+        self.vpn_app.as_ref().map(rule_of)
+    }
+
+    /// Выбор VPN-приложения снимает его же из целей — по той же причине.
+    pub fn set_vpn_app(&mut self, app: Option<Target>) {
+        if let Some(app) = &app {
+            self.targets.retain(|t| t.entry != app.entry);
+        }
+        self.vpn_app = app;
+    }
+}
+
+/// Правило матчера из записи настроек: путь запуска помнится вместе с текущим,
+/// иначе сеанс, начатый до обновления цели, выпал бы из-под охраны.
+fn rule_of(target: &Target) -> TargetRule {
+    TargetRule {
+        entry: target.entry.clone(),
+        display_name: target.display_name.clone(),
+        kind: target.kind,
+        path: target.path.clone(),
+        launch_paths: {
+            let mut paths = vec![target.path.clone()];
+            for extra in &target.launch_paths {
+                if !paths.contains(extra) {
+                    paths.push(extra.clone());
+                }
+            }
+            paths
+        },
     }
 }

@@ -6,36 +6,43 @@
 
 1. **Trigger.** `macos/Sources/WetoSystem/NetworkEventSource.swift` emits `.networkPath`
    (`NWPathMonitor`), `.dynamicStore` (`SCDynamicStore` keys: global IPv4, per-service IPv4,
-   interface link), `.wake` and `.appLaunched(bundleID:)` (`NSWorkspace`). Independently
-   `GuardVM.startTicking` emits `.tick` every `settings.pollIntervalSeconds` (default 5 s),
-   and `SettingsStore.emit` → `GuardController.configurationChanged` bumps `revision`,
-   drops `freshVerdict` and calls `evaluate()` directly. `pollIntervalSeconds` deliberately
-   does not `emit` — changing the tick rate is not a configuration change for the verdict.
-2. **One process scan per trigger.** `GuardVM.handle` calls `ProcessEnforcer.scan()` once,
+   interface link), `.route` (a `PF_ROUTE` socket, coalesced — bringing up a tunnel adds routes
+   by the hundred), `.wake`, `.appLaunched(bundleID:)` and `.appTerminated(bundleID:)`
+   (`NSWorkspace`, GUI apps only). Independently `GuardVM.startTicking` emits `.tick` every
+   second and `startGeoTicking` emits `.geoSchedule` every 5 s — the only trigger that goes to
+   the network on its own. `SettingsStore.emit` → `GuardController.configurationChanged` bumps
+   `revision`, drops `freshVerdict` and calls `evaluate()` directly.
+2. **One process scan per trigger.** `GuardVM.handle` calls `ProcessEnforcer.scan(includingVPNApp:)`
+   once,
    stores it in `currentScan` and publishes `runningTargets` for the UI. argv is read
    (`KERN_PROCARGS2`) only when at least one rule is `.script`. Rules are resolved
    (filesystem + LaunchServices) only when `settings.targets` changed.
    `.appLaunched` short-circuits: non-target bundle IDs return immediately, and if the state
    is already `.unsafe` the launch is killed off the same scan without re-evaluating.
+   `.geoSchedule` skips the verdict path entirely and only asks the network.
 3. **Local decision first.** `GuardController.evaluate` reads `settings.guardConfig` and
-   `snapshotReader.snapshot()`, resolves VPN through `VPNStatusResolver`, then
-   `GuardPolicy.decideLocal`. A local answer cancels any in-flight probe, records the verdict
-   and is applied — VPN loss is visible from `SCDynamicStore` without any network call.
+   `snapshotReader.snapshot()`, asks `vpnAppStatus()` (the same scan, matched against the chosen
+   app's rule), then `GuardPolicy.decideLocal`. A local answer cancels any in-flight probe, records
+   the verdict and is applied — a closed VPN client needs no network call to be noticed, and
+   `didTerminateApplicationNotification` makes it instant.
 4. **Fail-closed before the verdict.** With no local answer, `beginNetworkVerification`
-   compares `Verdict(revision, snapshot.verdictFingerprint(forService:))` with `freshVerdict`. On mismatch
+   compares `Verdict(revision, snapshot.verdictFingerprint)` with `freshVerdict`. On mismatch
    (cold start, path change, settings edit) it applies `GuardPolicy.pendingVerification`
    — targets die *before* the first HTTP request. If the verdict is still fresh, the state is
-   left untouched while the probe runs: otherwise the 5 s tick would re-enter
+   re-decided from the reading already in hand, without a request: otherwise the tick would re-enter
    `verificationPending` and kill targets on a perfectly healthy VPN. That is why freshness is
    the pair «config revision + network snapshot fingerprint»
-   (`NetworkSnapshot.verdictFingerprint(forService:)`: the chosen service's active interface and
-   VPN qualification, plus the owner of the default route) and not plain snapshot equality. The
-   fingerprint is scoped to the chosen service on purpose — with the machine-wide one, a second
-   VPN reconnecting beside the chosen tunnel killed the targets. The 300 ms debounce (`Constants.networkEventDebounceSeconds`)
+   (`NetworkSnapshot.verdictFingerprint`: the interface the kernel picks for the verdict request
+   plus that interface's local address) and not plain snapshot equality. The set of interfaces is
+   deliberately absent — with a machine-wide fingerprint, a second VPN reconnecting beside the
+   working tunnel killed the targets. The 300 ms debounce (`Constants.networkEventDebounceSeconds`)
    that follows only coalesces outgoing requests — the state is already fail-closed.
 5. **Probe.** `GeoProbe.probe()`: Keychain token → ipinfo Lite (`v4.api.ipinfo.io`),
    `IPAddress.isValid` on the returned address *before* it goes into a URL, then confirmation
-   `free.freeipapi.com` → `get.geojs.io` fallback. Nothing is cached. The return value is a
+   `free.freeipapi.com` → `get.geojs.io` fallback, and that confirmation is served from the
+   per-address cache while the 60 s soft ceiling holds. Address and primary country are never
+   cached. When ipinfo refuses, the probe asks the geojs "who am I" endpoint instead: the address
+   is what lets the guard decide whether the previous verdict may stand. The return value is a
    `GeoProbeReport` — per-source outcome, `NWPathMonitor` path flag, timestamp — and the guard
    verdict is `report.outcome`, so the popup and the enforcement read the same object.
    A press of the popup's recheck button enters here through `GuardController.probeNow()`:
@@ -47,8 +54,10 @@
    confirmation line; `report.outcome` still requires ipinfo, so the verdict stays fail-closed.
 6. **Apply.** `applyLatestNetworkOutcome` drops outcomes whose `revision` is stale, re-reads
    config and snapshot immediately before deciding (a slow probe must never resurrect `safe`),
-   publishes the report (`GuardVM.receive` keeps `lastReport`, prefetches the flag when the
-   reading resolved) and calls `GuardPolicy.decide`.
+   publishes the report (`GuardVM.receive` keeps `lastReport`) and calls `GuardPolicy.decide`.
+   When ipinfo stayed silent but the reference service named an address equal to the last verdict's,
+   the outcome becomes `.degraded(previous:)` — same address, same country, so the targets live and
+   the shield turns yellow. A different address, or silence from both, keeps `.unavailable`.
 7. **Enforce.** `GuardVM.apply`: `.safe` cancels the watchdog and clears `recordedPIDs` /
    `recordedReasons`; `.kill` sets `.unsafe`, enforces and starts a 250 ms watchdog
    (`Constants.watchdogIntervalSeconds`) that re-runs `enforce` only — no re-evaluation and no

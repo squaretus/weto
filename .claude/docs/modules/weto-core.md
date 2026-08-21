@@ -8,7 +8,6 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 
 ## Key files
 - `macos/Sources/WetoCore/GuardPolicy.swift` — `GuardConfig`, `GuardSignals`, `UnsafeReason`, `GuardDecision`, the three decision entry points
-- `macos/Sources/WetoCore/VPNStatusResolver.swift` — snapshot → `VPNStatus`
 - `macos/Sources/WetoCore/ProcessMatcher.swift` — rules × processes → pids to kill / rows to show
 - `macos/Sources/WetoCore/ProcessTree.swift` — parent/child index shared by both matcher passes
 - `macos/Sources/WetoCore/IPAddress.swift`, `IPRange.swift` — `inet_pton` parsing, CIDR containment
@@ -16,16 +15,15 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `macos/Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user
 - `macos/Sources/WetoCore/VoidResult.swift`, `Constants.swift`
 - `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`
-- Tests: `macos/Tests/WetoCoreTests/` (8 files, ~100 cases; `ProcessMatcherTests` and `GuardPolicyTests` are the load-bearing ones)
+- Tests: `macos/Tests/WetoCoreTests/` (~100 cases; `ProcessMatcherTests` and `GuardPolicyTests` are the load-bearing ones)
 
 ## Entry points
-- `GuardPolicy.decideLocal(isEnabled:vpn:config:) → GuardDecision?` — tri-state, see invariants
+- `GuardPolicy.decideLocal(isEnabled:vpn:config:) → GuardDecision?` — tri-state, see invariants; `vpn` is a `VPNAppStatus`, computed by the caller from the process scan
 - `GuardPolicy.decide(GuardSignals) → GuardDecision` — full ordered chain
 - `GuardPolicy.pendingVerification(isEnabled:config:) → GuardDecision`
-- `VPNStatusResolver.status(serviceID:in:) → VPNStatus`
 - `ProcessMatcher.matches(in:rules:) → [MatchedProcess]`, `.pids(in:rules:) → [Int32]`
 - `ProcessMatcher.runningTargets(in:rules:) → [RunningTarget]` — UI rows, one per session
-- `NetworkSnapshot.verdictFingerprint(forService:) → String`, `.vpnCandidates → [NetworkServiceSnapshot]`
+- `NetworkSnapshot.verdictFingerprint → String` — the interface carrying the verdict request plus its local address, nothing else
 - `IPAddress.isValid(_:)`, `IPRange.init?(_:)`, `IPRange.contains(_:)`
 - `GeoResponses.decodeIPInfo/decodeFreeIPAPI/decodeGeoJS/makeReading`
 - `ReleaseParser.parse(_:currentVersion:) → Result<UpdateInfo, Error>`, `ReleaseParser.latestReleaseURL`
@@ -77,13 +75,17 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - **Cycles in the process tree are assumed possible.** `ProcessTree.descendants` relies on a shared
   `seen` set plus `stepLimit = processes.count * 2`, and `topmostMatch` is bounded by the pid count.
   A snapshot where a parent points at its own descendant must terminate, not hang.
-- **`verdictFingerprint` is scoped to the selected service, not to the whole network.** It covers the
-  chosen service's active interface and VPN qualification plus the default-route owner — the two things
-  the verdict actually depends on. The service name is omitted on purpose (a rename must not invalidate
-  a fresh verdict), and so is every *other* service and tunnel: a second VPN reconnecting on its own
-  used to change the machine-wide fingerprint and kill targets with `verificationPending` while the
-  chosen tunnel never moved. Losing the chosen interface, or the route moving off it, still must
-  invalidate — and a missing chosen service must not read the same as no selection at all.
+- **`verdictFingerprint` covers the traffic carrier and nothing else:** the interface the kernel
+  picks for the verdict request plus that interface's local address. The address is in there because
+  a tunnel can keep its name and change its address — that is a different network state. The set of
+  interfaces is deliberately absent: a second VPN reconnecting on its own used to change the
+  machine-wide fingerprint and kill targets with `verificationPending` while the traffic never moved.
+  `out=-` (no carrier, or the geo host not resolved yet) is its own state, and a verdict cannot
+  exist in it.
+- **`VPNAppStatus` is the caller's answer, not the core's.** The core never scans processes; it only
+  knows whether something was chosen (`config.vpnAppRule`) and what the caller reports. `decideLocal`
+  kills on an empty selection *before* looking at the status, so a caller whose status drifts out of
+  sync with the settings still fails closed.
 - **`ProcessSnapshot.arguments` stays an array.** A joined command line must never be used for matching.
 
 ## Failure hotspots

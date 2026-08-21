@@ -35,6 +35,10 @@ final class ProcessEnforcer {
     private var resolvedAt: Date?
     private var lastKnownRules: [String: TargetRule] = [:]
 
+    private var cachedVPNEntry: String??
+    private var cachedVPNRule: TargetRule?
+    private var vpnResolvedAt: Date?
+
     private let now: () -> Date
 
     init(
@@ -96,15 +100,44 @@ final class ProcessEnforcer {
         return remembered
     }
 
-    func invalidateRuleCache() {
-        cachedEntries = nil
+    /// Правило выбранного VPN-приложения. Разрешается тем же путём, что цели,
+    /// и кэшируется по тому же поводу: у клиента, обновившегося через собственный
+    /// апдейтер, путь меняется целиком, а правило, разрешённое однажды, молча
+    /// перестало бы совпадать с чем-либо — и охрана решила бы, что VPN закрыт.
+    ///
+    /// В `Scan.rules` это правило не попадает никогда: там ровно то, что `enforce`
+    /// имеет право завершать, а завершать собственный источник защиты нельзя.
+    func vpnAppRule() -> TargetRule? {
+        let entry = settings.vpnAppRule
+        let moment = now()
+        let isStale = vpnResolvedAt.map {
+            moment.timeIntervalSince($0) >= Constants.targetRuleRefreshSeconds
+        } ?? true
+
+        if cachedVPNEntry != entry || isStale {
+            cachedVPNEntry = entry
+            cachedVPNRule = entry.flatMap(resolve)
+            vpnResolvedAt = moment
+        }
+        return cachedVPNRule
     }
 
-    func scan() -> Scan {
-        let rules = rules()
-        guard !rules.isEmpty else { return Scan(processes: [], rules: []) }
+    func invalidateRuleCache() {
+        cachedEntries = nil
+        cachedVPNEntry = nil
+    }
 
-        let needsArguments = rules.contains { $0.kind == .script }
+    /// Один обход процессов на событие.
+    ///
+    /// `includingVPNApp` не добавляет правило в скан, а лишь учитывает его в двух
+    /// вопросах: нужен ли argv (VPN-клиент может оказаться скриптом с shebang)
+    /// и нужен ли обход вообще, когда целей ещё нет.
+    func scan(includingVPNApp: Bool = false) -> Scan {
+        let rules = rules()
+        let vpnRule = includingVPNApp ? vpnAppRule() : nil
+        guard !rules.isEmpty || vpnRule != nil else { return Scan(processes: [], rules: []) }
+
+        let needsArguments = (rules + [vpnRule].compactMap { $0 }).contains { $0.kind == .script }
         return Scan(
             processes: locator.allProcesses(includeArguments: needsArguments),
             rules: rules

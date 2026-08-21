@@ -32,7 +32,11 @@ AFTER="$(md5 -q "${VERSIONED_FILES[@]}")"
 [ -f "$PKG" ] || fail "пакет $PKG не собран"
 
 # 3. В payload нет документации и картинок.
-if pkgutil --payload-files "$PKG" 2>/dev/null | grep -q 'docs/'; then
+# Payload снимается в переменную: `grep -q` закрыл бы пайп на первом совпадении,
+# `pkgutil` получил бы SIGPIPE, и при `set -o pipefail` проверка сообщила бы «чисто»
+# именно тогда, когда документация в payload есть.
+PAYLOAD="$(pkgutil --payload-files "$PKG" 2>/dev/null || true)"
+if grep -q 'docs/' <<< "$PAYLOAD"; then
     fail "в payload попала документация"
 fi
 

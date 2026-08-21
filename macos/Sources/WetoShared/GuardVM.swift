@@ -36,7 +36,6 @@ public final class GuardVM {
     public private(set) var isProbing = false
 
     public private(set) var permissionFailure: String?
-    public private(set) var availableVPNs: [NetworkServiceSnapshot] = []
     public private(set) var runningTargets: [RunningTarget] = []
 
     @ObservationIgnored private let settings: SettingsStore
@@ -57,6 +56,10 @@ public final class GuardVM {
     // pid те же, а дедупликация была только по ним.
     @ObservationIgnored private var recordedReasons: Set<String> = []
 
+    // Запись эпизода, сделанная до вердикта: причина в ней — «ещё не проверено»,
+    // и её положено уточнить, как только вердикт станет известен.
+    @ObservationIgnored private var pendingEventID: UUID?
+
     @ObservationIgnored private var controller: GuardController!
     @ObservationIgnored private var enforcer: ProcessEnforcer!
 
@@ -64,6 +67,7 @@ public final class GuardVM {
     // обязано убивать по нему же, а не запускать второй обход.
     @ObservationIgnored private var currentScan: ProcessEnforcer.Scan?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
+    @ObservationIgnored private var geoTickTask: Task<Void, Never>?
     @ObservationIgnored private var watchdogTask: Task<Void, Never>?
 
     public init(
@@ -102,26 +106,34 @@ public final class GuardVM {
             snapshotReader: snapshotReader,
             geoProbe: geoProbe,
             debounceInterval: debounceInterval,
+            vpnAppStatus: { [weak self] in self?.vpnAppStatus() ?? .notChosen },
             onDecision: { [weak self] decision in self?.apply(decision) },
             onReport: { [weak self] report in self?.receive(report) }
         )
+
+        // Список живых целей обновляется на правку настроек, а не на следующем тике.
+        // Вердикт контроллер пересчитывает сам, но пользователь смотрит на другое:
+        // добавил цель — и до тика в интерфейсе не менялось ничего, отчего казалось,
+        // что цель подхватится только после перезапуска приложения.
+        settings.onGuardConfigurationChange { [weak self] change in
+            guard change.field == .targets || change.field == .vpnApp else { return }
+            self?.refreshRunningTargets()
+        }
     }
 
     deinit {
         tickTask?.cancel()
+        geoTickTask?.cancel()
         watchdogTask?.cancel()
     }
 
     public func start() {
-        // Миграция выбора «по имени» на UUID выполняется до первого решения:
-        // иначе прежний выбор выглядел бы как «VPN не выбран» и цели ушли бы зря.
-        settings.migrateLegacyVPNSelection(in: snapshotReader.snapshot())
-        refreshVPNCandidates()
         refreshRunningTargets()
         events.start { [weak self] trigger in
             Task { @MainActor [weak self] in self?.handle(trigger) }
         }
         startTicking()
+        startGeoTicking()
         handle(.tick)
     }
 
@@ -129,7 +141,20 @@ public final class GuardVM {
         events.stop()
         controller.stop()
         tickTask?.cancel(); tickTask = nil
+        geoTickTask?.cancel(); geoTickTask = nil
         watchdogTask?.cancel(); watchdogTask = nil
+    }
+
+    /// Цвет статуса для глаза.
+    ///
+    /// Отдельно от `state.statusColor`: «на страже, но ipinfo молчит» для целей —
+    /// по-прежнему safe, потому что адрес доказанно тот же, а для пользователя это
+    /// не полноценная зелёная защита. Зелёный тут врал бы.
+    public var statusColor: GuardStatusColor {
+        guard case .safe(let reading) = state, reading != nil,
+              let report = lastReport, case .failed = report.ipinfo
+        else { return state.statusColor }
+        return .yellow
     }
 
     public var currentCountryCode: String? {
@@ -140,7 +165,7 @@ public final class GuardVM {
             return reading?.primaryCountry
         case .unsafe(let reason):
             switch reason {
-            case .vpnNotConfigured, .vpnDown, .vpnNotPrimary, .geoUnavailable:
+            case .vpnAppNotChosen, .vpnAppNotRunning, .geoUnavailable:
                 return nil
             default:
                 return lastReading?.primaryCountry
@@ -154,8 +179,19 @@ public final class GuardVM {
         return launchAgent.disable()
     }
 
-    public func refreshVPNCandidates() {
-        availableVPNs = snapshotReader.snapshot().vpnCandidates
+    /// Запущено ли выбранное VPN-приложение.
+    ///
+    /// Считается по уже снятому скану: обход процессов идёт раз в тик и один,
+    /// а правило приложения разрешается тем же путём, что цели, — с симлинками,
+    /// версионными путями и скриптами по argv.
+    private func vpnAppStatus() -> VPNAppStatus {
+        guard settings.vpnAppRule != nil else { return .notChosen }
+        guard let rule = enforcer.vpnAppRule() else { return .notRunning }
+
+        let scan = currentScan ?? enforcer.scan(includingVPNApp: true)
+        return ProcessMatcher.pids(in: scan.processes, rules: [rule]).isEmpty
+            ? .notRunning
+            : .running
     }
 
     public func refreshRunningTargets() {
@@ -184,11 +220,17 @@ public final class GuardVM {
     }
 
     public func handle(_ trigger: GuardTrigger) {
-        let scan = enforcer.scan()
+        let scan = enforcer.scan(includingVPNApp: true)
         currentScan = scan
         defer { currentScan = nil }
 
         runningTargets = enforcer.runningTargets(in: scan)
+
+        // Расписание гео — единственный триггер, который сам идёт в сеть.
+        if case .geoSchedule = trigger {
+            controller.probeOnSchedule()
+            return
+        }
 
         if case .appLaunched(let bundleID) = trigger {
 
@@ -230,7 +272,6 @@ public final class GuardVM {
         }
         guard case .resolved(let reading) = report.outcome else { return }
         lastReading = reading
-        FlagImageStore.shared.prefetch(reading.primaryCountry)
     }
 
     private func apply(_ decision: GuardDecision) {
@@ -240,15 +281,40 @@ public final class GuardVM {
             permissionFailure = nil
             recordedPIDs.removeAll()
             recordedReasons.removeAll()
+            pendingEventID = nil
             state = settings.isEnabled && settings.guardConfig.hasTargets
                 ? .safe(lastReading)
                 : .disabled
 
         case .kill(let reason):
             state = .unsafe(reason)
+            refineEpisodeReason(to: reason)
             enforce(reason: reason)
             startWatchdog()
         }
+    }
+
+    /// Причина эпизода, ставшая известной, дописывается в его запись.
+    ///
+    /// Ключ причины в `recordedReasons` подменяется вместе с текстом: иначе
+    /// уточнённая причина считалась бы новой и завела бы вторую запись про то же
+    /// самое падение.
+    private func refineEpisodeReason(to reason: UnsafeReason) {
+        if case .verificationPending = reason { return }
+        guard let id = pendingEventID else { return }
+
+        pendingEventID = nil
+        recordedReasons.remove(UnsafeReason.verificationPending.displayText)
+        recordedReasons.insert(reason.displayText)
+
+        eventLog.refine(
+            id: id,
+            reasonText: reason.displayText,
+            ip: lastReading?.ip,
+            country: lastReading?.primaryCountry,
+            confirmedCountry: lastReading?.confirmedCountry,
+            confirmSource: lastReading?.confirmSource?.rawValue
+        )
     }
 
     private func enforce(reason: UnsafeReason) {
@@ -277,7 +343,7 @@ public final class GuardVM {
         var names: [String] = []
         for name in fresh.map(\.targetName) where !names.contains(name) { names.append(name) }
 
-        eventLog.record(KillEvent(
+        let event = KillEvent(
             date: Date(),
             targetNames: names,
             kind: kind,
@@ -287,7 +353,9 @@ public final class GuardVM {
             confirmedCountry: lastReading?.confirmedCountry,
             confirmSource: lastReading?.confirmSource?.rawValue,
             killedPIDs: fresh.map(\.pid)
-        ))
+        )
+        eventLog.record(event)
+        if case .verificationPending = reason { pendingEventID = event.id }
         notifier.notify(
             reasonText: "\(names.joined(separator: ", ")): \(reason.displayText)",
             killedCount: fresh.count
@@ -308,14 +376,24 @@ public final class GuardVM {
         }
     }
 
+    /// Расписание обращений к гео-сервисам. Свой таймер, а не общий тик: опрос системы
+    /// частый и бесплатный, запрос к чужим сервисам редкий и платный.
+    private func startGeoTicking() {
+        geoTickTask?.cancel()
+        geoTickTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Constants.geoProbeIntervalSeconds))
+                guard !Task.isCancelled else { return }
+                await MainActor.run { [weak self] in self?.handle(.geoSchedule) }
+            }
+        }
+    }
+
     private func startTicking() {
         tickTask?.cancel()
         tickTask = Task { [weak self] in
             while !Task.isCancelled {
-                let interval = await MainActor.run { [weak self] in
-                    self?.settings.pollIntervalSeconds ?? Constants.defaultPollIntervalSeconds
-                }
-                try? await Task.sleep(for: .seconds(interval))
+                try? await Task.sleep(for: .seconds(Constants.tickIntervalSeconds))
                 guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in self?.handle(.tick) }
             }

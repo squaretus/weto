@@ -21,7 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use weto_config::settings::Settings;
-use weto_core::geo::{GeoOutcome, GeoProbeReport};
+use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading, SourceOutcome};
+use weto_core::network::VpnAppStatus;
 use weto_core::policy::{decide, decide_local, pending_verification, GuardDecision, GuardSignals};
 use weto_core::presentation::{status_presentation, GuardState, StatusPresentation};
 use weto_core::process::RunningTarget;
@@ -34,6 +35,12 @@ use crate::enforcer::ProcessEnforcer;
 /// Окно коалесценции: несколько событий сети подряд не должны порождать
 /// несколько запросов. У подтверждающего сервиса лимит 60 запросов в минуту.
 const COALESCE_WINDOW: Duration = Duration::from_millis(300);
+
+/// Расписание обращений к гео-сервисам. Отдельно от штатного тика: опрос системы
+/// бесплатный и частый, запрос к чужим сервисам платный и редкий. Нужен потому, что
+/// страна выхода меняется и на неизменном пути — например, когда пользователь
+/// переключает сервер внутри своего клиента, — и отпечаток об этом не скажет.
+const GEO_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Откуда пришёл запрос пробы. Кнопка ведёт себя иначе, чем таймер, и это
 /// не оптимизация, а поведение продукта.
@@ -52,6 +59,11 @@ pub trait SettingsProviding: Send + Sync {
 
 pub trait KillReporting: Send + Sync {
     fn report(&self, killed: &[weto_core::process::MatchedProcess], reason: &str);
+
+    /// Причина эпизода, ставшая известной. Приёмник, ведущий журнал, дописывает
+    /// её в запись эпизода: вызов приходит и тогда, когда завершать больше нечего,
+    /// то есть ровно в том случае, где записи иначе не появится вовсе.
+    fn refine(&self, _reason: &str) {}
 }
 
 /// Вердикт вместе с признаком, при каких условиях он был получен.
@@ -69,13 +81,21 @@ pub struct GuardSnapshot {
     pub presentation: Option<StatusPresentation>,
     pub report: Option<GeoProbeReport>,
     pub running: Vec<RunningTarget>,
-    pub vpn_candidates: Vec<String>,
 }
 
 struct Inner {
     verdict: Option<CachedVerdict>,
+    /// Чтение, на котором стоит последний состоявшийся вердикт, и отпечаток сети,
+    /// при котором он получен. Нужно, чтобы молчание ipinfo не завершало цели,
+    /// когда адрес доказанно тот же: тот же адрес — та же страна.
+    established: Option<Established>,
     last_probe_finished: Option<Instant>,
     snapshot: GuardSnapshot,
+}
+
+struct Established {
+    reading: GeoReading,
+    fingerprint: String,
 }
 
 pub struct GuardController {
@@ -109,6 +129,7 @@ impl GuardController {
             reporter,
             inner: Mutex::new(Inner {
                 verdict: None,
+                established: None,
                 last_probe_finished: None,
                 snapshot: GuardSnapshot::default(),
             }),
@@ -158,10 +179,8 @@ impl GuardController {
         let config = settings.guard_config();
         // Отпечаток берётся по выбранному интерфейсу, а не по всей сети: иначе
         // чужой VPN, переподключившийся сам по себе, стоил бы пользователю целей.
-        let fingerprint = network.verdict_fingerprint(settings.vpn_interface.as_deref());
-
-        let vpn =
-            weto_core::network::resolve_vpn_status(&network, settings.vpn_interface.as_deref());
+        let fingerprint = network.verdict_fingerprint();
+        let vpn = self.vpn_app_status(&settings);
         let local = decide_local(settings.is_enabled, vpn, &config);
 
         // Локальное основание применяется сразу, до ответа сети: жизни целям
@@ -196,13 +215,32 @@ impl GuardController {
         }
 
         if let Some(cached) = self.fresh_verdict(settings.revision, &fingerprint) {
+            // Подошло расписание — идём в сеть, но fail-closed не объявляем:
+            // прошлый вердикт в силе, пока не пришёл новый ответ.
+            let armed = settings.is_enabled && !config.targets.is_empty();
+            let refreshed = if armed && (trigger == ProbeTrigger::Manual || self.geo_schedule_due())
+            {
+                self.probe_and_store(&settings, &fingerprint)
+            } else {
+                None
+            };
+
+            let geo = refreshed.unwrap_or_else(|| cached.outcome.clone());
             let decision = decide(&GuardSignals {
                 is_enabled: settings.is_enabled,
                 vpn,
-                geo: cached.outcome.clone(),
+                geo,
                 config,
             });
-            self.apply(&settings, decision.clone(), Some(cached.report));
+            let report = self
+                .inner
+                .lock()
+                .expect("состояние охраны")
+                .verdict
+                .as_ref()
+                .map(|v| v.report.clone())
+                .unwrap_or(cached.report);
+            self.apply(&settings, decision.clone(), Some(report));
             return decision;
         }
 
@@ -242,6 +280,16 @@ impl GuardController {
             .filter(|v| v.revision == revision && v.fingerprint == fingerprint)
     }
 
+    /// Пора ли обновлять гео. Отдельно от окна коалесценции: то гасит всплески
+    /// событий, это задаёт частоту запросов.
+    fn geo_schedule_due(&self) -> bool {
+        let inner = self.inner.lock().expect("состояние охраны");
+        match inner.last_probe_finished {
+            None => true,
+            Some(at) => at.elapsed() >= GEO_PROBE_INTERVAL,
+        }
+    }
+
     fn coalescing_window_passed(&self) -> bool {
         let inner = self.inner.lock().expect("состояние охраны");
         match inner.last_probe_finished {
@@ -258,10 +306,16 @@ impl GuardController {
 
         let token = self.secrets.load().ok().flatten();
         let report = self.geo.probe(token.as_deref());
-        let outcome = report.outcome();
+        let outcome = self.admissible_outcome(&report, fingerprint);
 
         {
             let mut inner = self.inner.lock().expect("состояние охраны");
+            if let GeoOutcome::Resolved(reading) = &outcome {
+                inner.established = Some(Established {
+                    reading: reading.clone(),
+                    fingerprint: fingerprint.to_string(),
+                });
+            }
             inner.verdict = Some(CachedVerdict {
                 revision: settings.revision,
                 fingerprint: fingerprint.to_string(),
@@ -274,6 +328,59 @@ impl GuardController {
 
         self.probe_in_flight.store(false, Ordering::SeqCst);
         Some(outcome)
+    }
+
+    /// Запущено ли выбранное VPN-приложение.
+    ///
+    /// Обход `/proc` тот же, что у целей: правило приложения приходит из настроек
+    /// уже разрешённым, а в список целей не попадает никогда — завершать свой
+    /// источник защиты охрана не имеет права.
+    fn vpn_app_status(&self, settings: &Settings) -> VpnAppStatus {
+        let Some(rule) = settings.vpn_app_rule() else {
+            return VpnAppStatus::NotChosen;
+        };
+        if self.enforcer.is_running(&rule) {
+            VpnAppStatus::Running
+        } else {
+            VpnAppStatus::NotRunning
+        }
+    }
+
+    /// Что из отчёта годится в основание вердикта.
+    ///
+    /// ipinfo ответил — берём его ответ. ipinfo молчит — смотрим, назвал ли резервный
+    /// сервис наш адрес: совпал с адресом прошлого вердикта, значит страна та же
+    /// и перепроверять нечего. Снисхождение выдаётся за доказательство, а не за давность,
+    /// и каждый круг доказывается заново: перестанет отвечать и резервный — адреса
+    /// не будет, и цели завершатся.
+    ///
+    /// Сменился отпечаток сети — снисхождения нет ни при каком совпадении адреса:
+    /// вердикт при смене пути недействителен по построению.
+    fn admissible_outcome(&self, report: &GeoProbeReport, fingerprint: &str) -> GeoOutcome {
+        let outcome = report.outcome();
+        let GeoOutcome::Unavailable(detail) = &outcome else {
+            return outcome;
+        };
+
+        let inner = self.inner.lock().expect("состояние охраны");
+        let Some(established) = inner
+            .established
+            .as_ref()
+            .filter(|e| e.fingerprint == fingerprint)
+        else {
+            return outcome;
+        };
+        let Some(address) = report.ip.as_deref() else {
+            return outcome;
+        };
+
+        if address != established.reading.ip {
+            return GeoOutcome::Unavailable("адрес сменился, страна не проверена".to_string());
+        }
+        GeoOutcome::Degraded {
+            previous: established.reading.clone(),
+            detail: detail.clone(),
+        }
     }
 
     /// Забыть показания, снятые при другом состоянии сети.
@@ -291,9 +398,13 @@ impl GuardController {
         let running = match &decision {
             GuardDecision::Safe => self.enforcer.running(&rules),
             GuardDecision::Kill(reason) => {
+                let text = reason.display_text();
+                // Сначала уточнение, потом завершение: иначе уточнённая причина
+                // считалась бы новой и завела бы вторую запись про то же падение.
+                self.reporter.refine(&text);
                 let result = self.enforcer.enforce(&rules);
                 if !result.killed.is_empty() {
-                    self.reporter.report(&result.killed, &reason.display_text());
+                    self.reporter.report(&result.killed, &text);
                 }
                 result.running
             }
@@ -301,29 +412,29 @@ impl GuardController {
 
         let country = report.as_ref().and_then(|r| match r.outcome() {
             GeoOutcome::Resolved(reading) => Some(reading.primary_country),
+            GeoOutcome::Degraded { previous, .. } => Some(previous.primary_country),
             GeoOutcome::Unavailable(_) => r.reference_country().map(str::to_string),
         });
+
+        // Цели живут, но защита держится на том, что адрес не менялся, а не на свежем
+        // ответе ipinfo. Глаз обязан это видеть: зелёный тут врал бы.
+        let is_degraded = matches!(decision, GuardDecision::Safe)
+            && report
+                .as_ref()
+                .is_some_and(|r| matches!(r.ipinfo, SourceOutcome::Failed(_)));
 
         let presentation = status_presentation(&GuardState {
             is_enabled: settings.is_enabled,
             has_targets: !settings.targets.is_empty(),
             decision: decision.clone(),
             country,
+            is_degraded,
         });
-
-        let candidates = self
-            .network
-            .snapshot()
-            .vpn_candidates()
-            .iter()
-            .map(|i| i.name.clone())
-            .collect();
 
         let mut inner = self.inner.lock().expect("состояние охраны");
         inner.snapshot.decision = Some(decision);
         inner.snapshot.presentation = Some(presentation);
         inner.snapshot.running = running;
-        inner.snapshot.vpn_candidates = candidates;
         if report.is_some() {
             inner.snapshot.report = report;
         }

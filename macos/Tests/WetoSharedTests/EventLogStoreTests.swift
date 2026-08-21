@@ -134,7 +134,7 @@ final class UnsafeReasonTextTests: XCTestCase {
 
     func test_every_reason_has_non_empty_text() {
         let reasons: [UnsafeReason] = [
-            .vpnNotConfigured, .vpnDown, .vpnNotPrimary,
+            .vpnAppNotChosen, .vpnAppNotRunning, .verificationPending,
             .geoUnavailable("timeout"), .blacklistedIP("1.2.3.4"),
             .blockedCountry(code: "RU", source: "ipinfo"),
             .confirmationUnavailable,
@@ -147,7 +147,7 @@ final class UnsafeReasonTextTests: XCTestCase {
 
     func test_only_missing_confirmation_is_degraded() {
         XCTAssertTrue(UnsafeReason.confirmationUnavailable.isDegradedRatherThanBlocked)
-        XCTAssertFalse(UnsafeReason.vpnDown.isDegradedRatherThanBlocked)
+        XCTAssertFalse(UnsafeReason.vpnAppNotRunning.isDegradedRatherThanBlocked)
         XCTAssertFalse(UnsafeReason.blockedCountry(code: "RU", source: "ipinfo")
             .isDegradedRatherThanBlocked)
         XCTAssertFalse(UnsafeReason.countryConflict(primary: "KZ", confirmed: "DE")

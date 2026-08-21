@@ -12,8 +12,10 @@ OUT=".build/release_build"
 # так замечается случайно попавшая в payload документация или ресурсы.
 # История правок базы — чтобы рост был осознанным, а не «подвинули, раз красное»:
 #   2000 → 2250  пакет UpdateKit: приложение линкует пять его таргетов, +230 КБ кода;
-#   2250 → 2460  иконка приложения: AppIcon.icns 141 КБ и два PNG по 10 КБ на темы.
-APP_BASELINE_KB=2460
+#   2250 → 2460  иконка приложения: AppIcon.icns 141 КБ и два PNG по 10 КБ на темы;
+#   2460 → 3640  флаги стран в бандле: 265 SVG на 1060 КБ. Раньше они тянулись
+#                с CDN — а CDN в России блокируется, и флаг нужен ровно под VPN.
+APP_BASELINE_KB=3640
 
 echo "=== weto $VERSION — сборка ==="
 
@@ -131,11 +133,16 @@ if grep -q "<relocate>" "$OUT/_verify/PackageInfo"; then
 fi
 rm -rf "$OUT/_verify"
 
+# Список payload снимается один раз в переменную, а не подаётся в `grep -q` пайпом.
+# `grep -q` закрывает пайп на первом совпадении, `pkgutil` получает SIGPIPE, и при
+# `set -o pipefail` проверка падала на успехе. Пока payload был короткий, grep дочитывал
+# его целиком и обрыва не случалось — ловушка ждала первого крупного ресурса.
+PAYLOAD="$(pkgutil --payload-files "$OUT/_component.pkg")"
+
 for bundle in .build/release/*.bundle; do
     [ -e "$bundle" ] || continue
     name="$(basename "$bundle")"
-    if ! pkgutil --payload-files "$OUT/_component.pkg" \
-        | grep -qx "./Applications/Weto.app/Contents/Resources/$name"; then
+    if ! grep -qx "./Applications/Weto.app/Contents/Resources/$name" <<< "$PAYLOAD"; then
         echo "✗ $name отсутствует в Contents/Resources внутри пакета — иконок не будет" >&2
         exit 1
     fi

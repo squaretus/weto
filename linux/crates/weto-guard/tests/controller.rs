@@ -5,11 +5,11 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use weto_config::settings::{Settings, Target};
-use weto_core::geo::{ConfirmSource, GeoProbeReport, SourceOutcome};
-use weto_core::network::{NetworkInterfaceSnapshot, NetworkSnapshot};
+use weto_core::geo::{ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
+use weto_core::network::{NetworkSnapshot, OutgoingRoute};
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::process::{ProcessSnapshot, TargetKind};
 use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
@@ -28,36 +28,27 @@ struct FakeNetwork(Arc<Mutex<NetworkSnapshot>>);
 impl FakeNetwork {
     fn healthy_tunnel() -> FakeNetwork {
         FakeNetwork(Arc::new(Mutex::new(NetworkSnapshot {
-            interfaces: vec![interface("wg0", true, true), interface("eth0", true, false)],
-            default_route_interface: Some("wg0".to_string()),
+            outgoing: Some(OutgoingRoute {
+                interface: "wg0".to_string(),
+                address: "10.7.0.2".to_string(),
+            }),
         })))
     }
 
     fn route_moves_to(&self, name: &str) {
-        self.0.lock().unwrap().default_route_interface = Some(name.to_string());
+        self.0.lock().unwrap().outgoing = Some(OutgoingRoute {
+            interface: name.to_string(),
+            address: "10.7.0.2".to_string(),
+        });
     }
 
-    fn foreign_tunnel_appears(&self, name: &str) {
-        self.0
-            .lock()
-            .unwrap()
-            .interfaces
-            .push(interface(name, true, true));
-    }
-
+    /// Туннель упал: трафик пошёл напрямую.
     fn tunnel_goes_down(&self) {
         let mut snapshot = self.0.lock().unwrap();
-        snapshot.interfaces[0].is_up = false;
-        snapshot.default_route_interface = Some("eth0".to_string());
-    }
-}
-
-fn interface(name: &str, is_up: bool, is_tunnel: bool) -> NetworkInterfaceSnapshot {
-    NetworkInterfaceSnapshot {
-        name: name.to_string(),
-        index: 1,
-        is_up,
-        is_tunnel,
+        snapshot.outgoing = Some(OutgoingRoute {
+            interface: "eth0".to_string(),
+            address: "192.168.1.10".to_string(),
+        });
     }
 }
 
@@ -71,6 +62,8 @@ impl NetworkSnapshotReading for FakeNetwork {
 struct FakeGeo {
     country: Arc<Mutex<String>>,
     calls: Arc<AtomicUsize>,
+    /// Адрес, который называет резервный сервис, когда ipinfo молчит.
+    silent_ipinfo: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeGeo {
@@ -78,11 +71,18 @@ impl FakeGeo {
         FakeGeo {
             country: Arc::new(Mutex::new("NL".to_string())),
             calls: Arc::new(AtomicUsize::new(0)),
+            silent_ipinfo: Arc::new(Mutex::new(None)),
         }
     }
 
     fn now_reports(&self, country: &str) {
         *self.country.lock().unwrap() = country.to_string();
+    }
+
+    /// ipinfo молчит, а адрес называет резервный сервис — та самая форма отчёта,
+    /// которую отдаёт проба при 429 от ipinfo.
+    fn ipinfo_goes_silent(&self, address_from_reference: &str) {
+        *self.silent_ipinfo.lock().unwrap() = Some(address_from_reference.to_string());
     }
 
     fn call_count(&self) -> usize {
@@ -94,6 +94,18 @@ impl GeoProbing for FakeGeo {
     fn probe(&self, _token: Option<&str>) -> GeoProbeReport {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let country = self.country.lock().unwrap().clone();
+
+        if let Some(address) = self.silent_ipinfo.lock().unwrap().clone() {
+            return GeoProbeReport {
+                ip: Some(address),
+                ipinfo: SourceOutcome::Failed(GeoFailure::RateLimited(429)),
+                confirmation: SourceOutcome::Answered(country),
+                confirm_source: Some(ConfirmSource::Geojs),
+                has_network_path: true,
+                checked_at: SystemTime::now(),
+            };
+        }
+
         GeoProbeReport {
             ip: Some("203.0.113.7".to_string()),
             ipinfo: SourceOutcome::Answered(country.clone()),
@@ -107,6 +119,13 @@ impl GeoProbing for FakeGeo {
 
 #[derive(Clone)]
 struct FakeProcesses(Arc<Mutex<Vec<ProcessSnapshot>>>);
+
+impl FakeProcesses {
+    /// Пользователь закрыл VPN-клиент.
+    fn vpn_app_closes(&self) {
+        self.0.lock().unwrap().retain(|p| p.pid != 77);
+    }
+}
 
 impl ProcessRegistryReading for FakeProcesses {
     fn snapshot(&self) -> Vec<ProcessSnapshot> {
@@ -150,7 +169,13 @@ struct FakeSettings(Arc<Mutex<Settings>>);
 impl FakeSettings {
     fn armed() -> FakeSettings {
         let settings = Settings {
-            vpn_interface: Some("wg0".to_string()),
+            vpn_app: Some(Target {
+                entry: "/usr/bin/happ".to_string(),
+                display_name: "happ".to_string(),
+                kind: TargetKind::Binary,
+                path: "/usr/bin/happ".to_string(),
+                launch_paths: vec![],
+            }),
             blocked_countries: vec!["RU".to_string()],
             targets: vec![Target {
                 entry: "/usr/bin/nano".to_string(),
@@ -178,11 +203,15 @@ impl SettingsProviding for FakeSettings {
 }
 
 #[derive(Clone, Default)]
-struct RecordingReporter(Arc<Mutex<Vec<String>>>);
+struct RecordingReporter(Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>);
 
 impl KillReporting for RecordingReporter {
     fn report(&self, _killed: &[weto_core::process::MatchedProcess], reason: &str) {
         self.0.lock().unwrap().push(reason.to_string());
+    }
+
+    fn refine(&self, reason: &str) {
+        self.1.lock().unwrap().push(reason.to_string());
     }
 }
 
@@ -193,6 +222,7 @@ struct Harness {
     network: FakeNetwork,
     geo: FakeGeo,
     settings: FakeSettings,
+    processes: FakeProcesses,
     killer: RecordingKiller,
     reporter: RecordingReporter,
 }
@@ -209,19 +239,28 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
     let settings = FakeSettings::armed();
     let killer = RecordingKiller::default();
     let reporter = RecordingReporter::default();
-    let processes = FakeProcesses(Arc::new(Mutex::new(vec![ProcessSnapshot {
-        pid: 42,
-        parent_pid: 1,
-        executable_path: "/usr/bin/nano".to_string(),
-        arguments: Some(vec!["nano".to_string()]),
-    }])));
+    let processes = FakeProcesses(Arc::new(Mutex::new(vec![
+        ProcessSnapshot {
+            pid: 42,
+            parent_pid: 1,
+            executable_path: "/usr/bin/nano".to_string(),
+            arguments: Some(vec!["nano".to_string()]),
+        },
+        // Живой VPN-клиент: без него локальное основание — «приложение не запущено».
+        ProcessSnapshot {
+            pid: 77,
+            parent_pid: 1,
+            executable_path: "/usr/bin/happ".to_string(),
+            arguments: Some(vec!["happ".to_string()]),
+        },
+    ])));
 
     let controller = GuardController::new(
         Box::new(network.clone()),
         Box::new(geo.clone()),
         Box::new(NoSecret),
         Box::new(settings.clone()),
-        ProcessEnforcer::new(Box::new(processes), Box::new(killer.clone())),
+        ProcessEnforcer::new(Box::new(processes.clone()), Box::new(killer.clone())),
         Box::new(reporter.clone()),
     )
     .with_coalesce_window(window);
@@ -230,6 +269,7 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
         controller,
         network,
         geo,
+        processes,
         settings,
         killer,
         reporter,
@@ -282,16 +322,17 @@ fn a_routine_tick_with_a_healthy_vpn_does_not_touch_the_targets() {
 
 /// Второй VPN, живущий рядом, — не событие для охраны.
 ///
-/// Корпоративный клиент рвёт связь и поднимается сам: его туннель уходит
-/// из снимка и возвращается. Выбранный интерфейс и владелец маршрута при этом
-/// не шелохнулись, значит и вердикт остался в силе.
+/// Корпоративный клиент рвёт связь и поднимается сам. Носитель трафика при этом
+/// не шелохнулся, значит и вердикт остался в силе: состава интерфейсов
+/// в отпечатке нет вовсе.
 #[test]
 fn a_foreign_vpn_reconnecting_does_not_touch_the_targets() {
     let h = harness();
     h.controller.tick();
     let killed_after_first = h.killer.killed().len();
 
-    h.network.foreign_tunnel_appears("cscotun0");
+    // Снимок пересобран заново, носитель трафика тот же.
+    h.network.route_moves_to("wg0");
     let decision = h.controller.tick();
 
     assert_eq!(decision, GuardDecision::Safe);
@@ -304,35 +345,60 @@ fn a_foreign_vpn_reconnecting_does_not_touch_the_targets() {
 }
 
 /// Смена владельца маршрута обесценивает вердикт ещё до всякого запроса.
-/// Локальное основание применяется до сети и сетью не отменяется.
+/// Сменился носитель трафика — прежний вердикт недействителен: цели завершаются
+/// до ответа сети, и только потом вердикт выводится заново.
 ///
-/// Запрос при этом уходит — но только за показаниями: экран обязан сказать,
-/// где пользователь оказался, когда трафик пошёл мимо туннеля. Раньше здесь
-/// проверялось отсутствие запроса вовсе, и ценой этого был экран, навсегда
-/// застывший на стране упавшего VPN.
+/// Запрос при этом уходит и за показаниями: экран обязан сказать, где пользователь
+/// оказался, когда трафик пошёл мимо туннеля, а не застыть на стране упавшего VPN.
 #[test]
-fn moving_the_route_off_the_tunnel_kills_before_the_network_is_asked() {
+fn moving_the_route_off_the_tunnel_re_verifies_before_trusting_anything() {
     let h = harness();
     h.controller.tick();
+    let killed_before = h.killer.killed().len();
+    let probes_before = h.geo.call_count();
 
     h.geo.now_reports("KZ");
     h.network.route_moves_to("eth0");
-    let decision = h.controller.tick();
+    h.controller.tick();
 
-    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnNotPrimary));
-    // Ответ сети «страна безопасная» вердикт не меняет: цели завершены.
-    assert!(!h.killer.killed().is_empty());
+    assert!(
+        h.killer.killed().len() > killed_before,
+        "до ответа сети цели обязаны быть завершены"
+    );
+    assert!(
+        h.geo.call_count() > probes_before,
+        "вердикт обязан быть выведен заново, а не наследован"
+    );
+    assert!(h.controller.snapshot().report.is_some());
 }
 
 #[test]
-fn a_tunnel_that_went_down_is_noticed_locally() {
+fn a_closed_vpn_app_is_noticed_locally() {
     let h = harness();
     h.controller.tick();
 
-    h.network.tunnel_goes_down();
+    h.processes.vpn_app_closes();
     let decision = h.controller.tick();
 
-    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnDown));
+    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnAppNotRunning));
+    assert!(!h.killer.killed().is_empty());
+}
+
+/// Упавший туннель виден по смене носителя трафика: вердикт недействителен,
+/// и цели завершаются до всякой сети.
+#[test]
+fn a_tunnel_that_went_down_invalidates_the_verdict() {
+    let h = harness();
+    h.controller.tick();
+    let killed_before = h.killer.killed().len();
+
+    h.network.tunnel_goes_down();
+    h.controller.tick();
+
+    assert!(
+        h.killer.killed().len() > killed_before,
+        "трафик пошёл напрямую — цели завершаются до ответа сети"
+    );
 }
 
 /// Правка настроек меняет ревизию, а значит обесценивает прежний вердикт.
@@ -411,12 +477,35 @@ fn a_blocked_country_kills_and_names_the_source() {
         .any(|r| r.contains("RU")));
 }
 
+/// Причина эпизода уточняется у приёмника даже тогда, когда завершать уже
+/// нечего: цели умерли на fail-closed, и записи с настоящей причиной иначе
+/// не появится вовсе — в журнале навсегда остаётся «ещё не проверено».
+#[test]
+fn the_settled_reason_is_offered_for_refinement() {
+    let h = harness();
+    h.controller.tick();
+
+    h.geo.now_reports("RU");
+    h.settings.edit(|_| {});
+    h.controller.tick();
+
+    let refinements = h.reporter.1.lock().unwrap().clone();
+    assert!(
+        refinements.contains(&"Подключение ещё не проверено".to_string()),
+        "первый такт fail-closed: {refinements:?}"
+    );
+    assert!(
+        refinements.iter().any(|r| r.contains("RU")),
+        "настоящая причина обязана дойти до журнала: {refinements:?}"
+    );
+}
+
 /// Кнопка спрашивает «где я», а не «нужна ли проверка»: запрос уходит даже
 /// тогда, когда судьба целей решена локально.
 #[test]
 fn the_button_asks_the_network_even_when_the_verdict_is_local() {
     let h = harness();
-    h.network.tunnel_goes_down();
+    h.processes.vpn_app_closes();
     h.controller.tick();
     let calls_before = h.geo.call_count();
 
@@ -424,7 +513,7 @@ fn the_button_asks_the_network_even_when_the_verdict_is_local() {
 
     assert_eq!(
         reason(&decision),
-        Some(&UnsafeReason::VpnDown),
+        Some(&UnsafeReason::VpnAppNotRunning),
         "локальное основание применяется сразу, жизни целям кнопка не продлевает"
     );
     assert_eq!(h.geo.call_count(), calls_before + 1);
@@ -446,14 +535,6 @@ fn the_button_does_not_cost_the_user_their_targets() {
 
     assert_eq!(decision, GuardDecision::Safe);
     assert_eq!(h.killer.killed().len(), killed_before);
-}
-
-#[test]
-fn the_screen_shows_which_tunnels_can_be_chosen() {
-    let h = harness();
-    h.controller.tick();
-
-    assert_eq!(h.controller.snapshot().vpn_candidates, vec!["wg0"]);
 }
 
 #[test]
@@ -480,13 +561,13 @@ fn without_targets_there_is_nothing_to_guard() {
 }
 
 #[test]
-fn an_unchosen_tunnel_is_its_own_reason() {
+fn an_unchosen_vpn_app_is_its_own_reason() {
     let h = harness();
-    h.settings.edit(|s| s.vpn_interface = None);
+    h.settings.edit(|s| s.set_vpn_app(None));
 
     let decision = h.controller.tick();
 
-    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnNotConfigured));
+    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnAppNotChosen));
 }
 
 #[test]
@@ -514,12 +595,10 @@ fn the_readout_refreshes_when_the_tunnel_falls() {
     assert!(probes_while_guarded > 0, "на страже проба обязана быть");
     assert!(h.controller.snapshot().report.is_some());
 
-    // VPN выключили: судьба целей ясна без сети, но показания устарели.
+    // VPN выключили: трафик пошёл напрямую, вердикт недействителен, показания устарели.
     h.geo.now_reports("KZ");
     h.network.tunnel_goes_down();
-    let decision = h.controller.tick();
-
-    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnDown));
+    h.controller.tick();
     assert!(
         h.geo.call_count() > probes_while_guarded,
         "после падения VPN показания обязаны обновиться"
@@ -552,5 +631,63 @@ fn a_settled_local_verdict_does_not_probe_every_tick() {
         h.geo.call_count(),
         after_first,
         "состояние сети не менялось — новых запросов быть не должно"
+    );
+}
+
+/// Молчание ipinfo — не повод завершать цели, если адрес доказанно тот же.
+/// Тот же адрес — та же страна.
+#[test]
+fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
+    let h = harness();
+    assert_eq!(h.controller.tick(), GuardDecision::Safe);
+    // Первый круг всегда fail-closed до ответа сети, и его завершения уже в списке.
+    let killed_before = h.killer.killed().len();
+
+    h.geo.ipinfo_goes_silent("203.0.113.7");
+    std::thread::sleep(Duration::from_millis(20));
+
+    assert_eq!(
+        h.controller.probe_now(),
+        GuardDecision::Safe,
+        "адрес тот же — перепроверять нечего"
+    );
+    assert_eq!(
+        h.killer.killed().len(),
+        killed_before,
+        "молчание ipinfo при неизменном адресе целей не стоит"
+    );
+}
+
+/// Адрес другой, страны для него никто не назвал — вердикта нет, и снисхождения тоже.
+#[test]
+fn silent_ipinfo_with_a_new_address_kills() {
+    let h = harness();
+    assert_eq!(h.controller.tick(), GuardDecision::Safe);
+
+    h.geo.ipinfo_goes_silent("198.51.100.231");
+    let decision = h.controller.probe_now();
+
+    assert_eq!(
+        reason(&decision),
+        Some(&UnsafeReason::GeoUnavailable(
+            "адрес сменился, страна не проверена".to_string()
+        ))
+    );
+}
+
+/// Расписание гео: страна выхода меняется и на неизменном пути, поэтому запрос
+/// уходит и без событий сети.
+#[test]
+fn geo_schedule_asks_again_on_an_unchanged_path() {
+    let h = harness();
+    h.controller.tick();
+    let calls_after_verdict = h.geo.call_count();
+
+    // Тик сразу за первым: расписание ещё не подошло, в сеть идти незачем.
+    h.controller.tick();
+    assert_eq!(
+        h.geo.call_count(),
+        calls_after_verdict,
+        "частота запросов не равна частоте тиков"
     );
 }

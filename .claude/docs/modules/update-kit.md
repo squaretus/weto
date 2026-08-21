@@ -65,5 +65,10 @@ root logic.
   `KeepAlive`: the installer terminates the app and launchd brings it back.
 - **The install fraction is only meaningful while downloading.** `installer` reports no
   progress, so the installing phase is honestly indeterminate.
+- **The action row splits the free width evenly — one spacer per gap.** Buttons are
+  `fixedSize`, and with a single spacer the row read as two groups: «Пропустить версию» pinned
+  left, «Напомнить позже» and «Обновить» stuck together on the right (50 pt of air against 16).
+  Two spacers give one measured 24 pt gap each. The row also lives outside the text column, or
+  the labels would be truncated to «Проп…».
 - **The daemon never receives a URL or a version from the client** — it re-checks the release
   itself. Otherwise any authorized process could ask root to install an arbitrary package.

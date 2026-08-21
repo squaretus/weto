@@ -31,6 +31,10 @@ final class GuardController {
     private let geoProbe: GeoProbing
     private let debounceInterval: TimeInterval
 
+    /// Статус выбранного VPN-приложения. Приходит снаружи: процессы обходит
+    /// `GuardVM` — у него уже есть скан, и второй обход был бы лишним.
+    private let vpnAppStatus: () -> VPNAppStatus
+
     private let onDecision: (GuardDecision) -> Void
     /// `nil` гасит показания: устаревшие адрес и страна на экране
     /// читаются как «я всё ещё под VPN», хотя защиты уже нет.
@@ -39,12 +43,24 @@ final class GuardController {
     private(set) var revision = 0
     private var freshVerdict: Verdict?
     private var probeTask: Task<Void, Never>?
+    private var isProbeInFlight = false
+
+    /// Чтение, на котором стоит последний состоявшийся вердикт, и отпечаток сети,
+    /// при котором он получен. Нужно, чтобы молчание ipinfo не завершало цели,
+    /// когда адрес доказанно тот же: тот же адрес — та же страна.
+    private var established: EstablishedReading?
+
+    private struct EstablishedReading {
+        let reading: GeoReading
+        let fingerprint: String
+    }
 
     init(
         settings: SettingsStore,
         snapshotReader: NetworkSnapshotReading,
         geoProbe: GeoProbing,
         debounceInterval: TimeInterval,
+        vpnAppStatus: @escaping () -> VPNAppStatus,
         onDecision: @escaping (GuardDecision) -> Void,
         onReport: @escaping (GeoProbeReport?) -> Void
     ) {
@@ -52,6 +68,7 @@ final class GuardController {
         self.snapshotReader = snapshotReader
         self.geoProbe = geoProbe
         self.debounceInterval = debounceInterval
+        self.vpnAppStatus = vpnAppStatus
         self.onDecision = onDecision
         self.onReport = onReport
 
@@ -75,7 +92,7 @@ final class GuardController {
     func evaluate() {
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
-        let vpn = VPNStatusResolver.status(serviceID: config.vpnServiceID, in: snapshot)
+        let vpn = vpnAppStatus()
 
         if let local = GuardPolicy.decideLocal(
             isEnabled: settings.isEnabled,
@@ -88,13 +105,13 @@ final class GuardController {
             // защиту, которой уже нет.
             let isStale = freshVerdict != Verdict(
                 revision: revision,
-                snapshotFingerprint: snapshot.verdictFingerprint(forService: config.vpnServiceID)
+                snapshotFingerprint: snapshot.verdictFingerprint
             )
             let isArmed = settings.isEnabled && !config.targets.isEmpty
 
             if isStale { onReport(nil) }
 
-            record(snapshot: snapshot, serviceID: config.vpnServiceID)
+            record(snapshot: snapshot)
             onDecision(local)
 
             // Один запрос на смену состояния сети, и только пока охрана на посту:
@@ -123,7 +140,7 @@ final class GuardController {
     func probeNow() {
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
-        let vpn = VPNStatusResolver.status(serviceID: config.vpnServiceID, in: snapshot)
+        let vpn = vpnAppStatus()
 
         // Локальное основание применяем сразу: ответ гео-сервисов не должен
         // ни продлевать целям жизнь, ни задерживать их завершение.
@@ -132,24 +149,50 @@ final class GuardController {
             vpn: vpn,
             config: config
         ) {
-            record(snapshot: snapshot, serviceID: config.vpnServiceID)
+            record(snapshot: snapshot)
             onDecision(local)
         }
 
         startProbe(after: 0)
     }
 
+    /// Судьба целей решается сетью. Запрос при этом уходит не на каждом такте:
+    /// пока и настройки, и путь в сеть те же, решение принимается по уже полученному
+    /// чтению, а обновляет его расписание гео. Иначе частота опроса системы и частота
+    /// обращений к чужим сервисам — одно и то же число, и учащение первого жжёт лимиты
+    /// второго: при такте в 5 секунд это больше полумиллиона запросов в месяц.
     private func beginNetworkVerification(config: GuardConfig, snapshot: NetworkSnapshot) {
-        let fingerprint = snapshot.verdictFingerprint(forService: config.vpnServiceID)
+        let fingerprint = snapshot.verdictFingerprint
 
-        if freshVerdict != Verdict(revision: revision, snapshotFingerprint: fingerprint) {
-            onDecision(GuardPolicy.pendingVerification(
+        guard freshVerdict != Verdict(revision: revision, snapshotFingerprint: fingerprint) else {
+            guard let established, established.fingerprint == fingerprint else { return }
+            onDecision(GuardPolicy.decide(GuardSignals(
                 isEnabled: settings.isEnabled,
+                vpn: vpnAppStatus(),
+                geo: .resolved(established.reading),
                 config: config
-            ))
+            )))
+            return
         }
 
+        onDecision(GuardPolicy.pendingVerification(
+            isEnabled: settings.isEnabled,
+            config: config
+        ))
+
         startProbe(after: debounceInterval)
+    }
+
+    /// Запрос по расписанию: страна выхода меняется и на неизменном пути — например,
+    /// когда пользователь переключает сервер внутри своего клиента, — и отпечаток
+    /// об этом не скажет.
+    ///
+    /// Пол между пробами обязателен: таймаут ipinfo равен периоду расписания,
+    /// и без него пробы начнут накладываться.
+    func probeOnSchedule() {
+        let config = settings.guardConfig
+        guard settings.isEnabled, config.hasTargets, !isProbeInFlight else { return }
+        startProbe(after: 0)
     }
 
     private func startProbe(after interval: TimeInterval) {
@@ -162,8 +205,11 @@ final class GuardController {
             try? await Task.sleep(for: .seconds(interval))
             guard !Task.isCancelled else { return }
 
-            guard let report = await self?.geoProbe.probe() else { return }
-            guard !Task.isCancelled else { return }
+            self?.isProbeInFlight = true
+            let report = await self?.geoProbe.probe()
+            self?.isProbeInFlight = false
+
+            guard let report, !Task.isCancelled else { return }
 
             self?.applyLatestNetworkOutcome(report, revision: expected)
         }
@@ -174,25 +220,54 @@ final class GuardController {
 
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
-        let vpn = VPNStatusResolver.status(serviceID: config.vpnServiceID, in: snapshot)
+        let vpn = vpnAppStatus()
+        let fingerprint = snapshot.verdictFingerprint
 
         // Отчёт отдаётся и при отказе: попап обязан показать, кто именно молчал.
         onReport(report)
 
-        record(snapshot: snapshot, serviceID: config.vpnServiceID)
+        let geo = admissibleOutcome(of: report, fingerprint: fingerprint)
+        if case .resolved(let reading) = geo {
+            established = EstablishedReading(reading: reading, fingerprint: fingerprint)
+        }
+
+        record(snapshot: snapshot)
         onDecision(GuardPolicy.decide(GuardSignals(
             isEnabled: settings.isEnabled,
             vpn: vpn,
-            geo: report.outcome,
+            geo: geo,
             config: config
         )))
     }
 
-    private func record(snapshot: NetworkSnapshot, serviceID: String?) {
-        freshVerdict = Verdict(
-            revision: revision,
-            snapshotFingerprint: snapshot.verdictFingerprint(forService: serviceID)
-        )
+    /// Что из отчёта годится в основание вердикта.
+    ///
+    /// ipinfo ответил — берём его ответ, тут решать нечего. ipinfo молчит — смотрим,
+    /// назвал ли резервный сервис наш адрес: совпал с адресом прошлого вердикта, значит
+    /// страна та же и перепроверять нечего. Снисхождение выдаётся за доказательство,
+    /// а не за давность, и каждый круг доказывается заново: перестанет отвечать
+    /// и резервный — адреса не будет, и цели завершатся.
+    ///
+    /// Сменился отпечаток сети — снисхождения нет ни при каком совпадении адреса:
+    /// вердикт при смене пути недействителен по построению.
+    private func admissibleOutcome(
+        of report: GeoProbeReport,
+        fingerprint: String
+    ) -> GeoOutcome {
+        let outcome = report.outcome
+        guard case .unavailable(let detail) = outcome else { return outcome }
+
+        guard let established, established.fingerprint == fingerprint, let address = report.ip
+        else { return outcome }
+
+        guard address == established.reading.ip else {
+            return .unavailable("адрес сменился, страна не проверена")
+        }
+        return .degraded(previous: established.reading, detail: detail)
+    }
+
+    private func record(snapshot: NetworkSnapshot) {
+        freshVerdict = Verdict(revision: revision, snapshotFingerprint: snapshot.verdictFingerprint)
     }
 
     private func configurationChanged() {

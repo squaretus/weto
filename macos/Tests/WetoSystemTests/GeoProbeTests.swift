@@ -31,6 +31,25 @@ private struct FakeNetworkPath: NetworkPathReporting {
     let hasPath: Bool
 }
 
+/// Время — граница системы, поэтому подменяется. Потолки кэша иначе пришлось бы
+/// ждать по-настоящему.
+private final class MutableClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) { self.value = value }
+
+    var now: Date {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        value = value.addingTimeInterval(interval)
+    }
+}
+
 final class GeoProbeTests: XCTestCase {
 
     func test_report_names_the_service_that_answered() async {
@@ -116,6 +135,31 @@ final class GeoProbeTests: XCTestCase {
         XCTAssertEqual(ipinfoCalls, 0, "без токена ipinfo спрашивать нечем")
     }
 
+    /// Отказ ipinfo не оставляет нас без адреса: адрес и есть то, по чему потом решают,
+    /// нужно ли перепроверять страну. Тот же адрес — та же страна, и круг гео не нужен.
+    func test_when_ipinfo_refuses_the_probe_asks_the_reference_source_for_its_own_address() async {
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .failure(HTTPFetchError.badStatus(429)),
+            "ip/country.json": .success(geojsSelfKZ),
+        ])
+        let probe = GeoProbe(
+            fetcher: fetcher,
+            networkPath: FakeNetworkPath(hasPath: true),
+            token: { "t" }
+        )
+
+        let report = await probe.probe()
+
+        XCTAssertEqual(report.ipinfo, .failed(.rateLimited(429)))
+        XCTAssertEqual(report.ip, "91.224.74.56", "без адреса нечем доказать, что он не менялся")
+        XCTAssertEqual(report.confirmation, .answered("KZ"))
+        XCTAssertEqual(report.confirmSource, .geojs)
+
+        guard case .unavailable = report.outcome else {
+            return XCTFail("без ответа ipinfo вердикт обязан остаться fail-closed")
+        }
+    }
+
     func test_reference_source_failure_is_shown_instead_of_a_country() async {
         let fetcher = FakeFetcher(responses: ["geojs.io": .failure(HTTPFetchError.badStatus(503))])
         let probe = GeoProbe(
@@ -176,8 +220,11 @@ final class GeoProbeTests: XCTestCase {
         XCTAssertNil(reading.confirmSource)
     }
 
-    func test_confirmation_is_requested_on_every_probe() async {
-
+    /// Подтверждение отвечает «в какой стране вот этот адрес». У неизменного адреса ответ
+    /// не меняется каждые пять секунд, а квота подтверждающего сервиса считается на адрес
+    /// выхода VPN и делится с соседями по узлу — переспрашивать его каждый такт значит
+    /// выжигать общий лимит и ловить чужие отказы.
+    func test_confirmation_is_not_asked_again_for_the_same_address() async {
         let fetcher = FakeFetcher(responses: [
             "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
             "freeipapi": .success(freeipapiKZ),
@@ -188,15 +235,13 @@ final class GeoProbeTests: XCTestCase {
 
         let ipinfoCalls = await fetcher.count("ipinfo.io")
         let confirmCalls = await fetcher.count("freeipapi")
-        XCTAssertEqual(ipinfoCalls, 5, "ipinfo опрашивается каждый такт")
-        XCTAssertEqual(
-            confirmCalls, 5,
-            "подтверждение не кэшируется: иначе смена страны на том же адресе осталась бы незамеченной"
-        )
+        XCTAssertEqual(ipinfoCalls, 5, "ipinfo опрашивается каждый такт: он и есть детектор смены страны")
+        XCTAssertEqual(confirmCalls, 1, "адрес тот же — подтверждать нечего")
     }
 
-    func test_country_change_is_seen_immediately() async {
-
+    /// Страну меняет ipinfo, и это видно в тот же такт: кэшируется подтверждение,
+    /// а не основной источник.
+    func test_country_change_from_ipinfo_is_seen_immediately() async {
         let fetcher = FakeFetcher(responses: [
             "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
             "freeipapi": .success(freeipapiKZ),
@@ -204,7 +249,24 @@ final class GeoProbeTests: XCTestCase {
         let probe = GeoProbe(fetcher: fetcher, token: { "t" })
         _ = await probe.probe()
 
-        // Тот же адрес, но подтверждающий сервис поменял вердикт.
+        await fetcher.setResponse("ipinfo.io", .success(ipinfoData(ip: "203.0.113.28", country: "RU")))
+
+        guard case .resolved(let reading) = await probe.probe().outcome else {
+            return XCTFail("ожидался .resolved")
+        }
+        XCTAssertEqual(reading.primaryCountry, "RU")
+    }
+
+    func test_confirmation_is_refreshed_after_the_soft_ceiling() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .success(freeipapiKZ),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" }, now: { clock.now })
+        _ = await probe.probe()
+
+        clock.advance(by: Constants.confirmationSoftTTLSeconds + 1)
         await fetcher.setResponse(
             "freeipapi",
             .success(Data(#"{"ipVersion":4,"ipAddress":"203.0.113.28","countryCode":"RU"}"#.utf8))
@@ -213,7 +275,49 @@ final class GeoProbeTests: XCTestCase {
         guard case .resolved(let reading) = await probe.probe().outcome else {
             return XCTFail("ожидался .resolved")
         }
-        XCTAssertEqual(reading.confirmedCountry, "RU")
+        XCTAssertEqual(reading.confirmedCountry, "RU", "по мягкому потолку ответ обязан обновиться")
+    }
+
+    /// Неудачное обновление в пределах жёсткого потолка ничего не меняет: у нас есть
+    /// годный ответ про этот адрес, и отказ чужого сервиса не повод завершать цели.
+    func test_failed_refresh_keeps_the_previous_confirmation() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .success(freeipapiKZ),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" }, now: { clock.now })
+        _ = await probe.probe()
+
+        clock.advance(by: Constants.confirmationSoftTTLSeconds + 1)
+        await fetcher.setResponse("freeipapi", .failure(HTTPFetchError.badStatus(429)))
+        await fetcher.setResponse("ip/country/", .failure(HTTPFetchError.badStatus(503)))
+
+        let report = await probe.probe()
+
+        XCTAssertEqual(report.confirmation, .answered("KZ"))
+        XCTAssertEqual(report.confirmSource, .freeipapi)
+    }
+
+    func test_after_the_hard_ceiling_a_failed_refresh_drops_the_confirmation() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .success(freeipapiKZ),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" }, now: { clock.now })
+        _ = await probe.probe()
+
+        clock.advance(by: Constants.confirmationHardTTLSeconds + 1)
+        await fetcher.setResponse("freeipapi", .failure(HTTPFetchError.badStatus(429)))
+        await fetcher.setResponse("ip/country/", .failure(HTTPFetchError.badStatus(503)))
+
+        let report = await probe.probe()
+
+        XCTAssertEqual(
+            report.confirmation, .failed(.rateLimited(429)),
+            "вечно доверять одному подтверждению нельзя: у переприсвоенных диапазонов страна меняется"
+        )
     }
 
     func test_failed_confirmation_recovers_on_the_next_probe() async {

@@ -73,12 +73,10 @@ extension UnsafeReason {
         switch self {
         case .verificationPending:
             return "Подключение ещё не проверено"
-        case .vpnNotConfigured:
-            return "VPN-сервис не выбран в настройках"
-        case .vpnDown:
-            return "VPN не поднят"
-        case .vpnNotPrimary:
-            return "VPN поднят, но трафик идёт мимо него"
+        case .vpnAppNotChosen:
+            return "VPN-приложение не выбрано в настройках"
+        case .vpnAppNotRunning:
+            return "VPN-приложение не запущено"
         case .geoUnavailable(let detail):
             return "Не удалось определить внешний адрес: \(detail)"
         case .blacklistedIP(let ip):

@@ -15,9 +15,15 @@ public enum Constants {
         return version
     }()
 
-    public static let defaultPollIntervalSeconds: TimeInterval = 5
+    /// Опрос системы: процессы, VPN-приложение, носитель трафика. Настройкой
+    /// не является — он бесплатный (полный обход 230 процессов занимает 5 мс),
+    /// а платит за частоту не он, а расписание гео.
+    public static let tickIntervalSeconds: TimeInterval = 1
 
-    public static let pollIntervalOptions: [TimeInterval] = [5, 10, 15]
+    /// Как часто уходит запрос к гео-сервисам. Отдельно от опроса системы: опрос
+    /// бесплатный и частый, обращение к чужим сервисам платное и редкое, и учащение
+    /// первого не должно жечь лимиты второго.
+    public static let geoProbeIntervalSeconds: TimeInterval = 5
 
     public static let networkEventDebounceSeconds: TimeInterval = 0.3
 
@@ -38,11 +44,30 @@ public enum Constants {
     /// поэтому ждём его заметно меньше, чем основной источник.
     public static let geoConfirmationTimeoutSeconds: TimeInterval = 2.5
 
+    /// Мягкий потолок ответа подтверждающего сервиса: по нему делается попытка переспросить
+    /// про тот же адрес. Неудача ничего не меняет — годный ответ у нас уже есть, и отказ
+    /// чужого сервиса не повод завершать цели.
+    public static let confirmationSoftTTLSeconds: TimeInterval = 60
+
+    /// Жёсткий потолок: дольше этого доверять одному ответу нельзя. У переприсвоенных
+    /// диапазонов страна регистрации меняется, и подтверждение обязано обновиться
+    /// или признаться недоступным.
+    public static let confirmationHardTTLSeconds: TimeInterval = 900
+
     public static let ipinfoLiteURL = "https://v4.api.ipinfo.io/lite/me"
 
+    /// Хост ipinfo отдельно от адреса запроса: до него же идёт проба маршрута.
+    /// Спрашивать ядро надо про тот адрес, до которого реально пойдёт вердиктный
+    /// запрос, — фиксированные публичные адреса клиенты исключают из туннеля.
+    public static var ipinfoHost: String {
+        URL(string: ipinfoLiteURL)?.host ?? "v4.api.ipinfo.io"
+    }
+
     /// Канонический адрес без редиректа: freeipapi.com отвечает 302 на free.freeipapi.com.
-    /// Лимит — 60 запросов в минуту, а мы при опросе раз в 5 секунд тратим 12:
-    /// подтверждение спрашивается на каждой пробе, без кэша.
+    /// Лимит — 60 запросов в минуту, и считается он на клиентский адрес, то есть
+    /// на выход VPN: делим его с другими клиентами того же узла. Поэтому подтверждение
+    /// спрашивается не на каждой пробе, а по смене адреса и по мягкому потолку —
+    /// один запрос в минуту вместо двенадцати.
     public static func freeipapiURL(ip: String) -> String {
         "https://free.freeipapi.com/api/json/\(ip)"
     }

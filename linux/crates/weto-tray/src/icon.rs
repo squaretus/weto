@@ -36,6 +36,8 @@ pub struct Pixmap {
 fn tint(state: ShieldState) -> &'static str {
     match state {
         ShieldState::Guarded => "#46D09B",
+        // Тот же жёлтый, что у ожидания: другого жёлтого в теме нет.
+        ShieldState::Degraded => "#F2B544",
         ShieldState::Pending => "#F2B544",
         ShieldState::Killed => "#FF6B81",
         ShieldState::Disabled => "#9C9AA6",

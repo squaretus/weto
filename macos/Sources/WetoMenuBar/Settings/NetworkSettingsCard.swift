@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import WetoCore
 import WetoShared
 import WetoDesign
@@ -13,13 +14,6 @@ struct NetworkSettingsCard: View {
 
     private var scheme: ColorScheme { coordinator.settings.appTheme.colorScheme }
 
-    private var pickerRows: [VPNPickerRow] {
-        VPNPicker.rows(
-            candidates: coordinator.guardVM.availableVPNs,
-            chosen: coordinator.settings.vpnServiceID
-        )
-    }
-
     private var maskedToken: String {
         let token = coordinator.settings.ipinfoToken
         guard token.count > 4 else { return String(repeating: "•", count: token.count) }
@@ -27,56 +21,25 @@ struct NetworkSettingsCard: View {
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: WetoTokens.space2) {
+            card
+
+            Text("VPN-приложение задаётся так же, как цель: имя команды, путь или бандл. Пока оно не запущено, цели не работают.")
+                .font(WetoTokens.diagnostics)
+                .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, WetoTokens.space2)
+        }
+    }
+
+    private var card: some View {
         WetoCard("Сеть и гео") {
             VStack(spacing: 0) {
-                WetoRow {
-                    Text("VPN-сервис")
-                        .font(WetoTokens.label)
-                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
-
-                    Spacer(minLength: 0)
-
-                    // Значение тега — UUID сервиса: два VPN с одинаковым именем
-                    // должны оставаться различимыми.
-                    Picker("", selection: Binding(
-                        get: { coordinator.settings.vpnServiceID ?? "" },
-                        set: { coordinator.settings.vpnServiceID = $0.isEmpty ? nil : $0 }
-                    )) {
-                        // Выбранный туннель остаётся в списке, даже когда его
-                        // сейчас нет: у клиента, поднимающего utun сам, интерфейс
-                        // живёт ровно пока живо подключение.
-                        ForEach(pickerRows) { row in
-                            Text(row.label).tag(row.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .buttonStyle(.borderless)
-                    .font(WetoTokens.value)
-                    .fixedSize()
-                }
+                vpnAppRow
 
                 WetoDivider()
 
-                WetoRow {
-                    Text("Токен ipinfo")
-                        .font(WetoTokens.label)
-                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
-                        .fixedSize()
-                        .padding(.trailing, WetoTokens.space5 - WetoTokens.space3)
-
-                    TextField("", text: $tokenDraft, prompt: Text("Ключ ipinfo.io"))
-                        .textFieldStyle(WetoFieldStyle())
-                        .labelsHidden()
-                        .onSubmit { save(tokenDraft) }
-                        .onChange(of: tokenDraft) { _, value in
-                            guard value != maskedToken else { return }
-                            save(value)
-                        }
-                        .onChange(of: isTokenFocused) { _, focused in
-                            tokenDraft = focused ? coordinator.settings.ipinfoToken : maskedToken
-                        }
-                        .focused($isTokenFocused)
-                }
+                tokenRow
 
                 if let tokenError {
                     WetoRow {
@@ -86,27 +49,81 @@ struct NetworkSettingsCard: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-
-                WetoDivider()
-
-                VStack(alignment: .leading, spacing: WetoTokens.space2) {
-                    Text("Интервал опроса")
-                        .font(WetoTokens.label)
-                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
-
-                    WetoSegmentedControl(
-                        selection: Binding(
-                            get: { coordinator.settings.pollIntervalSeconds },
-                            set: { coordinator.settings.pollIntervalSeconds = $0 }
-                        ),
-                        options: Constants.pollIntervalOptions.map { ($0, "\(Int($0)) с") }
-                    )
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, WetoTokens.space2)
             }
         }
         .onAppear { tokenDraft = maskedToken }
+    }
+
+    /// Выбирается приложение, а не туннель: спрашивать «какой из utunN твой»
+    /// у пользователя нельзя, а «какое приложение поднимает тебе VPN» — можно.
+    @ViewBuilder
+    private var vpnAppRow: some View {
+        WetoRow {
+            Text("VPN-приложение")
+                .font(WetoTokens.label)
+                .foregroundStyle(WetoTokens.ink.resolve(scheme))
+
+            Spacer(minLength: 0)
+
+            if let rule = coordinator.settings.vpnAppRule {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(coordinator.guardVM.displayName(forTarget: rule))
+                        .font(WetoTokens.value)
+                        .foregroundStyle(WetoTokens.ink.resolve(scheme))
+                    Text(coordinator.guardVM.resolvedDescription(forTarget: rule))
+                        .font(WetoTokens.caption)
+                        .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                        .textSelection(.enabled)
+                }
+
+                WetoDeleteRowAction(label: "Снять выбор VPN-приложения", hint: "Снять выбор") {
+                    coordinator.settings.vpnAppRule = nil
+                }
+            } else {
+                Text("не выбрано")
+                    .font(WetoTokens.value)
+                    .foregroundStyle(WetoTokens.faint.resolve(scheme))
+
+                Button("Выбрать…") { pickFromDisk() }
+                    .buttonStyle(WetoPillButtonStyle(.primary))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var tokenRow: some View {
+        WetoRow {
+            Text("Токен ipinfo")
+                .font(WetoTokens.label)
+                .foregroundStyle(WetoTokens.ink.resolve(scheme))
+                .fixedSize()
+                .padding(.trailing, WetoTokens.space5 - WetoTokens.space3)
+
+            TextField("", text: $tokenDraft, prompt: Text("Ключ ipinfo.io"))
+                .textFieldStyle(WetoFieldStyle())
+                .labelsHidden()
+                .onSubmit { save(tokenDraft) }
+                .onChange(of: tokenDraft) { _, value in
+                    guard value != maskedToken else { return }
+                    save(value)
+                }
+                .onChange(of: isTokenFocused) { _, focused in
+                    tokenDraft = focused ? coordinator.settings.ipinfoToken : maskedToken
+                }
+                .focused($isTokenFocused)
+        }
+    }
+
+    private func pickFromDisk() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.showsHiddenFiles = true
+        panel.treatsFilePackagesAsDirectories = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        coordinator.settings.vpnAppRule = Bundle(url: url)?.bundleIdentifier ?? url.path
     }
 
     /// Токен считается сохранённым только после успешной записи в связку ключей.

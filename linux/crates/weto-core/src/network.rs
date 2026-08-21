@@ -1,110 +1,55 @@
-//! Снимок сети и статус выбранного туннеля.
+//! Снимок сети сведён к одному вопросу: через кого ядро выпускает вердиктный
+//! запрос.
 //!
-//! На macOS охрана выбирает *сетевой сервис* по UUID и проверяет, что он поднят
-//! и держит маршрут по умолчанию. В ядре Linux понятия «сетевой сервис» нет —
-//! эквивалент здесь интерфейс, и его имя же служит стабильным идентификатором.
-//!
-//! Что именно считать туннелем, решает граница системы (`weto-sys`), а не этот
-//! модуль: признак приходит уже вычисленным. Причина та же, что на macOS —
-//! выводить туннель из имени нельзя, «VPN» пользователь напишет на чём угодно.
+//! Списка интерфейсов здесь больше нет. Он был нужен, пока пользователь выбирал
+//! туннель: имена вроде `utun6`/`wg0` шли в список выбора, а квалификация
+//! «туннель или нет» решала, кого туда пускать. Выбирается приложение, поэтому
+//! от снимка остался только признак свежести вердикта.
 
 use serde::{Deserialize, Serialize};
 
+/// Носитель трафика: имя интерфейса и локальный адрес, который ядро выберет
+/// источником. Адрес входит в отпечаток вместе с именем — туннель умеет сохранить
+/// имя и сменить адрес, и это смена состояния сети.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetworkInterfaceSnapshot {
-    pub name: String,
-    pub index: u32,
-    /// IFF_UP и IFF_RUNNING одновременно: поднятый, но не несущий линк
-    /// интерфейс охрану не устраивает.
-    pub is_up: bool,
-    pub is_tunnel: bool,
+pub struct OutgoingRoute {
+    pub interface: String,
+    pub address: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NetworkSnapshot {
-    pub interfaces: Vec<NetworkInterfaceSnapshot>,
-    /// Интерфейс, через который уходит маршрут по умолчанию с наименьшей метрикой.
-    pub default_route_interface: Option<String>,
+    pub outgoing: Option<OutgoingRoute>,
 }
 
+/// Состояние VPN-приложения — того, что выбрал пользователь.
+///
+/// Выбирается приложение, а не туннель, потому что вопрос «какой из `utunN` твой»
+/// пользователю задать нельзя: имена ничего не значат и меняются при каждом
+/// переподключении. Вопрос «какое приложение поднимает тебе VPN» — отвечаемый.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-pub enum VpnStatus {
-    NotConfigured,
-    Down,
-    #[serde(rename_all = "camelCase")]
-    Up {
-        is_primary: bool,
-    },
+pub enum VpnAppStatus {
+    NotChosen,
+    NotRunning,
+    Running,
 }
 
 impl NetworkSnapshot {
     /// Отпечаток снимка: по нему видно, устарел ли прежний сетевой вердикт.
-    /// Сравнивать снимки целиком на горячем пути дороже, а нужен именно
-    /// дешёвый признак свежести.
     ///
-    /// В отпечаток входит ровно то, от чего вердикт зависит: состояние
-    /// выбранного интерфейса и владелец маршрута по умолчанию, определяющий
-    /// выход в сеть. Чужие интерфейсы не входят намеренно.
+    /// Входит ровно то, от чего вердикт зависит: интерфейс, через который уходит
+    /// вердиктный запрос, и его локальный адрес. Чужих интерфейсов в отпечатке нет
+    /// вовсе — второй VPN, живущий рядом и переподключающийся сам, маршрут
+    /// не забирает, и обесценивать вердикт ему нечем.
     ///
-    /// Отпечаток по всему снимку выглядел строже, а на деле подставлял: второй
-    /// VPN, живущий рядом, рвёт связь и поднимается сам — состав интерфейсов
-    /// меняется, прежний вердикт объявляется протухшим, и цели завершаются
-    /// с `VerificationPending` при полностью исправном выбранном туннеле.
-    pub fn verdict_fingerprint(&self, chosen: Option<&str>) -> String {
-        // Пропавший интерфейс и невыбранный VPN — разные состояния с разными
-        // вердиктами впереди (`Down` против `NotConfigured`), и отпечаток
-        // обязан их различать.
-        let part = match chosen.and_then(|name| self.interface(name)) {
-            Some(i) => format!(
-                "{}:{}:{}",
-                i.name,
-                if i.is_up { "up" } else { "down" },
-                if i.is_tunnel { "vpn" } else { "net" }
-            ),
-            None => format!("chosen={}", chosen.unwrap_or("-")),
-        };
-
-        format!(
-            "{}|primary={}",
-            part,
-            self.default_route_interface.as_deref().unwrap_or("-")
-        )
-    }
-
-    /// Кандидаты в VPN — только туннели, отсортированные по имени.
-    pub fn vpn_candidates(&self) -> Vec<&NetworkInterfaceSnapshot> {
-        let mut candidates: Vec<&NetworkInterfaceSnapshot> =
-            self.interfaces.iter().filter(|i| i.is_tunnel).collect();
-        candidates.sort_by(|a, b| a.name.cmp(&b.name));
-        candidates
-    }
-
-    pub fn interface(&self, name: &str) -> Option<&NetworkInterfaceSnapshot> {
-        self.interfaces.iter().find(|i| i.name == name)
-    }
-}
-
-/// Статус выбранного туннеля.
-///
-/// Незнакомое имя — `Down`, а не «неизвестно»: тот же выбор, что на macOS,
-/// и он fail-closed. Интерфейс, потерявший квалификацию туннеля (или вписанный
-/// в настройки руками), тоже `Down` — иначе Ethernet сойдёт за VPN.
-pub fn resolve_vpn_status(snapshot: &NetworkSnapshot, chosen: Option<&str>) -> VpnStatus {
-    let Some(name) = chosen else {
-        return VpnStatus::NotConfigured;
-    };
-
-    let Some(interface) = snapshot.interface(name) else {
-        return VpnStatus::Down;
-    };
-
-    if !interface.is_tunnel || !interface.is_up {
-        return VpnStatus::Down;
-    }
-
-    VpnStatus::Up {
-        is_primary: snapshot.default_route_interface.as_deref() == Some(name),
+    /// `-` означает «наружу никто не выпускает или адрес гео-сервиса ещё
+    /// не разрешён»: состояние, в котором вердикта быть не может.
+    pub fn verdict_fingerprint(&self) -> String {
+        match &self.outgoing {
+            Some(route) => format!("out={}/{}", route.interface, route.address),
+            None => "out=-".to_string(),
+        }
     }
 }
 
@@ -112,136 +57,35 @@ pub fn resolve_vpn_status(snapshot: &NetworkSnapshot, chosen: Option<&str>) -> V
 mod tests {
     use super::*;
 
-    fn snapshot(interfaces: &[(&str, bool, bool)], default_route: Option<&str>) -> NetworkSnapshot {
+    fn snapshot(interface: Option<&str>, address: &str) -> NetworkSnapshot {
         NetworkSnapshot {
-            interfaces: interfaces
-                .iter()
-                .enumerate()
-                .map(
-                    |(index, (name, is_up, is_tunnel))| NetworkInterfaceSnapshot {
-                        name: (*name).to_string(),
-                        index: index as u32 + 1,
-                        is_up: *is_up,
-                        is_tunnel: *is_tunnel,
-                    },
-                )
-                .collect(),
-            default_route_interface: default_route.map(str::to_string),
+            outgoing: interface.map(|name| OutgoingRoute {
+                interface: name.to_string(),
+                address: address.to_string(),
+            }),
         }
     }
 
     #[test]
-    fn unknown_interface_is_treated_as_down() {
-        let s = snapshot(&[("eth0", true, false)], Some("eth0"));
-        assert_eq!(resolve_vpn_status(&s, Some("wg0")), VpnStatus::Down);
-    }
-
-    #[test]
-    fn interface_that_is_not_a_tunnel_is_never_up() {
-        let s = snapshot(&[("eth0", true, false)], Some("eth0"));
-        assert_eq!(resolve_vpn_status(&s, Some("eth0")), VpnStatus::Down);
-    }
-
-    #[test]
-    fn tunnel_without_the_default_route_is_not_primary() {
-        let s = snapshot(&[("wg0", true, true), ("eth0", true, false)], Some("eth0"));
-        assert_eq!(
-            resolve_vpn_status(&s, Some("wg0")),
-            VpnStatus::Up { is_primary: false }
-        );
-    }
-
-    #[test]
-    fn tunnel_holding_the_default_route_is_primary() {
-        let s = snapshot(&[("wg0", true, true)], Some("wg0"));
-        assert_eq!(
-            resolve_vpn_status(&s, Some("wg0")),
-            VpnStatus::Up { is_primary: true }
-        );
-    }
-
-    #[test]
-    fn downed_tunnel_is_down_even_while_it_still_owns_the_route() {
-        let s = snapshot(&[("wg0", false, true)], Some("wg0"));
-        assert_eq!(resolve_vpn_status(&s, Some("wg0")), VpnStatus::Down);
-    }
-
-    #[test]
-    fn without_a_choice_the_status_is_not_configured() {
-        let s = snapshot(&[("wg0", true, true)], Some("wg0"));
-        assert_eq!(resolve_vpn_status(&s, None), VpnStatus::NotConfigured);
-    }
-
-    #[test]
-    fn fingerprint_changes_when_the_route_owner_changes() {
-        let a = snapshot(&[("wg0", true, true), ("eth0", true, false)], Some("wg0"));
-        let b = snapshot(&[("wg0", true, true), ("eth0", true, false)], Some("eth0"));
+    fn the_traffic_moving_to_another_interface_changes_the_fingerprint() {
         assert_ne!(
-            a.verdict_fingerprint(Some("wg0")),
-            b.verdict_fingerprint(Some("wg0"))
+            snapshot(Some("wg0"), "10.7.0.2").verdict_fingerprint(),
+            snapshot(Some("eth0"), "192.168.1.10").verdict_fingerprint()
         );
     }
 
+    /// Туннель умеет переподключиться, сохранив имя интерфейса, и получить другой
+    /// адрес. Для вердикта это смена состояния сети.
     #[test]
-    fn fingerprint_changes_when_the_chosen_tunnel_goes_down() {
-        let a = snapshot(&[("wg0", true, true)], Some("wg0"));
-        let b = snapshot(&[("wg0", false, true)], Some("wg0"));
+    fn the_same_interface_with_a_new_address_changes_the_fingerprint() {
         assert_ne!(
-            a.verdict_fingerprint(Some("wg0")),
-            b.verdict_fingerprint(Some("wg0"))
-        );
-    }
-
-    /// Второй VPN рвёт связь и поднимается сам — вердикт про выбранный туннель
-    /// от этого не устаревает.
-    #[test]
-    fn a_foreign_tunnel_coming_and_going_leaves_the_fingerprint_alone() {
-        let alone = snapshot(&[("wg0", true, true), ("eth0", true, false)], Some("wg0"));
-        let with_corporate = snapshot(
-            &[
-                ("wg0", true, true),
-                ("eth0", true, false),
-                ("cscotun0", true, true),
-            ],
-            Some("wg0"),
-        );
-        assert_eq!(
-            alone.verdict_fingerprint(Some("wg0")),
-            with_corporate.verdict_fingerprint(Some("wg0")),
-            "чужой туннель не меняет ни выбранный, ни выход в сеть"
-        );
-    }
-
-    /// Пропавший интерфейс и невыбранный VPN ведут к разным вердиктам
-    /// (`Down` против `NotConfigured`), значит и отпечатки у них разные.
-    #[test]
-    fn a_missing_interface_is_not_the_same_as_no_choice() {
-        let s = snapshot(&[("eth0", true, false)], Some("eth0"));
-        assert_ne!(
-            s.verdict_fingerprint(Some("wg0")),
-            s.verdict_fingerprint(None)
+            snapshot(Some("wg0"), "10.7.0.2").verdict_fingerprint(),
+            snapshot(Some("wg0"), "10.8.0.2").verdict_fingerprint()
         );
     }
 
     #[test]
-    fn only_tunnels_are_offered_as_candidates_and_they_are_sorted() {
-        let s = snapshot(
-            &[
-                ("tun0", true, true),
-                ("eth0", true, false),
-                ("wg0", true, true),
-            ],
-            None,
-        );
-        let names: Vec<&str> = s.vpn_candidates().iter().map(|i| i.name.as_str()).collect();
-        assert_eq!(names, vec!["tun0", "wg0"]);
-    }
-
-    /// Туннель, поднятый впервые, обязан попадать в список сразу — иначе
-    /// пользователь не сможет его выбрать в настройках.
-    #[test]
-    fn a_tunnel_that_is_down_is_still_a_candidate() {
-        let s = snapshot(&[("wg0", false, true)], None);
-        assert_eq!(s.vpn_candidates().len(), 1);
+    fn no_outgoing_route_is_its_own_state() {
+        assert_eq!(snapshot(None, "").verdict_fingerprint(), "out=-");
     }
 }

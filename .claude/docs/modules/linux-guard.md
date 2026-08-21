@@ -13,7 +13,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
 | `weto-core` | `ip.rs` | address validation and CIDR |
 | `weto-core` | `presentation.rs` | status wording, `ShieldState` |
-| `weto-sys` | `network_snapshot.rs` | sysfs interfaces + kernel route probe |
+| `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic |
 | `weto-sys` | `network_events.rs` | netlink subscription |
 | `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root |
 | `weto-sys` | `process_killer.rs` | `SIGTERM` |
@@ -51,6 +51,8 @@ the whole of what the Linux side is allowed to differ in:
 | target hint mentions bundles | hint mentions command and path only | `appBundle` does not exist here |
 | `NSAlert` for destructive confirmations | `Gtk.AlertDialog` | each platform asks its own dialog |
 | — | tray context menu (check / settings / quit) | SNI needs one; the popup carries the same actions |
+| country flag in the menu bar | country name as text | no flag rendering here yet; the set ships with macOS only |
+| app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
 
 Everything else matches: the settings window is the same five cards in the same order
 (`Цели`, `Сеть и гео`, `Чёрный список`, `Внешний вид`, `Обслуживание`) plus the same
@@ -65,17 +67,19 @@ settings model on both platforms and is exposed by neither. The same goes for a
 
 Everything the policy decides is shared. What the system dictates is not:
 
-- **VPN is identified by interface name; the tunnel qualification comes from the kernel**
-  (`DEVTYPE`, `tun_flags`, ARPHRD), never from the name — a user will call anything "VPN".
-  An unknown name resolves to `Down`, fail-closed, same as an unknown UUID on macOS.
-- **`is_up` is the IFF_UP bit alone.** IFF_RUNNING is not exposed through sysfs (a working
-  `eth0` reads `0x1003`) and "carries link" is undefined for tunnels anyway. Whether
-  traffic actually flows through an interface is answered by the route probe.
+- **The VPN is a chosen application, same as on macOS.** Interface names (`wg0`, `tun0`) meant
+  nothing to the user and changed between runs; sysfs reading and the tunnel qualification
+  (`DEVTYPE`, `tun_flags`, ARPHRD) went away with the picker. What survived is the route probe —
+  it answers whether traffic flows, which is the only thing the verdict needs.
+- **A VPN without a process cannot be chosen.** `wg-quick` brings an interface up and exits;
+  there is nothing to watch. Such a setup leaves the choice empty, which is fail-closed, and the
+  geo half of the policy still works once an app is picked. macOS has no equivalent gap because
+  every client there is an app.
 - **Network events come from a netlink subscription**, the replacement for
   `NWPathMonitor`: single-digit milliseconds instead of waiting out a five-second tick.
   Locked down by `netlink-events-contract.sh`.
-- **The 250 ms poll stays.** Catching launches through the netlink connector needs
-  `CAP_NET_ADMIN`, and the whole installation is designed to be unprivileged.
+- **The poll stays** (1 s while safe, 250 ms while unsafe). Catching launches through the netlink
+  connector needs `CAP_NET_ADMIN`, and the whole installation is designed to be unprivileged.
 - **Two macOS traps are solved by the kernel:** `readlink /proc/<pid>/exe` returns an
   already-resolved path, so the `nano`→`pico` symlink never appears; argv arrives as a
   ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is needed.
@@ -100,15 +104,20 @@ Everything the policy decides is shared. What the system dictates is not:
   different sizes. `ui::action_row()` owns both that and the vertical centring; a GTK button
   fills the row height by default and needs `valign: Center` to stay a pill.
 - **The geo readout refreshes on every network change**, not only when the verdict needs the
-  network — same contract as `WetoShared`. One probe per (revision + fingerprint) pair, only
-  while the guard is armed, and the stale report is dropped first. The fingerprint is
-  `verdict_fingerprint(settings.vpn_interface)` — the chosen interface and the default-route
-  owner, never the whole interface list: a second tunnel appearing or vanishing beside the
-  chosen one must not cost the user their targets.
-- **The chosen tunnel survives going offline.** `vpn_rows` keeps the stored choice as a
-  "(не подключён)" row and separates rebuilding the list from a user's click; without that
-  separation switching the VPN off silently erased the setting, and the guard then reported
-  "VPN not selected" instead of "VPN down".
+  network — same contract as `WetoShared`. The geo schedule (5 s) and a fingerprint change are what
+  send a request; the stale report is dropped first. The fingerprint is `verdict_fingerprint()` —
+  the traffic carrier and its local address, never the interface list: a second tunnel appearing or
+  vanishing beside the working one must not cost the user their targets.
+- **The confirmation cache and the reference-address fallback are identical to macOS**, down to the
+  60 s / 15 min ceilings: the freeipapi quota counts per exit address and is shared with everyone
+  else on that node, so its 429 must not kill targets.
+- **The journal keeps one entry per episode and refines its reason**, same contract as
+  `WetoShared`. `KillReporting` gained `refine(reason)` with an empty default implementation:
+  `report` fires only when something was actually killed, and by the time the verdict is known
+  the targets are already dead — so without a separate call the entry would keep saying
+  "not verified yet" forever. `apply` offers the settled reason before enforcing, and
+  `Journal::refine_last_reason` rewrites the last entry. Unlike macOS, entries here carry no
+  ip/country at all — a pre-existing gap, not part of this contract.
 
 ## Self-update
 

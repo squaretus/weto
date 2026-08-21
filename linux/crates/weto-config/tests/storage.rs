@@ -27,7 +27,13 @@ fn settings_survive_a_round_trip() {
     let path = tmp.path().join("weto/config.toml");
 
     let settings = Settings {
-        vpn_interface: Some("wg0".to_string()),
+        vpn_app: Some(Target {
+            entry: "happ".to_string(),
+            display_name: "happ".to_string(),
+            kind: TargetKind::Binary,
+            path: "/usr/bin/happ".to_string(),
+            launch_paths: vec![],
+        }),
         blocked_countries: vec!["RU".to_string()],
         blocked_ip_ranges: vec!["10.0.0.0/8".to_string()],
         targets: vec![Target {
@@ -54,7 +60,13 @@ fn the_token_never_reaches_the_settings_file() {
     let path = tmp.path().join("config.toml");
 
     let settings = Settings {
-        vpn_interface: Some("wg0".to_string()),
+        vpn_app: Some(Target {
+            entry: "happ".to_string(),
+            display_name: "happ".to_string(),
+            kind: TargetKind::Binary,
+            path: "/usr/bin/happ".to_string(),
+            launch_paths: vec![],
+        }),
         ..Default::default()
     };
     settings.save(&path).unwrap();
@@ -132,6 +144,31 @@ fn journal_keeps_the_last_ten_entries() {
     assert_eq!(journal.entries()[9].killed_pids, vec![14]);
 }
 
+/// Причина эпизода, ставшая известной, дописывается в его запись: fail-closed
+/// пишет «ещё не проверено» раньше вердикта, а второй записи не будет — цели
+/// к тому моменту уже мертвы.
+#[test]
+fn journal_refines_the_reason_of_the_last_entry() {
+    let mut journal = Journal::default();
+    journal.append(event(7, "Подключение ещё не проверено"));
+
+    assert!(journal.refine_last_reason("Адрес 185.228.113.231 в чёрном списке"));
+
+    assert_eq!(journal.entries().len(), 1);
+    assert_eq!(
+        journal.entries()[0].reason_text,
+        "Адрес 185.228.113.231 в чёрном списке"
+    );
+    assert_eq!(journal.entries()[0].killed_pids, vec![7]);
+}
+
+#[test]
+fn refining_an_empty_journal_changes_nothing() {
+    let mut journal = Journal::default();
+    assert!(!journal.refine_last_reason("Адрес в чёрном списке"));
+    assert!(journal.entries().is_empty());
+}
+
 #[test]
 fn journal_survives_a_round_trip() {
     let tmp = tempfile::tempdir().unwrap();
@@ -186,10 +223,6 @@ fn paths_follow_xdg_layout_under_a_given_home() {
         paths.journal_file(),
         std::path::Path::new("/дом/.local/state/weto/journal.json")
     );
-    assert_eq!(
-        paths.flags_cache_dir(),
-        std::path::Path::new("/дом/.cache/weto/flags-circle")
-    );
 }
 
 /// Разбор записи чёрного списка живёт в настройках, а не в окне: мусор
@@ -233,19 +266,40 @@ fn removing_a_blacklist_entry_does_not_care_which_list_it_came_from() {
     assert!(settings.blocked_entries().is_empty());
 }
 
-/// Испорченный интервал в файле — правка руками. Охрана берёт умолчание,
-/// а не крутится вхолостую и не засыпает навсегда.
+/// Выбор VPN-приложения снимает его же из целей: охрана не имеет права
+/// завершать собственный источник защиты.
 #[test]
-fn a_broken_poll_interval_falls_back_to_the_default() {
-    let mut settings = Settings::default();
-    assert_eq!(settings.poll_interval().as_secs(), 5);
+fn choosing_a_vpn_app_removes_it_from_the_targets() {
+    let app = Target {
+        entry: "happ".to_string(),
+        display_name: "happ".to_string(),
+        kind: TargetKind::Binary,
+        path: "/usr/bin/happ".to_string(),
+        launch_paths: vec![],
+    };
+    let mut settings = Settings {
+        targets: vec![
+            Target {
+                entry: "nano".to_string(),
+                display_name: "nano".to_string(),
+                kind: TargetKind::Binary,
+                path: "/usr/bin/nano".to_string(),
+                launch_paths: vec![],
+            },
+            app.clone(),
+        ],
+        ..Default::default()
+    };
 
-    settings.poll_interval_seconds = 0.0;
-    assert_eq!(settings.poll_interval().as_secs(), 5);
+    settings.set_vpn_app(Some(app));
 
-    settings.poll_interval_seconds = -1.0;
-    assert_eq!(settings.poll_interval().as_secs(), 5);
-
-    settings.poll_interval_seconds = 15.0;
-    assert_eq!(settings.poll_interval().as_secs(), 15);
+    assert_eq!(
+        settings
+            .targets
+            .iter()
+            .map(|t| t.entry.as_str())
+            .collect::<Vec<_>>(),
+        vec!["nano"]
+    );
+    assert!(settings.vpn_app_rule().is_some());
 }

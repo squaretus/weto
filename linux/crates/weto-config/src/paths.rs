@@ -48,10 +48,6 @@ impl Paths {
     pub fn journal_file(&self) -> PathBuf {
         self.state_dir.join("journal.json")
     }
-
-    pub fn flags_cache_dir(&self) -> PathBuf {
-        self.cache_dir.join("flags-circle")
-    }
 }
 
 fn xdg(variable: &str, home: &std::path::Path, fallback: &str) -> PathBuf {
