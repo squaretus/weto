@@ -68,7 +68,14 @@ root logic.
 - **The action row splits the free width evenly — one spacer per gap.** Buttons are
   `fixedSize`, and with a single spacer the row read as two groups: «Пропустить версию» pinned
   left, «Напомнить позже» and «Обновить» stuck together on the right (50 pt of air against 16).
-  Two spacers give one measured 24 pt gap each. The row also lives outside the text column, or
+  Two spacers give one measured gap each. The row also lives outside the text column, or
   the labels would be truncated to «Проп…».
+- **`theme.width` is a promise the package cannot keep on its own.** Because the buttons are
+  `fixedSize`, a window narrower than the row clips the last button instead of shrinking a
+  label — «Обновить» ran off the right edge at 480 pt while the row needed 507. The host theme
+  must check its own number against `UpdateDialogView.minimumWidth(fittingButtons:)` with the
+  live controls measured; weto does it in `WetoUpdateThemeTests`. The package exposes the
+  arithmetic and its layout constants (`padding`, `rowSpacing`) so the check cannot drift from
+  the view.
 - **The daemon never receives a URL or a version from the client** — it re-checks the release
   itself. Otherwise any authorized process could ask root to install an arbitrary package.
