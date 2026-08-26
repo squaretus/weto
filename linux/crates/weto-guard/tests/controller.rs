@@ -419,6 +419,25 @@ fn editing_the_settings_invalidates_the_verdict() {
     );
 }
 
+/// Whitelist входит в ревизию конфигурации ровно так же, как чёрный список:
+/// его правка обязана обесценить прежний вердикт.
+#[test]
+fn editing_the_whitelist_invalidates_the_verdict() {
+    let h = harness();
+    h.controller.tick();
+    let calls_before = h.geo.call_count();
+
+    h.settings
+        .edit(|s| s.add_allowed_entry("NL").expect("запись валидна"));
+    h.controller.tick();
+
+    assert_eq!(
+        h.geo.call_count(),
+        calls_before + 1,
+        "после правки whitelist вердикт нужно получать заново"
+    );
+}
+
 /// У подтверждающего сервиса лимит 60 запросов в минуту. Всплеск событий сети
 /// не должен превращаться во всплеск запросов — но и цели в это окно не живут:
 /// вердикта нет, значит fail-closed.
