@@ -15,7 +15,15 @@ public enum AppTheme: String, CaseIterable, Sendable {
     }
 }
 
-public enum BlacklistEntryError: Error, Equatable, Sendable {
+/// Вид списка геоправил. Разбор записи, проверка дубликата и удаление —
+/// один путь на оба списка: два экземпляра одного алгоритма разъезжались бы
+/// молча, а расходиться им нельзя.
+public enum GeoListKind: Equatable, Sendable {
+    case blocked
+    case allowed
+}
+
+public enum GeoListEntryError: Error, Equatable, Sendable {
     case empty
     case invalidEntry
     case duplicate
@@ -53,6 +61,7 @@ public struct GuardConfigurationChange: Equatable, Sendable {
         case vpnApp
         case ipinfoToken
         case blacklist
+        case whitelist
     }
 
     public let field: Field
@@ -79,6 +88,8 @@ public final class SettingsStore {
         static let legacyExecutables = "targetExecutables"
         static let blockedCountryCodes = "blockedCountryCodes"
         static let blockedIPRangeTexts = "blockedIPRangeTexts"
+        static let allowedCountryCodes = "allowedCountryCodes"
+        static let allowedIPRangeTexts = "allowedIPRangeTexts"
     }
 
     private static let tokenAccount = "token"
@@ -102,6 +113,10 @@ public final class SettingsStore {
         self._targets = Self.loadTargets(from: defaults)
         self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
         self._blockedIPRangeTexts = defaults.stringArray(forKey: Key.blockedIPRangeTexts) ?? []
+        // Отсутствие ключей означает пустой whitelist — так ранее сохранённые
+        // установки открываются с прежним поведением.
+        self._allowedCountryCodes = defaults.stringArray(forKey: Key.allowedCountryCodes) ?? []
+        self._allowedIPRangeTexts = defaults.stringArray(forKey: Key.allowedIPRangeTexts) ?? []
         self._ipinfoToken = secrets.read(account: Self.tokenAccount) ?? ""
         self.tokenBox.value = _ipinfoToken.isEmpty ? nil : _ipinfoToken
     }
@@ -190,6 +205,27 @@ public final class SettingsStore {
         }
     }
 
+    private var _allowedCountryCodes: [String]
+    public var allowedCountryCodes: [String] {
+        get { _allowedCountryCodes }
+        set {
+            let normalized = Array(Set(newValue.map { $0.uppercased() })).sorted()
+            _allowedCountryCodes = normalized
+            defaults.set(normalized, forKey: Key.allowedCountryCodes)
+            emit(.whitelist)
+        }
+    }
+
+    private var _allowedIPRangeTexts: [String]
+    public var allowedIPRangeTexts: [String] {
+        get { _allowedIPRangeTexts }
+        set {
+            _allowedIPRangeTexts = newValue
+            defaults.set(newValue, forKey: Key.allowedIPRangeTexts)
+            emit(.whitelist)
+        }
+    }
+
     private var _ipinfoToken: String
     public private(set) var ipinfoToken: String {
         get { _ipinfoToken }
@@ -214,34 +250,84 @@ public final class SettingsStore {
         return .success(())
     }
 
-    /// Разбор строки чёрного списка живёт в store, а не во View: раньше мусорная
-    /// запись молча попадала в настройки и висела там с пометкой «не разобран».
+    /// Разбор строки живёт в store, а не во View: раньше мусорная запись молча
+    /// попадала в настройки и висела там с пометкой «не разобран».
+    ///
+    /// Путь один на оба списка — различает их только `kind`.
     @discardableResult
-    public func addBlockedEntry(_ text: String) -> Result<Void, BlacklistEntryError> {
+    public func addEntry(_ text: String, to kind: GeoListKind) -> Result<Void, GeoListEntryError> {
         let entry = text.trimmingCharacters(in: .whitespaces)
         guard !entry.isEmpty else { return .failure(.empty) }
 
         if entry.count == 2, entry.allSatisfy(\.isLetter) {
             let code = entry.uppercased()
-            guard !blockedCountryCodes.contains(code) else { return .failure(.duplicate) }
-            blockedCountryCodes += [code]
+            guard !countryCodes(of: kind).contains(code) else { return .failure(.duplicate) }
+            setCountryCodes(countryCodes(of: kind) + [code], of: kind)
             return .success(())
         }
 
         guard let range = IPRange(entry) else { return .failure(.invalidEntry) }
-        guard !blockedIPRangeTexts.contains(range.text) else { return .failure(.duplicate) }
-        blockedIPRangeTexts += [range.text]
+        guard !rangeTexts(of: kind).contains(range.text) else { return .failure(.duplicate) }
+        setRangeTexts(rangeTexts(of: kind) + [range.text], of: kind)
         return .success(())
     }
 
-    public func removeBlockedEntry(_ entry: String) {
-        blockedCountryCodes = blockedCountryCodes.filter { $0 != entry }
-        blockedIPRangeTexts = blockedIPRangeTexts.filter { $0 != entry }
+    public func removeEntry(_ entry: String, from kind: GeoListKind) {
+        setCountryCodes(countryCodes(of: kind).filter { $0 != entry }, of: kind)
+        setRangeTexts(rangeTexts(of: kind).filter { $0 != entry }, of: kind)
     }
 
-    public var blockedEntries: [String] {
-        blockedCountryCodes + blockedIPRangeTexts
+    public func entries(of kind: GeoListKind) -> [String] {
+        countryCodes(of: kind) + rangeTexts(of: kind)
     }
+
+    private func countryCodes(of kind: GeoListKind) -> [String] {
+        switch kind {
+        case .blocked: return blockedCountryCodes
+        case .allowed: return allowedCountryCodes
+        }
+    }
+
+    private func setCountryCodes(_ codes: [String], of kind: GeoListKind) {
+        switch kind {
+        case .blocked: blockedCountryCodes = codes
+        case .allowed: allowedCountryCodes = codes
+        }
+    }
+
+    private func rangeTexts(of kind: GeoListKind) -> [String] {
+        switch kind {
+        case .blocked: return blockedIPRangeTexts
+        case .allowed: return allowedIPRangeTexts
+        }
+    }
+
+    private func setRangeTexts(_ texts: [String], of kind: GeoListKind) {
+        switch kind {
+        case .blocked: blockedIPRangeTexts = texts
+        case .allowed: allowedIPRangeTexts = texts
+        }
+    }
+
+    // Обёртки для привязок UI: ничего, кроме делегирования в общий путь.
+
+    @discardableResult
+    public func addBlockedEntry(_ text: String) -> Result<Void, GeoListEntryError> {
+        addEntry(text, to: .blocked)
+    }
+
+    public func removeBlockedEntry(_ entry: String) { removeEntry(entry, from: .blocked) }
+
+    public var blockedEntries: [String] { entries(of: .blocked) }
+
+    @discardableResult
+    public func addAllowedEntry(_ text: String) -> Result<Void, GeoListEntryError> {
+        addEntry(text, to: .allowed)
+    }
+
+    public func removeAllowedEntry(_ entry: String) { removeEntry(entry, from: .allowed) }
+
+    public var allowedEntries: [String] { entries(of: .allowed) }
 
     public func onGuardConfigurationChange(
         _ handler: @escaping (GuardConfigurationChange) -> Void
@@ -259,8 +345,8 @@ public final class SettingsStore {
             vpnAppRule: vpnAppRule,
             blockedCountries: Set(blockedCountryCodes),
             blockedIPRanges: blockedIPRangeTexts.compactMap(IPRange.init),
-            allowedCountries: [],
-            allowedIPRanges: [],
+            allowedCountries: Set(allowedCountryCodes),
+            allowedIPRanges: allowedIPRangeTexts.compactMap(IPRange.init),
             targets: targets
         )
     }
