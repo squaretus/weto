@@ -261,4 +261,97 @@ final class SettingsStoreTests: XCTestCase {
         store.setIPInfoToken("")
         XCTAssertNil(store.tokenBox.value)
     }
+
+    // MARK: - Белый список
+
+    func test_allowed_country_entry_is_normalised_and_stored() {
+        let store = makeStore()
+
+        XCTAssertTrue(store.addAllowedEntry(" nl ").isSuccess)
+
+        XCTAssertEqual(store.allowedCountryCodes, ["NL"])
+        XCTAssertTrue(store.allowedIPRangeTexts.isEmpty)
+        XCTAssertTrue(store.blockedEntries.isEmpty, "белый список не должен течь в чёрный")
+    }
+
+    func test_allowed_cidr_entry_lands_in_range_list() {
+        let store = makeStore()
+
+        XCTAssertTrue(store.addAllowedEntry("198.51.100.0/24").isSuccess)
+
+        XCTAssertEqual(store.allowedIPRangeTexts, ["198.51.100.0/24"])
+    }
+
+    func test_rejects_malformed_allowed_entry() {
+        let store = makeStore()
+
+        XCTAssertEqual(store.addAllowedEntry("10.0.0.0/99").failureValue, .invalidEntry)
+        XCTAssertEqual(store.addAllowedEntry("   ").failureValue, .empty)
+
+        XCTAssertTrue(store.allowedEntries.isEmpty, "мусор не должен попадать в настройки")
+    }
+
+    func test_duplicate_allowed_entry_is_reported() {
+        let store = makeStore()
+        XCTAssertTrue(store.addAllowedEntry("NL").isSuccess)
+
+        XCTAssertEqual(store.addAllowedEntry("nl").failureValue, .duplicate)
+        XCTAssertEqual(store.allowedCountryCodes, ["NL"])
+    }
+
+    func test_removing_allowed_entry_clears_it_from_both_lists() {
+        let store = makeStore()
+        _ = store.addAllowedEntry("NL")
+        _ = store.addAllowedEntry("198.51.100.0/24")
+
+        store.removeAllowedEntry("NL")
+        XCTAssertEqual(store.allowedEntries, ["198.51.100.0/24"])
+
+        store.removeAllowedEntry("198.51.100.0/24")
+        XCTAssertTrue(store.allowedEntries.isEmpty)
+    }
+
+    /// Одна и та же запись в обоих списках — допустимый ввод: приоритет
+    /// задаёт политика, а не поле ввода.
+    func test_the_same_entry_may_live_in_both_lists() {
+        let store = makeStore()
+
+        XCTAssertTrue(store.addBlockedEntry("NL").isSuccess)
+        XCTAssertTrue(store.addAllowedEntry("NL").isSuccess)
+
+        XCTAssertEqual(store.blockedEntries, ["NL"])
+        XCTAssertEqual(store.allowedEntries, ["NL"])
+    }
+
+    func test_whitelist_survives_a_restart_of_the_store() {
+        let secrets = InMemorySecretStore()
+        let store = SettingsStore(defaults: defaults, secrets: secrets)
+        _ = store.addAllowedEntry("NL")
+        _ = store.addAllowedEntry("198.51.100.0/24")
+
+        let reopened = SettingsStore(defaults: defaults, secrets: secrets)
+
+        XCTAssertEqual(reopened.allowedEntries, ["NL", "198.51.100.0/24"])
+    }
+
+    /// Ранее сохранённые установки whitelist не знают — и обязаны заводиться
+    /// с пустым, а не падать и не терять чёрный список.
+    func test_settings_saved_before_the_whitelist_open_with_an_empty_one() {
+        defaults.set(["RU"], forKey: "blockedCountryCodes")
+
+        let store = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+
+        XCTAssertEqual(store.blockedEntries, ["RU"])
+        XCTAssertTrue(store.allowedEntries.isEmpty)
+        XCTAssertTrue(store.guardConfig.allowedCountries.isEmpty)
+    }
+
+    func test_guard_config_carries_the_whitelist() {
+        let store = makeStore()
+        _ = store.addAllowedEntry("NL")
+        _ = store.addAllowedEntry("198.51.100.0/24")
+
+        XCTAssertEqual(store.guardConfig.allowedCountries, ["NL"])
+        XCTAssertEqual(store.guardConfig.allowedIPRanges.map(\.text), ["198.51.100.0/24"])
+    }
 }
