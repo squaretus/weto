@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "about": [
     "Голден-фикстуры политики охраны. Один и тот же набор случаев прогоняют обе",
     "реализации: macOS/Tests/WetoCoreTests/GuardPolicyFixtureTests.swift и",
@@ -20,7 +20,12 @@
     "",
     "function: decide | decideLocal | pendingVerification.",
     "expect.decision: safe | kill | none (none — только для decideLocal, означает",
-    "«локальных оснований нет, нужен сетевой вердикт»)."
+    "«локальных оснований нет, нужен сетевой вердикт»).",
+    "",
+    "config.allowedCountries и config.allowedIPRanges — белый список. Поля",
+    "необязательные: их отсутствие означает пустой whitelist, и такой случай",
+    "работает ровно как до его появления. Whitelist спрашивается последним —",
+    "после чёрного списка, подтверждения и сверки стран."
   ],
   "cases": [
     {
@@ -815,6 +820,286 @@
           "kind": "countryConflict",
           "primary": "KZ",
           "confirmed": "NL"
+        }
+      }
+    },
+    {
+      "name": "пустой whitelist не меняет безопасный случай",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "allowedCountries": [],
+        "allowedIPRanges": [],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "safe"
+      }
+    },
+    {
+      "name": "разрешённая страна допускает выход",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "allowedCountries": [
+          "KZ"
+        ],
+        "allowedIPRanges": [],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "safe"
+      }
+    },
+    {
+      "name": "разрешённый CIDR допускает выход, даже если страна не в списке",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "allowedCountries": [
+          "DE"
+        ],
+        "allowedIPRanges": [
+          "203.0.113.0/24"
+        ],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "safe"
+      }
+    },
+    {
+      "name": "страна вне whitelist из одних стран — завершение",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "allowedCountries": [
+          "DE"
+        ],
+        "allowedIPRanges": [],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "notWhitelistedCountry",
+          "code": "KZ"
+        }
+      }
+    },
+    {
+      "name": "адрес вне whitelist с диапазонами — причина называет адрес",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "allowedCountries": [
+          "DE"
+        ],
+        "allowedIPRanges": [
+          "198.51.100.0/24"
+        ],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "notWhitelistedIP",
+          "ip": "203.0.113.28"
+        }
+      }
+    },
+    {
+      "name": "запись в обоих списках — чёрный побеждает",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "KZ"
+        ],
+        "blockedIPRanges": [
+          "203.0.113.0/24"
+        ],
+        "allowedCountries": [
+          "KZ"
+        ],
+        "allowedIPRanges": [
+          "203.0.113.0/24"
+        ],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "blacklistedIP",
+          "ip": "203.0.113.28"
+        }
+      }
+    },
+    {
+      "name": "нет подтверждения — завершение до whitelist",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "allowedCountries": [
+          "KZ"
+        ],
+        "allowedIPRanges": [],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "confirmationUnavailable"
+        }
+      }
+    },
+    {
+      "name": "расхождение стран — завершение до whitelist",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "DE",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "allowedCountries": [
+          "KZ"
+        ],
+        "allowedIPRanges": [],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "countryConflict",
+          "primary": "KZ",
+          "confirmed": "DE"
         }
       }
     }
