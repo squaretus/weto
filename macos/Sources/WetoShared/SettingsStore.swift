@@ -259,6 +259,8 @@ public final class SettingsStore {
             vpnAppRule: vpnAppRule,
             blockedCountries: Set(blockedCountryCodes),
             blockedIPRanges: blockedIPRangeTexts.compactMap(IPRange.init),
+            allowedCountries: [],
+            allowedIPRanges: [],
             targets: targets
         )
     }

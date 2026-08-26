@@ -127,22 +127,32 @@ final class GuardPolicyFixtureTests: XCTestCase {
         let vpnApp: String?
         let blockedCountries: [String]
         let blockedIPRanges: [String]
+        /// Старые случаи полей не знают: их отсутствие означает пустой whitelist,
+        /// а значит прежний смысл случая сохраняется дословно.
+        let allowedCountries: [String]?
+        let allowedIPRanges: [String]?
         let targets: [String]
 
         func asGuardConfig() throws -> GuardConfig {
+            GuardConfig(
+                vpnAppRule: vpnApp,
+                blockedCountries: Set(blockedCountries),
+                blockedIPRanges: try Self.ranges(blockedIPRanges),
+                allowedCountries: Set(allowedCountries ?? []),
+                allowedIPRanges: try Self.ranges(allowedIPRanges ?? []),
+                targets: targets
+            )
+        }
+
+        private static func ranges(_ texts: [String]) throws -> [IPRange] {
             var ranges: [IPRange] = []
-            for text in blockedIPRanges {
+            for text in texts {
                 guard let range = IPRange(text) else {
                     throw Failure("фикстуры содержат неразбираемый диапазон «\(text)»")
                 }
                 ranges.append(range)
             }
-            return GuardConfig(
-                vpnAppRule: vpnApp,
-                blockedCountries: Set(blockedCountries),
-                blockedIPRanges: ranges,
-                targets: targets
-            )
+            return ranges
         }
     }
 
@@ -179,6 +189,8 @@ final class GuardPolicyFixtureTests: XCTestCase {
             case "confirmationUnavailable": return .confirmationUnavailable
             case "countryConflict":
                 return .countryConflict(primary: primary ?? "", confirmed: confirmed ?? "")
+            case "notWhitelistedIP": return .notWhitelistedIP(ip ?? "")
+            case "notWhitelistedCountry": return .notWhitelistedCountry(code ?? "")
             default:
                 fatalError("неизвестная причина «\(kind)» в фикстурах")
             }

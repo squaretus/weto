@@ -139,10 +139,33 @@ final class UnsafeReasonTextTests: XCTestCase {
             .blockedCountry(code: "RU", source: "ipinfo"),
             .confirmationUnavailable,
             .countryConflict(primary: "KZ", confirmed: "DE"),
+            .notWhitelistedIP("1.2.3.4"),
+            .notWhitelistedCountry("DE"),
         ]
         for reason in reasons {
             XCTAssertFalse(reason.displayText.isEmpty, "пустой текст у \(reason)")
         }
+    }
+
+    /// Текст видит пользователь в статусе, журнале и уведомлении — техническое
+    /// имя перечисления туда попадать не должно.
+    func test_whitelist_reasons_speak_russian() {
+        XCTAssertEqual(
+            UnsafeReason.notWhitelistedIP("203.0.113.28").displayText,
+            "Адрес 203.0.113.28 не входит в белый список"
+        )
+        XCTAssertEqual(
+            UnsafeReason.notWhitelistedCountry("DE").displayText,
+            "Страна DE не входит в белый список"
+        )
+    }
+
+    /// Непопадание в whitelist — сработавшая защита, а не отказ сервиса:
+    /// жёлтой деградацией оно выглядеть не должно.
+    func test_whitelist_reasons_are_not_degradation() {
+        XCTAssertFalse(UnsafeReason.notWhitelistedIP("203.0.113.28").isDegradedRatherThanBlocked)
+        XCTAssertFalse(UnsafeReason.notWhitelistedCountry("DE").isDegradedRatherThanBlocked)
+        XCTAssertEqual(UnsafeReason.notWhitelistedCountry("DE").statusTitle, "Цели завершены")
     }
 
     func test_only_missing_confirmation_is_degraded() {
