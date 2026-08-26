@@ -155,6 +155,8 @@ impl Settings {
                 .iter()
                 .filter_map(|text| IpRange::parse(text))
                 .collect(),
+            allowed_countries: std::collections::HashSet::new(),
+            allowed_ip_ranges: Vec::new(),
             targets: self.targets.iter().map(|t| t.entry.clone()).collect(),
         }
     }
