@@ -11,6 +11,8 @@ final class GuardPolicyLocalTests: XCTestCase {
             vpnAppRule: vpn,
             blockedCountries: ["RU"],
             blockedIPRanges: [],
+            allowedCountries: [],
+            allowedIPRanges: [],
             targets: targets
         )
     }
