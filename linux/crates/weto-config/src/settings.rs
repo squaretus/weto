@@ -16,6 +16,12 @@ pub struct Settings {
     pub vpn_app: Option<Target>,
     pub blocked_countries: Vec<String>,
     pub blocked_ip_ranges: Vec<String>,
+    /// Пустой whitelist — нормальное умолчание: он не сужает ничего.
+    /// `serde(default)` держит обратную совместимость конфигов без этих ключей.
+    #[serde(default)]
+    pub allowed_countries: Vec<String>,
+    #[serde(default)]
+    pub allowed_ip_ranges: Vec<String>,
     pub targets: Vec<Target>,
     pub theme: Theme,
     /// Ревизия растёт на каждое сохранение: по ней охрана понимает, что прежний
@@ -50,6 +56,8 @@ impl Default for Settings {
             vpn_app: None,
             blocked_countries: Vec::new(),
             blocked_ip_ranges: Vec::new(),
+            allowed_countries: Vec::new(),
+            allowed_ip_ranges: Vec::new(),
             targets: Vec::new(),
             theme: Theme::Dark,
             revision: 0,
@@ -57,9 +65,18 @@ impl Default for Settings {
     }
 }
 
-/// Отказы при вводе записи чёрного списка. Тексты — те же, что на macOS.
+/// Вид списка геоправил. Разбор записи, проверка дубликата и удаление —
+/// один путь на оба списка: два экземпляра одного алгоритма разъезжались бы
+/// молча, а расходиться им нельзя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeoListKind {
+    Blocked,
+    Allowed,
+}
+
+/// Отказы при вводе записи списка геоправил. Тексты — те же, что на macOS.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum BlacklistEntryError {
+pub enum GeoListEntryError {
     #[error("введите код страны, IP-адрес или диапазон")]
     Empty,
     #[error("не похоже ни на код страны, ни на IP-адрес или CIDR")]
@@ -102,45 +119,90 @@ impl Settings {
         std::fs::rename(&temporary, path).map_err(|e| SettingsError::Write(e.to_string()))
     }
 
-    /// Записи чёрного списка одним списком — так их и показывает экран:
-    /// пользователь ввёл одно поле, и разделение на страны и диапазоны его
-    /// не касается.
-    pub fn blocked_entries(&self) -> Vec<String> {
-        let mut entries = self.blocked_countries.clone();
-        entries.extend(self.blocked_ip_ranges.iter().cloned());
+    /// Записи одним списком — так их и показывает экран: пользователь ввёл
+    /// одно поле, и разделение на страны и диапазоны его не касается.
+    pub fn entries(&self, kind: GeoListKind) -> Vec<String> {
+        let (countries, ranges) = self.lists(kind);
+        let mut entries = countries.clone();
+        entries.extend(ranges.iter().cloned());
         entries
     }
 
     /// Разбор живёт здесь, а не в окне: иначе мусорная запись молча попадала бы
     /// в настройки и висела там как «не разобрана».
-    pub fn add_blocked_entry(&mut self, text: &str) -> Result<(), BlacklistEntryError> {
+    ///
+    /// Путь один на оба списка — различает их только `kind`.
+    pub fn add_entry(&mut self, text: &str, kind: GeoListKind) -> Result<(), GeoListEntryError> {
         let entry = text.trim();
         if entry.is_empty() {
-            return Err(BlacklistEntryError::Empty);
+            return Err(GeoListEntryError::Empty);
         }
 
         if entry.chars().count() == 2 && entry.chars().all(|c| c.is_alphabetic()) {
             let code = entry.to_uppercase();
-            if self.blocked_countries.contains(&code) {
-                return Err(BlacklistEntryError::Duplicate);
+            let (countries, _) = self.lists_mut(kind);
+            if countries.contains(&code) {
+                return Err(GeoListEntryError::Duplicate);
             }
-            self.blocked_countries.push(code);
+            countries.push(code);
             return Ok(());
         }
 
         let Some(range) = IpRange::parse(entry) else {
-            return Err(BlacklistEntryError::InvalidEntry);
+            return Err(GeoListEntryError::InvalidEntry);
         };
-        if self.blocked_ip_ranges.contains(&range.text) {
-            return Err(BlacklistEntryError::Duplicate);
+        let (_, ranges) = self.lists_mut(kind);
+        if ranges.contains(&range.text) {
+            return Err(GeoListEntryError::Duplicate);
         }
-        self.blocked_ip_ranges.push(range.text);
+        ranges.push(range.text);
         Ok(())
     }
 
+    pub fn remove_entry(&mut self, entry: &str, kind: GeoListKind) {
+        let (countries, ranges) = self.lists_mut(kind);
+        countries.retain(|c| c != entry);
+        ranges.retain(|r| r != entry);
+    }
+
+    fn lists(&self, kind: GeoListKind) -> (&Vec<String>, &Vec<String>) {
+        match kind {
+            GeoListKind::Blocked => (&self.blocked_countries, &self.blocked_ip_ranges),
+            GeoListKind::Allowed => (&self.allowed_countries, &self.allowed_ip_ranges),
+        }
+    }
+
+    fn lists_mut(&mut self, kind: GeoListKind) -> (&mut Vec<String>, &mut Vec<String>) {
+        match kind {
+            GeoListKind::Blocked => (&mut self.blocked_countries, &mut self.blocked_ip_ranges),
+            GeoListKind::Allowed => (&mut self.allowed_countries, &mut self.allowed_ip_ranges),
+        }
+    }
+
+    // Обёртки для вызовов из окна: ничего, кроме делегирования в общий путь.
+
+    pub fn blocked_entries(&self) -> Vec<String> {
+        self.entries(GeoListKind::Blocked)
+    }
+
+    pub fn add_blocked_entry(&mut self, text: &str) -> Result<(), GeoListEntryError> {
+        self.add_entry(text, GeoListKind::Blocked)
+    }
+
     pub fn remove_blocked_entry(&mut self, entry: &str) {
-        self.blocked_countries.retain(|c| c != entry);
-        self.blocked_ip_ranges.retain(|r| r != entry);
+        self.remove_entry(entry, GeoListKind::Blocked)
+    }
+
+    pub fn allowed_entries(&self) -> Vec<String> {
+        self.entries(GeoListKind::Allowed)
+    }
+
+    pub fn add_allowed_entry(&mut self, text: &str) -> Result<(), GeoListEntryError> {
+        self.add_entry(text, GeoListKind::Allowed)
+    }
+
+    pub fn remove_allowed_entry(&mut self, entry: &str) {
+        self.remove_entry(entry, GeoListKind::Allowed)
     }
 
     /// Правила целей для матчера. Неразбираемые диапазоны отбрасываются молча:
@@ -155,8 +217,12 @@ impl Settings {
                 .iter()
                 .filter_map(|text| IpRange::parse(text))
                 .collect(),
-            allowed_countries: std::collections::HashSet::new(),
-            allowed_ip_ranges: Vec::new(),
+            allowed_countries: self.allowed_countries.iter().cloned().collect(),
+            allowed_ip_ranges: self
+                .allowed_ip_ranges
+                .iter()
+                .filter_map(|text| IpRange::parse(text))
+                .collect(),
             targets: self.targets.iter().map(|t| t.entry.clone()).collect(),
         }
     }
