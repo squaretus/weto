@@ -16,7 +16,7 @@ parsing, validation and persistence happen in the stores.
 - `macos/Sources/WetoMenuBar/Settings/SettingsWindow.swift`
 - `macos/Sources/WetoMenuBar/Settings/TargetsCard.swift`
 - `macos/Sources/WetoMenuBar/Settings/NetworkSettingsCard.swift`
-- `macos/Sources/WetoMenuBar/Settings/BlacklistCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/GeoListCard.swift` — built twice, for the blacklist and the whitelist
 - `macos/Sources/WetoMenuBar/Settings/MaintenanceCard.swift`
 - `macos/Sources/WetoMenuBar/Settings/JournalCard.swift`
 - `macos/Sources/WetoMenuBar/Settings/SettingsFooter.swift`
@@ -53,7 +53,7 @@ parsing, validation and persistence happen in the stores.
   target profile. Releasing the token brings the throttling back
 - Mutates persisted state through stores on user input: `settings.targets`,
   `settings.vpnAppRule`, `settings.appTheme`,
-  `settings.addBlockedEntry` / `removeBlockedEntry`, `settings.setIPInfoToken`
+  `settings.addEntry(_:to:)` / `removeEntry(_:from:)` (both geo lists), `settings.setIPInfoToken`
   (Keychain write), `eventLog.clear()`
 - `MaintenanceCard` writes/removes `~/Library/LaunchAgents/com.weto.app.plist` via
   `launchAgent.enable()`/`disable()`, runs `maintenance.closeApp()` / `uninstall()` and
@@ -92,6 +92,11 @@ parsing, validation and persistence happen in the stores.
 - The module carries no domain logic and therefore no tests — anything worth testing must
   be pushed down into `WetoShared`/`WetoCore`.
 - VPN picker tags carry the service **UUID**, never the name: two services can share a name.
+- **`GeoListCard` is one component instantiated twice**, not two cards: `SettingsWindow` passes the
+  title, the empty text, the removal-label tail and the add/remove closures. Its `newEntry` and
+  `entryError` are `@State`, so each instance keeps its own draft — a shared store-side draft would
+  let typing in one list surface in the other. A copy of the card for the whitelist would drift from
+  the blacklist one exactly the way the store's parsing path would.
 - The ipinfo token is never displayed in full unless the field is focused; `maskedToken`
   is compared against the draft to avoid saving the mask itself.
 
@@ -111,8 +116,8 @@ parsing, validation and persistence happen in the stores.
   or repeatedly on every popup open
 - `SettingsWindowConfigurator` reaches `view.window` through `DispatchQueue.main.async`;
   timing changes in SwiftUI window creation can leave the titlebar unconfigured
-- `ForEach` over `settings.targets` / `blockedEntries` uses `id: \.element` — duplicate
-  entries would collide, which is why `add()` refuses duplicates
+- `ForEach` over `settings.targets` and over either geo list uses `id: \.element` — duplicate
+  entries would collide, which is why the store refuses duplicates per list
 - `uninstall()` partial failure path: terminating without showing `failureText` would leave
   files on disk while the user believes the system is clean
 - Resource loading must go through `DesignResources`; `Bundle.module` lookups from this
@@ -121,4 +126,5 @@ parsing, validation and persistence happen in the stores.
 ## Related docs
 - `.claude/rules/ARCHITECTURE.md` — module index and key contracts
 - `docs/design-system.md` — visual language the cards and popup must follow
+- `features/geo-whitelist.md` — why the settings screen shows six cards
 - `.claude/docs/debug-map.md`

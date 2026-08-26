@@ -29,6 +29,11 @@ The ring buffer lives in `UserDefaults(suiteName: "com.weto.shared")` under `eve
 - **`verificationPending` right after the tunnel came up or went down** — the traffic carrier
   changed, so the fingerprint changed. Suspects: `KernelRouteProbe` (is the ipinfo host resolved?
   `out=-` means it is not) and the `PF_ROUTE` subscription.
+- **`notWhitelistedIP` / `notWhitelistedCountry` («… не входит в белый список»)** — not a
+  malfunction: a non-empty whitelist is in the settings and the exit matched none of it. The list
+  lives under `allowedCountryCodes` / `allowedIPRangeTexts` (Linux: `allowed_countries` /
+  `allowed_ip_ranges` in `config.toml`); an empty one cannot produce these reasons. Which of the two
+  reasons appears depends only on whether the list contains ranges — see `features/geo-whitelist.md`.
 - **`geoUnavailable` / `confirmationUnavailable`** — the boundary answered badly. `GeoProbe`,
   `GeoFailure`, and the rate limits in `decisions/geo-confirmation-services.md`.
 
