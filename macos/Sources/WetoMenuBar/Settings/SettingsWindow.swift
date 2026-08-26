@@ -42,7 +42,23 @@ struct SettingsWindow: View {
                     case .settings:
                         TargetsCard()
                         NetworkSettingsCard()
-                        BlacklistCard()
+                        GeoListCard(
+                            title: "Чёрный список",
+                            emptyText: "Список пуст",
+                            removalListName: "чёрного списка",
+                            entries: coordinator.settings.blockedEntries,
+                            add: { coordinator.settings.addEntry($0, to: .blocked) },
+                            remove: { coordinator.settings.removeEntry($0, from: .blocked) }
+                        )
+
+                        GeoListCard(
+                            title: "Белый список",
+                            emptyText: "Список пуст",
+                            removalListName: "белого списка",
+                            entries: coordinator.settings.allowedEntries,
+                            add: { coordinator.settings.addEntry($0, to: .allowed) },
+                            remove: { coordinator.settings.removeEntry($0, from: .allowed) }
+                        )
                         appearanceCard
                         MaintenanceCard()
                     case .journal:
