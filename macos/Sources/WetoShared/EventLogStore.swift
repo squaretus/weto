@@ -16,15 +16,25 @@ public final class EventLogStore {
 
     public init(storage: EventLogPersisting, migratingFrom defaults: UserDefaults? = nil) {
         self.storage = storage
-        events = storage.load()
+        events = Self.capped(storage.load())
 
         // Перенос из настроек: история пользователя не выбрасывается, а ключ
         // из plist убирается — иначе он остаётся мёртвым грузом навсегда.
         if let defaults, events.isEmpty, let data = defaults.data(forKey: Self.legacyKey) {
-            events = (try? KillEvent.decodeLog(data)) ?? []
+            // Ёмкость применяется и здесь: прежняя запись описывала проход целиком,
+            // и десять записей на живой машине — это две с лишним сотни процессов.
+            // Развёрнутые по одному, они не влезают в журнал.
+            events = Self.capped((try? KillEvent.decodeLog(data)) ?? [])
             if !events.isEmpty { storage.save(events) }
             defaults.removeObject(forKey: Self.legacyKey)
         }
+    }
+
+    /// Свежие сверху, лишнее снизу.
+    private static func capped(_ events: [KillEvent]) -> [KillEvent] {
+        events.count > Constants.eventLogCapacity
+            ? Array(events.prefix(Constants.eventLogCapacity))
+            : events
     }
 
     public convenience init() {

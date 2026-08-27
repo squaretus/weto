@@ -104,6 +104,31 @@ final class EventLogStoreTests: XCTestCase {
         XCTAssertEqual(store().events.count, 2, "и лежит уже в файле")
     }
 
+    /// Перенос обязан соблюдать ёмкость.
+    ///
+    /// На живой машине десять прежних записей — это две с лишним сотни pid:
+    /// одно падение VPN завершало по три десятка процессов разом. Развернув их
+    /// по процессам, перенос клал в журнал больше, чем журнал вмещает, и лишнее
+    /// уходило только при следующем завершении.
+    func test_migration_respects_the_capacity() {
+        var records: [String] = []
+        for episode in 0..<10 {
+            let pids = (0..<30).map { "\(episode * 100 + $0)" }.joined(separator: ",")
+            records.append("""
+            {"id":"\(UUID().uuidString)","date":\(809_519_566 - Double(episode) * 60),
+             "killedPIDs":[\(pids)],"targetNames":["claude"],"kind":"terminated",
+             "reasonText":"Подключение ещё не проверено"}
+            """)
+        }
+        defaults.set(Data("[\(records.joined(separator: ","))]".utf8), forKey: "eventLog")
+
+        let migrated = EventLogStore(storage: file(), migratingFrom: defaults)
+
+        XCTAssertEqual(migrated.events.count, Constants.eventLogCapacity)
+        XCTAssertEqual(migrated.events.first?.pid, 0, "свежие сверху и остались")
+        XCTAssertEqual(store().events.count, Constants.eventLogCapacity, "и на диск легло столько же")
+    }
+
     /// Перенос — разовый. Журнал, уже живущий файлом, настройки не переписывают:
     /// иначе пустой файл после «очистить журнал» воскрешал бы старую историю.
     func test_migration_does_not_overwrite_an_existing_file_journal() {
