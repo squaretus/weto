@@ -87,6 +87,10 @@ extension UnsafeReason {
             return "Подтверждающие сервисы недоступны"
         case .countryConflict(let primary, let confirmed):
             return "Расхождение стран: ipinfo — \(primary), подтверждение — \(confirmed)"
+        case .notWhitelistedIP(let ip):
+            return "Адрес \(ip) не входит в белый список"
+        case .notWhitelistedCountry(let code):
+            return "Страна \(code) не входит в белый список"
         }
     }
 

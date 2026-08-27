@@ -3,23 +3,32 @@ import WetoCore
 import WetoShared
 import WetoDesign
 
-struct BlacklistCard: View {
+/// Карточка списка геоправил. Экран создаёт её дважды — под чёрный и под белый
+/// список. Собственные `newEntry` и `entryError` у каждого экземпляра: ввод
+/// в одну карточку не должен подмешиваться в другую.
+struct GeoListCard: View {
 
     @Environment(AppCoordinator.self) private var coordinator
+
+    let title: String
+    let emptyText: String
+    /// Хвост подписи кнопки удаления: «Удалить RU из чёрного списка».
+    let removalListName: String
+    let entries: [String]
+    let add: (String) -> Result<Void, GeoListEntryError>
+    let remove: (String) -> Void
 
     @State private var newEntry = ""
     @State private var entryError: String?
 
     private var scheme: ColorScheme { coordinator.settings.appTheme.colorScheme }
 
-    private var entries: [String] { coordinator.settings.blockedEntries }
-
     var body: some View {
-        WetoCard("Чёрный список") {
+        WetoCard(title) {
             VStack(spacing: 0) {
                 if entries.isEmpty {
                     WetoRow {
-                        Text("Список пуст")
+                        Text(emptyText)
                             .font(WetoTokens.caption)
                             .foregroundStyle(WetoTokens.faint.resolve(scheme))
                     }
@@ -37,10 +46,10 @@ struct BlacklistCard: View {
                             Spacer(minLength: 0)
 
                             WetoDeleteRowAction(
-                                label: "Удалить \(entry) из чёрного списка",
+                                label: "Удалить \(entry) из \(removalListName)",
                                 hint: "Удалить из списка"
                             ) {
-                                coordinator.settings.removeBlockedEntry(entry)
+                                remove(entry)
                             }
                         }
                     }
@@ -56,9 +65,9 @@ struct BlacklistCard: View {
                     )
                     .textFieldStyle(WetoFieldStyle())
                     .labelsHidden()
-                    .onSubmit { add() }
+                    .onSubmit { commit() }
 
-                    Button("Добавить") { add() }
+                    Button("Добавить") { commit() }
                         .buttonStyle(WetoPillButtonStyle(.primary))
                         .disabled(newEntry.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
@@ -76,8 +85,8 @@ struct BlacklistCard: View {
     }
 
     /// Разбор и проверку делает store: во View остаётся только показать причину отказа.
-    private func add() {
-        switch coordinator.settings.addBlockedEntry(newEntry) {
+    private func commit() {
+        switch add(newEntry) {
         case .success:
             newEntry = ""
             entryError = nil

@@ -49,6 +49,12 @@ impl UnsafeReason {
             UnsafeReason::CountryConflict { primary, confirmed } => {
                 format!("Расхождение стран: ipinfo — {primary}, подтверждение — {confirmed}")
             }
+            UnsafeReason::NotWhitelistedIp(ip) => {
+                format!("Адрес {ip} не входит в белый список")
+            }
+            UnsafeReason::NotWhitelistedCountry(code) => {
+                format!("Страна {code} не входит в белый список")
+            }
         }
     }
 
@@ -238,6 +244,28 @@ pub fn status_presentation(state: &GuardState) -> StatusPresentation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Тексты обязаны совпадать с macOS дословно: это один продукт,
+    /// а не два похожих.
+    #[test]
+    fn whitelist_reasons_speak_russian() {
+        assert_eq!(
+            UnsafeReason::NotWhitelistedIp("203.0.113.28".to_string()).display_text(),
+            "Адрес 203.0.113.28 не входит в белый список"
+        );
+        assert_eq!(
+            UnsafeReason::NotWhitelistedCountry("DE".to_string()).display_text(),
+            "Страна DE не входит в белый список"
+        );
+    }
+
+    /// Непопадание в whitelist — сработавшая защита, а не отказ сервиса.
+    #[test]
+    fn whitelist_reasons_are_not_degradation() {
+        let reason = UnsafeReason::NotWhitelistedCountry("DE".to_string());
+        assert!(!reason.is_degraded_rather_than_blocked());
+        assert_eq!(reason.status_title(), "Цели завершены");
+    }
 
     fn state(decision: GuardDecision) -> GuardState {
         GuardState {

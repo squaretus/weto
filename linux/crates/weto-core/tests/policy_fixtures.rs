@@ -164,7 +164,23 @@ struct Config {
     blocked_countries: Vec<String>,
     #[serde(rename = "blockedIPRanges")]
     blocked_ip_ranges: Vec<String>,
+    /// Старые случаи полей не знают: их отсутствие означает пустой whitelist,
+    /// а значит прежний смысл случая сохраняется дословно.
+    #[serde(default, rename = "allowedCountries")]
+    allowed_countries: Vec<String>,
+    #[serde(default, rename = "allowedIPRanges")]
+    allowed_ip_ranges: Vec<String>,
     targets: Vec<String>,
+}
+
+fn ranges(texts: &[String]) -> Vec<IpRange> {
+    texts
+        .iter()
+        .map(|text| {
+            IpRange::parse(text)
+                .unwrap_or_else(|| panic!("фикстуры содержат неразбираемый диапазон «{text}»"))
+        })
+        .collect()
 }
 
 impl Config {
@@ -176,15 +192,13 @@ impl Config {
                 .iter()
                 .cloned()
                 .collect::<HashSet<_>>(),
-            blocked_ip_ranges: self
-                .blocked_ip_ranges
+            blocked_ip_ranges: ranges(&self.blocked_ip_ranges),
+            allowed_countries: self
+                .allowed_countries
                 .iter()
-                .map(|text| {
-                    IpRange::parse(text).unwrap_or_else(|| {
-                        panic!("фикстуры содержат неразбираемый диапазон «{text}»")
-                    })
-                })
-                .collect(),
+                .cloned()
+                .collect::<HashSet<_>>(),
+            allowed_ip_ranges: ranges(&self.allowed_ip_ranges),
             targets: self.targets.clone(),
         }
     }
@@ -237,6 +251,8 @@ impl Reason {
                 primary: text(&self.primary),
                 confirmed: text(&self.confirmed),
             },
+            "notWhitelistedIP" => UnsafeReason::NotWhitelistedIp(text(&self.ip)),
+            "notWhitelistedCountry" => UnsafeReason::NotWhitelistedCountry(text(&self.code)),
             other => panic!("неизвестная причина «{other}» в фикстурах"),
         }
     }

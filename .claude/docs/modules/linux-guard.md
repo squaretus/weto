@@ -54,8 +54,8 @@ the whole of what the Linux side is allowed to differ in:
 | country flag in the menu bar | country name as text | no flag rendering here yet; the set ships with macOS only |
 | app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
 
-Everything else matches: the settings window is the same five cards in the same order
-(`Цели`, `Сеть и гео`, `Чёрный список`, `Внешний вид`, `Обслуживание`) plus the same
+Everything else matches: the settings window is the same six cards in the same order
+(`Цели`, `Сеть и гео`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
 footer (github link, version, update tile), and the status popup is shield + title +
 two icon buttons, then the geo readout, the update banner, and live targets.
 
@@ -111,6 +111,12 @@ Everything the policy decides is shared. What the system dictates is not:
 - **The confirmation cache and the reference-address fallback are identical to macOS**, down to the
   60 s / 15 min ceilings: the freeipapi quota counts per exit address and is shared with everyone
   else on that node, so its 429 must not kill targets.
+- **Both geo lists share one builder and one storage path.** `geo_list_card(state, kind, title)` is
+  called twice, and `Settings::entries/add_entry/remove_entry` take a `GeoListKind`; the
+  `…_blocked_entry` / `…_allowed_entry` functions only delegate. Same shape as macOS, and for the
+  same reason — a second copy of the parse-and-dedupe algorithm would drift silently.
+  `allowed_countries` / `allowed_ip_ranges` are `serde(default)`, so a config written before the
+  whitelist existed loads as an empty one.
 - **The journal keeps one entry per episode and refines its reason**, same contract as
   `WetoShared`. `KillReporting` gained `refine(reason)` with an empty default implementation:
   `report` fires only when something was actually killed, and by the time the verdict is known
@@ -140,15 +146,16 @@ points at the new version.
 
 ## Divergence control
 
-`shared/fixtures/guard-policy.json` holds 27 cases extracted from the existing Swift
-tests. Both `weto-core/tests/policy_fixtures.rs` and
+`shared/fixtures/guard-policy.json` (`version: 3`) holds 36 cases extracted from the existing
+Swift tests. `allowedCountries` / `allowedIPRanges` are optional in both runners, so a case that
+predates the whitelist keeps its exact previous meaning. Both `weto-core/tests/policy_fixtures.rs` and
 `macos/Tests/WetoCoreTests/GuardPolicyFixtureTests.swift` run them. A behavioural drift
 between platforms fails a test naming the case, instead of surfacing as a kill-switch
 that quietly stopped working on one OS.
 
 ## Testing
 
-179 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+196 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. Everything that cannot be
 faked — a real WireGuard tunnel, the look of the tray icon — is covered by the

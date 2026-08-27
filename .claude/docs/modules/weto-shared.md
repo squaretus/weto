@@ -28,9 +28,11 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `GuardVM.refreshVPNCandidates()`, `refreshRunningTargets()`, `runningProcessCount(forTarget:)`,
   `displayName(forTarget:)`, `resolvedDescription(forTarget:)`, `unloadCompletely() → Result<Void, LaunchAgentError>`
 - `SettingsStore` setters (`isEnabled`, `targets`, `vpnAppRule`, `blockedCountryCodes`,
-  `blockedIPRangeTexts`, `appTheme`),
+  `blockedIPRangeTexts`, `allowedCountryCodes`, `allowedIPRangeTexts`, `appTheme`),
   `setIPInfoToken(_) → Result<Void, SettingsPersistenceError>`,
-  `addBlockedEntry(_) → Result<Void, BlacklistEntryError>`, `removeBlockedEntry(_)`,
+  `addEntry(_:to: GeoListKind) → Result<Void, GeoListEntryError>`, `removeEntry(_:from:)`,
+  `entries(of:)` — one path for both geo lists; the `…Blocked…` / `…Allowed…` trio of each list is a
+  delegating wrapper kept for UI bindings,
   `migrateLegacyVPNSelection(in:)`, `onGuardConfigurationChange(_)`, `guardConfig`
 - `EventLogStore.record(_)`, `clear()`
 - `LaunchAgentManaging.enable() / disable() / bootout()`, `isInstalled`, `pointsAtCurrentBundle`
@@ -117,6 +119,14 @@ this layer decides *when* to ask and *what to do* with the answer.
   `revision == expected`, and re-reads settings + snapshot immediately before deciding.
 - `GuardController` subscribes to config changes in `init`, not in `start()` — a setting changed
   before the guard starts must still shape the first decision.
+- **Both geo lists take the same code path, told apart only by `GeoListKind`.** Parsing (two letters
+  → country code, otherwise `IPRange`), the duplicate refusal and removal exist once; a second copy
+  for the whitelist would drift from the blacklist silently. `GeoListEntryError` (ex
+  `BlacklistEntryError`) is shared for the same reason.
+- **A whitelist edit invalidates the standing verdict** (`Field.whitelist` on both allowed-list
+  setters): a tightened list must not keep targets alive on an answer obtained under the old one
+  (`test_old_config_probe_result_is_ignored_after_whitelist_change`). Absent keys are read as `?? []`
+  — an empty whitelist, which is what keeps older settings behaving exactly as before.
 - One process scan per event: `GuardVM.handle` stores `currentScan` and `enforce` reuses it;
   argv is only read when a `.script` rule exists.
 - Rule cache is keyed on the raw `settings.targets` array **and on time**
@@ -196,4 +206,5 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Related docs
 - `.claude/rules/ARCHITECTURE.md` — key contracts (policy order, fail-closed, autostart)
+- `features/geo-whitelist.md` — the allowed-exits list this store persists
 - `docs/design-system.md` — for the UI that consumes `StatusPresentation`
