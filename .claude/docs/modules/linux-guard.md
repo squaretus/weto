@@ -117,13 +117,26 @@ Everything the policy decides is shared. What the system dictates is not:
   same reason — a second copy of the parse-and-dedupe algorithm would drift silently.
   `allowed_countries` / `allowed_ip_ranges` are `serde(default)`, so a config written before the
   whitelist existed loads as an empty one.
-- **The journal keeps one entry per episode and refines its reason**, same contract as
-  `WetoShared`. `KillReporting` gained `refine(reason)` with an empty default implementation:
-  `report` fires only when something was actually killed, and by the time the verdict is known
-  the targets are already dead — so without a separate call the entry would keep saying
-  "not verified yet" forever. `apply` offers the settled reason before enforcing, and
-  `Journal::refine_last_reason` rewrites the last entry. Unlike macOS, entries here carry no
-  ip/country at all — a pre-existing gap, not part of this contract.
+- **The journal keeps one record per killed process and one `episode_id` per pass**, same
+  contract as `WetoShared`. `KillReporting` carries a `KillContext` — reason, geo readout,
+  diagnostics — instead of a bare `&str`: `report` fires only when something was actually killed,
+  and by the time the verdict is known the targets are already dead, so `refine` and
+  `resolved_safe` exist as separate calls. Without them the records keep saying "not verified yet"
+  forever. `Journal::refine_episode` rewrites every record of the episode.
+- Dedup is by the pair **reason + pid**. It used to be by reason alone, which never let a target
+  launched mid-episode into the journal at all: the user saw a kill the journal did not remember,
+  and no notification either.
+- Records carry ip and countries now. They used to be `None` always — not a storage gap but a
+  wiring one: the reporter was never handed the readout.
+- **One journal, not two.** `AppState` and `JournalWriter` each held their own `Mutex<Journal>`
+  loaded from the same file and never synced: new kills never appeared in the settings window, and
+  "clear journal" wiped only the displayed copy, after which the next write restored everything.
+  Both now share one `Arc<Mutex<Journal>>`.
+- **Timestamps serialise as ISO 8601 strings** (`weto_core::timestamp`). `SystemTime` defaults to
+  a `{secs_since_epoch, nanos}` object, and macOS writes strings; the export is read by a human or
+  an agent, so one format is mandatory. Field names with acronyms (`episodeID`, `parentPID`,
+  `allowedIPRanges`, `hasIPInfoToken`) are renamed explicitly — serde's camelCase would give
+  `episodeId`, and the file would need two parsers.
 
 ## Self-update
 
