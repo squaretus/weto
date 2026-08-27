@@ -14,6 +14,25 @@ public struct UpdateDialogView: View {
         self.theme = theme
     }
 
+    /// Отступ окна и шаг ряда кнопок — числа вёрстки, а не украшение: по ним
+    /// считается минимальная ширина, при которой подписи не обрезаются.
+    static let padding: CGFloat = 18
+    static let rowSpacing: CGFloat = 8
+
+    /// Наименьшая ширина окна, при которой ряд кнопок помещается целиком.
+    ///
+    /// Кнопкам запрещено сжиматься, поэтому окно уже этого значения не обрезает
+    /// текст — оно обрезает саму кнопку. Число подбирается не на глаз: тема
+    /// обязана сверить свою ширину с замером живых контролов, иначе смена
+    /// подписи или стиля пилюли тихо выносит последнюю кнопку за край.
+    public static func minimumWidth(fittingButtons widths: [CGFloat]) -> CGFloat {
+        guard let first = widths.first else { return 0 }
+
+        // Между соседями — распорка: два промежутка `HStack` плюс её minLength.
+        let perGap = rowSpacing * 3
+        return widths.dropFirst().reduce(first) { $0 + perGap + $1 } + padding * 2
+    }
+
     public var body: some View {
         let model = controller.dialogModel
 
@@ -56,7 +75,7 @@ public struct UpdateDialogView: View {
 
             buttons(model: model)
         }
-        .padding(18)
+        .padding(Self.padding)
         .frame(width: theme.width, alignment: .leading)
         .background(theme.background)
     }
@@ -85,12 +104,12 @@ public struct UpdateDialogView: View {
     /// версию», справа прижатые друг к другу «Напомнить позже» и «Обновить».
     @ViewBuilder
     private func buttons(model: UpdateDialogModel) -> some View {
-        HStack(alignment: .center, spacing: 8) {
+        HStack(alignment: .center, spacing: Self.rowSpacing) {
             if model.showsChoiceButtons {
                 theme.secondaryButton(controller.strings.skip) { controller.skipCurrentVersion() }
                     .fixedSize(horizontal: true, vertical: false)
 
-                Spacer(minLength: 8)
+                Spacer(minLength: Self.rowSpacing)
 
                 theme.menuButton(
                     controller.strings.remindLater,
@@ -105,7 +124,7 @@ public struct UpdateDialogView: View {
                     .fixedSize(horizontal: true, vertical: false)
 
                 if model.canInstall {
-                    Spacer(minLength: 8)
+                    Spacer(minLength: Self.rowSpacing)
 
                     theme.primaryButton(controller.strings.install) { controller.install() }
                         .fixedSize(horizontal: true, vertical: false)
@@ -113,7 +132,7 @@ public struct UpdateDialogView: View {
             }
 
             if model.showsReleasePageButton {
-                Spacer(minLength: 8)
+                Spacer(minLength: Self.rowSpacing)
                 theme.secondaryButton(controller.strings.openReleasePage) {
                     controller.openReleasePage()
                 }

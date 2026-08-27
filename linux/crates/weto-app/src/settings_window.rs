@@ -1,7 +1,7 @@
 //! Окно настроек — порт `SettingsWindow` с macOS.
 //!
 //! Состав и порядок карточек повторяют оригинал: «Цели», «Сеть и гео»,
-//! «Чёрный список», «Внешний вид», «Обслуживание», а под ними подвал со ссылкой,
+//! «Чёрный список», «Белый список», «Внешний вид», «Обслуживание», а под ними подвал со ссылкой,
 //! версией и проверкой обновлений. Вторая вкладка — журнал.
 //!
 //! Тумблера охраны здесь нет, и это не упущение: на macOS его нет тоже.
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use gtk4::prelude::*;
 use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack};
 
-use weto_config::settings::Theme;
+use weto_config::settings::{GeoListKind, Theme};
 use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
@@ -89,13 +89,22 @@ fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     window
 }
 
-/// Страница настроек: пять карточек и подвал, всё под прокруткой.
+/// Страница настроек: шесть карточек и подвал, всё под прокруткой.
 fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWindow {
     let page = GtkBox::new(Orientation::Vertical, ui::SPACE3);
 
     page.append(&targets_card(window, state.clone()));
     page.append(&network_card(state.clone()));
-    page.append(&blacklist_card(state.clone()));
+    page.append(&geo_list_card(
+        state.clone(),
+        GeoListKind::Blocked,
+        "Чёрный список",
+    ));
+    page.append(&geo_list_card(
+        state.clone(),
+        GeoListKind::Allowed,
+        "Белый список",
+    ));
     page.append(&appearance_card(state.clone()));
     page.append(&maintenance_card(state.clone()));
     page.append(&footer(state.clone()));
@@ -421,10 +430,13 @@ fn mask(token: &str) -> String {
     format!("{}{tail}", "•".repeat(length - 4))
 }
 
-// --- Чёрный список --------------------------------------------------------
+// --- Списки геоправил -----------------------------------------------------
 
-fn blacklist_card(state: Arc<AppState>) -> GtkBox {
-    let card = ui::card("Чёрный список");
+/// Один builder на обе карточки: чёрный и белый списки отличаются только
+/// заголовком и видом списка. Второй экземпляр функции разъехался бы с первым
+/// молча, а расходиться им нельзя.
+fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox {
+    let card = ui::card(title);
     let list = GtkBox::new(Orientation::Vertical, 0);
     card.append(&list);
 
@@ -451,7 +463,7 @@ fn blacklist_card(state: Arc<AppState>) -> GtkBox {
         let self_ref = redraw.clone();
         let draw: Rc<dyn Fn()> = Rc::new(move || {
             clear(&list);
-            let entries = state.settings.current().blocked_entries();
+            let entries = state.settings.current().entries(kind);
 
             if entries.is_empty() {
                 let row = ui::row(true);
@@ -474,7 +486,7 @@ fn blacklist_card(state: Arc<AppState>) -> GtkBox {
                 let blocked = blocked.clone();
                 let again = self_ref.clone();
                 remove.connect_clicked(move |_| {
-                    state.settings.edit(|s| s.remove_blocked_entry(&blocked));
+                    state.settings.edit(|s| s.remove_entry(&blocked, kind));
                     if let Some(draw) = again.borrow().clone() {
                         draw();
                     }
@@ -512,9 +524,7 @@ fn blacklist_card(state: Arc<AppState>) -> GtkBox {
             let text = entry.text().to_string();
             // Разбор и проверка живут в настройках: экрану остаётся показать отказ.
             let mut outcome = Ok(());
-            state
-                .settings
-                .edit(|s| outcome = s.add_blocked_entry(&text));
+            state.settings.edit(|s| outcome = s.add_entry(&text, kind));
 
             match outcome {
                 Ok(()) => {

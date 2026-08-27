@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use weto_config::journal::{Journal, KillEvent, KillEventKind, CAPACITY};
 use weto_config::paths::Paths;
-use weto_config::settings::{Settings, Target};
+use weto_config::settings::{GeoListEntryError, GeoListKind, Settings, Target};
 use weto_core::process::TargetKind;
 
 fn event(pid: i32, reason: &str) -> KillEvent {
@@ -242,15 +242,15 @@ fn a_blacklist_entry_is_parsed_before_it_is_stored() {
 
     assert_eq!(
         settings.add_blocked_entry("не адрес"),
-        Err(weto_config::settings::BlacklistEntryError::InvalidEntry)
+        Err(GeoListEntryError::InvalidEntry)
     );
     assert_eq!(
         settings.add_blocked_entry("  "),
-        Err(weto_config::settings::BlacklistEntryError::Empty)
+        Err(GeoListEntryError::Empty)
     );
     assert_eq!(
         settings.add_blocked_entry("RU"),
-        Err(weto_config::settings::BlacklistEntryError::Duplicate)
+        Err(GeoListEntryError::Duplicate)
     );
 }
 
@@ -302,4 +302,104 @@ fn choosing_a_vpn_app_removes_it_from_the_targets() {
         vec!["nano"]
     );
     assert!(settings.vpn_app_rule().is_some());
+}
+
+#[test]
+fn allowed_entries_are_normalised_and_split_by_kind() {
+    let mut settings = Settings::default();
+
+    settings.add_allowed_entry(" nl ").unwrap();
+    settings.add_allowed_entry("198.51.100.0/24").unwrap();
+
+    assert_eq!(settings.allowed_countries, ["NL"]);
+    assert_eq!(settings.allowed_ip_ranges, ["198.51.100.0/24"]);
+    assert!(
+        settings.blocked_entries().is_empty(),
+        "белый список не должен течь в чёрный"
+    );
+}
+
+#[test]
+fn malformed_and_duplicate_allowed_entries_are_rejected() {
+    let mut settings = Settings::default();
+    settings.add_allowed_entry("NL").unwrap();
+
+    assert_eq!(
+        settings.add_allowed_entry("nl"),
+        Err(GeoListEntryError::Duplicate)
+    );
+    assert_eq!(
+        settings.add_allowed_entry("не адрес"),
+        Err(GeoListEntryError::InvalidEntry)
+    );
+    assert_eq!(
+        settings.add_allowed_entry("  "),
+        Err(GeoListEntryError::Empty)
+    );
+    assert_eq!(settings.allowed_entries().len(), 1);
+}
+
+#[test]
+fn removing_an_allowed_entry_clears_it_from_both_lists() {
+    let mut settings = Settings::default();
+    settings.add_allowed_entry("NL").unwrap();
+    settings.add_allowed_entry("198.51.100.0/24").unwrap();
+
+    settings.remove_entry("NL", GeoListKind::Allowed);
+    settings.remove_entry("198.51.100.0/24", GeoListKind::Allowed);
+
+    assert!(settings.allowed_entries().is_empty());
+}
+
+/// Одна и та же запись в обоих списках — допустимый ввод: приоритет задаёт
+/// политика, а не поле ввода.
+#[test]
+fn the_same_entry_may_live_in_both_lists() {
+    let mut settings = Settings::default();
+
+    settings.add_blocked_entry("NL").unwrap();
+    settings.add_allowed_entry("NL").unwrap();
+
+    assert_eq!(settings.blocked_entries(), ["NL"]);
+    assert_eq!(settings.allowed_entries(), ["NL"]);
+}
+
+/// Конфиг, записанный до появления whitelist, обязан читаться — с пустым
+/// белым списком и целым чёрным.
+#[test]
+fn a_config_written_before_the_whitelist_still_loads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+is_enabled = true
+blocked_countries = ["RU"]
+blocked_ip_ranges = ["10.0.0.0/8"]
+targets = []
+theme = "dark"
+revision = 4
+"#,
+    )
+    .unwrap();
+
+    let settings = Settings::load(&path).unwrap();
+
+    assert_eq!(settings.blocked_countries, ["RU"]);
+    assert!(settings.allowed_countries.is_empty());
+    assert!(settings.allowed_ip_ranges.is_empty());
+    assert!(!settings.guard_config().has_whitelist());
+}
+
+#[test]
+fn the_guard_config_carries_the_whitelist() {
+    let mut settings = Settings::default();
+    settings.add_allowed_entry("NL").unwrap();
+    settings.add_allowed_entry("198.51.100.0/24").unwrap();
+
+    let config = settings.guard_config();
+
+    assert!(config.allowed_countries.contains("NL"));
+    assert_eq!(config.allowed_ip_ranges.len(), 1);
+    assert!(config.allowed_ip_ranges[0].contains("198.51.100.7"));
 }

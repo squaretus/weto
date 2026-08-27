@@ -408,6 +408,45 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
     }
 
+    /// Whitelist входит в ревизию конфигурации: его правка обязана обесценить
+    /// вердикт, полученный до неё, — иначе цели жили бы на устаревшем ответе.
+    func test_old_config_probe_result_is_ignored_after_whitelist_change() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+
+        h.settings.allowedCountryCodes = ["DE"]
+        await settle()
+
+        await h.probe.resumeFirst(with: geoOutcome())
+        await settle()
+
+        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+    }
+
+    /// Ужесточение whitelist на работающей цели: страна выхода перестаёт быть
+    /// разрешённой, и цель обязана быть завершена, а причина — попасть в журнал
+    /// человеческим текстом.
+    func test_tightening_the_whitelist_kills_a_running_target() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+
+        h.settings.allowedCountryCodes = ["DE"]
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.state, .unsafe(.notWhitelistedCountry("KZ")))
+        XCTAssertEqual(h.killer.killedBatches.last, [500, 501])
+        XCTAssertEqual(
+            h.log.events.first?.reasonText,
+            UnsafeReason.notWhitelistedCountry("KZ").displayText
+        )
+    }
+
     func test_adding_a_target_while_unsafe_kills_without_waiting_for_tick() {
         let h = makeHarness(
             snapshot: healthySnapshot(),

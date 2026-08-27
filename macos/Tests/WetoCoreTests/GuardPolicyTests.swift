@@ -7,12 +7,16 @@ final class GuardPolicyTests: XCTestCase {
         vpn: String? = "BC2D1D42",
         blocked: Set<String> = ["RU"],
         ranges: [IPRange] = [],
+        allowed: Set<String> = [],
+        allowedRanges: [IPRange] = [],
         targets: [String] = ["com.example.target"]
     ) -> GuardConfig {
         GuardConfig(
             vpnAppRule: vpn,
             blockedCountries: blocked,
             blockedIPRanges: ranges,
+            allowedCountries: allowed,
+            allowedIPRanges: allowedRanges,
             targets: targets
         )
     }
@@ -201,6 +205,110 @@ final class GuardPolicyTests: XCTestCase {
         XCTAssertEqual(
             GuardPolicy.pendingVerification(isEnabled: true, config: config(targets: [])),
             .safe
+        )
+    }
+
+    // MARK: - Белый список
+
+    /// Пустой whitelist — умолчание всех существующих установок: поведение
+    /// обязано остаться ровно прежним.
+    func test_empty_whitelist_leaves_the_safe_case_safe() {
+        XCTAssertEqual(GuardPolicy.decide(signals()), .safe)
+    }
+
+    func test_allowed_country_lets_the_exit_through() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(config: config(allowed: ["KZ"]))),
+            .safe
+        )
+    }
+
+    /// Регистр в настройках не нормализован задним числом: политика приводит сама.
+    func test_allowed_country_is_matched_case_insensitively() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(config: config(allowed: ["kz"]))),
+            .safe
+        )
+    }
+
+    func test_allowed_cidr_lets_the_exit_through() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(
+                config: config(allowedRanges: [IPRange("203.0.113.0/24")!])
+            )),
+            .safe
+        )
+    }
+
+    /// Совпадение по IP достаточно само по себе: страна в разрешённых не нужна.
+    func test_allowed_cidr_wins_even_when_the_country_is_not_allowed() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(
+                config: config(allowed: ["DE"], allowedRanges: [IPRange("203.0.113.0/24")!])
+            )),
+            .safe
+        )
+    }
+
+    func test_country_outside_a_country_only_whitelist_kills() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(config: config(allowed: ["DE"]))),
+            .kill(.notWhitelistedCountry("KZ"))
+        )
+    }
+
+    /// Диагностический приоритет у IP: если в списке есть диапазоны и адрес
+    /// в них не попал, пользователю называют именно адрес.
+    func test_address_outside_a_whitelist_with_ranges_names_the_address() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(
+                config: config(allowed: ["DE"], allowedRanges: [IPRange("198.51.100.0/24")!])
+            )),
+            .kill(.notWhitelistedIP("203.0.113.28"))
+        )
+    }
+
+    /// Одна и та же запись в обоих списках — не ошибка ввода: приоритет у чёрного.
+    func test_blacklisted_country_wins_over_the_same_country_in_the_whitelist() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(
+                config: config(blocked: ["KZ"], allowed: ["KZ"])
+            )),
+            .kill(.blockedCountry(code: "KZ", source: "ipinfo"))
+        )
+    }
+
+    func test_blacklisted_range_wins_over_the_same_range_in_the_whitelist() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(
+                config: config(
+                    ranges: [IPRange("203.0.113.0/24")!],
+                    allowedRanges: [IPRange("203.0.113.0/24")!]
+                )
+            )),
+            .kill(.blacklistedIP("203.0.113.28"))
+        )
+    }
+
+    /// Отсутствие подтверждения решает раньше whitelist — иначе строгий
+    /// fail-closed превратился бы в «нам хватило разрешённой страны».
+    func test_missing_confirmation_kills_before_the_whitelist_is_consulted() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(
+                geo: geo(confirmed: nil, source: nil),
+                config: config(allowed: ["KZ"])
+            )),
+            .kill(.confirmationUnavailable)
+        )
+    }
+
+    func test_country_conflict_kills_before_the_whitelist_is_consulted() {
+        XCTAssertEqual(
+            GuardPolicy.decide(signals(
+                geo: geo(primary: "KZ", confirmed: "DE"),
+                config: config(allowed: ["KZ"])
+            )),
+            .kill(.countryConflict(primary: "KZ", confirmed: "DE"))
         )
     }
 }

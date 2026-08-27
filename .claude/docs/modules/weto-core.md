@@ -21,6 +21,8 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `GuardPolicy.decideLocal(isEnabled:vpn:config:) → GuardDecision?` — tri-state, see invariants; `vpn` is a `VPNAppStatus`, computed by the caller from the process scan
 - `GuardPolicy.decide(GuardSignals) → GuardDecision` — full ordered chain
 - `GuardPolicy.pendingVerification(isEnabled:config:) → GuardDecision`
+- `GuardConfig.hasTargets`, `GuardConfig.hasWhitelist` — the whitelist stage is skipped entirely
+  when the latter is `false`
 - `ProcessMatcher.matches(in:rules:) → [MatchedProcess]`, `.pids(in:rules:) → [Int32]`
 - `ProcessMatcher.runningTargets(in:rules:) → [RunningTarget]` — UI rows, one per session
 - `NetworkSnapshot.verdictFingerprint → String` — the interface carrying the verdict request plus its local address, nothing else
@@ -62,8 +64,18 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   the whole geo half of the policy.
 - **All three entry points re-check `isEnabled && config.hasTargets` first.** That guard is what makes
   a disabled switch inert; it is duplicated on purpose in `decide`, `decideLocal` and `pendingVerification`.
-- **Country comparison is case-insensitive at compare time**, not at storage time: both the blocked set
-  and the readings are uppercased inside `decide`, so persisted settings may hold any casing.
+- **Country comparison is case-insensitive at compare time**, not at storage time: both the blocked
+  and the allowed sets, and the readings, are uppercased inside `decide`, so persisted settings may
+  hold any casing.
+- **The whitelist narrows, it never rescues.** It is asked last and only of an already agreed
+  verdict: an empty list returns `.safe` unchanged, and a non-empty one demands the address be
+  inside an allowed CIDR *or* the agreed country be in the allowed set. Blacklist, missing
+  confirmation and country conflict all decide earlier by design — an allowed country must not be
+  able to cancel strict fail-closed. Consequence: the same country in both lists is not a data
+  entry error, the blacklist simply wins.
+- **The whitelist reason is a diagnostic choice, not a decision.** `notWhitelistedIP` is reported
+  when the list contains any ranges, `notWhitelistedCountry` when it is countries only. Both mean
+  the same kill; swapping them changes only the sentence the user reads.
 - **Rule order is significant.** `matches` uses `rules.first(where:)` and `runningTargets` uses
   `rules.firstIndex(where:)`, so the earliest matching rule names the process and owns the UI row.
 - **`TargetRule.launchPaths` always starts with `path`** — the initializer prepends it and de-duplicates,
@@ -91,8 +103,9 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 ## Failure hotspots
 <!-- generated, verify -->
 - **The check order in `GuardPolicy.decide` is the security contract**, not a style choice: blacklist
-  before country, primary country before `confirmationUnavailable`, `countryConflict` last. Reordering
-  compiles, keeps most tests green and silently weakens fail-closed. The canonical order is in
+  before country, primary country before `confirmationUnavailable`, `countryConflict` before the
+  whitelist stage, which is last of all. Reordering compiles, keeps most tests green and silently
+  weakens fail-closed. The canonical order is in
   `.claude/rules/ARCHITECTURE.md` → "Инварианты, общие для обеих реализаций".
 - **`decide` has an unreachable branch:** the `geoUnavailable("нет данных")` fallback can only fire if
   `GeoOutcome` gains a third case. Adding one routes it into a generic reason instead of a compile error.
@@ -119,4 +132,6 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   VPN qualification, script-vs-argv matching)
 - Project pitfalls that shape this module (symlinked binaries, shebang scripts, GUI-only workspace
   notifications): `.claude/CLAUDE.md` → "Ловушки предметной области"
-- `features/`, `bugs/`, `decisions/` — no entries yet
+- `features/geo-whitelist.md` — the optional allowed-exits list and where its stage sits
+- `bugs/`, `decisions/` — no entries beyond `decisions/vpn-app-instead-of-tunnel.md`,
+  `decisions/geo-confirmation-services.md`
