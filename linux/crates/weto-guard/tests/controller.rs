@@ -12,6 +12,7 @@ use weto_core::geo::{ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
 use weto_core::network::{NetworkSnapshot, OutgoingRoute};
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::process::{ProcessSnapshot, TargetKind};
+use weto_core::diagnostics::KillContext;
 use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::GeoProbing;
@@ -103,6 +104,7 @@ impl GeoProbing for FakeGeo {
                 confirm_source: Some(ConfirmSource::Geojs),
                 has_network_path: true,
                 checked_at: SystemTime::now(),
+                traces: Vec::new(),
             };
         }
 
@@ -113,6 +115,7 @@ impl GeoProbing for FakeGeo {
             confirm_source: Some(ConfirmSource::Freeipapi),
             has_network_path: true,
             checked_at: SystemTime::now(),
+            traces: Vec::new(),
         }
     }
 }
@@ -203,15 +206,21 @@ impl SettingsProviding for FakeSettings {
 }
 
 #[derive(Clone, Default)]
-struct RecordingReporter(Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>);
+struct RecordingReporter(
+    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<String>>>,
+    /// Контексты завершений: по ним проверяется диагностика, а не только текст.
+    Arc<Mutex<Vec<KillContext>>>,
+);
 
 impl KillReporting for RecordingReporter {
-    fn report(&self, _killed: &[weto_core::process::MatchedProcess], reason: &str) {
-        self.0.lock().unwrap().push(reason.to_string());
+    fn report(&self, _killed: &[weto_core::process::MatchedProcess], context: &KillContext) {
+        self.0.lock().unwrap().push(context.reason.clone());
+        self.2.lock().unwrap().push(context.clone());
     }
 
-    fn refine(&self, reason: &str) {
-        self.1.lock().unwrap().push(reason.to_string());
+    fn refine(&self, context: &KillContext) {
+        self.1.lock().unwrap().push(context.reason.clone());
     }
 }
 

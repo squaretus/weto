@@ -9,11 +9,14 @@
 //! (их не требуется нигде), ни для резидентности — её обеспечивает автозапуск
 //! сессии. Ровно как на macOS, где охрана живёт в процессе приложения.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use weto_config::journal::{Journal, KillEvent, KillEventKind};
+use weto_config::journal::{
+    GeoReadingPatch, Journal, KillContext, KillEvent, KillEventKind,
+};
 use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
 use weto_core::geo::SourceOutcome;
@@ -80,75 +83,228 @@ impl SettingsProviding for SettingsSource {
     }
 }
 
-/// Журнал пишет каждый новый pid в рамках эпизода, а причину у записи держит
-/// одну — ту, что выяснилась последней. «Подключение ещё не проверено» приходит
-/// первым, потому что fail-closed срабатывает раньше вердикта, и уточняется
-/// на месте: новой записи не будет, завершать уже нечего.
+/// Журнал пишет каждый завершённый процесс отдельно.
+///
+/// Дедупликация по паре «причина + pid»: тот же процесс по той же причине второй
+/// записи не заводит, а запущенный заново — заводит всегда. Дедупликация по одной
+/// лишь причине, как было, вообще не пускала в журнал цель, запущенную посреди
+/// эпизода: пользователь видел завершение, которого журнал не помнил.
+///
+/// «Подключение ещё не проверено» приходит первым, потому что fail-closed
+/// срабатывает раньше вердикта, и уточняется на месте. Эпизод, закончившийся
+/// безопасным выходом, дописывает исход: без него запись навсегда оставалась
+/// с отговоркой, и завершение выглядело беспричинным.
 struct JournalWriter {
     paths: Paths,
     journal: Mutex<Journal>,
-    last_reason: Mutex<Option<String>>,
+    episode: Mutex<Episode>,
     notifier: Box<dyn KillNotifying>,
 }
 
+#[derive(Default)]
+struct Episode {
+    /// Пары «причина + pid», уже описанные в журнале.
+    recorded: HashSet<(String, i32)>,
+    /// Причины, уже описанные в рамках текущего эпизода.
+    reasons: HashSet<String>,
+    /// Эпизод, записанный до вердикта: его причину предстоит уточнить.
+    pending_id: Option<String>,
+}
+
+impl JournalWriter {
+    fn save(&self, journal: &Journal) {
+        if let Err(error) = journal.save(&self.paths.journal_file()) {
+            eprintln!("weto: журнал не сохранился: {error}");
+        }
+    }
+
+    fn patch(context: &KillContext) -> GeoReadingPatch {
+        context.reading.clone()
+    }
+
+    /// «claude ×34, codex» — цели прохода с числом завершённых процессов там,
+    /// где их больше одного.
+    fn targets_summary(killed: &[MatchedProcess]) -> Vec<String> {
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for process in killed {
+            if !counts.contains_key(&process.target_name) {
+                order.push(process.target_name.clone());
+            }
+            *counts.entry(process.target_name.clone()).or_default() += 1;
+        }
+        order
+            .into_iter()
+            .map(|name| match counts.get(&name) {
+                Some(1) | None => name,
+                Some(count) => format!("{name} ×{count}"),
+            })
+            .collect()
+    }
+}
+
 impl KillReporting for JournalWriter {
-    /// Причина эпизода, ставшая известной, дописывается в его запись.
-    fn refine(&self, reason: &str) {
-        let mut last = self.last_reason.lock().expect("журнал");
+    /// Причина эпизода, ставшая известной, дописывается всем его записям.
+    fn refine(&self, context: &KillContext) {
+        if context.is_pending {
+            return;
+        }
+
+        let mut episode = self.episode.lock().expect("журнал");
+        let Some(pending_id) = episode.pending_id.take() else {
+            return;
+        };
+
         let pending = UnsafeReason::VerificationPending.display_text();
-        if last.as_deref() != Some(pending.as_str()) || reason == pending {
-            return;
-        }
-        *last = Some(reason.to_string());
-        drop(last);
+        episode.reasons.remove(&pending);
+        episode.reasons.insert(context.reason.clone());
+
+        // Ключ дедупликации переезжает вместе с текстом: те же процессы того же
+        // эпизода под уточнённой причиной выглядели бы новыми и завели бы второй
+        // набор записей про то же самое падение.
+        episode.recorded = episode
+            .recorded
+            .drain()
+            .map(|(reason, pid)| {
+                if reason == pending {
+                    (context.reason.clone(), pid)
+                } else {
+                    (reason, pid)
+                }
+            })
+            .collect();
+        drop(episode);
 
         let mut journal = self.journal.lock().expect("журнал");
-        if !journal.refine_last_reason(reason) {
+        if !journal.refine_episode(
+            &pending_id,
+            Some(&context.reason),
+            None,
+            Some(&Self::patch(context)),
+            Some(&context.diagnostics),
+        ) {
             return;
         }
-        if let Err(error) = journal.save(&self.paths.journal_file()) {
-            eprintln!("weto: журнал не сохранился: {error}");
-        }
+        self.save(&journal);
     }
 
-    fn report(&self, killed: &[MatchedProcess], reason: &str) {
-        let mut last = self.last_reason.lock().expect("журнал");
-        let same_episode = last.as_deref() == Some(reason);
-        *last = Some(reason.to_string());
-        drop(last);
+    /// Эпизод, начавшийся до вердикта, закончился безопасным выходом.
+    fn resolved_safe(&self, context: &KillContext) {
+        let mut episode = self.episode.lock().expect("журнал");
+        let pending_id = episode.pending_id.take();
+        episode.recorded.clear();
+        episode.reasons.clear();
+        drop(episode);
 
-        if same_episode {
+        let Some(pending_id) = pending_id else {
             return;
-        }
-
-        let names: Vec<String> = {
-            let mut names: Vec<String> = killed.iter().map(|k| k.target_name.clone()).collect();
-            names.sort();
-            names.dedup();
-            names
         };
 
-        let event = KillEvent {
-            at: std::time::SystemTime::now(),
-            target_names: names.clone(),
-            kind: KillEventKind::Terminated,
-            reason_text: reason.to_string(),
-            ip: None,
-            country: None,
-            confirmed_country: None,
-            confirm_source: None,
-            killed_pids: killed.iter().map(|k| k.pid).collect(),
+        let outcome = match (&context.reading.ip, &context.reading.country) {
+            (Some(ip), Some(country)) => {
+                format!("проверка завершилась безопасным выходом: {ip}, {country}")
+            }
+            _ => "проверка завершилась безопасным выходом".to_string(),
         };
-
-        // Уведомление уходит всегда: настройки «уведомлять или нет» нет и на macOS.
-        self.notifier.notify(&names, reason);
 
         let mut journal = self.journal.lock().expect("журнал");
-        journal.append(event);
-        if let Err(error) = journal.save(&self.paths.journal_file()) {
-            eprintln!("weto: журнал не сохранился: {error}");
+        if !journal.refine_episode(
+            &pending_id,
+            None,
+            Some(&outcome),
+            Some(&Self::patch(context)),
+            Some(&context.diagnostics),
+        ) {
+            return;
         }
+        self.save(&journal);
     }
+
+    fn report(&self, killed: &[MatchedProcess], context: &KillContext) {
+        let mut episode = self.episode.lock().expect("журнал");
+
+        let is_new_reason = !episode.reasons.contains(&context.reason);
+        let fresh: Vec<&MatchedProcess> = killed
+            .iter()
+            .filter(|process| {
+                !episode
+                    .recorded
+                    .contains(&(context.reason.clone(), process.pid))
+            })
+            .collect();
+
+        if fresh.is_empty() {
+            return;
+        }
+
+        episode.reasons.insert(context.reason.clone());
+        for process in &fresh {
+            episode
+                .recorded
+                .insert((context.reason.clone(), process.pid));
+        }
+
+        let kind = if is_new_reason {
+            KillEventKind::Terminated
+        } else {
+            KillEventKind::LaunchBlocked
+        };
+
+        // Один проход охраны — один эпизод: сколько процессов завершено,
+        // столько и записей, и все они помнят, что это было одно событие.
+        let episode_id = new_id();
+        let at = std::time::SystemTime::now();
+        let events: Vec<KillEvent> = fresh
+            .iter()
+            .enumerate()
+            .map(|(order, process)| KillEvent {
+                id: format!("{episode_id}-{order}"),
+                episode_id: episode_id.clone(),
+                at,
+                target_name: process.target_name.clone(),
+                pid: process.pid,
+                parent_pid: process.parent_pid,
+                executable_path: process.executable_path.clone(),
+                is_descendant: process.is_descendant,
+                kind,
+                reason_text: context.reason.clone(),
+                resolution_text: None,
+                ip: context.reading.ip.clone(),
+                country: context.reading.country.clone(),
+                confirmed_country: context.reading.confirmed_country.clone(),
+                confirm_source: context.reading.confirm_source.clone(),
+                diagnostics: Some(context.diagnostics.clone()),
+            })
+            .collect();
+
+        if context.is_pending {
+            episode.pending_id = Some(episode_id.clone());
+        }
+        drop(episode);
+
+        // Уведомление — на проход, а не на процесс: тридцать четыре баннера
+        // подряд не сообщение, а помеха. Настройки «уведомлять или нет»
+        // нет и на macOS.
+        self.notifier
+            .notify(&Self::targets_summary(killed), &context.reason);
+
+        let mut journal = self.journal.lock().expect("журнал");
+        journal.append(events);
+        self.save(&journal);
+    }
+}
+
+/// Идентификатор эпизода. UUID сюда тянуть незачем: хватает монотонного счётчика
+/// с отметкой запуска — записи живут внутри одного файла одного пользователя.
+fn new_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let order = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    format!("{since_epoch:x}-{order:x}")
 }
 
 pub struct AppState {
@@ -169,7 +325,7 @@ impl AppState {
         let writer = JournalWriter {
             paths: paths.clone(),
             journal: Mutex::new(Journal::load(&paths.journal_file())),
-            last_reason: Mutex::new(None),
+            episode: Mutex::new(Episode::default()),
             notifier: Box::new(PortalNotifier::new()),
         };
 

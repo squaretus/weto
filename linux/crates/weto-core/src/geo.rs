@@ -139,6 +139,10 @@ pub struct GeoProbeReport {
     pub confirm_source: Option<ConfirmSource>,
     pub has_network_path: bool,
     pub checked_at: std::time::SystemTime,
+    /// Что ответил каждый сервис до разбора: адрес, код, время и сырое тело.
+    /// Разобранный ответ уже прошёл через наши предположения, и случай, где
+    /// предположение неверно, по нему не виден.
+    pub traces: Vec<crate::diagnostics::GeoServiceTrace>,
 }
 
 impl GeoProbeReport {
@@ -255,6 +259,7 @@ mod tests {
             confirm_source: Some(ConfirmSource::Freeipapi),
             has_network_path: true,
             checked_at: SystemTime::UNIX_EPOCH,
+            traces: Vec::new(),
         }
     }
 

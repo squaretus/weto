@@ -11,6 +11,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
+use weto_core::diagnostics::GeoServiceTrace;
 use weto_core::geo::{responses, ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
 use weto_core::ip::is_valid_address;
 
@@ -67,6 +68,9 @@ pub struct HttpGeoProbe {
     /// Последний годный ответ подтверждающего сервиса. Ключ — адрес: подтверждение
     /// отвечает «в какой стране вот этот адрес», и к другому адресу не относится.
     confirmation: Mutex<Option<CachedConfirmation>>,
+    /// Трассы текущей пробы. Собираются по ходу и уезжают в отчёт: журналу нужен
+    /// не вывод, а то, из чего он сделан.
+    traces: Mutex<Vec<GeoServiceTrace>>,
 }
 
 #[derive(Clone)]
@@ -85,6 +89,7 @@ impl HttpGeoProbe {
             network_path,
             clock: Box::new(Instant::now),
             confirmation: Mutex::new(None),
+            traces: Mutex::new(Vec::new()),
         }
     }
 
@@ -106,6 +111,7 @@ impl HttpGeoProbe {
             confirm_source: None,
             has_network_path: self.network_path.has_path(),
             checked_at: SystemTime::now(),
+            traces: self.take_traces(),
         }
     }
 
@@ -121,7 +127,7 @@ impl HttpGeoProbe {
     fn fallback_report(&self, no_answer: SourceOutcome) -> GeoProbeReport {
         let no_token = no_answer;
 
-        match self.fetch(&self.endpoints.geojs_self, None) {
+        match self.fetch("geojs-self", &self.endpoints.geojs_self, None) {
             Ok(body) => match responses::decode_geojs_self(&body) {
                 Ok(answer) => GeoProbeReport {
                     ip: Some(answer.ip),
@@ -130,6 +136,7 @@ impl HttpGeoProbe {
                     confirm_source: Some(ConfirmSource::Geojs),
                     has_network_path: self.network_path.has_path(),
                     checked_at: SystemTime::now(),
+                    traces: self.take_traces(),
                 },
                 Err(_) => self.reference_failure(
                     no_token,
@@ -148,6 +155,7 @@ impl HttpGeoProbe {
             confirm_source: None,
             has_network_path: self.network_path.has_path(),
             checked_at: SystemTime::now(),
+            traces: self.take_traces(),
         }
     }
 
@@ -168,6 +176,7 @@ impl HttpGeoProbe {
 
         if let (Some(cached), Some(age)) = (&cached, age) {
             if age < CONFIRMATION_SOFT_TTL {
+                self.note_cached(cached, age);
                 return (
                     SourceOutcome::Answered(cached.country.clone()),
                     Some(cached.source),
@@ -188,6 +197,7 @@ impl HttpGeoProbe {
 
         if let (Some(cached), Some(age)) = (&cached, age) {
             if age < CONFIRMATION_HARD_TTL {
+                self.note_cached(cached, age);
                 return (
                     SourceOutcome::Answered(cached.country.clone()),
                     Some(cached.source),
@@ -197,10 +207,25 @@ impl HttpGeoProbe {
         fresh
     }
 
+    /// Ответ из кэша — тоже событие пробы: без отметки в журнале выходило, что
+    /// сервис отвечал там, где его вообще не спрашивали.
+    fn note_cached(&self, cached: &CachedConfirmation, age: Duration) {
+        self.trace(GeoServiceTrace {
+            service: cached.source.name().to_string(),
+            url: String::new(),
+            http_status: None,
+            duration_milliseconds: None,
+            body: Some(cached.country.clone()),
+            failure: None,
+            from_cache: true,
+            cache_age_seconds: Some(age.as_secs()),
+        });
+    }
+
     /// Отказ первичного подтверждающего сервиса запоминается: когда молчат оба,
     /// в отчёт идёт его причина, а не общая «недоступность».
     fn confirm(&self, ip: &str) -> (SourceOutcome, Option<ConfirmSource>) {
-        let primary = self.fetch_country(&self.endpoints.freeipapi.replace("{ip}", ip), |body| {
+        let primary = self.fetch_country("freeipapi", &self.endpoints.freeipapi.replace("{ip}", ip), |body| {
             responses::decode_freeipapi(body).ok().flatten()
         });
         if let Ok(country) = primary {
@@ -210,7 +235,7 @@ impl HttpGeoProbe {
             );
         }
 
-        let fallback = self.fetch_country(&self.endpoints.geojs.replace("{ip}", ip), |body| {
+        let fallback = self.fetch_country("geojs", &self.endpoints.geojs.replace("{ip}", ip), |body| {
             responses::decode_geojs(body).ok()
         });
         if let Ok(country) = fallback {
@@ -223,26 +248,103 @@ impl HttpGeoProbe {
 
     fn fetch_country(
         &self,
+        service: &str,
         url: &str,
         decode: impl Fn(&str) -> Option<String>,
     ) -> Result<String, GeoFailure> {
-        let body = self.fetch(url, None)?;
+        let body = self.fetch(service, url, None)?;
         decode(&body).ok_or_else(|| GeoFailure::Other("сервис не назвал страну".into()))
     }
 
-    fn fetch(&self, url: &str, token: Option<&str>) -> Result<String, GeoFailure> {
+    /// Запрос с записью трассы: и удача, и отказ ложатся в журнал одинаково полно.
+    ///
+    /// Токен уходит заголовком и в трассу не попадает: записывается только адрес
+    /// запроса, а заголовки не записываются вовсе.
+    fn fetch(&self, service: &str, url: &str, token: Option<&str>) -> Result<String, GeoFailure> {
         let mut request = ureq::get(url).timeout(self.timeout);
         if let Some(token) = token {
             request = request.set("Authorization", &format!("Bearer {token}"));
         }
 
-        match request.call() {
-            Ok(response) => response
-                .into_string()
-                .map_err(|_| GeoFailure::Other("ответ не прочитался".into())),
-            Err(ureq::Error::Status(code, _)) => Err(GeoFailure::from_http_status(code)),
-            Err(ureq::Error::Transport(transport)) => Err(translate_transport(&transport)),
+        let started = Instant::now();
+        let outcome = request.call();
+        let elapsed = started.elapsed().as_millis() as u64;
+
+        match outcome {
+            Ok(response) => {
+                let status = response.status();
+                match response.into_string() {
+                    Ok(body) => {
+                        self.trace(GeoServiceTrace {
+                            service: service.to_string(),
+                            url: url.to_string(),
+                            http_status: Some(status),
+                            duration_milliseconds: Some(elapsed),
+                            body: Some(GeoServiceTrace::trimmed(&body)),
+                            failure: None,
+                            from_cache: false,
+                            cache_age_seconds: None,
+                        });
+                        Ok(body)
+                    }
+                    Err(_) => {
+                        let failure = GeoFailure::Other("ответ не прочитался".into());
+                        self.trace(GeoServiceTrace {
+                            service: service.to_string(),
+                            url: url.to_string(),
+                            http_status: Some(status),
+                            duration_milliseconds: Some(elapsed),
+                            body: None,
+                            failure: Some(failure.display_text()),
+                            from_cache: false,
+                            cache_age_seconds: None,
+                        });
+                        Err(failure)
+                    }
+                }
+            }
+            Err(ureq::Error::Status(code, response)) => {
+                // Тело отказа и объясняет отказ: «rate limit exceeded», имя
+                // провайдера, требование капчи. Выбрасывая один код, журнал терял
+                // ровно то, ради чего его читают.
+                let body = response.into_string().ok();
+                let failure = GeoFailure::from_http_status(code);
+                self.trace(GeoServiceTrace {
+                    service: service.to_string(),
+                    url: url.to_string(),
+                    http_status: Some(code),
+                    duration_milliseconds: Some(elapsed),
+                    body: body.as_deref().map(GeoServiceTrace::trimmed),
+                    failure: Some(failure.display_text()),
+                    from_cache: false,
+                    cache_age_seconds: None,
+                });
+                Err(failure)
+            }
+            Err(ureq::Error::Transport(transport)) => {
+                let failure = translate_transport(&transport);
+                self.trace(GeoServiceTrace {
+                    service: service.to_string(),
+                    url: url.to_string(),
+                    http_status: None,
+                    duration_milliseconds: Some(elapsed),
+                    body: None,
+                    failure: Some(failure.display_text()),
+                    from_cache: false,
+                    cache_age_seconds: None,
+                });
+                Err(failure)
+            }
         }
+    }
+
+    fn trace(&self, trace: GeoServiceTrace) {
+        self.traces.lock().expect("трассы пробы").push(trace);
+    }
+
+    /// Трассы забираются целиком: следующая проба начинается с чистого списка.
+    fn take_traces(&self) -> Vec<GeoServiceTrace> {
+        std::mem::take(&mut *self.traces.lock().expect("трассы пробы"))
     }
 }
 
@@ -266,6 +368,8 @@ fn translate_transport(error: &ureq::Transport) -> GeoFailure {
 
 impl GeoProbing for HttpGeoProbe {
     fn probe(&self, token: Option<&str>) -> GeoProbeReport {
+        self.take_traces();
+
         let Some(token) = token.filter(|value| !value.is_empty()) else {
             return self.fallback_report(SourceOutcome::Failed(GeoFailure::Other(
                 "не задан токен ipinfo".into(),
@@ -281,7 +385,7 @@ impl GeoProbing for HttpGeoProbe {
             )));
         }
 
-        let body = match self.fetch(&self.endpoints.ipinfo, Some(token)) {
+        let body = match self.fetch("ipinfo", &self.endpoints.ipinfo, Some(token)) {
             Ok(body) => body,
             Err(failure) => return self.fallback_report(SourceOutcome::Failed(failure)),
         };
@@ -308,6 +412,7 @@ impl GeoProbing for HttpGeoProbe {
             confirm_source,
             has_network_path: self.network_path.has_path(),
             checked_at: SystemTime::now(),
+            traces: self.take_traces(),
         }
     }
 }
