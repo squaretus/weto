@@ -290,7 +290,7 @@ final class GuardVMTests: XCTestCase {
         let probe = StubGeoProbe(geo)
         let notifier = SpyNotifier()
         let events = ManualEventSource()
-        let log = EventLogStore(defaults: defaults)
+        let log = EventLogStore(storage: InMemoryEventLog())
         let network = StubSnapshotReader(snapshotValue: snapshot)
 
         let vm = GuardVM(
@@ -336,7 +336,7 @@ final class GuardVMTests: XCTestCase {
 
         let killer = SpyKiller()
         let probe = DelayedGeoProbe()
-        let log = EventLogStore(defaults: defaults)
+        let log = EventLogStore(storage: InMemoryEventLog())
         let network = StubSnapshotReader(snapshotValue: snapshot)
 
         let vm = GuardVM(
@@ -885,7 +885,7 @@ final class GuardVMTests: XCTestCase {
 
         let vm = GuardVM(
             settings: settings,
-            eventLog: EventLogStore(defaults: defaults),
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
             snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
@@ -954,7 +954,7 @@ final class GuardVMTests: XCTestCase {
 
         let vm = GuardVM(
             settings: settings,
-            eventLog: EventLogStore(defaults: defaults),
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
             snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: StubLocator(bundlePaths: [targetBundleID: targetPath], processes: processes),
@@ -1052,7 +1052,7 @@ final class GuardVMTests: XCTestCase {
         let killer = SpyKiller()
         let vm = GuardVM(
             settings: settings,
-            eventLog: EventLogStore(defaults: defaults),
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
             snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
@@ -1106,7 +1106,7 @@ final class GuardVMTests: XCTestCase {
         let probe = StubGeoProbe(geoOutcome())
         let vm = GuardVM(
             settings: settings,
-            eventLog: EventLogStore(defaults: defaults),
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
             snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: probe,
             locator: locator,
@@ -1153,7 +1153,7 @@ final class GuardVMTests: XCTestCase {
         let killer = SpyKiller()
         let vm = GuardVM(
             settings: settings,
-            eventLog: EventLogStore(defaults: defaults),
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
             snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
@@ -1196,7 +1196,7 @@ final class GuardVMTests: XCTestCase {
 
         let vm = GuardVM(
             settings: settings,
-            eventLog: EventLogStore(defaults: defaults),
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
             snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: ProcessRegistry(),
@@ -1333,7 +1333,7 @@ final class GuardVMTests: XCTestCase {
         settings.targets = [targetBundleID]
 
         let killer = SpyKiller()
-        let log = EventLogStore(defaults: defaults)
+        let log = EventLogStore(storage: InMemoryEventLog())
         let locator = MutableLocator(
             bundlePaths: [targetBundleID: targetPath],
             processes: [.init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target")]
@@ -1467,7 +1467,7 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let log = EventLogStore(defaults: defaults)
+        let log = EventLogStore(storage: InMemoryEventLog())
         let locator = MutableLocator(
             bundlePaths: [targetBundleID: targetPath],
             processes: [.init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target")]
