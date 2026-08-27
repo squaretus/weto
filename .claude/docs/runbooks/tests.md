@@ -39,7 +39,9 @@ cd macos && swift test --package-path macos/Packages/UpdateKit
 | `UpdateKitTests` | `UpdateController` against fake fetcher / installer / store / clock, `UserDefaultsUpdateStore` |
 | `UpdateKitHelperTests` | `HelperInstallState`, `HelperUpdateFlow` (refusals, ordering, recorded failures) |
 
-CI (`.github/workflows/pr-checks.yml`, runner `macos-26`, every PR and push to `master`) runs four steps: `swift build`, `swift test`, `swift test --package-path macos/Packages/UpdateKit`, then **Packaging contracts** — `bash macos/scripts/tests/build-artifact-contract.sh 9.9.9`, which does a real release build and therefore also runs `launch-agent-contract.sh` from inside `build.sh`. So both shell contracts below are gated on every PR, not only locally and on release. The step `chmod +x`s `build.sh`, `preinstall`, `postinstall` and both contract scripts before running them.
+CI (`.github/workflows/pr-checks.yml`, workflow `CI`, runner `macos-26`, every PR — and only on
+PRs: a `pull_request` run already tests the merge of the branch into `master`, so a second run
+after the merge would re-check a tree that is already green) runs four steps: `swift build`, `swift test`, `swift test --package-path macos/Packages/UpdateKit`, then **Packaging contracts** — `bash macos/scripts/tests/build-artifact-contract.sh 9.9.9`, which does a real release build and therefore also runs `launch-agent-contract.sh` from inside `build.sh`. So both shell contracts below are gated on every PR, not only locally and on release. The step `chmod +x`s `build.sh`, `preinstall`, `postinstall` and both contract scripts before running them.
 
 Both packaging failures the project has shipped so far ("the app never appeared" and "the popup crashed on click") were about packaging, which is why this step exists despite costing a full release build per PR.
 
