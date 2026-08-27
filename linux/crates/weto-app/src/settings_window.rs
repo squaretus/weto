@@ -95,8 +95,16 @@ fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWi
 
     page.append(&targets_card(window, state.clone()));
     page.append(&network_card(state.clone()));
-    page.append(&geo_list_card(state.clone(), GeoListKind::Blocked, "Чёрный список"));
-    page.append(&geo_list_card(state.clone(), GeoListKind::Allowed, "Белый список"));
+    page.append(&geo_list_card(
+        state.clone(),
+        GeoListKind::Blocked,
+        "Чёрный список",
+    ));
+    page.append(&geo_list_card(
+        state.clone(),
+        GeoListKind::Allowed,
+        "Белый список",
+    ));
     page.append(&appearance_card(state.clone()));
     page.append(&maintenance_card(state.clone()));
     page.append(&footer(state.clone()));
@@ -516,9 +524,7 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
             let text = entry.text().to_string();
             // Разбор и проверка живут в настройках: экрану остаётся показать отказ.
             let mut outcome = Ok(());
-            state
-                .settings
-                .edit(|s| outcome = s.add_entry(&text, kind));
+            state.settings.edit(|s| outcome = s.add_entry(&text, kind));
 
             match outcome {
                 Ok(()) => {

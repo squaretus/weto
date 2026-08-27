@@ -260,7 +260,11 @@ mod tests {
 
     #[test]
     fn allowed_cidr_lets_the_exit_through() {
-        let s = signals("KZ", Some("KZ"), config(&["RU"], &[], &[], &["203.0.113.0/24"]));
+        let s = signals(
+            "KZ",
+            Some("KZ"),
+            config(&["RU"], &[], &[], &["203.0.113.0/24"]),
+        );
         assert_eq!(decide(&s), GuardDecision::Safe);
     }
 
