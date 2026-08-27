@@ -75,8 +75,25 @@ public struct MatchedProcess: Equatable, Sendable {
 
     public let targetName: String
 
-    public init(pid: Int32, targetName: String) {
+    public let parentPID: Int32
+
+    public let executablePath: String
+
+    /// Процесс попал под охрану не сам по себе, а как потомок совпавшего.
+    /// Именно потомки объясняют, почему у одной цели десятки завершений.
+    public let isDescendant: Bool
+
+    public init(
+        pid: Int32,
+        targetName: String,
+        parentPID: Int32 = 0,
+        executablePath: String = "",
+        isDescendant: Bool = false
+    ) {
         self.pid = pid
         self.targetName = targetName
+        self.parentPID = parentPID
+        self.executablePath = executablePath
+        self.isDescendant = isDescendant
     }
 }

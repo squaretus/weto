@@ -807,16 +807,43 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.networkPath)
 
         XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
-        XCTAssertEqual(h.log.events.count, 1)
-        XCTAssertEqual(h.log.events[0].reasonText, "Подключение ещё не проверено")
+        XCTAssertEqual(h.log.events.count, 2, "два завершённых процесса — две записи")
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1, "и один эпизод на них")
+        XCTAssertEqual(Set(h.log.events.map(\.reasonText)), ["Подключение ещё не проверено"])
 
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
-        XCTAssertEqual(h.log.events.count, 1, "эпизод остаётся одной записью, а не двумя")
-        XCTAssertEqual(h.log.events[0].reasonText, "Обнаружена страна RU по данным ipinfo")
-        XCTAssertEqual(h.log.events[0].country, "RU", "показания вердикта тоже дописываются")
-        XCTAssertEqual(h.log.events[0].ip, "203.0.113.28")
+        XCTAssertEqual(h.log.events.count, 2, "эпизод не удваивается от уточнения причины")
+        XCTAssertEqual(
+            Set(h.log.events.map(\.reasonText)),
+            ["Обнаружена страна RU по данным ipinfo"]
+        )
+        XCTAssertEqual(Set(h.log.events.map(\.country)), ["RU"], "показания вердикта тоже дописываются")
+        XCTAssertEqual(Set(h.log.events.map(\.ip)), ["203.0.113.28"])
+    }
+
+    /// Самый частый и самый непонятный для пользователя случай: вердикт потерял
+    /// свежесть, fail-closed завершил цели, а через миг проверка сказала «всё
+    /// в порядке». Уточнять причину нечем — она и была «ещё не проверено», — но
+    /// запись обязана сказать, чем дело кончилось. Без этого в журнале навсегда
+    /// оставалась отговорка без единой цифры, и завершение выглядело беспричинным.
+    func test_episode_that_ends_safe_records_how_it_ended() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ", confirmed: "KZ"))
+
+        h.vm.handle(.networkPath)
+        XCTAssertEqual(Set(h.log.events.map(\.reasonText)), ["Подключение ещё не проверено"])
+        XCTAssertNil(h.log.events.first?.resolutionText, "пока вердикта нет, исход неизвестен")
+
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(
+            h.log.events.first?.resolutionText,
+            "проверка завершилась безопасным выходом: 203.0.113.28, KZ"
+        )
+        XCTAssertEqual(h.log.events.first?.ip, "203.0.113.28", "показания вердикта дописываются тоже")
+        XCTAssertEqual(h.log.events.first?.country, "KZ")
     }
 
     /// Уточнение — про один эпизод. Новое падение после возврата к жизни обязано
@@ -827,16 +854,16 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
         XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
-        XCTAssertEqual(h.log.events.count, 1)
-        let first = h.log.events[0]
+        XCTAssertEqual(h.log.events.count, 2)
+        let firstEpisode = h.log.events[0].episodeID
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.log.events.count, 2, "второй эпизод — вторая запись")
-        XCTAssertEqual(h.log.events.last?.id, first.id)
-        XCTAssertEqual(h.log.events.last?.reasonText, first.reasonText)
+        XCTAssertEqual(h.log.events.count, 4, "второй эпизод — свои записи")
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 2)
+        XCTAssertEqual(h.log.events.last?.episodeID, firstEpisode, "прошлый эпизод остался внизу")
     }
 
     private func makeCountingHarness(
@@ -1231,17 +1258,19 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
         XCTAssertEqual(h.killer.killedBatches, [[500, 501], [500, 501]])
 
-        // Одно падение — одна запись: причина в ней уточняется с «ещё не проверено»
-        // на настоящую, как только вердикт готов. Двумя записями это выглядело как
-        // два разных события, а на живой машине второй записи не было вовсе —
-        // цели к тому моменту уже мертвы, завершать нечего.
-        XCTAssertEqual(h.log.events.count, 1)
-        XCTAssertEqual(h.log.events.first?.country, "RU")
+        // Одно падение — один эпизод: записей в нём столько, сколько процессов
+        // завершено, а причина у всех уточняется с «ещё не проверено» на настоящую,
+        // как только вердикт готов. Вторым эпизодом это выглядело бы как два разных
+        // события, а на живой машине второй записи не было вовсе — цели к тому
+        // моменту уже мертвы, завершать нечего.
+        XCTAssertEqual(h.log.events.count, 2, "два процесса — две записи")
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1, "и один эпизод")
+        XCTAssertEqual(Set(h.log.events.map(\.country)), ["RU"])
         XCTAssertEqual(
-            h.log.events.first?.reasonText,
-            UnsafeReason.blockedCountry(code: "RU", source: "ipinfo").displayText
+            Set(h.log.events.map(\.reasonText)),
+            [UnsafeReason.blockedCountry(code: "RU", source: "ipinfo").displayText]
         )
-        XCTAssertEqual(h.notifier.messages.count, 1)
+        XCTAssertEqual(h.notifier.messages.count, 1, "уведомление — на проход, а не на процесс")
     }
 
     func test_missing_confirmation_kills_and_shows_yellow() async {
@@ -1292,7 +1321,8 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.appLaunched(bundleID: targetBundleID))
 
         XCTAssertEqual(h.killer.killedBatches.count, 2, "перезапущенная цель должна быть добита")
-        XCTAssertEqual(h.log.events.count, 1, "те же pid повторно в журнал не пишутся")
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1,
+                       "те же pid по той же причине второго эпизода не заводят")
     }
 
     func test_newly_launched_target_is_recorded_even_while_already_unsafe() async {
@@ -1329,7 +1359,7 @@ final class GuardVMTests: XCTestCase {
         vm.handle(.tick)
 
         XCTAssertEqual(log.events.count, 2, "новый pid обязан попасть в журнал")
-        XCTAssertEqual(log.events.first?.killedPIDs, [777])
+        XCTAssertEqual(log.events.first?.pid, 777)
     }
 
     func test_launch_of_unrelated_app_is_ignored() async {
@@ -1457,7 +1487,7 @@ final class GuardVMTests: XCTestCase {
 
         vm.handle(.networkPath)
         XCTAssertEqual(log.events.first?.kind, .terminated)
-        XCTAssertEqual(log.events.first?.targetNames, [targetBundleID])
+        XCTAssertEqual(log.events.first?.targetName, targetBundleID)
 
         locator.processes = [.init(pid: 777, executablePath: "\(targetPath)/Contents/MacOS/Target")]
         vm.handle(.tick)
