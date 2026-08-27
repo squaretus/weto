@@ -31,7 +31,10 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `GeoProbing.probe() async → GeoProbeReport` (`GeoProbe` is an `actor`); the guard verdict is
   `report.outcome`, the popup reads the per-service breakdown
 - `NetworkPathReporting.hasPath → Bool` — `NWPathMonitor.currentPath`, no request of its own
-- `HTTPFetching.data(from:headers:) async throws → Data`; impl `URLSessionHTTPFetcher(timeout:)`
+- `HTTPFetching.fetch(from:headers:) async throws → HTTPResponse`; impl `URLSessionHTTPFetcher(timeout:)`.
+  The whole answer — body, status and duration — because the journal cannot tell a timeout from a
+  429 from a provider stub page returning 200 by a parsed result: parsing never happens on failure.
+  `HTTPFetchError` carries the response for the same reason: the body of a 429 is what explains it.
 - `ProcessLocating.allProcesses(includeArguments:) → [ProcessSnapshot]`,
   `.allProcesses()` (convenience, argv off), `.bundlePath(forBundleID:) → String?`
 - `ProcessKilling.kill(pids: [Int32]) → [KillResult]` (`KillResult.isTerminated`)
