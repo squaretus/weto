@@ -77,7 +77,7 @@ public final class AppCoordinator {
     }
 
     public func start() {
-        UserNotificationKillNotifier.requestAuthorization()
+        UserNotificationKillNotifier.activate()
         applyAppIcon()
         dockPresence.start()
         guardVM.start()
