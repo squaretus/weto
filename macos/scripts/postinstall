@@ -3,11 +3,19 @@ set -euo pipefail
 
 LABEL="com.weto.app"
 HELPER_LABEL="com.weto.helper"
-HELPER="/Library/PrivilegedHelperTools/$HELPER_LABEL"
-HELPER_PLIST="/Library/LaunchDaemons/$HELPER_LABEL.plist"
-APP="/Applications/Weto.app"
+
+# Швы установки. В бою все переменные пустые или указывают на системные утилиты;
+# подменяются они только контрактом `scripts/tests/install-idempotency-contract.sh`,
+# которому нужно прогнать установку дважды без root и не тронув рабочую машину.
+ROOT="${WETO_INSTALL_ROOT:-}"
+LAUNCHCTL="${WETO_LAUNCHCTL:-/bin/launchctl}"
+CHOWN="${WETO_CHOWN:-/usr/sbin/chown}"
+
+HELPER="$ROOT/Library/PrivilegedHelperTools/$HELPER_LABEL"
+HELPER_PLIST="$ROOT/Library/LaunchDaemons/$HELPER_LABEL.plist"
+APP="$ROOT/Applications/Weto.app"
 BIN="$APP/Contents/MacOS/WetoMenuBar"
-LEGACY_PLIST="/Library/LaunchAgents/$LABEL.plist"
+LEGACY_PLIST="$ROOT/Library/LaunchAgents/$LABEL.plist"
 
 # Установщик мог «переехать» на другой бандл com.weto.app: тогда автозапуск указывал бы
 # в пустоту и охраны не было бы. Молча это пропускать нельзя — установка обязана упасть.
@@ -16,14 +24,14 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-CONSOLE_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || echo "")
+CONSOLE_USER="${WETO_CONSOLE_USER:-$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || echo "")}"
 if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
     echo "Не найден пользователь графического сеанса — автозапуск настроить некому" >&2
     exit 1
 fi
 
 USER_UID=$(id -u "$CONSOLE_USER")
-HOME_DIR=$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
+HOME_DIR="${WETO_INSTALL_HOME:-$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')}"
 if [ -z "$HOME_DIR" ] || [ ! -d "$HOME_DIR" ]; then
     echo "Не удалось определить домашний каталог пользователя $CONSOLE_USER" >&2
     exit 1
@@ -32,11 +40,31 @@ fi
 AGENTS_DIR="$HOME_DIR/Library/LaunchAgents"
 PLIST="$AGENTS_DIR/$LABEL.plist"
 
-# Агент живёт ровно там, где им управляют приложение и деинсталлятор:
-# в домашнем каталоге пользователя. Системный /Library/LaunchAgents прежних
-# версий приложение не видело — тумблер врал, а удаление было неполным.
-/bin/mkdir -p "$AGENTS_DIR"
-/usr/bin/tee "$PLIST" > /dev/null <<PLIST_EOF
+# Файл фонового элемента переписывается только тогда, когда его содержимое
+# действительно изменилось.
+#
+# Background Task Management держит выданное пользователем разрешение за записью,
+# а запись — за файлом. Перезапись заводит новую запись, и macOS спрашивает
+# разрешение на фоновую работу заново — после каждого обновления. Содержимое
+# у обновления совпадает всегда: путь к бинарнику от версии не зависит.
+#
+# Возвращает 0, если файл переписан, и 1, если он и так был верным.
+write_if_changed() {
+    local path="$1"
+    local content="$2"
+
+    # Обе стороны сравнения проходят через подстановку команды: она снимает
+    # хвостовые переводы строки одинаково и с файла, и с образца. Прямое
+    # сравнение с "$content" не совпадало никогда — у heredoc остаётся \n.
+    if [ -f "$path" ] && [ "$(/bin/cat "$path")" = "$(printf '%s' "$content")" ]; then
+        return 1
+    fi
+
+    printf '%s' "$content" > "$path"
+    return 0
+}
+
+read -r -d '' AGENT_CONTENT <<PLIST_EOF || true
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -53,35 +81,71 @@ PLIST="$AGENTS_DIR/$LABEL.plist"
 </plist>
 PLIST_EOF
 
-/usr/sbin/chown "$CONSOLE_USER" "$AGENTS_DIR" "$PLIST"
+# Агент живёт ровно там, где им управляют приложение и деинсталлятор:
+# в домашнем каталоге пользователя. Системный /Library/LaunchAgents прежних
+# версий приложение не видело — тумблер врал, а удаление было неполным.
+/bin/mkdir -p "$AGENTS_DIR"
+write_if_changed "$PLIST" "$AGENT_CONTENT" || true
+
+"$CHOWN" "$CONSOLE_USER" "$AGENTS_DIR" "$PLIST"
 /bin/chmod 644 "$PLIST"
 
 # Остаток прежней установки: системный агент поднимал бы вторую копию приложения.
 if [ -f "$LEGACY_PLIST" ]; then
-    /bin/launchctl asuser "$USER_UID" /bin/launchctl bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
+    "$LAUNCHCTL" asuser "$USER_UID" "$LAUNCHCTL" bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
     /bin/rm -f "$LEGACY_PLIST"
 fi
 
-/bin/launchctl asuser "$USER_UID" /bin/launchctl bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
+# Задание выгружено в preinstall, поэтому здесь именно загрузка. Повторный bootout
+# на всякий случай остаётся: установка поверх работающей копии без preinstall
+# (ручной прогон, откат) не должна упираться в «уже загружено».
+"$LAUNCHCTL" asuser "$USER_UID" "$LAUNCHCTL" bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
 
-if ! /bin/launchctl asuser "$USER_UID" /bin/launchctl bootstrap "gui/$USER_UID" "$PLIST"; then
+if ! "$LAUNCHCTL" asuser "$USER_UID" "$LAUNCHCTL" bootstrap "gui/$USER_UID" "$PLIST"; then
     echo "launchd отказался загрузить автозапуск из $PLIST" >&2
     exit 1
 fi
 
 # Демон обновлений: ставит следующие версии под root, поэтому живёт в системном
 # домене. Без него приложение обновляться само не сможет — только через браузер.
-if [ ! -x "$HELPER" ] || [ ! -f "$HELPER_PLIST" ]; then
+if [ ! -x "$HELPER" ]; then
     echo "Демон обновления не установлен: $HELPER" >&2
     exit 1
 fi
 
-/usr/sbin/chown root:wheel "$HELPER" "$HELPER_PLIST"
+read -r -d '' HELPER_CONTENT <<PLIST_EOF || true
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$HELPER_LABEL</string>
+    <key>Program</key>
+    <string>$HELPER</string>
+    <key>MachServices</key>
+    <dict>
+        <key>$HELPER_LABEL</key>
+        <true/>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+PLIST_EOF
+
+# Демон в payload пакета не входит своим plist: installer перезаписывал бы файл
+# на каждом обновлении мимо проверки выше, и BTM заводил бы новую запись.
+/bin/mkdir -p "$(dirname "$HELPER_PLIST")"
+write_if_changed "$HELPER_PLIST" "$HELPER_CONTENT" || true
+
+"$CHOWN" root:wheel "$HELPER" "$HELPER_PLIST"
 /bin/chmod 755 "$HELPER"
 /bin/chmod 644 "$HELPER_PLIST"
 
-/bin/launchctl bootout "system/$HELPER_LABEL" 2>/dev/null || true
-if ! /bin/launchctl bootstrap system "$HELPER_PLIST"; then
+"$LAUNCHCTL" bootout "system/$HELPER_LABEL" 2>/dev/null || true
+if ! "$LAUNCHCTL" bootstrap system "$HELPER_PLIST"; then
     echo "launchd отказался загрузить демон обновления из $HELPER_PLIST" >&2
     exit 1
 fi

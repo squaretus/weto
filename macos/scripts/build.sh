@@ -63,7 +63,7 @@ echo "  подпись: ad-hoc (без Developer ID и нотаризации)"
 
 ROOT="$OUT/_pkg-root"
 SCRIPTS="$OUT/_pkg-scripts"
-mkdir -p "$ROOT/Applications" "$ROOT/Library/PrivilegedHelperTools" "$ROOT/Library/LaunchDaemons" "$SCRIPTS"
+mkdir -p "$ROOT/Applications" "$ROOT/Library/PrivilegedHelperTools" "$SCRIPTS"
 
 # Агент автозапуска в payload не входит: его пишет postinstall в домашний каталог
 # консольного пользователя — там же, где им управляют приложение и деинсталлятор.
@@ -73,8 +73,12 @@ cp -R "$OUT/_app/Weto.app" "$ROOT/Applications/"
 # LaunchDaemon (не агент) — он один на машину и не привязан к сеансу пользователя.
 cp .build/release/WetoHelper "$ROOT/Library/PrivilegedHelperTools/com.weto.helper"
 chmod 755 "$ROOT/Library/PrivilegedHelperTools/com.weto.helper"
-cp Resources/com.weto.helper.plist "$ROOT/Library/LaunchDaemons/"
-chmod 644 "$ROOT/Library/LaunchDaemons/com.weto.helper.plist"
+
+# LaunchDaemon демона в payload не входит, как и агент автозапуска: его пишет
+# postinstall, и только если содержимое изменилось. installer перезаписывал бы
+# файл на каждом обновлении мимо этой проверки, а Background Task Management
+# держит выданное разрешение за записью, привязанной к файлу, — отсюда
+# «Weto добавила элементы, которые могут работать в фоне» после каждого обновления.
 cp scripts/preinstall scripts/postinstall "$SCRIPTS/"
 chmod +x "$SCRIPTS/preinstall" "$SCRIPTS/postinstall"
 
