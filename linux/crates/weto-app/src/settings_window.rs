@@ -70,7 +70,7 @@ fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     let stack = Stack::new();
     stack.set_vexpand(true);
     stack.add_named(&settings_page(&window, state.clone()), Some("settings"));
-    stack.add_named(&journal_page(state.clone()), Some("journal"));
+    stack.add_named(&journal_page(&window, state.clone()), Some("journal"));
     panel.append(&stack);
 
     {
@@ -811,22 +811,29 @@ fn footer(state: Arc<AppState>) -> GtkBox {
 
 // --- Журнал ---------------------------------------------------------------
 
-fn journal_page(state: Arc<AppState>) -> ScrolledWindow {
+fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWindow {
     let page = GtkBox::new(Orientation::Vertical, ui::SPACE3);
 
     let card = ui::card("Журнал");
     let list = GtkBox::new(Orientation::Vertical, 0);
     card.append(&list);
 
+    // Ряд из двух кнопок: выгрузка рядом с очисткой, как на macOS.
+    let buttons = ui::row(false);
+    buttons.set_margin_top(ui::SPACE3);
+    let export_button = ui::muted_button("Выгрузить журнал");
+    export_button.set_hexpand(true);
     let clear_button = ui::destructive_button("Очистить журнал");
     clear_button.set_hexpand(true);
-    clear_button.set_margin_top(ui::SPACE3);
-    card.append(&clear_button);
+    buttons.append(&export_button);
+    buttons.append(&clear_button);
+    card.append(&buttons);
 
     let redraw = {
         let state = state.clone();
         let list = list.clone();
         let clear_button = clear_button.clone();
+        let export_button = export_button.clone();
         move || {
             clear(&list);
             let journal = state.journal();
@@ -836,10 +843,12 @@ fn journal_page(state: Arc<AppState>) -> ScrolledWindow {
                 row.append(&ui::caption("Срабатываний не было"));
                 list.append(&row);
                 clear_button.set_visible(false);
+                export_button.set_visible(false);
                 return;
             }
 
             clear_button.set_visible(true);
+            export_button.set_visible(true);
             // Свежие сверху: журнал читают, чтобы понять, что случилось только что.
             for event in journal.entries().iter().rev() {
                 list.append(&ui::journal_row(
@@ -858,6 +867,32 @@ fn journal_page(state: Arc<AppState>) -> ScrolledWindow {
         clear_button.connect_clicked(move |_| {
             state.clear_journal();
             redraw();
+        });
+    }
+
+    // Выгрузка в файл, а не в буфер обмена: файл прикладывают к переписке,
+    // а сотня записей с сырыми ответами сервисов в буфере нечитаема.
+    {
+        let state = state.clone();
+        let window = window.clone();
+        export_button.connect_clicked(move |_| {
+            let Some(text) = state.export_journal() else {
+                return;
+            };
+
+            let dialog = gtk4::FileDialog::builder()
+                .title("Выгрузка журнала weto")
+                .initial_name(weto_config::export::JournalExport::file_name(&stamp_now()))
+                .build();
+
+            dialog.save(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
+                // Отмена — не ошибка: пользователь передумал.
+                let Ok(file) = result else { return };
+                let Some(path) = file.path() else { return };
+                if let Err(error) = std::fs::write(&path, &text) {
+                    eprintln!("weto: журнал не выгрузился: {error}");
+                }
+            });
         });
     }
 
@@ -922,4 +957,39 @@ fn set_vpn_app(state: &Arc<AppState>, text: &str) {
             launch_paths: vec![text.to_string()],
         }))
     });
+}
+
+/// Отметка времени для имени файла — с точностью до минуты и без пробелов,
+/// чтобы файл можно было приложить куда угодно, не переименовывая.
+///
+/// Считается вручную из unix-времени: тянуть chrono ради одной строки незачем,
+/// а часового пояса у имени файла и не должно быть — UTC однозначен.
+fn stamp_now() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+
+    let days = seconds / 86_400;
+    let minute_of_day = (seconds % 86_400) / 60;
+    let (year, month, day) = civil_from_days(days as i64);
+    format!(
+        "{year:04}-{month:02}-{day:02}-{:02}{:02}",
+        minute_of_day / 60,
+        minute_of_day % 60
+    )
+}
+
+/// Григорианская дата из числа дней с эпохи — алгоритм Хиннанта.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }

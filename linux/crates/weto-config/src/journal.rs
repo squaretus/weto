@@ -48,12 +48,15 @@ impl KillEventKind {
 pub struct KillEvent {
     pub id: String,
     /// Общий для всех процессов, завершённых одним проходом охраны.
+    #[serde(rename = "episodeID")]
     pub episode_id: String,
+    /// В файле — `date`: имя общее с macOS, где поле так и называется.
+    #[serde(rename = "date", with = "weto_core::timestamp::iso8601")]
     pub at: SystemTime,
 
     pub target_name: String,
     pub pid: i32,
-    #[serde(default)]
+    #[serde(default, rename = "parentPID")]
     pub parent_pid: i32,
     #[serde(default)]
     pub executable_path: String,

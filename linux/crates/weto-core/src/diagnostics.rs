@@ -128,6 +128,7 @@ pub struct KillDiagnostics {
     pub vpn_app_status: Option<String>,
     #[serde(default)]
     pub services: Vec<GeoServiceTrace>,
+    #[serde(default, with = "crate::timestamp::iso8601_option")]
     pub probed_at: Option<SystemTime>,
     pub app_version: Option<String>,
 }

@@ -31,7 +31,7 @@ use weto_sys::network_snapshot::KernelNetworkReader;
 use weto_sys::notifications::{KillNotifying, PortalNotifier};
 use weto_sys::process_killer::SigtermKiller;
 use weto_sys::process_registry::ProcRegistry;
-use weto_sys::secret_store::FileSecretStore;
+use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
 const TICK_UNSAFE: Duration = Duration::from_millis(250);
@@ -96,7 +96,13 @@ impl SettingsProviding for SettingsSource {
 /// с отговоркой, и завершение выглядело беспричинным.
 struct JournalWriter {
     paths: Paths,
-    journal: Mutex<Journal>,
+    /// Тот же самый журнал, что показывает окно настроек.
+    ///
+    /// Копий было две — своя у писателя и своя у состояния приложения, — и они
+    /// не сходились никогда: новые завершения в окне не появлялись вовсе,
+    /// а «очистить журнал» стирало только показанную копию, после чего первая
+    /// же запись возвращала на диск всё стёртое.
+    journal: Arc<Mutex<Journal>>,
     episode: Mutex<Episode>,
     notifier: Box<dyn KillNotifying>,
 }
@@ -324,7 +330,7 @@ impl AppState {
 
         let writer = JournalWriter {
             paths: paths.clone(),
-            journal: Mutex::new(Journal::load(&paths.journal_file())),
+            journal: journal.clone(),
             episode: Mutex::new(Episode::default()),
             notifier: Box::new(PortalNotifier::new()),
         };
@@ -356,6 +362,37 @@ impl AppState {
 
     pub fn journal(&self) -> Journal {
         self.journal.lock().expect("журнал").clone()
+    }
+
+    /// Журнал для разбора: события вместе с настройками момента и версиями.
+    ///
+    /// Токен в файл не попадает — только признак, задан ли он: без этого
+    /// отказ ipinfo в трассах не объяснить.
+    pub fn export_journal(&self) -> Option<String> {
+        let settings = self.settings.current();
+        // Токен спрашивается у хранилища, а в файл уходит только признак:
+        // выгрузка отправляется в переписку.
+        let has_token = FileSecretStore::new(self.paths.token_file())
+            .load()
+            .ok()
+            .flatten()
+            .is_some_and(|token| !token.is_empty());
+        let events = self.journal().entries().to_vec();
+
+        let export = weto_config::export::JournalExport::build(
+            &settings,
+            events,
+            has_token,
+            std::time::SystemTime::now(),
+            os_version(),
+        );
+        match export.encoded() {
+            Ok(text) => Some(text),
+            Err(error) => {
+                eprintln!("weto: журнал не собрался: {error}");
+                None
+            }
+        }
     }
 
     /// Очистка журнала — и в памяти, и на диске: иначе записи вернулись бы
@@ -453,4 +490,12 @@ impl AppState {
             })
             .expect("поток охраны не создался");
     }
+}
+
+/// Версия ядра для выгрузки. Из `/proc/version` — в контейнере и на живой машине
+/// это единственный источник, не требующий ни утилит, ни зависимостей.
+fn os_version() -> String {
+    std::fs::read_to_string("/proc/version")
+        .map(|text| text.trim().to_string())
+        .unwrap_or_else(|_| "неизвестно".to_string())
 }
