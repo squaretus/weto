@@ -61,6 +61,10 @@ public final class GuardVM {
     // и её положено уточнить у всех его записей, как только вердикт станет известен.
     @ObservationIgnored private var pendingEpisodeID: UUID?
 
+    // Разбор свежести, с которым эпизод начался. Уточнение причины приходит
+    // после пробы, а «что потеряло свежесть» известно только в её начале.
+    @ObservationIgnored private var pendingStaleness: VerdictStaleness?
+
     private struct RecordedKill: Hashable {
         let pid: Int32
         let reason: String
@@ -321,13 +325,16 @@ public final class GuardVM {
             $0.reason == pending ? RecordedKill(pid: $0.pid, reason: reason.displayText) : $0
         })
 
+        // Диагностика дописывается вместе с причиной: эпизод начался до пробы,
+        // и в момент записи трасс ещё не существовало.
         eventLog.refine(
             episodeID: episodeID,
             reasonText: reason.displayText,
             ip: lastReading?.ip,
             country: lastReading?.primaryCountry,
             confirmedCountry: lastReading?.confirmedCountry,
-            confirmSource: lastReading?.confirmSource?.rawValue
+            confirmSource: lastReading?.confirmSource?.rawValue,
+            diagnostics: currentDiagnostics(for: reason, staleness: pendingStaleness)
         )
     }
 
@@ -356,7 +363,10 @@ public final class GuardVM {
             ip: lastReading?.ip,
             country: lastReading?.primaryCountry,
             confirmedCountry: lastReading?.confirmedCountry,
-            confirmSource: lastReading?.confirmSource?.rawValue
+            confirmSource: lastReading?.confirmSource?.rawValue,
+            diagnostics: currentDiagnostics(
+                for: .verificationPending, staleness: pendingStaleness
+            )
         )
     }
 
@@ -391,6 +401,7 @@ public final class GuardVM {
         // столько и записей, и все они помнят, что это было одно событие.
         let episodeID = UUID()
         let moment = Date()
+        let diagnostics = currentDiagnostics(for: reason)
         let batch = fresh.map { process in
             KillEvent(
                 episodeID: episodeID,
@@ -405,17 +416,51 @@ public final class GuardVM {
                 ip: lastReading?.ip,
                 country: lastReading?.primaryCountry,
                 confirmedCountry: lastReading?.confirmedCountry,
-                confirmSource: lastReading?.confirmSource?.rawValue
+                confirmSource: lastReading?.confirmSource?.rawValue,
+                diagnostics: diagnostics
             )
         }
         eventLog.record(batch)
-        if case .verificationPending = reason { pendingEpisodeID = episodeID }
+        if case .verificationPending = reason {
+            pendingEpisodeID = episodeID
+            pendingStaleness = diagnostics.staleness
+        }
 
         // Уведомление — на проход, а не на процесс: тридцать четыре баннера подряд
         // не сообщение, а помеха. Цели в нём перечислены с числом завершённого,
         // потому что «claude» и «claude ×34» — разные новости.
         notifier.notify(reasonText: "\(Self.targetsSummary(of: fresh)): \(reason.displayText)",
                         killedCount: fresh.count)
+    }
+
+    /// Отладочные показания эпизода: они не показываются пользователю и нужны
+    /// только выгрузке. Причина «подключение ещё не проверено» без них неотличима
+    /// от «изменили настройки», и завершение выглядит беспричинным.
+    private func currentDiagnostics(
+        for reason: UnsafeReason,
+        staleness explicit: VerdictStaleness? = nil
+    ) -> KillDiagnostics {
+        let snapshot = controller.lastSnapshot
+        let staleness: VerdictStaleness?
+        if let explicit {
+            staleness = explicit
+        } else if case .verificationPending = reason {
+            staleness = controller.lastStaleness
+        } else {
+            staleness = nil
+        }
+
+        return KillDiagnostics(
+            staleness: staleness,
+            outgoingInterface: snapshot?.outgoing?.interface,
+            outgoingAddress: snapshot?.outgoing?.address,
+            hasNetworkPath: lastReport?.hasNetworkPath,
+            vpnAppEntry: settings.vpnAppRule,
+            vpnAppStatus: String(describing: vpnAppStatus()),
+            services: lastReport?.traces ?? [],
+            probedAt: lastReport?.checkedAt,
+            appVersion: Constants.appVersion
+        )
     }
 
     /// «claude ×34, codex» — цели прохода с числом завершённых процессов там,

@@ -25,17 +25,14 @@ public struct JournalFile: EventLogPersisting {
     public static let fileName = "journal.json"
 
     private let url: URL
-    private let fileManager: FileManager
 
     public init?(
         directory: URL? = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent(JournalFile.directoryName, isDirectory: true),
-        fileManager: FileManager = .default
+            .appendingPathComponent(JournalFile.directoryName, isDirectory: true)
     ) {
         guard let directory else { return nil }
         self.url = directory.appendingPathComponent(Self.fileName)
-        self.fileManager = fileManager
     }
 
     public var path: String { url.path }
@@ -43,7 +40,7 @@ public struct JournalFile: EventLogPersisting {
     /// Испорченный журнал не должен мешать охране: он не данные пользователя,
     /// а история. Читается как пустой.
     public func load() -> [KillEvent] {
-        guard let data = fileManager.contents(atPath: url.path) else { return [] }
+        guard let data = FileManager.default.contents(atPath: url.path) else { return [] }
         return (try? KillEvent.decodeLog(data)) ?? []
     }
 
@@ -51,11 +48,11 @@ public struct JournalFile: EventLogPersisting {
         guard let data = try? KillEvent.encodeLog(events) else { return }
 
         let directory = url.deletingLastPathComponent()
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let temporary = url.appendingPathExtension("tmp")
         guard (try? data.write(to: temporary)) != nil else { return }
-        _ = try? fileManager.replaceItemAt(url, withItemAt: temporary)
+        _ = try? FileManager.default.replaceItemAt(url, withItemAt: temporary)
     }
 }
 

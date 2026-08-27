@@ -15,6 +15,20 @@ private final class StubSnapshotReader: NetworkSnapshotReading, @unchecked Senda
 
 /// Отчёт, чей вердикт равен заданному: тестам охраны важен именно вердикт,
 /// а разбор по сервисам проверяется в `GeoProbeTests` и `StatusPresentationTests`.
+/// Трассы у заглушки настоящие по форме: журнал берёт их из отчёта, и без них
+/// проверялась бы половина пути.
+private func stubTraces(ip: String?, country: String?) -> [GeoServiceTrace] {
+    [
+        GeoServiceTrace(
+            service: "ipinfo",
+            url: "https://api.ipinfo.io/lite/me",
+            httpStatus: 200,
+            durationMilliseconds: 42,
+            body: #"{"ip":"\#(ip ?? "")","country_code":"\#(country ?? "")"}"#
+        )
+    ]
+}
+
 private func stubReport(_ outcome: GeoOutcome) -> GeoProbeReport {
     switch outcome {
     case .resolved(let reading):
@@ -24,7 +38,8 @@ private func stubReport(_ outcome: GeoOutcome) -> GeoProbeReport {
             confirmation: reading.confirmedCountry.map { .answered($0) } ?? .failed(.unreachable),
             confirmSource: reading.confirmSource,
             hasNetworkPath: true,
-            checkedAt: Date()
+            checkedAt: Date(),
+            traces: stubTraces(ip: reading.ip, country: reading.primaryCountry)
         )
     case .degraded(let previous, let detail):
         // Ровно та форма, которую даёт резервный путь пробы: ipinfo молчит,
@@ -821,6 +836,58 @@ final class GuardVMTests: XCTestCase {
         )
         XCTAssertEqual(Set(h.log.events.map(\.country)), ["RU"], "показания вердикта тоже дописываются")
         XCTAssertEqual(Set(h.log.events.map(\.ip)), ["203.0.113.28"])
+    }
+
+    /// Причина «подключение ещё не проверено» без разбора неотличима от «изменили
+    /// настройки»: и то, и другое обнуляет свежесть вердикта. Запись обязана
+    /// сказать, что именно изменилось и на что.
+    func test_pending_episode_records_what_lost_the_freshness() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ", confirmed: "KZ"))
+
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+
+        h.network.snapshotValue = directSnapshot()
+        h.vm.handle(.networkPath)
+
+        let staleness = h.log.events.first?.diagnostics?.staleness
+        XCTAssertEqual(staleness?.cause, .networkChanged, "сменился выход, а не настройки")
+        XCTAssertNotEqual(staleness?.previousFingerprint, staleness?.fingerprint)
+        XCTAssertEqual(staleness?.fingerprint, directSnapshot().verdictFingerprint)
+    }
+
+    /// Правка настроек тоже обнуляет свежесть — и это обязано отличаться в журнале
+    /// от смены сети, иначе искать причину пользователю негде.
+    func test_settings_change_is_recorded_as_its_own_cause() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ", confirmed: "KZ"))
+
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        h.settings.blockedCountryCodes = ["DE"]
+        h.vm.handle(.tick)
+
+        let staleness = h.log.events.first?.diagnostics?.staleness
+        XCTAssertEqual(staleness?.cause, .configurationChanged)
+        XCTAssertEqual(staleness?.previousFingerprint, staleness?.fingerprint, "сеть та же")
+    }
+
+    /// Сырые ответы гео-сервисов доезжают до записи: разобранный ответ уже прошёл
+    /// через наши предположения, и случай, где предположение неверно, по нему не виден.
+    func test_record_carries_the_raw_answers_of_geo_services() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "RU"))
+
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        let services = h.log.events.first?.diagnostics?.services ?? []
+        XCTAssertFalse(services.isEmpty, "трассы обязаны доехать до журнала")
+        XCTAssertTrue(services.contains { $0.service == "ipinfo" })
+        XCTAssertTrue(
+            services.allSatisfy { !$0.url.lowercased().contains("token") },
+            "токен в выгрузку попадать не должен"
+        )
     }
 
     /// Самый частый и самый непонятный для пользователя случай: вердикт потерял

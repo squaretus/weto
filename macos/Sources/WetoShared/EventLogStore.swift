@@ -61,7 +61,8 @@ public final class EventLogStore {
         ip: String? = nil,
         country: String? = nil,
         confirmedCountry: String? = nil,
-        confirmSource: String? = nil
+        confirmSource: String? = nil,
+        diagnostics: KillDiagnostics? = nil
     ) {
         var touched = false
         for index in events.indices where events[index].episodeID == episodeID {
@@ -81,7 +82,8 @@ public final class EventLogStore {
                 ip: ip ?? event.ip,
                 country: country ?? event.country,
                 confirmedCountry: confirmedCountry ?? event.confirmedCountry,
-                confirmSource: confirmSource ?? event.confirmSource
+                confirmSource: confirmSource ?? event.confirmSource,
+                diagnostics: diagnostics ?? event.diagnostics
             )
             touched = true
         }

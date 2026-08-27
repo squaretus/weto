@@ -42,6 +42,18 @@ final class GuardController {
 
     private(set) var revision = 0
     private var freshVerdict: Verdict?
+
+    /// Почему вердикт перестал быть свежим в последний раз и через кого машина
+    /// выходила наружу. Journal читает это, записывая эпизод: без такой пары
+    /// «подключение ещё не проверено» не отличить от «изменили настройки».
+    private(set) var lastStaleness: VerdictStaleness?
+    private(set) var lastSnapshot: NetworkSnapshot?
+
+    /// Последний состоявшийся вердикт. В отличие от `freshVerdict` не обнуляется
+    /// правкой настроек: обнулённый, он делал изменение настроек неотличимым
+    /// от холодного старта, а в журнале это два разных ответа на вопрос
+    /// «почему цели завершились».
+    private var previousVerdict: Verdict?
     private var probeTask: Task<Void, Never>?
     private var isProbeInFlight = false
 
@@ -163,6 +175,7 @@ final class GuardController {
     /// второго: при такте в 5 секунд это больше полумиллиона запросов в месяц.
     private func beginNetworkVerification(config: GuardConfig, snapshot: NetworkSnapshot) {
         let fingerprint = snapshot.verdictFingerprint
+        lastSnapshot = snapshot
 
         guard freshVerdict != Verdict(revision: revision, snapshotFingerprint: fingerprint) else {
             guard let established, established.fingerprint == fingerprint else { return }
@@ -174,6 +187,13 @@ final class GuardController {
             )))
             return
         }
+
+        lastStaleness = VerdictStaleness(
+            previousRevision: previousVerdict?.revision,
+            revision: revision,
+            previousFingerprint: previousVerdict?.snapshotFingerprint,
+            fingerprint: fingerprint
+        )
 
         onDecision(GuardPolicy.pendingVerification(
             isEnabled: settings.isEnabled,
@@ -267,7 +287,10 @@ final class GuardController {
     }
 
     private func record(snapshot: NetworkSnapshot) {
-        freshVerdict = Verdict(revision: revision, snapshotFingerprint: snapshot.verdictFingerprint)
+        lastSnapshot = snapshot
+        let verdict = Verdict(revision: revision, snapshotFingerprint: snapshot.verdictFingerprint)
+        freshVerdict = verdict
+        previousVerdict = verdict
     }
 
     private func configurationChanged() {
