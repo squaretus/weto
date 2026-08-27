@@ -25,6 +25,10 @@ public actor GeoProbe: GeoProbing {
         let at: Date
     }
 
+    /// Трассы текущей пробы. Собираются по ходу и уезжают в отчёт: журналу нужен
+    /// не вывод, а то, из чего он сделан.
+    private var traces: [GeoServiceTrace] = []
+
     public init(
         fetcher: HTTPFetching,
         confirmationFetcher: HTTPFetching? = nil,
@@ -40,6 +44,8 @@ public actor GeoProbe: GeoProbing {
     }
 
     public func probe() async -> GeoProbeReport {
+        traces = []
+
         guard let token = token(), !token.isEmpty else {
             return await fallbackReport(ipinfo: .failed(.other("не задан токен ipinfo")))
         }
@@ -49,8 +55,13 @@ public actor GeoProbe: GeoProbing {
 
         let ipinfo: IPInfoLiteResponse
         do {
-            let data = try await fetcher.data(from: url, headers: ["Authorization": "Bearer \(token)"])
-            ipinfo = try GeoResponses.decodeIPInfo(data)
+            // Токен уходит заголовком и в трассу не попадает: записывается только
+            // адрес запроса, а заголовки не записываются вовсе.
+            let answer = try await fetch(
+                service: "ipinfo", url: url, headers: ["Authorization": "Bearer \(token)"],
+                using: fetcher
+            )
+            ipinfo = try GeoResponses.decodeIPInfo(answer.data)
         } catch {
             return await fallbackReport(ipinfo: .failed(GeoFailure(error)))
         }
@@ -71,8 +82,46 @@ public actor GeoProbe: GeoProbing {
             confirmation: confirmation.outcome,
             confirmSource: confirmation.source,
             hasNetworkPath: networkPath.hasPath,
-            checkedAt: Date()
+            checkedAt: Date(),
+            traces: traces
         )
+    }
+
+    /// Запрос с записью трассы: и удача, и отказ ложатся в журнал одинаково полно.
+    private func fetch(
+        service: String,
+        url: URL,
+        headers: [String: String],
+        using client: HTTPFetching
+    ) async throws -> HTTPResponse {
+        do {
+            let answer = try await client.fetch(from: url, headers: headers)
+            traces.append(GeoServiceTrace(
+                service: service,
+                url: url.absoluteString,
+                httpStatus: answer.statusCode,
+                durationMilliseconds: Int((answer.duration * 1000).rounded()),
+                body: String(data: answer.data, encoding: .utf8)
+            ))
+            return answer
+        } catch let failure as HTTPFetchError {
+            traces.append(GeoServiceTrace(
+                service: service,
+                url: url.absoluteString,
+                httpStatus: failure.statusCode,
+                durationMilliseconds: Int((failure.response.duration * 1000).rounded()),
+                body: String(data: failure.response.data, encoding: .utf8),
+                failure: GeoFailure(failure).displayText
+            ))
+            throw failure
+        } catch {
+            traces.append(GeoServiceTrace(
+                service: service,
+                url: url.absoluteString,
+                failure: GeoFailure(error).displayText
+            ))
+            throw error
+        }
     }
 
     /// ipinfo молчит — спрашиваем единственный сервис, который отвечает про звонящего сам.
@@ -95,15 +144,18 @@ public actor GeoProbe: GeoProbing {
         }
 
         do {
-            let data = try await confirmationFetcher.data(from: url, headers: [:])
-            let answer = try GeoResponses.decodeGeoJSSelf(data)
+            let answer = try await fetch(
+                service: "geojs-self", url: url, headers: [:], using: confirmationFetcher
+            )
+            let decoded = try GeoResponses.decodeGeoJSSelf(answer.data)
             return GeoProbeReport(
-                ip: answer.ip,
+                ip: decoded.ip,
                 ipinfo: noToken,
-                confirmation: .answered(answer.country),
+                confirmation: .answered(decoded.country),
                 confirmSource: .geojs,
                 hasNetworkPath: networkPath.hasPath,
-                checkedAt: Date()
+                checkedAt: Date(),
+                traces: traces
             )
         } catch {
             return GeoProbeReport(
@@ -112,7 +164,8 @@ public actor GeoProbe: GeoProbing {
                 confirmation: .failed(GeoFailure(error)),
                 confirmSource: nil,
                 hasNetworkPath: networkPath.hasPath,
-                checkedAt: Date()
+                checkedAt: Date(),
+                traces: traces
             )
         }
     }
@@ -124,7 +177,8 @@ public actor GeoProbe: GeoProbing {
             confirmation: .notRequested,
             confirmSource: nil,
             hasNetworkPath: networkPath.hasPath,
-            checkedAt: Date()
+            checkedAt: Date(),
+            traces: traces
         )
     }
 
@@ -139,6 +193,7 @@ public actor GeoProbe: GeoProbing {
         let age = cached.map { now().timeIntervalSince($0.at) }
 
         if let cached, let age, age < Constants.confirmationSoftTTLSeconds {
+            noteCachedConfirmation(cached, age: age)
             return (.answered(cached.country), cached.source)
         }
 
@@ -149,9 +204,22 @@ public actor GeoProbe: GeoProbing {
         }
 
         if let cached, let age, age < Constants.confirmationHardTTLSeconds {
+            noteCachedConfirmation(cached, age: age)
             return (.answered(cached.country), cached.source)
         }
         return fresh
+    }
+
+    /// Ответ из кэша — тоже событие пробы: без отметки в журнале выходило, что
+    /// сервис отвечал там, где его вообще не спрашивали.
+    private func noteCachedConfirmation(_ cached: CachedConfirmation, age: TimeInterval) {
+        traces.append(GeoServiceTrace(
+            service: cached.source.rawValue,
+            url: "",
+            body: cached.country,
+            fromCache: true,
+            cacheAgeSeconds: Int(age.rounded())
+        ))
     }
 
     /// Отказ первичного подтверждающего сервиса запоминается: когда молчат оба,
@@ -160,6 +228,7 @@ public actor GeoProbe: GeoProbing {
         ip: String
     ) async -> (outcome: GeoProbeReport.SourceOutcome, source: ConfirmSource?) {
         let primary = await fetchCountry(
+            service: ConfirmSource.freeipapi.rawValue,
             urlString: Constants.freeipapiURL(ip: ip),
             decode: GeoResponses.decodeFreeIPAPI
         )
@@ -168,6 +237,7 @@ public actor GeoProbe: GeoProbing {
         }
 
         if case .success(let country) = await fetchCountry(
+            service: ConfirmSource.geojs.rawValue,
             urlString: Constants.geojsURL(ip: ip),
             decode: GeoResponses.decodeGeoJS
         ) {
@@ -181,13 +251,16 @@ public actor GeoProbe: GeoProbing {
     }
 
     private func fetchCountry(
+        service: String,
         urlString: String,
         decode: (Data) throws -> String?
     ) async -> Result<String, GeoFailure> {
         guard let url = URL(string: urlString) else { return .failure(.other("некорректный URL")) }
         do {
-            let country = try decode(try await confirmationFetcher.data(from: url, headers: [:]))
-            guard let country else { return .failure(.other("сервис не назвал страну")) }
+            let answer = try await fetch(service: service, url: url, headers: [:], using: confirmationFetcher)
+            guard let country = try decode(answer.data) else {
+                return .failure(.other("сервис не назвал страну"))
+            }
             return .success(country)
         } catch {
             return .failure(GeoFailure(error))
@@ -202,9 +275,7 @@ extension GeoFailure {
     init(_ error: Error) {
         switch error {
         case let http as HTTPFetchError:
-            switch http {
-            case .badStatus(let code): self = GeoFailure(httpStatus: code)
-            }
+            self = GeoFailure(httpStatus: http.statusCode)
         case is DecodingError:
             self = .other("непонятный ответ сервиса")
         case let url as URLError:

@@ -56,6 +56,9 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
     public let confirmedCountry: String?
     public let confirmSource: String?
 
+    /// Отладочные показания: в интерфейсе не появляются, уходят в выгрузку.
+    public let diagnostics: KillDiagnostics?
+
     public init(
         id: UUID = UUID(),
         episodeID: UUID,
@@ -71,7 +74,8 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         ip: String?,
         country: String?,
         confirmedCountry: String? = nil,
-        confirmSource: String? = nil
+        confirmSource: String? = nil,
+        diagnostics: KillDiagnostics? = nil
     ) {
         self.id = id
         self.episodeID = episodeID
@@ -88,6 +92,7 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         self.country = country
         self.confirmedCountry = confirmedCountry
         self.confirmSource = confirmSource
+        self.diagnostics = diagnostics
     }
 
     public var summaryText: String {
