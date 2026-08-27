@@ -7,14 +7,26 @@ final class EventLogStoreTests: XCTestCase {
 
     private var suiteName: String!
     private var defaults: UserDefaults!
+    private var directory: URL!
 
     override func setUp() async throws {
         suiteName = "com.weto.tests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
+        directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("weto-journal-\(UUID().uuidString)")
     }
 
     override func tearDown() async throws {
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func file() -> JournalFile {
+        JournalFile(directory: directory)!
+    }
+
+    private func store() -> EventLogStore {
+        EventLogStore(storage: file())
     }
 
     private func event(
@@ -36,11 +48,11 @@ final class EventLogStoreTests: XCTestCase {
     }
 
     func test_new_store_is_empty() {
-        XCTAssertTrue(EventLogStore(defaults: defaults).events.isEmpty)
+        XCTAssertTrue(store().events.isEmpty)
     }
 
     func test_recorded_pass_appears_first() {
-        let store = EventLogStore(defaults: defaults)
+        let store = store()
         store.record([event("первое")])
         store.record([event("второе")])
         XCTAssertEqual(store.events.map(\.reasonText), ["второе", "первое"])
@@ -49,7 +61,7 @@ final class EventLogStoreTests: XCTestCase {
     /// Проход охраны пишется целиком: завершили четыре процесса — четыре записи,
     /// а не одна строка с четырьмя pid внутри.
     func test_pass_is_written_as_a_record_per_process() {
-        let store = EventLogStore(defaults: defaults)
+        let store = store()
         let episode = UUID()
 
         store.record([
@@ -63,13 +75,49 @@ final class EventLogStoreTests: XCTestCase {
         XCTAssertEqual(Set(store.events.map(\.episodeID)), [episode])
     }
 
-    func test_events_survive_a_new_store_over_same_defaults() {
-        EventLogStore(defaults: defaults).record([event("сохранённое")])
-        XCTAssertEqual(EventLogStore(defaults: defaults).events.map(\.reasonText), ["сохранённое"])
+    func test_events_survive_a_new_store_over_the_same_file() {
+        store().record([event("сохранённое")])
+        XCTAssertEqual(store().events.map(\.reasonText), ["сохранённое"])
+    }
+
+    /// Журнал переехал из plist настроек в файл: запись теперь на процесс,
+    /// ёмкость сто, и в записи едет диагностика. История пользователя при этом
+    /// не выбрасывается, а прежний ключ из настроек убирается — иначе он остаётся
+    /// мёртвым грузом навсегда.
+    func test_journal_moves_out_of_the_settings_plist_keeping_history() throws {
+        let legacy = """
+        [{
+            "id": "822543BC-4FFD-4659-A783-C0673BBCB59B",
+            "date": 809519566.380361,
+            "killedPIDs": [92594, 92261],
+            "targetNames": ["claude"],
+            "kind": "terminated",
+            "reasonText": "Подключение ещё не проверено"
+        }]
+        """
+        defaults.set(Data(legacy.utf8), forKey: "eventLog")
+
+        let migrated = EventLogStore(storage: file(), migratingFrom: defaults)
+
+        XCTAssertEqual(migrated.events.count, 2, "старая запись развернулась по процессам")
+        XCTAssertNil(defaults.data(forKey: "eventLog"), "ключ из настроек убран")
+        XCTAssertEqual(store().events.count, 2, "и лежит уже в файле")
+    }
+
+    /// Перенос — разовый. Журнал, уже живущий файлом, настройки не переписывают:
+    /// иначе пустой файл после «очистить журнал» воскрешал бы старую историю.
+    func test_migration_does_not_overwrite_an_existing_file_journal() {
+        defaults.set(Data("[]".utf8), forKey: "eventLog")
+        let existing = store()
+        existing.record([event("своё")])
+
+        let reopened = EventLogStore(storage: file(), migratingFrom: defaults)
+
+        XCTAssertEqual(reopened.events.map(\.reasonText), ["своё"])
     }
 
     func test_ring_buffer_drops_oldest_beyond_capacity() {
-        let store = EventLogStore(defaults: defaults)
+        let store = store()
         for index in 0..<(Constants.eventLogCapacity + 10) {
             store.record([event("событие \(index)")])
         }
@@ -83,7 +131,7 @@ final class EventLogStoreTests: XCTestCase {
     func test_capacity_is_a_hundred_records() {
         XCTAssertEqual(Constants.eventLogCapacity, 100)
 
-        let store = EventLogStore(defaults: defaults)
+        let store = store()
         for index in 0..<120 { store.record([event("событие \(index)")]) }
         XCTAssertEqual(store.events.count, 100)
         XCTAssertEqual(store.events.first?.reasonText, "событие 119")
@@ -93,7 +141,7 @@ final class EventLogStoreTests: XCTestCase {
     /// Причина уточняется у всех записей эпизода разом: процессов в нём десятки,
     /// и причина у них общая.
     func test_refine_touches_every_record_of_the_episode() {
-        let store = EventLogStore(defaults: defaults)
+        let store = store()
         let episode = UUID()
         let other = UUID()
 
@@ -115,7 +163,7 @@ final class EventLogStoreTests: XCTestCase {
     /// сказать, чем кончился: без этого в журнале навсегда остаётся отговорка
     /// «подключение ещё не проверено», и завершение выглядит беспричинным.
     func test_resolution_is_written_to_the_episode() {
-        let store = EventLogStore(defaults: defaults)
+        let store = store()
         let episode = UUID()
         store.record([event("Подключение ещё не проверено", pid: 100, episodeID: episode)])
 
@@ -184,11 +232,11 @@ final class EventLogStoreTests: XCTestCase {
     }
 
     func test_clear_empties_the_log() {
-        let store = EventLogStore(defaults: defaults)
-        store.record([event("будет стёрто")])
-        store.clear()
-        XCTAssertTrue(store.events.isEmpty)
-        XCTAssertTrue(EventLogStore(defaults: defaults).events.isEmpty)
+        let log = store()
+        log.record([event("будет стёрто")])
+        log.clear()
+        XCTAssertTrue(log.events.isEmpty)
+        XCTAssertTrue(store().events.isEmpty)
     }
 }
 

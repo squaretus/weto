@@ -27,6 +27,8 @@ sudo rm -rf /Applications/Weto.app
 
 rm -f "$HOME/Library/Preferences/com.weto.shared.plist"
 rm -rf "$HOME/Library/Caches/com.weto.app"
+# Журнал завершений: с переездом из plist настроек он живёт отдельным файлом.
+rm -rf "$HOME/Library/Application Support/weto"
 security delete-generic-password -s com.weto.ipinfo -a token 2>/dev/null || true
 
 tccutil reset All "$LABEL" 2>/dev/null || true

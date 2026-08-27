@@ -31,12 +31,18 @@
 
 | | macOS | Linux |
 |---|---|---|
-| настройки, журнал | `UserDefaults(suiteName: "com.weto.shared")` | `~/.config/weto/config.toml`, `~/.local/state/weto/journal.json` |
+| настройки | `UserDefaults(suiteName: "com.weto.shared")` | `~/.config/weto/config.toml` |
+| журнал | `~/Library/Application Support/weto/journal.json` | `~/.local/state/weto/journal.json` |
 | токен ipinfo | Keychain, сервис `com.weto.ipinfo` | `~/.config/weto/token`, права `0600` |
 | кэш обновлений | `~/Library/Caches/com.weto.app/updates/` | `~/.cache/weto/updates/` |
 
-Журнал — кольцевой буфер на 10 записей. Токен намеренно не хранится рядом с настройками
-ни там, ни там: plist и TOML читает любой процесс пользователя, и оба уходят в бэкапы.
+Журнал — кольцевой буфер на 100 записей, по записи на завершённый процесс;
+на обеих платформах отдельным файлом с атомарной записью через temp + rename.
+В plist настроек он лежать перестал: plist читается целиком при каждом старте,
+а в записи едет диагностика вплоть до сырых ответов гео-сервисов.
+
+Токен намеренно не хранится рядом с настройками ни там, ни там: plist и TOML читает
+любой процесс пользователя, и оба уходят в бэкапы.
 
 ## Сборка и запуск
 ```bash
