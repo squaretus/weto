@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use weto_config::settings::Settings;
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading, SourceOutcome};
+use weto_core::network::NetworkSnapshot;
 use weto_core::network::VpnAppStatus;
 use weto_core::policy::{
     decide, decide_local, pending_verification, GuardDecision, GuardSignals, UnsafeReason,
@@ -30,7 +31,6 @@ use weto_core::policy::{
 use weto_core::presentation::{status_presentation, GuardState, StatusPresentation};
 use weto_core::process::RunningTarget;
 use weto_sys::geo_probe::GeoProbing;
-use weto_core::network::NetworkSnapshot;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::secret_store::SecretStoring;
 
@@ -476,8 +476,12 @@ impl GuardController {
                     .pending_episode
                     .take();
                 if let Some(staleness) = pending {
-                    let mut context =
-                        self.kill_context(settings, UnsafeReasonText::pending(), report.as_ref(), network);
+                    let mut context = self.kill_context(
+                        settings,
+                        UnsafeReasonText::pending(),
+                        report.as_ref(),
+                        network,
+                    );
                     context.is_pending = true;
                     context.diagnostics.staleness = Some(staleness);
                     self.reporter.resolved_safe(&context);
@@ -487,12 +491,16 @@ impl GuardController {
             GuardDecision::Kill(reason) => {
                 let text = reason.display_text();
                 let is_pending = matches!(reason, UnsafeReason::VerificationPending);
-                let mut context = self.kill_context(settings, text.clone(), report.as_ref(), network);
+                let mut context =
+                    self.kill_context(settings, text.clone(), report.as_ref(), network);
                 context.is_pending = is_pending;
                 if is_pending {
                     let mut inner = self.inner.lock().expect("состояние охраны");
                     let staleness = VerdictStaleness::new(
-                        inner.previous_verdict.as_ref().map(|(revision, _)| *revision),
+                        inner
+                            .previous_verdict
+                            .as_ref()
+                            .map(|(revision, _)| *revision),
                         settings.revision,
                         inner
                             .previous_verdict

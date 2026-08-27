@@ -220,7 +220,11 @@ fn journal_refines_every_record_of_the_episode() {
 #[test]
 fn journal_records_how_a_pending_episode_ended() {
     let mut journal = Journal::default();
-    journal.append(vec![episode_event(7, "Подключение ещё не проверено", "наш")]);
+    journal.append(vec![episode_event(
+        7,
+        "Подключение ещё не проверено",
+        "наш",
+    )]);
 
     assert!(journal.refine_episode(
         "наш",

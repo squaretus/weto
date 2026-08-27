@@ -87,9 +87,7 @@ pub mod iso8601 {
         to_iso8601(*time).serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<SystemTime, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SystemTime, D::Error> {
         let text = String::deserialize(deserializer)?;
         from_iso8601(&text)
             .ok_or_else(|| serde::de::Error::custom(format!("непонятная отметка времени: {text}")))

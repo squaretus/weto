@@ -133,7 +133,6 @@ pub struct KillDiagnostics {
     pub app_version: Option<String>,
 }
 
-
 /// Показания вердикта, дописываемые эпизоду.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GeoReadingPatch {
@@ -142,7 +141,6 @@ pub struct GeoReadingPatch {
     pub confirmed_country: Option<String>,
     pub confirm_source: Option<String>,
 }
-
 
 /// Контекст завершения: всё, что охрана знает в момент, когда пишет журнал.
 ///
