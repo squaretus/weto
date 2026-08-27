@@ -49,16 +49,22 @@ public final class GuardVM {
     @ObservationIgnored private let events: NetworkEventSourcing
     @ObservationIgnored private let launchAgent: LaunchAgentManaging
 
-    @ObservationIgnored private var recordedPIDs: Set<Int32> = []
+    // Пара «причина + pid»: тот же процесс по той же причине второй записи
+    // не заводит, а новый — заводит всегда. Дедупликация только по pid съедала бы
+    // настоящую причину, пришедшую на смену «ещё не проверено».
+    @ObservationIgnored private var recordedKills: Set<RecordedKill> = []
 
     // Причины, уже описанные в журнале в рамках текущего небезопасного эпизода.
-    // Без этого запись «подключение ещё не проверено» съедала бы настоящую причину:
-    // pid те же, а дедупликация была только по ним.
     @ObservationIgnored private var recordedReasons: Set<String> = []
 
-    // Запись эпизода, сделанная до вердикта: причина в ней — «ещё не проверено»,
-    // и её положено уточнить, как только вердикт станет известен.
-    @ObservationIgnored private var pendingEventID: UUID?
+    // Эпизод, записанный до вердикта: причина в нём — «ещё не проверено»,
+    // и её положено уточнить у всех его записей, как только вердикт станет известен.
+    @ObservationIgnored private var pendingEpisodeID: UUID?
+
+    private struct RecordedKill: Hashable {
+        let pid: Int32
+        let reason: String
+    }
 
     @ObservationIgnored private var controller: GuardController!
     @ObservationIgnored private var enforcer: ProcessEnforcer!
@@ -279,9 +285,9 @@ public final class GuardVM {
         case .safe:
             watchdogTask?.cancel(); watchdogTask = nil
             permissionFailure = nil
-            recordedPIDs.removeAll()
+            resolvePendingEpisodeAsSafe()
+            recordedKills.removeAll()
             recordedReasons.removeAll()
-            pendingEventID = nil
             state = settings.isEnabled && settings.guardConfig.hasTargets
                 ? .safe(lastReading)
                 : .disabled
@@ -294,22 +300,59 @@ public final class GuardVM {
         }
     }
 
-    /// Причина эпизода, ставшая известной, дописывается в его запись.
+    /// Причина эпизода, ставшая известной, дописывается всем его записям.
     ///
     /// Ключ причины в `recordedReasons` подменяется вместе с текстом: иначе
-    /// уточнённая причина считалась бы новой и завела бы вторую запись про то же
-    /// самое падение.
+    /// уточнённая причина считалась бы новой и завела бы второй набор записей
+    /// про то же самое падение.
     private func refineEpisodeReason(to reason: UnsafeReason) {
         if case .verificationPending = reason { return }
-        guard let id = pendingEventID else { return }
+        guard let episodeID = pendingEpisodeID else { return }
 
-        pendingEventID = nil
-        recordedReasons.remove(UnsafeReason.verificationPending.displayText)
+        pendingEpisodeID = nil
+        let pending = UnsafeReason.verificationPending.displayText
+        recordedReasons.remove(pending)
         recordedReasons.insert(reason.displayText)
 
+        // Ключ дедупликации переезжает вместе с текстом: те же процессы того же
+        // эпизода под уточнённой причиной выглядели бы новыми и завели бы второй
+        // набор записей про то же самое падение.
+        recordedKills = Set(recordedKills.map {
+            $0.reason == pending ? RecordedKill(pid: $0.pid, reason: reason.displayText) : $0
+        })
+
         eventLog.refine(
-            id: id,
+            episodeID: episodeID,
             reasonText: reason.displayText,
+            ip: lastReading?.ip,
+            country: lastReading?.primaryCountry,
+            confirmedCountry: lastReading?.confirmedCountry,
+            confirmSource: lastReading?.confirmSource?.rawValue
+        )
+    }
+
+    /// Эпизод, начавшийся до вердикта, закончился безопасным выходом.
+    ///
+    /// Это и есть случай, который выглядит как «weto завершает процессы случайно»:
+    /// вердикт потерял свежесть, fail-closed завершил цели, а через секунду проверка
+    /// сказала «всё в порядке». Уточнять причину нечем — она и была «ещё не проверено», —
+    /// но запись обязана сказать, чем дело кончилось, иначе в журнале навсегда
+    /// остаётся отговорка без единой цифры.
+    private func resolvePendingEpisodeAsSafe() {
+        guard let episodeID = pendingEpisodeID else { return }
+        pendingEpisodeID = nil
+
+        let outcome: String
+        if let reading = lastReading {
+            outcome = "проверка завершилась безопасным выходом: \(reading.ip), \(reading.primaryCountry)"
+        } else {
+            outcome = "проверка завершилась безопасным выходом"
+        }
+
+        eventLog.refine(
+            episodeID: episodeID,
+            reasonText: UnsafeReason.verificationPending.displayText,
+            resolutionText: outcome,
             ip: lastReading?.ip,
             country: lastReading?.primaryCountry,
             confirmedCountry: lastReading?.confirmedCountry,
@@ -331,35 +374,62 @@ public final class GuardVM {
         let terminated = Set(results.filter(\.isTerminated).map(\.pid))
         let reasonKey = reason.displayText
         let isNewReason = !recordedReasons.contains(reasonKey)
+
+        // Дедупликация по паре «причина + pid»: тот же процесс по той же причине
+        // второй записи не заводит, а запущенный заново — заводит всегда.
         let fresh = matched.filter {
-            terminated.contains($0.pid) && (isNewReason || !recordedPIDs.contains($0.pid))
+            terminated.contains($0.pid)
+                && !recordedKills.contains(RecordedKill(pid: $0.pid, reason: reasonKey))
         }
         guard !fresh.isEmpty else { return }
 
         let kind: KillEventKind = isNewReason ? .terminated : .launchBlocked
         recordedReasons.insert(reasonKey)
-        recordedPIDs.formUnion(fresh.map(\.pid))
+        recordedKills.formUnion(fresh.map { RecordedKill(pid: $0.pid, reason: reasonKey) })
 
-        var names: [String] = []
-        for name in fresh.map(\.targetName) where !names.contains(name) { names.append(name) }
+        // Один проход охраны — один эпизод: сколько процессов завершено,
+        // столько и записей, и все они помнят, что это было одно событие.
+        let episodeID = UUID()
+        let moment = Date()
+        let batch = fresh.map { process in
+            KillEvent(
+                episodeID: episodeID,
+                date: moment,
+                targetName: process.targetName,
+                pid: process.pid,
+                parentPID: process.parentPID,
+                executablePath: process.executablePath,
+                isDescendant: process.isDescendant,
+                kind: kind,
+                reasonText: reason.displayText,
+                ip: lastReading?.ip,
+                country: lastReading?.primaryCountry,
+                confirmedCountry: lastReading?.confirmedCountry,
+                confirmSource: lastReading?.confirmSource?.rawValue
+            )
+        }
+        eventLog.record(batch)
+        if case .verificationPending = reason { pendingEpisodeID = episodeID }
 
-        let event = KillEvent(
-            date: Date(),
-            targetNames: names,
-            kind: kind,
-            reasonText: reason.displayText,
-            ip: lastReading?.ip,
-            country: lastReading?.primaryCountry,
-            confirmedCountry: lastReading?.confirmedCountry,
-            confirmSource: lastReading?.confirmSource?.rawValue,
-            killedPIDs: fresh.map(\.pid)
-        )
-        eventLog.record(event)
-        if case .verificationPending = reason { pendingEventID = event.id }
-        notifier.notify(
-            reasonText: "\(names.joined(separator: ", ")): \(reason.displayText)",
-            killedCount: fresh.count
-        )
+        // Уведомление — на проход, а не на процесс: тридцать четыре баннера подряд
+        // не сообщение, а помеха. Цели в нём перечислены с числом завершённого,
+        // потому что «claude» и «claude ×34» — разные новости.
+        notifier.notify(reasonText: "\(Self.targetsSummary(of: fresh)): \(reason.displayText)",
+                        killedCount: fresh.count)
+    }
+
+    /// «claude ×34, codex» — цели прохода с числом завершённых процессов там,
+    /// где их больше одного.
+    private static func targetsSummary(of processes: [MatchedProcess]) -> String {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for process in processes {
+            if counts[process.targetName] == nil { order.append(process.targetName) }
+            counts[process.targetName, default: 0] += 1
+        }
+        return order
+            .map { name in counts[name] == 1 ? name : "\(name) ×\(counts[name] ?? 0)" }
+            .joined(separator: ", ")
     }
 
     private func startWatchdog() {
