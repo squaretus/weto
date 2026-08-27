@@ -15,6 +15,7 @@ use weto_config::paths::Paths;
 use weto_config::settings::Settings;
 use weto_core::policy::GuardDecision;
 use weto_core::process::MatchedProcess;
+use weto_core::diagnostics::KillContext;
 use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
@@ -40,13 +41,14 @@ impl SettingsProviding for FileSettings {
 struct PrintingReporter;
 
 impl KillReporting for PrintingReporter {
-    fn report(&self, killed: &[MatchedProcess], reason: &str) {
+    fn report(&self, killed: &[MatchedProcess], context: &KillContext) {
         let names: Vec<&str> = killed.iter().map(|k| k.target_name.as_str()).collect();
         let pids: Vec<String> = killed.iter().map(|k| k.pid.to_string()).collect();
         println!(
-            "завершено: {} (pid {}) — {reason}",
+            "завершено: {} (pid {}) — {}",
             names.join(", "),
-            pids.join(", ")
+            pids.join(", "),
+            context.reason
         );
     }
 }

@@ -843,7 +843,7 @@ fn journal_page(state: Arc<AppState>) -> ScrolledWindow {
             // Свежие сверху: журнал читают, чтобы понять, что случилось только что.
             for event in journal.entries().iter().rev() {
                 list.append(&ui::journal_row(
-                    &event.targets_text(),
+                    &event.title(),
                     &event.summary_text(),
                     &diagnostics(event),
                 ));
@@ -877,15 +877,12 @@ fn diagnostics(event: &weto_config::journal::KillEvent) -> String {
     if let (Some(source), Some(country)) = (&event.confirm_source, &event.confirmed_country) {
         parts.push(format!("{source}: {country}"));
     }
-    parts.push(format!(
-        "pid: {}",
-        event
-            .killed_pids
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    if event.is_descendant {
+        parts.push(format!("потомок {}", event.parent_pid));
+    }
+    if let Some(resolution) = &event.resolution_text {
+        parts.push(format!("итог: {resolution}"));
+    }
     parts.join(" · ")
 }
 
