@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use weto_config::paths::Paths;
 use weto_config::settings::Settings;
+use weto_core::diagnostics::KillContext;
 use weto_core::policy::GuardDecision;
 use weto_core::process::MatchedProcess;
-use weto_core::diagnostics::KillContext;
 use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};

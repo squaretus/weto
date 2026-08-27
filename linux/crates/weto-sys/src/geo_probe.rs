@@ -225,9 +225,11 @@ impl HttpGeoProbe {
     /// Отказ первичного подтверждающего сервиса запоминается: когда молчат оба,
     /// в отчёт идёт его причина, а не общая «недоступность».
     fn confirm(&self, ip: &str) -> (SourceOutcome, Option<ConfirmSource>) {
-        let primary = self.fetch_country("freeipapi", &self.endpoints.freeipapi.replace("{ip}", ip), |body| {
-            responses::decode_freeipapi(body).ok().flatten()
-        });
+        let primary = self.fetch_country(
+            "freeipapi",
+            &self.endpoints.freeipapi.replace("{ip}", ip),
+            |body| responses::decode_freeipapi(body).ok().flatten(),
+        );
         if let Ok(country) = primary {
             return (
                 SourceOutcome::Answered(country),
@@ -235,9 +237,10 @@ impl HttpGeoProbe {
             );
         }
 
-        let fallback = self.fetch_country("geojs", &self.endpoints.geojs.replace("{ip}", ip), |body| {
-            responses::decode_geojs(body).ok()
-        });
+        let fallback =
+            self.fetch_country("geojs", &self.endpoints.geojs.replace("{ip}", ip), |body| {
+                responses::decode_geojs(body).ok()
+            });
         if let Ok(country) = fallback {
             return (SourceOutcome::Answered(country), Some(ConfirmSource::Geojs));
         }

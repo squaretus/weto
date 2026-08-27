@@ -14,9 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use weto_config::journal::{
-    GeoReadingPatch, Journal, KillContext, KillEvent, KillEventKind,
-};
+use weto_config::journal::{GeoReadingPatch, Journal, KillContext, KillEvent, KillEventKind};
 use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
 use weto_core::geo::SourceOutcome;

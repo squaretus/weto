@@ -8,11 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use weto_config::settings::{Settings, Target};
+use weto_core::diagnostics::KillContext;
 use weto_core::geo::{ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
 use weto_core::network::{NetworkSnapshot, OutgoingRoute};
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::process::{ProcessSnapshot, TargetKind};
-use weto_core::diagnostics::KillContext;
 use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::GeoProbing;

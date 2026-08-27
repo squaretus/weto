@@ -26,6 +26,7 @@ Linux собирается и тестируется в контейнере: ne
 linux/scripts/dev.sh cargo build --workspace         # сборка
 linux/scripts/dev.sh bash -c 'Xvfb :99 -screen 0 1280x1024x24 & sleep 2
                               DISPLAY=:99 cargo test --workspace'      # тесты
+linux/scripts/dev.sh cargo fmt --all --check                   # форматирование, его требует CI
 linux/scripts/dev.sh cargo clippy --workspace --all-targets -- -D warnings
 linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh      # инвариант границ ядра
 linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/

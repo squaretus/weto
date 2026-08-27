@@ -128,7 +128,10 @@ fn export() -> (Value, String) {
         "Linux 6.8.0".to_string(),
     );
     let text = export.encoded().expect("выгрузка не собралась");
-    (serde_json::from_str(&text).expect("выгрузка не разобралась"), text)
+    (
+        serde_json::from_str(&text).expect("выгрузка не разобралась"),
+        text,
+    )
 }
 
 fn keys(value: &Value) -> BTreeSet<String> {
@@ -187,9 +190,12 @@ fn event_matches_the_shared_contract() {
     assert!(contract
         .event_kinds
         .contains(&event["kind"].as_str().unwrap().to_string()));
-    assert!(contract
-        .staleness_causes
-        .contains(&diagnostics["staleness"]["cause"].as_str().unwrap().to_string()));
+    assert!(contract.staleness_causes.contains(
+        &diagnostics["staleness"]["cause"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    ));
 }
 
 /// `SystemTime` по умолчанию сериализуется объектом, а не строкой: без этой
