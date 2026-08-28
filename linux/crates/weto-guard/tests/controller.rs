@@ -224,6 +224,8 @@ struct RecordingReporter(
     Arc<Mutex<Vec<String>>>,
     /// Контексты завершений: по ним проверяется диагностика, а не только текст.
     Arc<Mutex<Vec<KillContext>>>,
+    /// Сколько раз эпизод объявлен законченным.
+    Arc<Mutex<Vec<()>>>,
 );
 
 impl KillReporting for RecordingReporter {
@@ -234,6 +236,10 @@ impl KillReporting for RecordingReporter {
 
     fn refine(&self, context: &KillContext) {
         self.1.lock().unwrap().push(context.reason.clone());
+    }
+
+    fn episode_finished(&self, _context: &KillContext) {
+        self.3.lock().unwrap().push(());
     }
 }
 

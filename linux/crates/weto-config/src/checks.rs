@@ -36,11 +36,10 @@ impl CheckLog {
         if !event.is_worth_recording() {
             return false;
         }
-        self.entries.push(event);
-        if self.entries.len() > CAPACITY {
-            let excess = self.entries.len() - CAPACITY;
-            self.entries.drain(0..excess);
-        }
+        // Свежие сверху — так же, как на macOS: файл выгрузки общий, и «первая
+        // запись» обязана значить одно и то же на обеих платформах.
+        self.entries.insert(0, event);
+        self.entries.truncate(CAPACITY);
         true
     }
 

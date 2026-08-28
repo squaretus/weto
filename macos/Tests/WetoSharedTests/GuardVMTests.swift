@@ -488,6 +488,46 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
+    /// Автоматические поводы пропускают пробу каждый такт — и в журнал это
+    /// не идёт. Иначе за пять секунд ожидания ipinfo они вытеснили бы
+    /// из полусотни записей ровно ту, ради которой журнал и ведётся.
+    func test_automatic_triggers_do_not_flood_the_check_log_with_skips() async {
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        let h = makeDelayedHarness(snapshot: healthySnapshot(), checkLog: checks)
+
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+
+        for _ in 0..<10 { h.vm.handle(.tick) }
+        await settle()
+
+        XCTAssertTrue(
+            checks.all.allSatisfy { $0.outcome != .skippedProbeInFlight },
+            "пропуски автоматических поводов — рабочее состояние, а не событие"
+        )
+    }
+
+    /// Остановленная охрана не оживает от ответа пробы, которая была в полёте.
+    ///
+    /// `stop()` снимает задачу пробы, но запрос к ipinfo уже ушёл. Применить его
+    /// ответ значило бы заново поднять сторожевой таймер у выключённого приложения.
+    func test_a_probe_answering_after_stop_does_not_revive_the_guard() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+
+        h.vm.stop()
+        await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
+        await settle()
+
+        XCTAssertEqual(
+            h.vm.state, .unsafe(.verificationPending),
+            "ответ после остановки к состоянию не применяется"
+        )
+    }
+
     /// Состоявшаяся проверка пишется с трассами сервисов и длительностью:
     /// по ним видно, ушёл ли запрос и что ответили.
     func test_a_completed_check_is_recorded_with_its_traces() async {

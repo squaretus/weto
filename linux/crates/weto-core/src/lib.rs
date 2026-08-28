@@ -8,6 +8,7 @@
 
 pub mod check;
 pub mod diagnostics;
+pub mod episode;
 pub mod geo;
 pub mod ip;
 pub mod launcher;

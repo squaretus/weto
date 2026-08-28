@@ -20,13 +20,6 @@ struct JournalCard: View {
 
     private var events: [KillEvent] { coordinator.eventLog.events }
 
-    /// Проверок в интерфейсе не видно: они материал выгрузки. Но выгружать
-    /// их надо и тогда, когда завершений не было вовсе — «нажал, и ничего
-    /// не произошло» это ровно тот случай.
-    private var hasSomethingToExport: Bool {
-        !events.isEmpty || !coordinator.checkLog.all.isEmpty
-    }
-
     var body: some View {
         WetoCard("Журнал") {
             VStack(spacing: 0) {
@@ -53,18 +46,23 @@ struct JournalCard: View {
                     }
                 }
 
-                if hasSomethingToExport {
-                    HStack(spacing: WetoTokens.space2) {
-                        Button("Выгрузить журнал") { export() }
-                            .buttonStyle(WetoPillButtonStyle(.ghost, expands: true))
+                // Выгрузка доступна всегда, а не только когда есть завершения.
+                // Ради «нажал проверить, и ничего не произошло» журнал проверок
+                // и заведён, а завершений в этом случае нет вовсе. Считать их
+                // для видимости кнопки нельзя: журнал проверок намеренно
+                // не наблюдаемый, и SwiftUI не перерисовал бы карточку — кнопка
+                // появлялась бы только после переоткрытия окна. Да и пустая
+                // выгрузка не бесполезна: в ней настройки и версии.
+                HStack(spacing: WetoTokens.space2) {
+                    Button("Выгрузить журнал") { export() }
+                        .buttonStyle(WetoPillButtonStyle(.ghost, expands: true))
 
-                        if !events.isEmpty {
-                            Button("Очистить журнал") { coordinator.eventLog.clear() }
-                                .buttonStyle(WetoPillButtonStyle(.danger, expands: true))
-                        }
+                    if !events.isEmpty {
+                        Button("Очистить журнал") { coordinator.eventLog.clear() }
+                            .buttonStyle(WetoPillButtonStyle(.danger, expands: true))
                     }
-                    .padding(.top, WetoTokens.space3)
                 }
+                .padding(.top, WetoTokens.space3)
             }
         }
     }

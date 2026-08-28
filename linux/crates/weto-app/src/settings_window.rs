@@ -849,8 +849,8 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
 
             clear_button.set_visible(true);
             export_button.set_visible(true);
-            // Свежие сверху: журнал читают, чтобы понять, что случилось только что.
-            for event in journal.entries().iter().rev() {
+            // Свежие сверху: журнал так и хранится, разворачивать нечего.
+            for event in journal.entries() {
                 list.append(&ui::journal_row(
                     &event.title(),
                     &event.summary_text(),

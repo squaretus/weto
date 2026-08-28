@@ -94,10 +94,14 @@ fn capacity_is_fifty_and_the_freshest_stay() {
     }
 
     assert_eq!(log.entries().len(), CAPACITY);
-    assert_eq!(log.entries()[0].at, UNIX_EPOCH + Duration::from_secs(20));
+    assert_eq!(
+        log.entries()[0].at,
+        UNIX_EPOCH + Duration::from_secs(69),
+        "свежие сверху"
+    );
     assert_eq!(
         log.entries()[CAPACITY - 1].at,
-        UNIX_EPOCH + Duration::from_secs(69)
+        UNIX_EPOCH + Duration::from_secs(20)
     );
 }
 

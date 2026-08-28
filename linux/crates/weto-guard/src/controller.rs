@@ -77,12 +77,14 @@ pub trait KillReporting: Send + Sync {
     /// нечего, то есть ровно в том случае, где записи иначе не появится вовсе.
     fn refine(&self, _context: &KillContext) {}
 
-    /// Эпизод, начавшийся до вердикта, закончился безопасным выходом.
+    /// Эпизод кончился безопасным выходом.
     ///
-    /// Уточнять причину нечем — она и была «подключение ещё не проверено», — но
-    /// запись обязана сказать, чем дело кончилось. Именно этот случай и выглядит
-    /// как «weto завершает процессы случайно».
-    fn resolved_safe(&self, _context: &KillContext) {}
+    /// Приходит на каждый переход в safe, а не только у эпизода, начавшегося
+    /// до вердикта: приёмник обнуляет здесь учёт «что уже описано». Эпизоду,
+    /// который начинался до вердикта (`context.is_pending`), дописывается ещё
+    /// и исход — цели умерли, а проверка следом сказала «всё в порядке».
+    /// Именно этот случай и выглядит как «weto завершает процессы случайно».
+    fn episode_finished(&self, _context: &KillContext) {}
 }
 
 /// Вердикт вместе с признаком, при каких условиях он был получен.
@@ -567,26 +569,30 @@ impl GuardController {
 
         let running = match &decision {
             GuardDecision::Safe => {
-                // Эпизод, начавшийся до вердикта, закончился безопасным выходом.
-                // Уточнять причину нечем, но запись обязана сказать, чем кончилось:
-                // иначе в журнале навсегда остаётся отговорка без единой цифры.
+                // Эпизод кончился. Сообщать об этом надо всегда, а не только
+                // когда он был неразобранным: учёт «что уже описано» обнуляется
+                // именно здесь, и без вызова следующее падение по той же причине
+                // писалось бы «запуск запрещён» вместо «завершено».
+                //
+                // Если эпизод начинался до вердикта, ему дописывается ещё и исход:
+                // цели умерли, а проверка следом сказала «всё в порядке» — без этого
+                // в журнале навсегда остаётся отговорка без единой цифры.
                 let pending = self
                     .inner
                     .lock()
                     .expect("состояние охраны")
                     .pending_episode
                     .take();
-                if let Some(staleness) = pending {
-                    let mut context = self.kill_context(
-                        settings,
-                        UnsafeReasonText::pending(),
-                        report.as_ref(),
-                        network,
-                    );
-                    context.is_pending = true;
-                    context.diagnostics.staleness = Some(staleness);
-                    self.reporter.resolved_safe(&context);
-                }
+                let mut context = self.kill_context(
+                    settings,
+                    UnsafeReasonText::pending(),
+                    report.as_ref(),
+                    network,
+                );
+                context.is_pending = pending.is_some();
+                context.diagnostics.staleness = pending;
+                self.reporter.episode_finished(&context);
+
                 self.enforcer.running(&rules)
             }
             GuardDecision::Kill(reason) => {

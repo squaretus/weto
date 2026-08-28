@@ -39,6 +39,7 @@ struct Contract {
     timestamp_fields: Vec<String>,
     body_limit: usize,
     forbidden_substrings: Vec<String>,
+    order: String,
 }
 
 /// Путь берётся от исходника теста: фикстуры лежат вне `linux/`, и копировать их
@@ -295,6 +296,69 @@ fn export_never_carries_the_token_or_its_header() {
             !text.contains(forbidden),
             "в выгрузке нашлось «{forbidden}» — файл отдают в переписку"
         );
+    }
+}
+
+/// Порядок записей одними именами ключей не ловится, а разъехался он именно
+/// молча: macOS клал свежие сверху, Linux — снизу. Файл уходит на разбор,
+/// и «первая запись» обязана значить одно и то же на обеих платформах.
+#[test]
+fn records_are_newest_first() {
+    use weto_config::checks::CheckLog;
+    use weto_config::journal::Journal;
+
+    assert_eq!(contract().order, "newestFirst");
+
+    let mut journal = Journal::default();
+    journal.append(vec![kill_event(1, 100)]);
+    journal.append(vec![kill_event(2, 200)]);
+    assert_eq!(journal.entries()[0].pid, 2, "свежее завершение первым");
+
+    let mut checks = CheckLog::default();
+    checks.append(check_event(100));
+    checks.append(check_event(200));
+    assert_eq!(
+        checks.entries()[0].at,
+        UNIX_EPOCH + Duration::from_secs(200),
+        "свежая проверка первой"
+    );
+}
+
+fn kill_event(pid: i32, seconds: u64) -> KillEvent {
+    KillEvent {
+        id: format!("событие-{pid}"),
+        episode_id: "эпизод".to_string(),
+        at: UNIX_EPOCH + Duration::from_secs(seconds),
+        target_name: "claude".to_string(),
+        pid,
+        parent_pid: 1,
+        executable_path: "/usr/bin/claude".to_string(),
+        is_descendant: false,
+        kind: KillEventKind::Terminated,
+        reason_text: "причина".to_string(),
+        resolution_text: None,
+        ip: None,
+        country: None,
+        confirmed_country: None,
+        confirm_source: None,
+        diagnostics: None,
+    }
+}
+
+fn check_event(seconds: u64) -> CheckEvent {
+    CheckEvent {
+        id: format!("проверка-{seconds}"),
+        at: UNIX_EPOCH + Duration::from_secs(seconds),
+        trigger: CheckTrigger::Manual,
+        outcome: CheckOutcome::SkippedProbeInFlight,
+        fingerprint: None,
+        duration_milliseconds: None,
+        ip: None,
+        country: None,
+        confirmed_country: None,
+        confirm_source: None,
+        services: Vec::new(),
+        detail: None,
     }
 }
 

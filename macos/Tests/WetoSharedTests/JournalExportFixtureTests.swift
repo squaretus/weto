@@ -91,6 +91,54 @@ final class JournalExportFixtureTests: XCTestCase {
         XCTAssertFalse(text.contains("очень-секретный-токен"))
     }
 
+    /// Порядок записей одними именами ключей не ловится, а разъехался он именно
+    /// молча: macOS клал свежие сверху, Linux — снизу. Файл уходит на разбор,
+    /// и «первая запись» обязана значить одно и то же на обеих платформах.
+    func test_records_are_newest_first() throws {
+        XCTAssertEqual(contract.order, "newestFirst")
+
+        let suiteName = "com.weto.tests.\(UUID().uuidString)"
+        let settings = SettingsStore(
+            defaults: UserDefaults(suiteName: suiteName)!,
+            secrets: InMemorySecretStore()
+        )
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+
+        let journal = EventLogStore(storage: InMemoryEventLog())
+        journal.record([killEvent(pid: 1, at: 100)])
+        journal.record([killEvent(pid: 2, at: 200)])
+
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        checks.record(checkEvent(at: 100))
+        checks.record(checkEvent(at: 200))
+
+        let export = JournalExporter.make(
+            settings: settings, events: journal.events, checks: checks.all
+        )
+
+        XCTAssertEqual(export.events.first?.pid, 2, "свежее завершение первым")
+        XCTAssertEqual(
+            export.checks.first?.date, Date(timeIntervalSince1970: 200),
+            "свежая проверка первой"
+        )
+    }
+
+    private func killEvent(pid: Int32, at seconds: TimeInterval) -> KillEvent {
+        KillEvent(
+            episodeID: UUID(), date: Date(timeIntervalSince1970: seconds),
+            targetName: "claude", pid: pid, kind: .terminated,
+            reasonText: "причина", ip: nil, country: nil
+        )
+    }
+
+    private func checkEvent(at seconds: TimeInterval) -> CheckEvent {
+        CheckEvent(
+            date: Date(timeIntervalSince1970: seconds),
+            trigger: .manual,
+            outcome: .skippedProbeInFlight
+        )
+    }
+
     func test_body_limit_is_the_shared_one() {
         XCTAssertEqual(GeoServiceTrace.bodyLimit, contract.bodyLimit)
     }
@@ -235,6 +283,7 @@ final class JournalExportFixtureTests: XCTestCase {
         let timestampFields: [String]
         let bodyLimit: Int
         let forbiddenSubstrings: [String]
+        let order: String
     }
 
     /// Путь берётся от исходника теста, а не от бандла: фикстуры лежат вне
