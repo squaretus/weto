@@ -22,6 +22,10 @@ public enum WetoUpdate {
         daemonPlistPath: "/Library/LaunchDaemons/com.weto.helper.plist",
         daemonBinaryPath: "/Library/PrivilegedHelperTools/com.weto.helper",
         logSubsystem: "com.weto.helper",
-        defaultsSuite: Constants.userDefaultsSuite
+        defaultsSuite: Constants.userDefaultsSuite,
+        // Рабочий каталог демона лежит внутри /var/db/weto: без родителя
+        // после удаления остаётся пустой каталог под root.
+        additionalUninstallPaths: ["/var/db/weto"],
+        packageIdentifier: "com.weto.pkg"
     )
 }
