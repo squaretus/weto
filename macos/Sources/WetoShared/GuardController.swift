@@ -62,6 +62,11 @@ final class GuardController {
     private var probeTask: Task<Void, Never>?
     private var isProbeInFlight = false
 
+    /// Повод пробы, которая создана, но ещё не ушла в сеть: между созданием
+    /// задачи и её запросом есть точка подвеса. Нужен, чтобы автоматический
+    /// повод не снял в этот зазор пробу, которую попросил пользователь.
+    private var pendingTrigger: CheckEvent.Trigger?
+
     /// Чтение, на котором стоит последний состоявшийся вердикт, и отпечаток сети,
     /// при котором он получен. Нужно, чтобы молчание ipinfo не завершало цели,
     /// когда адрес доказанно тот же: тот же адрес — та же страна.
@@ -101,6 +106,9 @@ final class GuardController {
     func stop() {
         probeTask?.cancel()
         probeTask = nil
+        // Иначе повод снятой пробы остался бы «кнопкой» навсегда и блокировал
+        // автоматические пробы после следующего старта.
+        pendingTrigger = nil
     }
 
     func awaitPendingProbe() async {
@@ -260,14 +268,24 @@ final class GuardController {
             return
         }
 
+        // Проба по кнопке не уступает автоматической: пользователь нажал, и его
+        // запрос обязан уйти. Раньше расписание, подошедшее в зазор между
+        // созданием задачи и её запросом, снимало нажатие — и оно исчезало
+        // бесследно: ни запроса, ни ошибки, ни записи в журнале.
+        if pendingTrigger == .manual, trigger != .manual { return }
+
         let expected = revision
 
+        pendingTrigger = trigger
         probeTask?.cancel()
         probeTask = Task { [weak self] in
             // Окно коалесценции гасит только исходящие запросы: состояние
             // уже переведено в fail-closed выше.
             try? await Task.sleep(for: .seconds(interval))
             guard !Task.isCancelled else { return }
+
+            // Окно коалесценции кончилось: дальше пробу не вытесняет никто.
+            self?.pendingTrigger = nil
 
             let started = ContinuousClock.now
             self?.isProbeInFlight = true

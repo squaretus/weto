@@ -220,8 +220,18 @@ public final class GuardVM {
             .reduce(0) { $0 + $1.processCount }
     }
 
+    /// Что именно стоит за целью — и почему её не нашли, если не нашли.
+    ///
+    /// Одного «не найдено в системе» мало: имя ищется по списку каталогов,
+    /// и не найтись оно может просто потому, что инструмент лежит в своём.
+    /// Подсказка про полный путь — единственный выход, который у пользователя
+    /// есть прямо сейчас.
     public func resolvedDescription(forTarget entry: String) -> String {
-        guard let rule = resolver.resolve(entry) else { return "не найдено в системе" }
+        guard let rule = resolver.resolve(entry) else {
+            return entry.contains("/")
+                ? "не найдено: по этому пути нет исполняемого файла"
+                : "не найдено по имени — укажите полный путь к файлу"
+        }
         switch rule.kind {
         case .appBundle: return "приложение: \(rule.path)"
         case .binary: return "бинарник: \(rule.path)"

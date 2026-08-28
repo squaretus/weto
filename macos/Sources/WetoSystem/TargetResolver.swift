@@ -8,13 +8,37 @@ public protocol TargetResolving: Sendable {
 
 public struct TargetResolver: TargetResolving {
 
-    private static let searchPaths = [
-        "/opt/homebrew/bin", "/opt/homebrew/sbin",
-        "/usr/local/bin", "/usr/local/sbin",
-        "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-    ]
+    /// Где искать цель, названную одним именем.
+    ///
+    /// Каталоги пользователя идут первыми и не случайно: `claude`, `codex`
+    /// и вообще всё, что ставится не через пакетный менеджер, живёт в
+    /// `~/.local/bin`. Его в списке не было, и цель, названная «claude»,
+    /// не находилась — при том что тот же инструмент по полному пути
+    /// добавлялся без вопросов.
+    ///
+    /// Список, а не `PATH`: приложение поднимает launchd, и в его окружении
+    /// `PATH` — это `/usr/bin:/bin:/usr/sbin:/sbin`. Спрашивать путь у login-шелла
+    /// значило бы исполнять пользовательские rc-файлы из процесса, который
+    /// завершает чужие процессы; цена выше пользы.
+    public static var defaultSearchPaths: [String] {
+        let home = NSHomeDirectory()
+        return [
+            "\(home)/.local/bin",
+            "\(home)/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/go/bin",
+            "\(home)/.bun/bin",
+            "/opt/homebrew/bin", "/opt/homebrew/sbin",
+            "/usr/local/bin", "/usr/local/sbin",
+            "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        ]
+    }
 
-    public init() {}
+    private let searchPaths: [String]
+
+    public init(searchPaths: [String] = TargetResolver.defaultSearchPaths) {
+        self.searchPaths = searchPaths
+    }
 
     public func resolve(_ entry: String) -> TargetRule? {
         let trimmed = entry.trimmingCharacters(in: .whitespaces)
@@ -53,7 +77,7 @@ public struct TargetResolver: TargetResolving {
     private func resolveExecutable(_ entry: String) -> TargetRule? {
         let candidates = entry.contains("/")
             ? [(entry as NSString).expandingTildeInPath]
-            : Self.searchPaths.map { "\($0)/\(entry)" }
+            : searchPaths.map { "\($0)/\(entry)" }
 
         let fm = FileManager.default
         for candidate in candidates where fm.isExecutableFile(atPath: candidate) {
