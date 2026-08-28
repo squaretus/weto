@@ -380,6 +380,74 @@ final class GuardVMTests: XCTestCase {
         for _ in 0..<20 { await Task.yield() }
     }
 
+    /// Такт охраны не имеет права отменять пробу, которая ещё в полёте.
+    ///
+    /// Пока вердикт несвеж, каждый такт заново объявляет fail-closed и запускает
+    /// пробу, снимая предыдущую. Такт идёт раз в секунду, а запрос к ipinfo с его
+    /// таймаутом в пять — на медленном канале проба не успевает ответить никогда,
+    /// и вердикт не приходит вовсе: ни сам по себе, ни по кнопке. Снаружи это
+    /// выглядит как «нажал пять раз, запрос так и не ушёл».
+    func test_a_tick_does_not_cancel_the_probe_in_flight() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+
+        // Секунда прошла, охрана сделала штатный такт — проба всё ещё в полёте.
+        h.vm.handle(.tick)
+        await settle()
+
+        await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
+        await settle()
+
+        let starts = await h.probe.starts()
+        XCTAssertEqual(
+            starts, 1,
+            "такт запустил вторую пробу поверх летящей: первая отменена, запрос выброшен"
+        )
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "ответ пробы обязан примениться")
+    }
+
+    /// То же про кнопку: пользователь нажал, запрос ушёл, и следующий такт
+    /// не должен его снимать.
+    func test_a_tick_does_not_cancel_the_probe_requested_by_the_button() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted()
+
+        h.vm.handle(.tick)
+        await settle()
+
+        await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
+        await settle()
+
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "проверка по кнопке обязана доехать")
+    }
+
+    /// Ответ пробы про прежний путь нельзя применять к новому.
+    ///
+    /// Раньше от этого спасала отмена: смена пути шла тиком, тик снимал летящую
+    /// пробу. Отмену убрали — значит несовпадение отпечатка обязано отсекать
+    /// ответ явно, иначе цели открываются на чужих показаниях.
+    func test_an_answer_about_the_previous_path_is_not_applied_to_the_new_one() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+
+        // Пока проба летела, трафик поехал мимо туннеля.
+        h.network.snapshotValue = directSnapshot()
+        await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
+        await settle()
+
+        XCTAssertEqual(
+            h.vm.state, .unsafe(.verificationPending),
+            "безопасный ответ про прежний выход не открывает цели на новом"
+        )
+    }
+
     func test_start_kills_targets_while_initial_probe_is_suspended() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
 
@@ -391,21 +459,29 @@ final class GuardVMTests: XCTestCase {
         h.vm.stop()
     }
 
-    func test_cancelled_old_probe_cannot_restore_safe_state() async {
+    /// Пачка событий сети не плодит проб и не выбрасывает ответ.
+    ///
+    /// Раньше второе событие снимало первую пробу, и её ответ отбрасывался — так
+    /// охрана защищалась от устаревших показаний. Защита оказалась дороже угрозы:
+    /// пока вердикт несвеж, события и такты идут непрерывно, и на медленном канале
+    /// ответ не доезжал никогда. Теперь пробу никто не снимает, а от чужих показаний
+    /// защищает отпечаток — путь тот же, значит ответ про нас, и он применяется.
+    func test_a_burst_of_network_events_neither_multiplies_nor_discards_the_probe() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
 
         h.vm.handle(.networkPath)
         await h.probe.waitUntilStarted()
         h.vm.handle(.networkPath)
+        h.vm.handle(.networkPath)
         await settle()
+
+        let starts = await h.probe.starts()
+        XCTAssertEqual(starts, 1, "пачка событий — одна проба")
 
         await h.probe.resumeFirst(with: geoOutcome())
         await settle()
 
-        XCTAssertEqual(
-            h.vm.state, .unsafe(.verificationPending),
-            "результат вытесненной пробы не имеет права вернуть safe"
-        )
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "путь тот же — ответ про нас")
     }
 
     func test_old_config_probe_result_is_ignored_after_blacklist_change() async {
@@ -1139,6 +1215,46 @@ final class GuardVMTests: XCTestCase {
 
         XCTAssertEqual(vm.state, .unsafe(.vpnAppNotRunning))
         XCTAssertEqual(killer.killedBatches.last, [500, 501], "убиты цели, но не сам клиент")
+    }
+
+    /// Запуск VPN-клиента пересчитывает вердикт сразу, как и его закрытие.
+    ///
+    /// Закрытие обрабатывалось, запуск — нет: у события запуска стоит проверка
+    /// «это цель?», а VPN-приложение целью не бывает — его выбор снимает его
+    /// из целей. Событие уходило в никуда, и охрана узнавала о поднявшемся
+    /// клиенте только следующим тактом.
+    func test_launching_the_vpn_app_re_evaluates_at_once() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: processesWithoutVPNApp
+        )
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: locator,
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
+            killer: SpyKiller(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0.01
+        )
+
+        vm.handle(.networkPath)
+        await vm.awaitPendingProbe()
+        XCTAssertEqual(vm.state, .unsafe(.vpnAppNotRunning))
+
+        locator.processes = defaultProcesses
+        vm.handle(.appLaunched(bundleID: vpnAppID))
+        await vm.awaitPendingProbe()
+
+        XCTAssertEqual(vm.state, .safe(vm.lastReading), "клиент поднялся — вердикт пересчитан")
     }
 
     /// Выбранное VPN-приложение не завершается никогда: охрана, убившая свой
