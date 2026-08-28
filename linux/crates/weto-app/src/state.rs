@@ -9,18 +9,23 @@
 //! (их не требуется нигде), ни для резидентности — её обеспечивает автозапуск
 //! сессии. Ровно как на macOS, где охрана живёт в процессе приложения.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use weto_config::journal::{Journal, KillEvent, KillEventKind};
+use weto_config::checks::{CheckEvent, CheckLog};
+use weto_config::journal::{GeoReadingPatch, Journal, KillContext, KillEvent, KillEventKind};
 use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
+use weto_core::episode::EpisodeLedger;
 use weto_core::geo::SourceOutcome;
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::presentation::GuardState;
 use weto_core::process::MatchedProcess;
-use weto_guard::controller::{GuardController, GuardSnapshot, KillReporting, SettingsProviding};
+use weto_guard::controller::{
+    CheckReporting, GuardController, GuardSnapshot, KillReporting, SettingsProviding,
+};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
@@ -28,7 +33,7 @@ use weto_sys::network_snapshot::KernelNetworkReader;
 use weto_sys::notifications::{KillNotifying, PortalNotifier};
 use weto_sys::process_killer::SigtermKiller;
 use weto_sys::process_registry::ProcRegistry;
-use weto_sys::secret_store::FileSecretStore;
+use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
 const TICK_UNSAFE: Duration = Duration::from_millis(250);
@@ -80,75 +85,218 @@ impl SettingsProviding for SettingsSource {
     }
 }
 
-/// Журнал пишет каждый новый pid в рамках эпизода, а причину у записи держит
-/// одну — ту, что выяснилась последней. «Подключение ещё не проверено» приходит
-/// первым, потому что fail-closed срабатывает раньше вердикта, и уточняется
-/// на месте: новой записи не будет, завершать уже нечего.
+/// Журнал пишет каждый завершённый процесс отдельно.
+///
+/// Дедупликация по паре «причина + pid»: тот же процесс по той же причине второй
+/// записи не заводит, а запущенный заново — заводит всегда. Дедупликация по одной
+/// лишь причине, как было, вообще не пускала в журнал цель, запущенную посреди
+/// эпизода: пользователь видел завершение, которого журнал не помнил.
+///
+/// «Подключение ещё не проверено» приходит первым, потому что fail-closed
+/// срабатывает раньше вердикта, и уточняется на месте. Эпизод, закончившийся
+/// безопасным выходом, дописывает исход: без него запись навсегда оставалась
+/// с отговоркой, и завершение выглядело беспричинным.
 struct JournalWriter {
     paths: Paths,
-    journal: Mutex<Journal>,
-    last_reason: Mutex<Option<String>>,
+    /// Тот же самый журнал, что показывает окно настроек.
+    ///
+    /// Копий было две — своя у писателя и своя у состояния приложения, — и они
+    /// не сходились никогда: новые завершения в окне не появлялись вовсе,
+    /// а «очистить журнал» стирало только показанную копию, после чего первая
+    /// же запись возвращала на диск всё стёртое.
+    journal: Arc<Mutex<Journal>>,
+    episode: Mutex<EpisodeLedger>,
     notifier: Box<dyn KillNotifying>,
 }
 
+impl JournalWriter {
+    fn save(&self, journal: &Journal) {
+        if let Err(error) = journal.save(&self.paths.journal_file()) {
+            eprintln!("weto: журнал не сохранился: {error}");
+        }
+    }
+
+    fn patch(context: &KillContext) -> GeoReadingPatch {
+        context.reading.clone()
+    }
+
+    /// «claude ×34, codex» — цели прохода с числом завершённых процессов там,
+    /// где их больше одного.
+    fn targets_summary(killed: &[MatchedProcess]) -> Vec<String> {
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for process in killed {
+            if !counts.contains_key(&process.target_name) {
+                order.push(process.target_name.clone());
+            }
+            *counts.entry(process.target_name.clone()).or_default() += 1;
+        }
+        order
+            .into_iter()
+            .map(|name| match counts.get(&name) {
+                Some(1) | None => name,
+                Some(count) => format!("{name} ×{count}"),
+            })
+            .collect()
+    }
+}
+
 impl KillReporting for JournalWriter {
-    /// Причина эпизода, ставшая известной, дописывается в его запись.
-    fn refine(&self, reason: &str) {
-        let mut last = self.last_reason.lock().expect("журнал");
+    /// Причина эпизода, ставшая известной, дописывается всем его записям.
+    fn refine(&self, context: &KillContext) {
+        if context.is_pending {
+            return;
+        }
+
         let pending = UnsafeReason::VerificationPending.display_text();
-        if last.as_deref() != Some(pending.as_str()) || reason == pending {
+        let settled: Option<String> = self
+            .episode
+            .lock()
+            .expect("журнал")
+            .settle(&pending, &context.reason);
+        let Some(pending_id) = settled else {
             return;
-        }
-        *last = Some(reason.to_string());
-        drop(last);
-
-        let mut journal = self.journal.lock().expect("журнал");
-        if !journal.refine_last_reason(reason) {
-            return;
-        }
-        if let Err(error) = journal.save(&self.paths.journal_file()) {
-            eprintln!("weto: журнал не сохранился: {error}");
-        }
-    }
-
-    fn report(&self, killed: &[MatchedProcess], reason: &str) {
-        let mut last = self.last_reason.lock().expect("журнал");
-        let same_episode = last.as_deref() == Some(reason);
-        *last = Some(reason.to_string());
-        drop(last);
-
-        if same_episode {
-            return;
-        }
-
-        let names: Vec<String> = {
-            let mut names: Vec<String> = killed.iter().map(|k| k.target_name.clone()).collect();
-            names.sort();
-            names.dedup();
-            names
         };
 
-        let event = KillEvent {
-            at: std::time::SystemTime::now(),
-            target_names: names.clone(),
-            kind: KillEventKind::Terminated,
-            reason_text: reason.to_string(),
-            ip: None,
-            country: None,
-            confirmed_country: None,
-            confirm_source: None,
-            killed_pids: killed.iter().map(|k| k.pid).collect(),
+        let mut journal = self.journal.lock().expect("журнал");
+        if !journal.refine_episode(
+            &pending_id,
+            Some(&context.reason),
+            None,
+            Some(&Self::patch(context)),
+            Some(&context.diagnostics),
+        ) {
+            return;
+        }
+        self.save(&journal);
+    }
+
+    /// Эпизод кончился безопасным выходом.
+    fn episode_finished(&self, context: &KillContext) {
+        // Учёт обнуляется всегда: без этого следующее падение по той же причине
+        // писалось бы «запуск запрещён» вместо «завершено».
+        let Some(pending_id) = self.episode.lock().expect("журнал").finish() else {
+            return;
         };
 
-        // Уведомление уходит всегда: настройки «уведомлять или нет» нет и на macOS.
-        self.notifier.notify(&names, reason);
+        let outcome = match (&context.reading.ip, &context.reading.country) {
+            (Some(ip), Some(country)) => {
+                format!("проверка завершилась безопасным выходом: {ip}, {country}")
+            }
+            _ => "проверка завершилась безопасным выходом".to_string(),
+        };
 
         let mut journal = self.journal.lock().expect("журнал");
-        journal.append(event);
-        if let Err(error) = journal.save(&self.paths.journal_file()) {
-            eprintln!("weto: журнал не сохранился: {error}");
+        if !journal.refine_episode(
+            &pending_id,
+            None,
+            Some(&outcome),
+            Some(&Self::patch(context)),
+            Some(&context.diagnostics),
+        ) {
+            return;
+        }
+        self.save(&journal);
+    }
+
+    fn report(&self, killed: &[MatchedProcess], context: &KillContext) {
+        let mut episode = self.episode.lock().expect("журнал");
+
+        let is_new_reason = episode.is_new_reason(&context.reason);
+        let fresh: Vec<MatchedProcess> = episode
+            .fresh(killed, &context.reason, |process| process.pid)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        if fresh.is_empty() {
+            return;
+        }
+
+        episode.remember(&context.reason, fresh.iter().map(|process| process.pid));
+
+        let kind = if is_new_reason {
+            KillEventKind::Terminated
+        } else {
+            KillEventKind::LaunchBlocked
+        };
+
+        // Один проход охраны — один эпизод: сколько процессов завершено,
+        // столько и записей, и все они помнят, что это было одно событие.
+        let episode_id = new_id();
+        let at = std::time::SystemTime::now();
+        let events: Vec<KillEvent> = fresh
+            .iter()
+            .enumerate()
+            .map(|(order, process)| KillEvent {
+                id: format!("{episode_id}-{order}"),
+                episode_id: episode_id.clone(),
+                at,
+                target_name: process.target_name.clone(),
+                pid: process.pid,
+                parent_pid: process.parent_pid,
+                executable_path: process.executable_path.clone(),
+                is_descendant: process.is_descendant,
+                kind,
+                reason_text: context.reason.clone(),
+                resolution_text: None,
+                ip: context.reading.ip.clone(),
+                country: context.reading.country.clone(),
+                confirmed_country: context.reading.confirmed_country.clone(),
+                confirm_source: context.reading.confirm_source.clone(),
+                diagnostics: Some(context.diagnostics.clone()),
+            })
+            .collect();
+
+        if context.is_pending {
+            episode.begin_pending(episode_id.clone());
+        }
+        drop(episode);
+
+        // Уведомление — на проход, а не на процесс: тридцать четыре баннера
+        // подряд не сообщение, а помеха. Настройки «уведомлять или нет»
+        // нет и на macOS.
+        // Считаются завершённые сейчас, а не все совпавшие: иначе один
+        // добитый процесс давал бы баннер «claude ×34».
+        self.notifier
+            .notify(&Self::targets_summary(&fresh), &context.reason);
+
+        let mut journal = self.journal.lock().expect("журнал");
+        journal.append(events);
+        self.save(&journal);
+    }
+}
+
+/// Журнал проверок приложения: пишется сразу на диск, как и журнал завершений,
+/// и в интерфейс не попадает — это материал выгрузки.
+struct CheckWriter {
+    paths: Paths,
+    log: Arc<Mutex<CheckLog>>,
+}
+
+impl CheckReporting for CheckWriter {
+    fn record(&self, event: CheckEvent) {
+        let mut log = self.log.lock().expect("журнал проверок");
+        if !log.append(event) {
+            return;
+        }
+        if let Err(error) = log.save(&self.paths.checks_file()) {
+            eprintln!("weto: журнал проверок не сохранился: {error}");
         }
     }
+}
+
+/// Идентификатор эпизода. UUID сюда тянуть незачем: хватает монотонного счётчика
+/// с отметкой запуска — записи живут внутри одного файла одного пользователя.
+fn new_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let order = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    format!("{since_epoch:x}-{order:x}")
 }
 
 pub struct AppState {
@@ -156,6 +304,8 @@ pub struct AppState {
     pub settings: Arc<SharedSettings>,
     controller: Arc<GuardController>,
     journal: Arc<Mutex<Journal>>,
+    /// Журнал проверок — рядом с журналом завершений и отдельным файлом.
+    checks: Arc<Mutex<CheckLog>>,
     /// Проба в полёте. На месте кнопки проверки крутится индикатор, а повторное
     /// нажатие запроса не порождает: у подтверждающего сервиса лимит.
     probing: Arc<AtomicBool>,
@@ -165,11 +315,12 @@ impl AppState {
     pub fn new(paths: Paths) -> Arc<AppState> {
         let settings = SharedSettings::load(&paths);
         let journal = Arc::new(Mutex::new(Journal::load(&paths.journal_file())));
+        let checks = Arc::new(Mutex::new(CheckLog::load(&paths.checks_file())));
 
         let writer = JournalWriter {
             paths: paths.clone(),
-            journal: Mutex::new(Journal::load(&paths.journal_file())),
-            last_reason: Mutex::new(None),
+            journal: journal.clone(),
+            episode: Mutex::new(EpisodeLedger::new()),
             notifier: Box::new(PortalNotifier::new()),
         };
 
@@ -183,6 +334,10 @@ impl AppState {
             Box::new(SettingsSource(settings.clone())),
             ProcessEnforcer::new(Box::new(ProcRegistry::new()), Box::new(SigtermKiller)),
             Box::new(writer),
+            Box::new(CheckWriter {
+                paths: paths.clone(),
+                log: checks.clone(),
+            }),
         ));
 
         Arc::new(AppState {
@@ -190,6 +345,7 @@ impl AppState {
             settings,
             controller,
             journal,
+            checks,
             probing: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -200,6 +356,44 @@ impl AppState {
 
     pub fn journal(&self) -> Journal {
         self.journal.lock().expect("журнал").clone()
+    }
+
+    /// Журнал для разбора: события вместе с настройками момента и версиями.
+    ///
+    /// Токен в файл не попадает — только признак, задан ли он: без этого
+    /// отказ ipinfo в трассах не объяснить.
+    pub fn export_journal(&self) -> Option<String> {
+        let settings = self.settings.current();
+        // Токен спрашивается у хранилища, а в файл уходит только признак:
+        // выгрузка отправляется в переписку.
+        let has_token = FileSecretStore::new(self.paths.token_file())
+            .load()
+            .ok()
+            .flatten()
+            .is_some_and(|token| !token.is_empty());
+        let events = self.journal().entries().to_vec();
+        let checks = self
+            .checks
+            .lock()
+            .expect("журнал проверок")
+            .entries()
+            .to_vec();
+
+        let export = weto_config::export::JournalExport::build(
+            &settings,
+            events,
+            checks,
+            has_token,
+            std::time::SystemTime::now(),
+            os_version(),
+        );
+        match export.encoded() {
+            Ok(text) => Some(text),
+            Err(error) => {
+                eprintln!("weto: журнал не собрался: {error}");
+                None
+            }
+        }
     }
 
     /// Очистка журнала — и в памяти, и на диске: иначе записи вернулись бы
@@ -297,4 +491,12 @@ impl AppState {
             })
             .expect("поток охраны не создался");
     }
+}
+
+/// Версия ядра для выгрузки. Из `/proc/version` — в контейнере и на живой машине
+/// это единственный источник, не требующий ни утилит, ни зависимостей.
+fn os_version() -> String {
+    std::fs::read_to_string("/proc/version")
+        .map(|text| text.trim().to_string())
+        .unwrap_or_else(|_| "неизвестно".to_string())
 }

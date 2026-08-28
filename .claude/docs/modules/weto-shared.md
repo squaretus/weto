@@ -13,7 +13,9 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `macos/Sources/WetoShared/GuardController.swift` — decision state machine, owns the network probe
 - `macos/Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event
 - `macos/Sources/WetoShared/SettingsStore.swift` — `UserDefaults` + Keychain, guard-config change bus
-- `macos/Sources/WetoShared/EventLogStore.swift` — 10-entry ring buffer of `KillEvent`
+- `macos/Sources/WetoShared/EventLogStore.swift` — 100-entry ring buffer of `KillEvent`, one per killed process
+- `macos/Sources/WetoShared/JournalFile.swift` — `~/Library/Application Support/weto/journal.json`, temp + rename
+- `macos/Sources/WetoShared/JournalExporter.swift` — the export envelope handed to a human or an agent
 - `macos/Sources/WetoShared/LaunchAgentController.swift` — `~/Library/LaunchAgents/com.weto.app.plist`
 - `macos/Sources/WetoShared/Maintenance.swift` — `closeApp` and full `uninstall` plan
 - `macos/Sources/WetoShared/WetoUpdateTheme.swift` — weto skin for the `UpdateKit` dialog
@@ -34,7 +36,9 @@ this layer decides *when* to ask and *what to do* with the answer.
   `entries(of:)` — one path for both geo lists; the `…Blocked…` / `…Allowed…` trio of each list is a
   delegating wrapper kept for UI bindings,
   `migrateLegacyVPNSelection(in:)`, `onGuardConfigurationChange(_)`, `guardConfig`
-- `EventLogStore.record(_)`, `clear()`
+- `EventLogStore.record(_ batch: [KillEvent])`, `refine(episodeID:reasonText:resolutionText:…)`, `clear()`
+- `JournalExporter.make(settings:events:at:osVersion:) → JournalExport`; `JournalExport.encoded()`,
+  `JournalExport.fileName(at:)`
 - `LaunchAgentManaging.enable() / disable() / bootout()`, `isInstalled`, `pointsAtCurrentBundle`
 - `Maintenance.closeApp() → Result<Void, LaunchAgentError>`, `uninstall() → MaintenanceResult`
 - `AppCoordinator.update` — an `UpdateController` from `macos/Packages/UpdateKit`, built from
@@ -143,15 +147,33 @@ this layer decides *when* to ask and *what to do* with the answer.
   claim it. A target that stops resolving (the instant its file is being replaced) keeps its
   last known rule instead of disappearing. Both are fail-closed by intent and pinned by
   `ProcessEnforcerTests`.
-- Journal dedup is by pid **and** by reason within an episode; both sets are cleared only on `safe`.
-- **One episode, one entry: the reason is refined, not appended.** Fail-closed kills before the
-  verdict exists, so the first thing written is `verificationPending` — "don't know yet". A second
-  later the real reason is known, but on a live machine nothing gets killed again (the targets are
-  already dead), so no second entry would ever appear and the journal kept the excuse instead of
-  the cause. `GuardVM` remembers the id of that entry and `EventLogStore.refine` rewrites its
-  reason and geo readout in place; the reason key inside `recordedReasons` is swapped along with
-  it, otherwise the refined reason counts as new and produces a duplicate entry. Linux mirrors
-  this through `KillReporting.refine` — see `linux-guard`.
+- **One record per killed process, one `episodeID` per pass.** A record used to describe the whole
+  pass — "claude" plus thirty-four pids on one line — which answers neither "what exactly died" nor
+  "why so many". Each record now carries its pid, parent, resolved path and an `isDescendant` flag:
+  descendants are what explains dozens of kills for a single target.
+- Journal dedup is by the pair **reason + pid**; both that set and `recordedReasons` are cleared
+  only on `safe`. The same process under the same reason writes nothing twice; a relaunched one
+  always writes.
+- **One episode, one set of entries: the reason is refined, not appended.** Fail-closed kills before
+  the verdict exists, so the first thing written is `verificationPending` — "don't know yet". A
+  second later the real reason is known, but on a live machine nothing gets killed again (the
+  targets are already dead), so no second entry would ever appear and the journal kept the excuse
+  instead of the cause. `GuardVM` remembers the episode id and `EventLogStore.refine` rewrites the
+  reason, the geo readout and the diagnostics of **every** record in it; the reason key inside
+  `recordedKills` is swapped along with the text, otherwise the refined reason counts as new and
+  produces a duplicate set. Linux mirrors this through `KillReporting.refine` — see `linux-guard`.
+- **An episode that ends `safe` records how it ended.** The verdict goes stale, fail-closed kills,
+  and a second later the probe answers "all good". There is no reason to refine — it really was
+  "not verified yet" — but without `resolutionText` the record keeps that excuse forever and the
+  kill reads as random. This is the single most common complaint the journal exists to answer.
+- **Diagnostics never reach the screen.** `KillDiagnostics` — staleness breakdown, outgoing
+  interface and address, VPN app status, per-service traces with raw bodies — lives in the record
+  and in the export only. The popup and the settings journal show target, reason and geo readout,
+  exactly as before.
+- The journal lives in a file, not in the settings plist: the plist is read whole on every launch,
+  and raw service bodies would make that hundreds of kilobytes. History migrates once out of the
+  old `eventLog` key, which is then removed; migration never overwrites an existing file, or
+  "clear journal" would resurrect what was cleared.
 - Boundary calls return `Result<Void, Error>`, never `Bool`: a silent Keychain or `launchctl`
   failure used to be reported as success.
 - `SettingsStore.migrateLegacyVPNSelection` runs before the first decision and refuses to guess:

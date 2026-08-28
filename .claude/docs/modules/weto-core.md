@@ -14,7 +14,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `macos/Sources/WetoCore/GeoResponses.swift` — DTOs and decoding for ipinfo / freeipapi / geojs
 - `macos/Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user
 - `macos/Sources/WetoCore/VoidResult.swift`, `Constants.swift`
-- `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`
+- `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`, `KillDiagnostics`, `JournalExport`
 - Tests: `macos/Tests/WetoCoreTests/` (~100 cases; `ProcessMatcherTests` and `GuardPolicyTests` are the load-bearing ones)
 
 ## Entry points

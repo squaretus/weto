@@ -12,11 +12,11 @@ private actor FakeFetcher: HTTPFetching {
         self.responses = responses
     }
 
-    func data(from url: URL, headers: [String: String]) async throws -> Data {
+    func fetch(from url: URL, headers: [String: String]) async throws -> HTTPResponse {
         let key = responses.keys.first { url.absoluteString.contains($0) } ?? "unmatched"
         callCounts[key, default: 0] += 1
         guard let result = responses[key] else { throw FetchFailure() }
-        return try result.get()
+        return HTTPResponse(data: try result.get(), statusCode: 200, duration: 0.012)
     }
 
     func count(_ key: String) -> Int { callCounts[key] ?? 0 }
@@ -75,8 +75,8 @@ final class GeoProbeTests: XCTestCase {
     func test_report_keeps_why_the_confirmation_refused() async {
         let fetcher = FakeFetcher(responses: [
             "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
-            "freeipapi": .failure(HTTPFetchError.badStatus(429)),
-            "geojs.io": .failure(HTTPFetchError.badStatus(503)),
+            "freeipapi": .failure(HTTPFetchError(statusCode: 429, response: HTTPResponse(data: Data("rate limit exceeded".utf8), statusCode: 429, duration: 0.005))),
+            "geojs.io": .failure(HTTPFetchError(statusCode: 503, response: HTTPResponse(data: Data("service unavailable".utf8), statusCode: 503, duration: 0.004))),
         ])
         let probe = GeoProbe(
             fetcher: fetcher,
@@ -139,7 +139,7 @@ final class GeoProbeTests: XCTestCase {
     /// нужно ли перепроверять страну. Тот же адрес — та же страна, и круг гео не нужен.
     func test_when_ipinfo_refuses_the_probe_asks_the_reference_source_for_its_own_address() async {
         let fetcher = FakeFetcher(responses: [
-            "ipinfo.io": .failure(HTTPFetchError.badStatus(429)),
+            "ipinfo.io": .failure(HTTPFetchError(statusCode: 429, response: HTTPResponse(data: Data("rate limit exceeded".utf8), statusCode: 429, duration: 0.005))),
             "ip/country.json": .success(geojsSelfKZ),
         ])
         let probe = GeoProbe(
@@ -161,7 +161,7 @@ final class GeoProbeTests: XCTestCase {
     }
 
     func test_reference_source_failure_is_shown_instead_of_a_country() async {
-        let fetcher = FakeFetcher(responses: ["geojs.io": .failure(HTTPFetchError.badStatus(503))])
+        let fetcher = FakeFetcher(responses: ["geojs.io": .failure(HTTPFetchError(statusCode: 503, response: HTTPResponse(data: Data("service unavailable".utf8), statusCode: 503, duration: 0.004)))])
         let probe = GeoProbe(
             fetcher: fetcher,
             networkPath: FakeNetworkPath(hasPath: true),
@@ -290,8 +290,8 @@ final class GeoProbeTests: XCTestCase {
         _ = await probe.probe()
 
         clock.advance(by: Constants.confirmationSoftTTLSeconds + 1)
-        await fetcher.setResponse("freeipapi", .failure(HTTPFetchError.badStatus(429)))
-        await fetcher.setResponse("ip/country/", .failure(HTTPFetchError.badStatus(503)))
+        await fetcher.setResponse("freeipapi", .failure(HTTPFetchError(statusCode: 429, response: HTTPResponse(data: Data("rate limit exceeded".utf8), statusCode: 429, duration: 0.005))))
+        await fetcher.setResponse("ip/country/", .failure(HTTPFetchError(statusCode: 503, response: HTTPResponse(data: Data("service unavailable".utf8), statusCode: 503, duration: 0.004))))
 
         let report = await probe.probe()
 
@@ -309,8 +309,8 @@ final class GeoProbeTests: XCTestCase {
         _ = await probe.probe()
 
         clock.advance(by: Constants.confirmationHardTTLSeconds + 1)
-        await fetcher.setResponse("freeipapi", .failure(HTTPFetchError.badStatus(429)))
-        await fetcher.setResponse("ip/country/", .failure(HTTPFetchError.badStatus(503)))
+        await fetcher.setResponse("freeipapi", .failure(HTTPFetchError(statusCode: 429, response: HTTPResponse(data: Data("rate limit exceeded".utf8), statusCode: 429, duration: 0.005))))
+        await fetcher.setResponse("ip/country/", .failure(HTTPFetchError(statusCode: 503, response: HTTPResponse(data: Data("service unavailable".utf8), statusCode: 503, duration: 0.004))))
 
         let report = await probe.probe()
 

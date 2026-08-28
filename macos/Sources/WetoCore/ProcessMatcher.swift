@@ -12,10 +12,21 @@ public enum ProcessMatcher {
         var result: [MatchedProcess] = []
         var nameByRoot: [Int32: String] = [:]
 
+        // Снимок по pid: журналу нужны родитель и путь каждого завершённого
+        // процесса, а обход дерева отдаёт одни идентификаторы.
+        var snapshotByPID: [Int32: ProcessSnapshot] = [:]
+        for process in processes { snapshotByPID[process.pid] = process }
+
         for process in processes {
             guard let rule = rules.first(where: { matches(process, rule: $0) }) else { continue }
             if seen.insert(process.pid).inserted {
-                result.append(MatchedProcess(pid: process.pid, targetName: rule.displayName))
+                result.append(MatchedProcess(
+                    pid: process.pid,
+                    targetName: rule.displayName,
+                    parentPID: process.parentPID,
+                    executablePath: process.executablePath,
+                    isDescendant: false
+                ))
                 nameByRoot[process.pid] = rule.displayName
             }
         }
@@ -23,7 +34,14 @@ public enum ProcessMatcher {
         let tree = ProcessTree(processes: processes)
         for descendant in tree.descendants(of: result.map(\.pid), skipping: &seen) {
             guard let name = nameByRoot[descendant.root] else { continue }
-            result.append(MatchedProcess(pid: descendant.pid, targetName: name))
+            let snapshot = snapshotByPID[descendant.pid]
+            result.append(MatchedProcess(
+                pid: descendant.pid,
+                targetName: name,
+                parentPID: snapshot?.parentPID ?? 0,
+                executablePath: snapshot?.executablePath ?? "",
+                isDescendant: true
+            ))
         }
         return result
     }

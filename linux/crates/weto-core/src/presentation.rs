@@ -345,6 +345,7 @@ mod tests {
             confirm_source: Some(crate::geo::ConfirmSource::Geojs),
             has_network_path: true,
             checked_at: std::time::SystemTime::UNIX_EPOCH,
+            traces: Vec::new(),
         };
 
         let lines = status_lines(&report, "12:00:00");
@@ -366,6 +367,7 @@ mod tests {
             confirm_source: None,
             has_network_path: false,
             checked_at: std::time::SystemTime::UNIX_EPOCH,
+            traces: Vec::new(),
         };
 
         let lines = status_lines(&report, "12:00:00");

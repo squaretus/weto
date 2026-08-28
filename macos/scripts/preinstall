@@ -2,22 +2,30 @@
 set -u
 
 LABEL="com.weto.app"
-LEGACY_PLIST="/Library/LaunchAgents/$LABEL.plist"
 
-CONSOLE_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || echo "")
+# Швы установки. В бою все переменные пустые или указывают на системные утилиты;
+# подменяются они только контрактом `scripts/tests/install-idempotency-contract.sh`,
+# которому нужно прогнать установку дважды без root и не тронув рабочую машину.
+ROOT="${WETO_INSTALL_ROOT:-}"
+LAUNCHCTL="${WETO_LAUNCHCTL:-/bin/launchctl}"
+KILLALL="${WETO_KILLALL:-/usr/bin/killall}"
+
+LEGACY_PLIST="$ROOT/Library/LaunchAgents/$LABEL.plist"
+
+CONSOLE_USER="${WETO_CONSOLE_USER:-$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || echo "")}"
 
 if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
     USER_UID=$(id -u "$CONSOLE_USER")
 
-    # Домашний каталог спрашиваем у системы, а не собираем из /Users/<имя>:
-    # он может быть где угодно, включая сетевые и переименованные каталоги.
-    HOME_DIR=$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
-
-    /bin/launchctl asuser "$USER_UID" /bin/launchctl bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
-
-    if [ -n "$HOME_DIR" ]; then
-        /bin/rm -f "$HOME_DIR/Library/LaunchAgents/$LABEL.plist"
-    fi
+    # Задание выгружается, но его файл остаётся на месте.
+    #
+    # Выгрузка обязательна: у агента `KeepAlive`, и без неё launchd поднимет копию
+    # приложения прямо посреди подмены бандла. А вот удалять файл нельзя —
+    # Background Task Management держит выданное пользователем разрешение
+    # за записью, а запись за файлом. Удаление и повторное создание заводило
+    # новую запись, и macOS спрашивала разрешение на фоновую работу после
+    # каждого обновления.
+    "$LAUNCHCTL" asuser "$USER_UID" "$LAUNCHCTL" bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
 fi
 
 # Агент прежних версий лежал в системном каталоге и приложением не управлялся.
@@ -26,8 +34,8 @@ fi
 # Демон обновления держит собственный бинарник; его надо выгрузить до подмены файла,
 # иначе launchd продолжит держать старую копию. Именно этот шаг убивает демон,
 # когда установку запускает он сам.
-/bin/launchctl bootout system/com.weto.helper 2>/dev/null || true
+"$LAUNCHCTL" bootout system/com.weto.helper 2>/dev/null || true
 
-/usr/bin/killall WetoMenuBar 2>/dev/null || true
+"$KILLALL" WetoMenuBar 2>/dev/null || true
 
 exit 0

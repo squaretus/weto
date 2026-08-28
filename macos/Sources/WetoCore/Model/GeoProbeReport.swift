@@ -20,13 +20,19 @@ public struct GeoProbeReport: Equatable, Sendable {
     public let hasNetworkPath: Bool
     public let checkedAt: Date
 
+    /// Что ответил каждый сервис до разбора: адрес, код, время и сырое тело.
+    /// Разобранный ответ уже прошёл через наши предположения, и случай, где
+    /// предположение неверно, по нему не виден.
+    public let traces: [GeoServiceTrace]
+
     public init(
         ip: String?,
         ipinfo: SourceOutcome,
         confirmation: SourceOutcome,
         confirmSource: ConfirmSource?,
         hasNetworkPath: Bool,
-        checkedAt: Date
+        checkedAt: Date,
+        traces: [GeoServiceTrace] = []
     ) {
         self.ip = ip
         self.ipinfo = ipinfo
@@ -34,6 +40,7 @@ public struct GeoProbeReport: Equatable, Sendable {
         self.confirmSource = confirmSource
         self.hasNetworkPath = hasNetworkPath
         self.checkedAt = checkedAt
+        self.traces = traces
     }
 
     /// Оба источника ответили — показывать нечего, кроме самих ответов.

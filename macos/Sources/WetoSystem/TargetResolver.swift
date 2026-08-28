@@ -8,13 +8,16 @@ public protocol TargetResolving: Sendable {
 
 public struct TargetResolver: TargetResolving {
 
-    private static let searchPaths = [
-        "/opt/homebrew/bin", "/opt/homebrew/sbin",
-        "/usr/local/bin", "/usr/local/sbin",
-        "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-    ]
+    /// Откуда берётся список каталогов для поиска по имени.
+    ///
+    /// Настоящий источник — `PATH` логин-шелла: приложение поднимает launchd,
+    /// и в окружении процесса лежит его минимальный `PATH`. Ни `~/.local/bin`,
+    /// куда ставятся claude и codex, ни шимы asdf, mise и nvm туда не попадают.
+    private let paths: SearchPathProviding
 
-    public init() {}
+    public init(paths: SearchPathProviding = LoginShellSearchPaths()) {
+        self.paths = paths
+    }
 
     public func resolve(_ entry: String) -> TargetRule? {
         let trimmed = entry.trimmingCharacters(in: .whitespaces)
@@ -51,23 +54,36 @@ public struct TargetResolver: TargetResolving {
     }
 
     private func resolveExecutable(_ entry: String) -> TargetRule? {
-        let candidates = entry.contains("/")
-            ? [(entry as NSString).expandingTildeInPath]
-            : Self.searchPaths.map { "\($0)/\(entry)" }
+        guard !entry.contains("/") else {
+            return rule(forEntry: entry, at: (entry as NSString).expandingTildeInPath)
+        }
 
-        let fm = FileManager.default
-        for candidate in candidates where fm.isExecutableFile(atPath: candidate) {
-            let real = (candidate as NSString).resolvingSymlinksInPath
-            let isScript = Self.hasShebang(atPath: real)
-            return TargetRule(
-                entry: entry,
-                displayName: entry.contains("/") ? (entry as NSString).lastPathComponent : entry,
-                kind: isScript ? .script : .binary,
-                path: real,
-                launchPaths: [candidate]
-            )
+        if let rule = search(entry, in: paths.searchPaths()) { return rule }
+
+        // Имя не нашлось. Инструмент могли поставить минуту назад — и тогда
+        // каталог появился в `PATH` уже после того, как мы его прочитали.
+        // Перечитывание не бесплатное, поэтому у него свой пол по времени.
+        return search(entry, in: paths.refreshedSearchPaths())
+    }
+
+    private func search(_ entry: String, in directories: [String]) -> TargetRule? {
+        for directory in directories {
+            if let rule = rule(forEntry: entry, at: "\(directory)/\(entry)") { return rule }
         }
         return nil
+    }
+
+    private func rule(forEntry entry: String, at candidate: String) -> TargetRule? {
+        guard FileManager.default.isExecutableFile(atPath: candidate) else { return nil }
+
+        let real = (candidate as NSString).resolvingSymlinksInPath
+        return TargetRule(
+            entry: entry,
+            displayName: entry.contains("/") ? (entry as NSString).lastPathComponent : entry,
+            kind: Self.hasShebang(atPath: real) ? .script : .binary,
+            path: real,
+            launchPaths: [candidate]
+        )
     }
 
     private static func hasShebang(atPath path: String) -> Bool {
