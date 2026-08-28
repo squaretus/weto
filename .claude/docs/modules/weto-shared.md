@@ -17,7 +17,12 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `macos/Sources/WetoShared/JournalFile.swift` — `~/Library/Application Support/weto/journal.json`, temp + rename
 - `macos/Sources/WetoShared/JournalExporter.swift` — the export envelope handed to a human or an agent
 - `macos/Sources/WetoShared/LaunchAgentController.swift` — `~/Library/LaunchAgents/com.weto.app.plist`
-- `macos/Sources/WetoShared/Maintenance.swift` — `closeApp` and full `uninstall` plan
+- `macos/Sources/WetoShared/Maintenance.swift` — `closeApp` and full `uninstall` plan.
+  The bundle, the daemon's files, `/var/db/weto` and the package receipt are root-owned and
+  removed by the daemon from paths in `UpdateFeedConfiguration`; the app used to `rm -rf` its
+  own bundle, hit permissions and reported success anyway, so it stayed in `/Applications`.
+  Uninstall now **verifies** the bundle is gone instead of assuming it. Parity with
+  `Resources/uninstall-weto.sh` is machine-checked — `scripts/tests/uninstall-parity-contract.sh`
 - `macos/Sources/WetoShared/WetoUpdateTheme.swift` — weto skin for the `UpdateKit` dialog
 - `macos/Sources/WetoCore/WetoUpdate.swift` — the update configuration this module wires up
 - `macos/Sources/WetoShared/StatusPresentation.swift`, `KillNotifying.swift`, `URLOpening.swift`

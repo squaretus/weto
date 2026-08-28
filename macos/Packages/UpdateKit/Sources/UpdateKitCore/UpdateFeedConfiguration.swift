@@ -37,6 +37,15 @@ public struct UpdateFeedConfiguration: Equatable, Sendable {
     /// Сюит `UserDefaults`, в котором живут пропуск версии, отсрочка и тумблер.
     public let defaultsSuite: String
 
+    /// Что ещё снести при удалении, кроме своих файлов: пути принадлежат
+    /// приложению-хозяину, а права на них есть только у демона.
+    public let additionalUninstallPaths: [String]
+
+    /// Идентификатор установочного пакета. Задан — при удалении демон забудет
+    /// чек установки, иначе система продолжает считать пакет установленным,
+    /// хотя файлов уже нет.
+    public let packageIdentifier: String?
+
     public let checkInterval: TimeInterval
     public let progressPollInterval: TimeInterval
 
@@ -54,6 +63,8 @@ public struct UpdateFeedConfiguration: Equatable, Sendable {
         daemonBinaryPath: String,
         logSubsystem: String,
         defaultsSuite: String,
+        additionalUninstallPaths: [String] = [],
+        packageIdentifier: String? = nil,
         checkInterval: TimeInterval = 3600,
         progressPollInterval: TimeInterval = 0.4
     ) {
@@ -70,6 +81,8 @@ public struct UpdateFeedConfiguration: Equatable, Sendable {
         self.daemonBinaryPath = daemonBinaryPath
         self.logSubsystem = logSubsystem
         self.defaultsSuite = defaultsSuite
+        self.additionalUninstallPaths = additionalUninstallPaths
+        self.packageIdentifier = packageIdentifier
         self.checkInterval = checkInterval
         self.progressPollInterval = progressPollInterval
     }

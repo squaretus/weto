@@ -43,9 +43,11 @@ jobs:
           chmod +x scripts/build.sh scripts/preinstall scripts/postinstall \
                    scripts/tests/build-artifact-contract.sh \
                    scripts/tests/launch-agent-contract.sh \
-                   scripts/tests/install-idempotency-contract.sh
+                   scripts/tests/install-idempotency-contract.sh \
+                   scripts/tests/uninstall-parity-contract.sh
           bash scripts/tests/build-artifact-contract.sh 9.9.9
           bash scripts/tests/install-idempotency-contract.sh
+          bash scripts/tests/uninstall-parity-contract.sh
 
   linux:
     name: Build & Test (Linux ${{ matrix.arch }})
