@@ -162,8 +162,22 @@ private final class CountingLocator: ProcessLocating, @unchecked Sendable {
     }
 }
 
-private struct StubResolver: TargetResolving {
-    let mapping: [String: String]
+/// Резолвер, которому можно переставить путь цели: так выглядит обновление
+/// инструмента, у которого в пути стоит номер версии.
+private final class StubResolver: TargetResolving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: String]
+
+    init(mapping: [String: String]) { self.storage = mapping }
+
+    var mapping: [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+
+    func point(_ entry: String, to path: String) {
+        lock.lock(); storage[entry] = path; lock.unlock()
+    }
 
     func resolve(_ entry: String) -> TargetRule? {
         guard let path = mapping[entry] else { return nil }
@@ -285,6 +299,7 @@ final class GuardVMTests: XCTestCase {
         let settings: SettingsStore
         let log: EventLogStore
         let network: StubSnapshotReader
+        let resolver: StubResolver
     }
 
     private func makeHarness(
@@ -307,6 +322,12 @@ final class GuardVMTests: XCTestCase {
         let events = ManualEventSource()
         let log = EventLogStore(storage: InMemoryEventLog())
         let network = StubSnapshotReader(snapshotValue: snapshot)
+        let resolver = StubResolver(mapping: [
+            targetBundleID: targetPath,
+            vpnAppID: vpnAppPath,
+            "nano": "/usr/bin/pico",
+            "qwen": "/opt/homebrew/lib/qwen/cli.js",
+        ])
 
         let vm = GuardVM(
             settings: settings,
@@ -317,12 +338,7 @@ final class GuardVMTests: XCTestCase {
                 bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
                 processes: processes ?? defaultProcesses
             ),
-            resolver: StubResolver(mapping: [
-                targetBundleID: targetPath,
-                vpnAppID: vpnAppPath,
-                "nano": "/usr/bin/pico",
-                "qwen": "/opt/homebrew/lib/qwen/cli.js",
-            ]),
+            resolver: resolver,
             killer: killer,
             notifier: notifier,
             events: events,
@@ -330,7 +346,8 @@ final class GuardVMTests: XCTestCase {
         )
 
         return Harness(vm: vm, killer: killer, probe: probe, notifier: notifier,
-                       events: events, settings: settings, log: log, network: network)
+                       events: events, settings: settings, log: log, network: network,
+                       resolver: resolver)
     }
 
     private struct DelayedHarness {
@@ -485,6 +502,34 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(
             skipped.first?.fingerprint, healthySnapshot().verdictFingerprint,
             "запись называет выход, на котором нажимали"
+        )
+    }
+
+    /// Обновление цели само по себе никого не закрывает.
+    ///
+    /// Путь у claude и codex содержит номер версии, и обновление меняет его
+    /// целиком. Правило переезжает на новую версию само, но переезд — это смена
+    /// пути, а не смена вердикта: ревизию конфигурации он не поднимает
+    /// и отпечаток сети не трогает. Иначе каждое обновление инструмента убивало
+    /// бы его же сеанс.
+    func test_updating_a_target_binary_kills_nothing() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ", confirmed: "KZ"))
+
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+
+        let killsBefore = h.killer.killedBatches.count
+
+        // Инструмент обновился: путь цели поменялся целиком.
+        h.resolver.point(targetBundleID, to: "\(targetPath)-2.1.251")
+        for _ in 0..<5 { h.vm.handle(.tick) }
+        await settle()
+
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "вердикт не трогается")
+        XCTAssertEqual(
+            h.killer.killedBatches.count, killsBefore,
+            "обновление цели — не повод завершать её сеанс"
         )
     }
 
