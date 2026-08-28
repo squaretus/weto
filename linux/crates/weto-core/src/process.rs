@@ -66,6 +66,11 @@ impl TargetRule {
 pub struct MatchedProcess {
     pub pid: i32,
     pub target_name: String,
+    pub parent_pid: i32,
+    pub executable_path: String,
+    /// Процесс попал под охрану не сам по себе, а как потомок совпавшего.
+    /// Именно потомки объясняют, откуда у одной цели десятки завершений.
+    pub is_descendant: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +189,10 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
     let mut result: Vec<MatchedProcess> = Vec::new();
     let mut name_by_root: HashMap<i32, String> = HashMap::new();
 
+    // Снимок по pid: журналу нужны родитель и путь каждого завершённого процесса,
+    // а обход дерева отдаёт одни идентификаторы.
+    let by_pid: HashMap<i32, &ProcessSnapshot> = processes.iter().map(|p| (p.pid, p)).collect();
+
     for process in processes {
         let Some(rule) = rules.iter().find(|rule| matches_rule(process, rule)) else {
             continue;
@@ -192,6 +201,9 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
             result.push(MatchedProcess {
                 pid: process.pid,
                 target_name: rule.display_name.clone(),
+                parent_pid: process.parent_pid,
+                executable_path: process.executable_path.clone(),
+                is_descendant: false,
             });
             name_by_root.insert(process.pid, rule.display_name.clone());
         }
@@ -204,6 +216,12 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
             result.push(MatchedProcess {
                 pid,
                 target_name: name.clone(),
+                parent_pid: by_pid.get(&pid).map(|p| p.parent_pid).unwrap_or_default(),
+                executable_path: by_pid
+                    .get(&pid)
+                    .map(|p| p.executable_path.clone())
+                    .unwrap_or_default(),
+                is_descendant: true,
             });
         }
     }

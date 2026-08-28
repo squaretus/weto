@@ -50,6 +50,22 @@ public enum GeoOutcome: Equatable, Sendable {
 
     case unavailable(String)
 
+    /// Проба дала годный ответ: адрес и страна названы источником, а не взяты
+    /// из прошлого вердикта.
+    public var isResolved: Bool {
+        if case .resolved = self { return true }
+        return false
+    }
+
+    /// Почему годного ответа нет — текстом источника, без нашей трактовки.
+    public var unavailableDetail: String? {
+        switch self {
+        case .resolved: return nil
+        case .degraded(_, let detail): return detail
+        case .unavailable(let detail): return detail
+        }
+    }
+
     /// Чтение, по которому принимается решение. `nil` — вердикта нет вовсе.
     public var reading: GeoReading? {
         switch self {

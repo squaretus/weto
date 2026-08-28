@@ -81,7 +81,15 @@ public enum Constants {
     /// строка на свежей установке берётся отсюда.
     public static let geojsSelfURL = "https://get.geojs.io/v1/ip/country.json"
 
-    public static let eventLogCapacity = 10
+    /// Сто записей, а не десять: запись теперь описывает один процесс, и одно
+    /// падение VPN на тридцати четырёх процессах вытесняло весь прежний журнал.
+    /// Число общее для обеих платформ — см. `journal::CAPACITY` в Linux-части.
+    public static let eventLogCapacity = 100
+
+    /// Журнал проверок подключения — отдельный и меньше: он про попытки, а не
+    /// про завершения, и нужен только выгрузке. Пишутся не все подряд: рутинная
+    /// удача расписания раз в пять секунд съела бы ёмкость за четыре минуты.
+    public static let checkLogCapacity = 50
 
     public static let userDefaultsSuite = "com.weto.shared"
 

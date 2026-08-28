@@ -18,12 +18,17 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use weto_config::settings::Settings;
+use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
+use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading, SourceOutcome};
+use weto_core::network::NetworkSnapshot;
 use weto_core::network::VpnAppStatus;
-use weto_core::policy::{decide, decide_local, pending_verification, GuardDecision, GuardSignals};
+use weto_core::policy::{
+    decide, decide_local, pending_verification, GuardDecision, GuardSignals, UnsafeReason,
+};
 use weto_core::presentation::{status_presentation, GuardState, StatusPresentation};
 use weto_core::process::RunningTarget;
 use weto_sys::geo_probe::GeoProbing;
@@ -57,13 +62,29 @@ pub trait SettingsProviding: Send + Sync {
     fn settings(&self) -> Settings;
 }
 
+/// Куда уходит запись о каждой попытке проверки — включая ту, где запрос
+/// так и не ушёл. Журнал завершений про это молчит: проверка, не породившая
+/// завершения, следа не оставляет.
+pub trait CheckReporting: Send + Sync {
+    fn record(&self, event: CheckEvent);
+}
+
 pub trait KillReporting: Send + Sync {
-    fn report(&self, killed: &[weto_core::process::MatchedProcess], reason: &str);
+    fn report(&self, killed: &[weto_core::process::MatchedProcess], context: &KillContext);
 
     /// Причина эпизода, ставшая известной. Приёмник, ведущий журнал, дописывает
-    /// её в запись эпизода: вызов приходит и тогда, когда завершать больше нечего,
-    /// то есть ровно в том случае, где записи иначе не появится вовсе.
-    fn refine(&self, _reason: &str) {}
+    /// её всем записям эпизода: вызов приходит и тогда, когда завершать больше
+    /// нечего, то есть ровно в том случае, где записи иначе не появится вовсе.
+    fn refine(&self, _context: &KillContext) {}
+
+    /// Эпизод кончился безопасным выходом.
+    ///
+    /// Приходит на каждый переход в safe, а не только у эпизода, начавшегося
+    /// до вердикта: приёмник обнуляет здесь учёт «что уже описано». Эпизоду,
+    /// который начинался до вердикта (`context.is_pending`), дописывается ещё
+    /// и исход — цели умерли, а проверка следом сказала «всё в порядке».
+    /// Именно этот случай и выглядит как «weto завершает процессы случайно».
+    fn episode_finished(&self, _context: &KillContext) {}
 }
 
 /// Вердикт вместе с признаком, при каких условиях он был получен.
@@ -85,6 +106,13 @@ pub struct GuardSnapshot {
 
 struct Inner {
     verdict: Option<CachedVerdict>,
+    /// Последний состоявшийся вердикт. В отличие от `verdict` не обнуляется
+    /// правкой настроек: обнулённый, он делал изменение настроек неотличимым
+    /// от холодного старта, а в журнале это два разных ответа на вопрос
+    /// «почему цели завершились».
+    previous_verdict: Option<(u64, String)>,
+    /// Эпизод, начавшийся до вердикта, и разбор свежести, с которым он начался.
+    pending_episode: Option<VerdictStaleness>,
     /// Чтение, на котором стоит последний состоявшийся вердикт, и отпечаток сети,
     /// при котором он получен. Нужно, чтобы молчание ipinfo не завершало цели,
     /// когда адрес доказанно тот же: тот же адрес — та же страна.
@@ -105,6 +133,7 @@ pub struct GuardController {
     settings: Box<dyn SettingsProviding>,
     enforcer: ProcessEnforcer,
     reporter: Box<dyn KillReporting>,
+    checks: Box<dyn CheckReporting>,
     inner: Mutex<Inner>,
     probe_in_flight: Arc<AtomicBool>,
     coalesce_window: Duration,
@@ -119,6 +148,7 @@ impl GuardController {
         settings: Box<dyn SettingsProviding>,
         enforcer: ProcessEnforcer,
         reporter: Box<dyn KillReporting>,
+        checks: Box<dyn CheckReporting>,
     ) -> GuardController {
         GuardController {
             network,
@@ -127,8 +157,11 @@ impl GuardController {
             settings,
             enforcer,
             reporter,
+            checks,
             inner: Mutex::new(Inner {
                 verdict: None,
+                previous_verdict: None,
+                pending_episode: None,
                 established: None,
                 last_probe_finished: None,
                 snapshot: GuardSnapshot::default(),
@@ -186,7 +219,7 @@ impl GuardController {
         // Локальное основание применяется сразу, до ответа сети: жизни целям
         // сетевой запрос не продлевает ни на такте, ни по кнопке.
         if let Some(decision) = local.clone() {
-            self.apply(&settings, decision.clone(), None);
+            self.apply(&settings, decision.clone(), None, &network);
 
             // Показания обновляются и здесь. Экономия запросов относится
             // к вердикту, а не к экрану: пока её распространяли и на показания,
@@ -209,7 +242,12 @@ impl GuardController {
             if trigger == ProbeTrigger::Manual
                 || (armed && stale && self.coalescing_window_passed())
             {
-                self.probe_and_store(&settings, &fingerprint);
+                let trigger = if trigger == ProbeTrigger::Manual {
+                    CheckTrigger::Manual
+                } else {
+                    self.staleness_trigger(settings.revision)
+                };
+                self.probe_and_store(&settings, &fingerprint, trigger);
             }
             return decision;
         }
@@ -220,7 +258,12 @@ impl GuardController {
             let armed = settings.is_enabled && !config.targets.is_empty();
             let refreshed = if armed && (trigger == ProbeTrigger::Manual || self.geo_schedule_due())
             {
-                self.probe_and_store(&settings, &fingerprint)
+                let reason = if trigger == ProbeTrigger::Manual {
+                    CheckTrigger::Manual
+                } else {
+                    CheckTrigger::Schedule
+                };
+                self.probe_and_store(&settings, &fingerprint, reason)
             } else {
                 None
             };
@@ -240,16 +283,21 @@ impl GuardController {
                 .as_ref()
                 .map(|v| v.report.clone())
                 .unwrap_or(cached.report);
-            self.apply(&settings, decision.clone(), Some(report));
+            self.apply(&settings, decision.clone(), Some(report), &network);
             return decision;
         }
 
         // Вердикта нет или он потерял свежесть: fail-closed до ответа сети.
         let pending = pending_verification(settings.is_enabled, &config);
-        self.apply(&settings, pending.clone(), None);
+        self.apply(&settings, pending.clone(), None, &network);
 
         if trigger == ProbeTrigger::Manual || self.coalescing_window_passed() {
-            if let Some(outcome) = self.probe_and_store(&settings, &fingerprint) {
+            let reason = if trigger == ProbeTrigger::Manual {
+                CheckTrigger::Manual
+            } else {
+                self.staleness_trigger(settings.revision)
+            };
+            if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
                 let decision = decide(&GuardSignals {
                     is_enabled: settings.is_enabled,
                     vpn,
@@ -263,12 +311,105 @@ impl GuardController {
                     .verdict
                     .as_ref()
                     .map(|v| v.report.clone());
-                self.apply(&settings, decision.clone(), report);
+                self.apply(&settings, decision.clone(), report, &network);
                 return decision;
             }
         }
 
         pending
+    }
+
+    /// Показания эпизода: они не показываются пользователю и нужны только выгрузке.
+    fn kill_context(
+        &self,
+        settings: &Settings,
+        reason: String,
+        report: Option<&GeoProbeReport>,
+        network: &NetworkSnapshot,
+    ) -> KillContext {
+        let reading = match report.map(|r| r.outcome()) {
+            Some(GeoOutcome::Resolved(reading)) => GeoReadingPatch {
+                ip: Some(reading.ip),
+                country: Some(reading.primary_country),
+                confirmed_country: reading.confirmed_country,
+                confirm_source: reading.confirm_source.map(|s| s.name().to_string()),
+            },
+            Some(GeoOutcome::Degraded { previous, .. }) => GeoReadingPatch {
+                ip: Some(previous.ip),
+                country: Some(previous.primary_country),
+                confirmed_country: previous.confirmed_country,
+                confirm_source: previous.confirm_source.map(|s| s.name().to_string()),
+            },
+            _ => GeoReadingPatch::default(),
+        };
+
+        KillContext {
+            reason,
+            is_pending: false,
+            reading,
+            diagnostics: KillDiagnostics {
+                staleness: None,
+                outgoing_interface: network.outgoing.as_ref().map(|o| o.interface.clone()),
+                outgoing_address: network.outgoing.as_ref().map(|o| o.address.clone()),
+                has_network_path: report.map(|r| r.has_network_path),
+                vpn_app_entry: settings.vpn_app.as_ref().map(|app| app.entry.clone()),
+                vpn_app_status: Some(format!("{:?}", self.vpn_app_status(settings))),
+                services: report.map(|r| r.traces.clone()).unwrap_or_default(),
+                probed_at: report.map(|r| r.checked_at),
+                app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            },
+        }
+    }
+
+    /// Запись о состоявшейся пробе: показания и трассы сервисов как есть.
+    fn note_check(
+        &self,
+        trigger: CheckTrigger,
+        outcome: &GeoOutcome,
+        report: &GeoProbeReport,
+        fingerprint: &str,
+        milliseconds: u64,
+    ) {
+        let reading = match outcome {
+            GeoOutcome::Resolved(reading) => Some(reading.clone()),
+            _ => None,
+        };
+        let detail = match outcome {
+            GeoOutcome::Resolved(_) => None,
+            GeoOutcome::Degraded { detail, .. } => Some(detail.clone()),
+            GeoOutcome::Unavailable(detail) => Some(detail.clone()),
+        };
+
+        self.checks.record(CheckEvent {
+            id: new_check_id(),
+            at: SystemTime::now(),
+            trigger,
+            outcome: if reading.is_some() {
+                CheckOutcome::Answered
+            } else {
+                CheckOutcome::Failed
+            },
+            fingerprint: Some(fingerprint.to_string()),
+            duration_milliseconds: Some(milliseconds),
+            ip: report.ip.clone(),
+            country: reading.as_ref().map(|r| r.primary_country.clone()),
+            confirmed_country: reading.as_ref().and_then(|r| r.confirmed_country.clone()),
+            confirm_source: reading
+                .as_ref()
+                .and_then(|r| r.confirm_source.map(|s| s.name().to_string())),
+            services: report.traces.clone(),
+            detail,
+        });
+    }
+
+    /// Повод пробы выводится из того, что именно перестало быть свежим: ревизия
+    /// настроек или отпечаток выхода.
+    fn staleness_trigger(&self, revision: u64) -> CheckTrigger {
+        let inner = self.inner.lock().expect("состояние охраны");
+        match inner.previous_verdict.as_ref() {
+            Some((previous, _)) if *previous != revision => CheckTrigger::SettingsChange,
+            _ => CheckTrigger::NetworkChange,
+        }
     }
 
     /// Вердикт годен, только если и настройки, и сеть те же самые.
@@ -299,14 +440,38 @@ impl GuardController {
     }
 
     /// Запрос к сервисам. Повторное нажатие в полёте запроса второго не порождает.
-    fn probe_and_store(&self, settings: &Settings, fingerprint: &str) -> Option<GeoOutcome> {
+    fn probe_and_store(
+        &self,
+        settings: &Settings,
+        fingerprint: &str,
+        trigger: CheckTrigger,
+    ) -> Option<GeoOutcome> {
         if self.probe_in_flight.swap(true, Ordering::SeqCst) {
+            // Ровно этот случай и означает «нажал пять раз, а запрос так и не ушёл».
+            self.checks.record(CheckEvent {
+                id: new_check_id(),
+                at: SystemTime::now(),
+                trigger,
+                outcome: CheckOutcome::SkippedProbeInFlight,
+                fingerprint: Some(fingerprint.to_string()),
+                duration_milliseconds: None,
+                ip: None,
+                country: None,
+                confirmed_country: None,
+                confirm_source: None,
+                services: Vec::new(),
+                detail: None,
+            });
             return None;
         }
 
         let token = self.secrets.load().ok().flatten();
+        let started = Instant::now();
         let report = self.geo.probe(token.as_deref());
+        let elapsed = started.elapsed().as_millis() as u64;
         let outcome = self.admissible_outcome(&report, fingerprint);
+
+        self.note_check(trigger, &outcome, &report, fingerprint, elapsed);
 
         {
             let mut inner = self.inner.lock().expect("состояние охраны");
@@ -322,6 +487,7 @@ impl GuardController {
                 outcome: outcome.clone(),
                 report: report.clone(),
             });
+            inner.previous_verdict = Some((settings.revision, fingerprint.to_string()));
             inner.last_probe_finished = Some(Instant::now());
             inner.snapshot.report = Some(report);
         }
@@ -392,19 +558,78 @@ impl GuardController {
         self.inner.lock().expect("состояние охраны").snapshot.report = None;
     }
 
-    fn apply(&self, settings: &Settings, decision: GuardDecision, report: Option<GeoProbeReport>) {
+    fn apply(
+        &self,
+        settings: &Settings,
+        decision: GuardDecision,
+        report: Option<GeoProbeReport>,
+        network: &NetworkSnapshot,
+    ) {
         let rules = settings.target_rules();
 
         let running = match &decision {
-            GuardDecision::Safe => self.enforcer.running(&rules),
+            GuardDecision::Safe => {
+                // Эпизод кончился. Сообщать об этом надо всегда, а не только
+                // когда он был неразобранным: учёт «что уже описано» обнуляется
+                // именно здесь, и без вызова следующее падение по той же причине
+                // писалось бы «запуск запрещён» вместо «завершено».
+                //
+                // Если эпизод начинался до вердикта, ему дописывается ещё и исход:
+                // цели умерли, а проверка следом сказала «всё в порядке» — без этого
+                // в журнале навсегда остаётся отговорка без единой цифры.
+                let pending = self
+                    .inner
+                    .lock()
+                    .expect("состояние охраны")
+                    .pending_episode
+                    .take();
+                let mut context = self.kill_context(
+                    settings,
+                    UnsafeReasonText::pending(),
+                    report.as_ref(),
+                    network,
+                );
+                context.is_pending = pending.is_some();
+                context.diagnostics.staleness = pending;
+                self.reporter.episode_finished(&context);
+
+                self.enforcer.running(&rules)
+            }
             GuardDecision::Kill(reason) => {
                 let text = reason.display_text();
+                let is_pending = matches!(reason, UnsafeReason::VerificationPending);
+                let mut context =
+                    self.kill_context(settings, text.clone(), report.as_ref(), network);
+                context.is_pending = is_pending;
+                if is_pending {
+                    let mut inner = self.inner.lock().expect("состояние охраны");
+                    let staleness = VerdictStaleness::new(
+                        inner
+                            .previous_verdict
+                            .as_ref()
+                            .map(|(revision, _)| *revision),
+                        settings.revision,
+                        inner
+                            .previous_verdict
+                            .as_ref()
+                            .map(|(_, fingerprint)| fingerprint.clone()),
+                        network.verdict_fingerprint(),
+                    );
+                    inner.pending_episode = Some(staleness.clone());
+                    drop(inner);
+                    context.diagnostics.staleness = Some(staleness);
+                } else {
+                    // Причина стала известна — эпизод перестал быть неразобранным.
+                    self.inner.lock().expect("состояние охраны").pending_episode = None;
+                }
+
                 // Сначала уточнение, потом завершение: иначе уточнённая причина
-                // считалась бы новой и завела бы вторую запись про то же падение.
-                self.reporter.refine(&text);
+                // считалась бы новой и завела бы второй набор записей про то же
+                // самое падение.
+                self.reporter.refine(&context);
                 let result = self.enforcer.enforce(&rules);
                 if !result.killed.is_empty() {
-                    self.reporter.report(&result.killed, &text);
+                    self.reporter.report(&result.killed, &context);
                 }
                 result.running
             }
@@ -439,4 +664,27 @@ impl GuardController {
             inner.snapshot.report = report;
         }
     }
+}
+
+/// Текст причины «подключение ещё не проверено» одним местом: он и ключ эпизода,
+/// и то, что видит пользователь, — расходиться этим двум нельзя.
+struct UnsafeReasonText;
+
+impl UnsafeReasonText {
+    fn pending() -> String {
+        UnsafeReason::VerificationPending.display_text()
+    }
+}
+
+/// Идентификатор записи проверки. UUID сюда тянуть незачем: хватает монотонного
+/// счётчика с отметкой времени — записи живут в одном файле одного пользователя.
+fn new_check_id() -> String {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let order = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let since_epoch = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    format!("check-{since_epoch:x}-{order:x}")
 }

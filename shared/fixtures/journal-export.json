@@ -1,0 +1,151 @@
+{
+  "version": 3,
+  "about": [
+    "Контракт формата выгрузки журнала. Одну и ту же форму обязаны давать обе",
+    "реализации: macOS/Tests/WetoSharedTests/JournalExportFixtureTests.swift и",
+    "linux/crates/weto-config/tests/export_fixture.rs.",
+    "",
+    "Файл выгрузки читает не только человек, но и агент, которому его отдают со",
+    "словами «разберись, почему завершились цели». Разные имена полей у двух",
+    "платформ означали бы, что разбирать придётся дважды, и расхождение всплыло бы",
+    "у пользователя, а не в тестах.",
+    "",
+    "Сверяются имена ключей, а не значения: значения зависят от машины. Случай",
+    "берётся полностью заполненный — иначе списки ключей разъедутся на пустых",
+    "полях, которые Swift опускает, а serde печатает как null.",
+    "",
+    "checks — попытки проверки подключения, включая те, где запрос так и не ушёл.",
+    "Журнал завершений про них молчит: проверка, не породившая завершения, следа",
+    "не оставляет, а «нажал и ничего не произошло» разбирают именно тут.",
+    "",
+    "timestampPattern — отметки времени строкой ISO 8601 в UTC. SystemTime в Rust",
+    "order — свежие записи первыми, и в events, и в checks. Порядок не косметика:",
+    "файл уходит на разбор, и «первая запись» обязана значить одно и то же",
+    "на обеих платформах. Одними именами ключей это не ловится.",
+    "",
+    "по умолчанию сериализуется объектом, поэтому на Linux стоит свой сериализатор.",
+    "",
+    "forbiddenSubstrings — то, чего в файле не должно быть никогда: токен ipinfo",
+    "уходит заголовком, а заголовки в журнал не записываются вовсе."
+  ],
+  "schemaVersion": 2,
+  "envelopeKeys": [
+    "app",
+    "checks",
+    "events",
+    "exportedAt",
+    "schemaVersion",
+    "settings"
+  ],
+  "appKeys": [
+    "osVersion",
+    "platform",
+    "version"
+  ],
+  "settingsKeys": [
+    "allowedCountries",
+    "allowedIPRanges",
+    "blockedCountries",
+    "blockedIPRanges",
+    "hasIPInfoToken",
+    "isEnabled",
+    "targets",
+    "vpnAppRule"
+  ],
+  "eventKeys": [
+    "confirmSource",
+    "confirmedCountry",
+    "country",
+    "date",
+    "diagnostics",
+    "episodeID",
+    "executablePath",
+    "id",
+    "ip",
+    "isDescendant",
+    "kind",
+    "parentPID",
+    "pid",
+    "reasonText",
+    "resolutionText",
+    "targetName"
+  ],
+  "diagnosticsKeys": [
+    "appVersion",
+    "hasNetworkPath",
+    "outgoingAddress",
+    "outgoingInterface",
+    "probedAt",
+    "services",
+    "staleness",
+    "vpnAppEntry",
+    "vpnAppStatus"
+  ],
+  "stalenessKeys": [
+    "cause",
+    "fingerprint",
+    "previousFingerprint",
+    "previousRevision",
+    "revision"
+  ],
+  "traceKeys": [
+    "body",
+    "cacheAgeSeconds",
+    "durationMilliseconds",
+    "failure",
+    "fromCache",
+    "httpStatus",
+    "service",
+    "url"
+  ],
+  "checkKeys": [
+    "confirmSource",
+    "confirmedCountry",
+    "country",
+    "date",
+    "detail",
+    "durationMilliseconds",
+    "fingerprint",
+    "id",
+    "ip",
+    "outcome",
+    "services",
+    "trigger"
+  ],
+  "checkTriggers": [
+    "manual",
+    "networkChange",
+    "schedule",
+    "settingsChange"
+  ],
+  "checkOutcomes": [
+    "answered",
+    "failed",
+    "skippedProbeInFlight",
+    "discardedPathChanged",
+    "discardedSettingsChanged"
+  ],
+  "stalenessCauses": [
+    "coldStart",
+    "configurationChanged",
+    "networkChanged",
+    "configurationAndNetworkChanged"
+  ],
+  "eventKinds": [
+    "terminated",
+    "launchBlocked"
+  ],
+  "timestampPattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
+  "timestampFields": [
+    "exportedAt",
+    "date",
+    "probedAt"
+  ],
+  "bodyLimit": 4096,
+  "forbiddenSubstrings": [
+    "Bearer ",
+    "Authorization",
+    "authorization"
+  ],
+  "order": "newestFirst"
+}

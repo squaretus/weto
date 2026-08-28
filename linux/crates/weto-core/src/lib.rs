@@ -6,6 +6,9 @@
 //!
 //! Инвариант границ проверяется `scripts/tests/core-boundary-contract.sh`.
 
+pub mod check;
+pub mod diagnostics;
+pub mod episode;
 pub mod geo;
 pub mod ip;
 pub mod launcher;
@@ -13,3 +16,4 @@ pub mod network;
 pub mod policy;
 pub mod presentation;
 pub mod process;
+pub mod timestamp;

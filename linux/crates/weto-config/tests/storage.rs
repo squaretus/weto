@@ -8,16 +8,27 @@ use weto_config::settings::{GeoListEntryError, GeoListKind, Settings, Target};
 use weto_core::process::TargetKind;
 
 fn event(pid: i32, reason: &str) -> KillEvent {
+    episode_event(pid, reason, "эпизод")
+}
+
+fn episode_event(pid: i32, reason: &str, episode_id: &str) -> KillEvent {
     KillEvent {
+        id: format!("{episode_id}-{pid}"),
+        episode_id: episode_id.to_string(),
         at: SystemTime::UNIX_EPOCH,
-        target_names: vec!["nano".to_string()],
+        target_name: "nano".to_string(),
+        pid,
+        parent_pid: 1,
+        executable_path: "/usr/bin/nano".to_string(),
+        is_descendant: false,
         kind: KillEventKind::Terminated,
         reason_text: reason.to_string(),
+        resolution_text: None,
         ip: None,
         country: None,
         confirmed_country: None,
         confirm_source: None,
-        killed_pids: vec![pid],
+        diagnostics: None,
     }
 }
 
@@ -132,41 +143,155 @@ fn target_rules_keep_the_launch_path_and_its_resolution() {
     );
 }
 
+/// Сто записей, а не десять: запись теперь на процесс, и одно падение VPN
+/// на тридцати четырёх процессах вытесняло прежний журнал целиком.
 #[test]
-fn journal_keeps_the_last_ten_entries() {
+fn journal_keeps_the_last_hundred_entries() {
+    assert_eq!(CAPACITY, 100);
+
     let mut journal = Journal::default();
-    for pid in 0..15 {
-        journal.append(event(pid, "VPN не поднят"));
+    for pid in 0..(CAPACITY as i32 + 5) {
+        journal.append(vec![event(pid, "VPN не поднят")]);
     }
 
     assert_eq!(journal.entries().len(), CAPACITY);
-    assert_eq!(journal.entries()[0].killed_pids, vec![5]);
-    assert_eq!(journal.entries()[9].killed_pids, vec![14]);
+    assert_eq!(
+        journal.entries()[0].pid,
+        CAPACITY as i32 + 4,
+        "свежие сверху"
+    );
+    assert_eq!(journal.entries()[CAPACITY - 1].pid, 5);
 }
 
-/// Причина эпизода, ставшая известной, дописывается в его запись: fail-closed
-/// пишет «ещё не проверено» раньше вердикта, а второй записи не будет — цели
-/// к тому моменту уже мертвы.
+/// Проход охраны пишется целиком: завершили четыре процесса — четыре записи,
+/// а не одна строка с четырьмя pid внутри.
 #[test]
-fn journal_refines_the_reason_of_the_last_entry() {
+fn a_pass_is_written_as_a_record_per_process() {
     let mut journal = Journal::default();
-    journal.append(event(7, "Подключение ещё не проверено"));
+    journal.append(vec![
+        episode_event(100, "причина", "проход"),
+        episode_event(101, "причина", "проход"),
+        episode_event(200, "причина", "проход"),
+    ]);
 
-    assert!(journal.refine_last_reason("Адрес 185.228.113.231 в чёрном списке"));
+    assert_eq!(journal.entries().len(), 3);
+    assert_eq!(
+        journal.entries().iter().map(|e| e.pid).collect::<Vec<_>>(),
+        vec![100, 101, 200]
+    );
+}
 
-    assert_eq!(journal.entries().len(), 1);
+/// Причина эпизода, ставшая известной, дописывается всем его записям: процессов
+/// в эпизоде десятки, и причина у них общая. Fail-closed пишет «ещё не проверено»
+/// раньше вердикта, а второго набора записей не будет — цели к тому моменту
+/// уже мертвы.
+#[test]
+fn journal_refines_every_record_of_the_episode() {
+    let mut journal = Journal::default();
+    journal.append(vec![episode_event(1, "чужое", "другой")]);
+    journal.append(vec![
+        episode_event(7, "Подключение ещё не проверено", "наш"),
+        episode_event(8, "Подключение ещё не проверено", "наш"),
+    ]);
+
+    assert!(journal.refine_episode(
+        "наш",
+        Some("Адрес 185.228.113.231 в чёрном списке"),
+        None,
+        None,
+        None
+    ));
+
+    let ours: Vec<&str> = journal
+        .entries()
+        .iter()
+        .filter(|e| e.episode_id == "наш")
+        .map(|e| e.reason_text.as_str())
+        .collect();
+    assert_eq!(
+        ours,
+        vec![
+            "Адрес 185.228.113.231 в чёрном списке",
+            "Адрес 185.228.113.231 в чёрном списке"
+        ]
+    );
+    // Ищем по эпизоду, а не по индексу: порядок записей — свежие сверху,
+    // и привязка к позиции ломается на первом же изменении порядка.
+    let other = journal
+        .entries()
+        .iter()
+        .find(|event| event.episode_id == "другой")
+        .expect("чужая запись на месте");
+    assert_eq!(other.reason_text, "чужое");
+}
+
+/// Эпизод, начавшийся до вердикта и закончившийся безопасным выходом, обязан
+/// сказать, чем кончился: без этого в журнале навсегда остаётся отговорка,
+/// и завершение выглядит беспричинным.
+#[test]
+fn journal_records_how_a_pending_episode_ended() {
+    let mut journal = Journal::default();
+    journal.append(vec![episode_event(
+        7,
+        "Подключение ещё не проверено",
+        "наш",
+    )]);
+
+    assert!(journal.refine_episode(
+        "наш",
+        None,
+        Some("проверка завершилась безопасным выходом: 1.2.3.4, KZ"),
+        None,
+        None
+    ));
+
+    assert_eq!(
+        journal.entries()[0].resolution_text.as_deref(),
+        Some("проверка завершилась безопасным выходом: 1.2.3.4, KZ")
+    );
     assert_eq!(
         journal.entries()[0].reason_text,
-        "Адрес 185.228.113.231 в чёрном списке"
+        "Подключение ещё не проверено",
+        "причина не подменяется: она и была «пока не знаю»"
     );
-    assert_eq!(journal.entries()[0].killed_pids, vec![7]);
 }
 
 #[test]
-fn refining_an_empty_journal_changes_nothing() {
+fn refining_an_unknown_episode_changes_nothing() {
     let mut journal = Journal::default();
-    assert!(!journal.refine_last_reason("Адрес в чёрном списке"));
+    assert!(!journal.refine_episode("нет такого", Some("причина"), None, None, None));
     assert!(journal.entries().is_empty());
+}
+
+/// Журнал прежнего формата не выбрасывается: одна старая запись про N процессов
+/// разворачивается в N записей одного эпизода.
+#[test]
+fn a_legacy_journal_expands_into_a_record_per_process() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("journal.json");
+    std::fs::write(
+        &path,
+        r#"{"entries":[{"at":{"secs_since_epoch":1,"nanos_since_epoch":0},
+           "targetNames":["claude"],"kind":"terminated",
+           "reasonText":"Подключение ещё не проверено","ip":null,"country":null,
+           "confirmedCountry":null,"confirmSource":null,
+           "killedPids":[92594,92261,26200]}]}"#,
+    )
+    .unwrap();
+
+    let journal = Journal::load(&path);
+
+    assert_eq!(journal.entries().len(), 3);
+    assert_eq!(
+        journal.entries().iter().map(|e| e.pid).collect::<Vec<_>>(),
+        vec![92594, 92261, 26200]
+    );
+    assert_eq!(journal.entries()[0].target_name, "claude");
+    assert_eq!(
+        journal.entries()[0].episode_id,
+        journal.entries()[2].episode_id,
+        "старая запись — один эпизод"
+    );
 }
 
 #[test]
@@ -175,7 +300,7 @@ fn journal_survives_a_round_trip() {
     let path = tmp.path().join("state/journal.json");
 
     let mut journal = Journal::default();
-    journal.append(event(42, "VPN не поднят"));
+    journal.append(vec![event(42, "VPN не поднят")]);
     journal.save(&path).unwrap();
 
     assert_eq!(Journal::load(&path), journal);
@@ -206,9 +331,9 @@ fn summary_lowercases_the_first_word_but_spares_abbreviations() {
 #[test]
 fn nameless_target_still_reads_as_something() {
     let mut nameless = event(1, "VPN не поднят");
-    nameless.target_names.clear();
+    nameless.target_name.clear();
 
-    assert_eq!(nameless.targets_text(), "неизвестная цель");
+    assert_eq!(nameless.title(), "неизвестная цель · pid 1");
 }
 
 #[test]

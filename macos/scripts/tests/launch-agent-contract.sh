@@ -29,12 +29,22 @@ fi
 # 2б. Демон обновления, наоборот, системный: без него автообновление невозможно.
 [ -x "$STAGE/Library/PrivilegedHelperTools/com.weto.helper" ] \
     || fail "в payload нет демона обновления"
-[ -f "$STAGE/Library/LaunchDaemons/com.weto.helper.plist" ] \
-    || fail "в payload нет LaunchDaemon демона обновления"
-grep -q 'com.weto.helper' "$STAGE/Library/LaunchDaemons/com.weto.helper.plist" \
-    || fail "в plist демона нет его MachService"
 
-grep -q 'launchctl bootstrap system' scripts/postinstall \
+# Его LaunchDaemon в payload не входит — ровно как агент автозапуска. installer
+# перезаписывает файлы payload на каждой установке, а Background Task Management
+# держит выданное разрешение за записью, привязанной к файлу: пересозданный файл
+# означает новую запись и вопрос про фоновую работу после каждого обновления.
+# Пишет его postinstall, и только когда содержимое действительно изменилось.
+if [ -e "$STAGE/Library/LaunchDaemons/com.weto.helper.plist" ]; then
+    fail "payload содержит LaunchDaemon демона — его должен писать postinstall"
+fi
+if [ -d "$STAGE/Library/LaunchDaemons" ] && [ -n "$(ls -A "$STAGE/Library/LaunchDaemons")" ]; then
+    fail "payload содержит непустой /Library/LaunchDaemons"
+fi
+grep -q 'MachServices' scripts/postinstall \
+    || fail "postinstall не пишет MachService демона обновления"
+
+grep -q 'bootstrap system' scripts/postinstall \
     || fail "postinstall не загружает демон в системный домен"
 grep -q 'bootout system/com.weto.helper' scripts/preinstall \
     || fail "preinstall не выгружает демон перед подменой файлов"
@@ -62,7 +72,7 @@ grep -q 'NFSHomeDirectory' scripts/postinstall \
     || fail "postinstall не спрашивает домашний каталог у системы"
 grep -q 'Library/LaunchAgents' scripts/postinstall \
     || fail "postinstall не пишет агент в Library/LaunchAgents пользователя"
-grep -q 'launchctl asuser' scripts/postinstall \
+grep -q 'asuser' scripts/postinstall \
     || fail "postinstall не использует launchctl asuser для сеанса пользователя"
 grep -q 'bootstrap' scripts/postinstall \
     || fail "postinstall не загружает агент через bootstrap"
@@ -73,15 +83,28 @@ grep -q 'pgrep' scripts/postinstall \
 grep -q 'Не найден пользователь графического сеанса' scripts/postinstall \
     || fail "postinstall не сообщает об отсутствии графического сеанса"
 
-# 5. preinstall и деинсталлятор снимают тот же самый агент, включая наследие
-#    прежних версий в /Library/LaunchAgents.
-for script in scripts/preinstall Resources/uninstall-weto.sh; do
-    grep -q 'Library/LaunchAgents/\$LABEL.plist' "$script" \
-        || fail "$script не удаляет агент пользователя"
-    grep -q '/Library/LaunchAgents/\$LABEL.plist' "$script" \
-        || fail "$script не удаляет системный агент прежних версий"
-    grep -q 'bootout' "$script" \
-        || fail "$script не выгружает задание перед удалением файла"
-done
+# 5. Удаляет агент пользователя только деинсталлятор.
+#
+#    preinstall задание выгружает — иначе launchd с `KeepAlive` поднимет копию
+#    посреди подмены бандла, — но файл оставляет на месте: за файлом держится
+#    запись Background Task Management с выданным разрешением на фоновую работу.
+#    Идемпотентность установки проверяет отдельный контракт,
+#    scripts/tests/install-idempotency-contract.sh.
+grep -q 'bootout' scripts/preinstall \
+    || fail "preinstall не выгружает задание перед подменой бандла"
+grep -qE '(rm|unlink).*LaunchAgents/\$LABEL\.plist' scripts/preinstall \
+    && fail "preinstall удаляет агент пользователя — macOS спросит разрешение на фоновую работу заново"
+
+grep -q 'Library/LaunchAgents/\$LABEL.plist' Resources/uninstall-weto.sh \
+    || fail "деинсталлятор не удаляет агент пользователя"
+grep -q '/Library/LaunchAgents/\$LABEL.plist' Resources/uninstall-weto.sh \
+    || fail "деинсталлятор не удаляет системный агент прежних версий"
+grep -q 'bootout' Resources/uninstall-weto.sh \
+    || fail "деинсталлятор не выгружает задание перед удалением файла"
+
+# Файлы, которые больше не приходят из payload, обязан убирать деинсталлятор сам:
+# в receipt пакета их нет, и pkgutil --forget о них ничего не знает.
+grep -q 'rm -f /Library/LaunchDaemons/com.weto.helper.plist' Resources/uninstall-weto.sh \
+    || fail "деинсталлятор не удаляет LaunchDaemon демона обновления"
 
 echo "✓ контракт автозапуска соблюдён"

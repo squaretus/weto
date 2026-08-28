@@ -15,7 +15,10 @@ OUT=".build/release_build"
 #   2250 → 2460  иконка приложения: AppIcon.icns 141 КБ и два PNG по 10 КБ на темы;
 #   2460 → 3640  флаги стран в бандле: 265 SVG на 1060 КБ. Раньше они тянулись
 #                с CDN — а CDN в России блокируется, и флаг нужен ровно под VPN.
-APP_BASELINE_KB=3640
+#   3640 → 4010  диагностический журнал: два кольцевых буфера, отладочные показания,
+#                трассы гео-сервисов и конверт выгрузки. Бинарник +340 КБ, и почти
+#                весь рост — синтезированные `Codable` у восьми новых типов.
+APP_BASELINE_KB=4010
 
 echo "=== weto $VERSION — сборка ==="
 
@@ -63,7 +66,7 @@ echo "  подпись: ad-hoc (без Developer ID и нотаризации)"
 
 ROOT="$OUT/_pkg-root"
 SCRIPTS="$OUT/_pkg-scripts"
-mkdir -p "$ROOT/Applications" "$ROOT/Library/PrivilegedHelperTools" "$ROOT/Library/LaunchDaemons" "$SCRIPTS"
+mkdir -p "$ROOT/Applications" "$ROOT/Library/PrivilegedHelperTools" "$SCRIPTS"
 
 # Агент автозапуска в payload не входит: его пишет postinstall в домашний каталог
 # консольного пользователя — там же, где им управляют приложение и деинсталлятор.
@@ -73,8 +76,12 @@ cp -R "$OUT/_app/Weto.app" "$ROOT/Applications/"
 # LaunchDaemon (не агент) — он один на машину и не привязан к сеансу пользователя.
 cp .build/release/WetoHelper "$ROOT/Library/PrivilegedHelperTools/com.weto.helper"
 chmod 755 "$ROOT/Library/PrivilegedHelperTools/com.weto.helper"
-cp Resources/com.weto.helper.plist "$ROOT/Library/LaunchDaemons/"
-chmod 644 "$ROOT/Library/LaunchDaemons/com.weto.helper.plist"
+
+# LaunchDaemon демона в payload не входит, как и агент автозапуска: его пишет
+# postinstall, и только если содержимое изменилось. installer перезаписывал бы
+# файл на каждом обновлении мимо этой проверки, а Background Task Management
+# держит выданное разрешение за записью, привязанной к файлу, — отсюда
+# «Weto добавила элементы, которые могут работать в фоне» после каждого обновления.
 cp scripts/preinstall scripts/postinstall "$SCRIPTS/"
 chmod +x "$SCRIPTS/preinstall" "$SCRIPTS/postinstall"
 
