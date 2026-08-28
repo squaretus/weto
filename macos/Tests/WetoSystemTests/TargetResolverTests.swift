@@ -65,6 +65,41 @@ final class TargetResolverTests: XCTestCase {
         XCTAssertEqual(rule.path, path)
     }
 
+    /// Инструмент обновился — правило переезжает само, без повторного добавления.
+    ///
+    /// У claude и codex в развёрнутом пути стоит номер версии, и обновление
+    /// меняет его целиком. Цель хранится именем, а путь пересчитывается,
+    /// поэтому переезд происходит сам собой.
+    func test_a_repointed_symlink_follows_the_new_version() throws {
+        let versions = root.appendingPathComponent("versions")
+        try FileManager.default.createDirectory(at: versions, withIntermediateDirectories: true)
+        let old = versions.appendingPathComponent("2.1.250")
+        let new = versions.appendingPathComponent("2.1.251")
+        for version in [old, new] {
+            try "не скрипт\n".write(to: version, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: version.path
+            )
+        }
+
+        let bin = root.appendingPathComponent(".local/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let link = bin.appendingPathComponent("claude")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: old)
+
+        let resolver = self.resolver([".local/bin"])
+        XCTAssertEqual(resolver.resolve("claude")?.path, old.path)
+
+        // Обновление: симлинк переставили на новую версию.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: new)
+
+        XCTAssertEqual(
+            resolver.resolve("claude")?.path, new.path,
+            "правило обязано переехать на новую версию без повторного добавления цели"
+        )
+    }
+
     /// У скрипта с shebang `proc_pidpath` показывает интерпретатор, поэтому вид
     /// цели обязан отличаться: такие ищутся по argv, а не по пути.
     func test_a_shebang_script_is_recognised_as_a_script() throws {
