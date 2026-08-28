@@ -342,7 +342,10 @@ final class GuardVMTests: XCTestCase {
         let network: StubSnapshotReader
     }
 
-    private func makeDelayedHarness(snapshot: NetworkSnapshot) -> DelayedHarness {
+    private func makeDelayedHarness(
+        snapshot: NetworkSnapshot,
+        checkLog: CheckLogStore = CheckLogStore(storage: InMemoryCheckLog())
+    ) -> DelayedHarness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
         settings.vpnAppRule = vpnAppID
@@ -357,6 +360,7 @@ final class GuardVMTests: XCTestCase {
         let vm = GuardVM(
             settings: settings,
             eventLog: log,
+            checkLog: checkLog,
             snapshotReader: network,
             geoProbe: probe,
             locator: StubLocator(
@@ -457,6 +461,51 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
         XCTAssertEqual(h.killer.killedBatches, [[500, 501]])
         h.vm.stop()
+    }
+
+    /// Нажатие, не пославшее запроса, обязано оставить след.
+    ///
+    /// Журнал завершений про это молчит: проверка, не породившая завершения,
+    /// записи не заводит. Снаружи «нажал пять раз, и ничего» неотличимо
+    /// от «кнопка сломана» — отличает только журнал проверок.
+    func test_a_press_while_a_probe_is_in_flight_is_recorded() async {
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        let h = makeDelayedHarness(snapshot: healthySnapshot(), checkLog: checks)
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted()
+
+        h.vm.recheckNow()
+        h.vm.recheckNow()
+        await settle()
+
+        let skipped = checks.all.filter { $0.outcome == .skippedProbeInFlight }
+        XCTAssertEqual(skipped.count, 2, "оба холостых нажатия записаны")
+        XCTAssertEqual(skipped.first?.trigger, .manual)
+        XCTAssertEqual(
+            skipped.first?.fingerprint, healthySnapshot().verdictFingerprint,
+            "запись называет выход, на котором нажимали"
+        )
+    }
+
+    /// Состоявшаяся проверка пишется с трассами сервисов и длительностью:
+    /// по ним видно, ушёл ли запрос и что ответили.
+    func test_a_completed_check_is_recorded_with_its_traces() async {
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        let h = makeDelayedHarness(snapshot: healthySnapshot(), checkLog: checks)
+
+        h.vm.recheckNow()
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
+        await settle()
+
+        let answered = checks.all.first { $0.outcome == .answered }
+        XCTAssertNotNil(answered, "успешная проверка по кнопке пишется")
+        XCTAssertEqual(answered?.trigger, .manual)
+        XCTAssertEqual(answered?.ip, "203.0.113.28")
+        XCTAssertEqual(answered?.country, "KZ")
+        XCTAssertFalse(answered?.services.isEmpty ?? true, "трассы сервисов на месте")
+        XCTAssertNotNil(answered?.durationMilliseconds)
     }
 
     /// Пачка событий сети не плодит проб и не выбрасывает ответ.

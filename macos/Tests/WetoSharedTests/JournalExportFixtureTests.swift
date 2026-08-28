@@ -28,6 +28,20 @@ final class JournalExportFixtureTests: XCTestCase {
         assertKeys(of: object["settings"], equal: contract.settingsKeys, at: "settings")
     }
 
+    /// Проверки — второй журнал в том же файле: «нажал и ничего не произошло»
+    /// разбирают именно по нему.
+    func test_check_matches_the_shared_contract() throws {
+        let check = try XCTUnwrap((object["checks"] as? [[String: Any]])?.first)
+        assertKeys(of: check, equal: contract.checkKeys, at: "проверка")
+
+        XCTAssertTrue(contract.checkTriggers.contains(check["trigger"] as? String ?? ""))
+        XCTAssertTrue(contract.checkOutcomes.contains(check["outcome"] as? String ?? ""))
+        assertKeys(
+            of: (check["services"] as? [[String: Any]])?.first,
+            equal: contract.traceKeys, at: "трасса проверки"
+        )
+    }
+
     func test_event_matches_the_shared_contract() throws {
         let event = try firstEvent()
         assertKeys(of: event, equal: contract.eventKeys, at: "событие")
@@ -146,9 +160,35 @@ final class JournalExportFixtureTests: XCTestCase {
             )
         )
 
+        let check = CheckEvent(
+            date: Date(timeIntervalSince1970: 1_787_000_050),
+            trigger: .manual,
+            outcome: .skippedProbeInFlight,
+            fingerprint: "out=utun6/10.2.0.5",
+            durationMilliseconds: 42,
+            ip: "176.12.76.15",
+            country: "KZ",
+            confirmedCountry: "KZ",
+            confirmSource: "freeipapi",
+            services: [
+                GeoServiceTrace(
+                    service: "ipinfo",
+                    url: "https://api.ipinfo.io/lite/me",
+                    httpStatus: 200,
+                    durationMilliseconds: 42,
+                    body: #"{"ip":"176.12.76.15","country_code":"KZ"}"#,
+                    failure: "нет",
+                    fromCache: true,
+                    cacheAgeSeconds: 7
+                )
+            ],
+            detail: "проба уже в полёте"
+        )
+
         let data = try JournalExporter.make(
             settings: settings,
             events: [event],
+            checks: [check],
             at: Date(timeIntervalSince1970: 1_787_000_100),
             osVersion: "Version 26.0"
         ).encoded()
@@ -186,6 +226,9 @@ final class JournalExportFixtureTests: XCTestCase {
         let diagnosticsKeys: [String]
         let stalenessKeys: [String]
         let traceKeys: [String]
+        let checkKeys: [String]
+        let checkTriggers: [String]
+        let checkOutcomes: [String]
         let stalenessCauses: [String]
         let eventKinds: [String]
         let timestampPattern: String

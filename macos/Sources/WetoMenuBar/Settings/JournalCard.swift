@@ -20,6 +20,13 @@ struct JournalCard: View {
 
     private var events: [KillEvent] { coordinator.eventLog.events }
 
+    /// Проверок в интерфейсе не видно: они материал выгрузки. Но выгружать
+    /// их надо и тогда, когда завершений не было вовсе — «нажал, и ничего
+    /// не произошло» это ровно тот случай.
+    private var hasSomethingToExport: Bool {
+        !events.isEmpty || !coordinator.checkLog.all.isEmpty
+    }
+
     var body: some View {
         WetoCard("Журнал") {
             VStack(spacing: 0) {
@@ -44,13 +51,17 @@ struct JournalCard: View {
                                 .foregroundStyle(WetoTokens.faint.resolve(scheme))
                         }
                     }
+                }
 
+                if hasSomethingToExport {
                     HStack(spacing: WetoTokens.space2) {
                         Button("Выгрузить журнал") { export() }
                             .buttonStyle(WetoPillButtonStyle(.ghost, expands: true))
 
-                        Button("Очистить журнал") { coordinator.eventLog.clear() }
-                            .buttonStyle(WetoPillButtonStyle(.danger, expands: true))
+                        if !events.isEmpty {
+                            Button("Очистить журнал") { coordinator.eventLog.clear() }
+                                .buttonStyle(WetoPillButtonStyle(.danger, expands: true))
+                        }
                     }
                     .padding(.top, WetoTokens.space3)
                 }
@@ -62,9 +73,12 @@ struct JournalCard: View {
     /// а сотня записей с сырыми ответами сервисов в буфере нечитаема.
     private func export() {
         let moment = Date()
+        // Кнопка ничего не собирает заново: оба журнала уже лежат на диске
+        // готовыми, здесь их только упаковывают в конверт.
         let export = JournalExporter.make(
             settings: coordinator.settings,
             events: events,
+            checks: coordinator.checkLog.all,
             at: moment
         )
 

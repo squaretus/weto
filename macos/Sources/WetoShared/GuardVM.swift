@@ -40,6 +40,7 @@ public final class GuardVM {
 
     @ObservationIgnored private let settings: SettingsStore
     @ObservationIgnored private let eventLog: EventLogStore
+    @ObservationIgnored private let checkLog: CheckLogStore
     @ObservationIgnored private let snapshotReader: NetworkSnapshotReading
     @ObservationIgnored private let geoProbe: GeoProbing
     @ObservationIgnored private let locator: ProcessLocating
@@ -83,6 +84,7 @@ public final class GuardVM {
     public init(
         settings: SettingsStore,
         eventLog: EventLogStore,
+        checkLog: CheckLogStore = CheckLogStore(storage: InMemoryCheckLog()),
         snapshotReader: NetworkSnapshotReading,
         geoProbe: GeoProbing,
         locator: ProcessLocating,
@@ -95,6 +97,7 @@ public final class GuardVM {
     ) {
         self.settings = settings
         self.eventLog = eventLog
+        self.checkLog = checkLog
         self.snapshotReader = snapshotReader
         self.geoProbe = geoProbe
         self.locator = locator
@@ -118,7 +121,8 @@ public final class GuardVM {
             debounceInterval: debounceInterval,
             vpnAppStatus: { [weak self] in self?.vpnAppStatus() ?? .notChosen },
             onDecision: { [weak self] decision in self?.apply(decision) },
-            onReport: { [weak self] report in self?.receive(report) }
+            onReport: { [weak self] report in self?.receive(report) },
+            onCheck: { [weak self] check in self?.checkLog.record(check) }
         )
 
         // Список живых целей обновляется на правку настроек, а не на следующем тике.
@@ -264,7 +268,17 @@ public final class GuardVM {
     /// Проверка по кнопке из попапа. Повторное нажатие, пока ответ не пришёл,
     /// не порождает второго запроса: у подтверждающего сервиса есть лимит.
     public func recheckNow() {
-        guard !isProbing else { return }
+        guard !isProbing else {
+            // Нажатие, отбитое индикатором, тоже событие: без записи «нажал пять
+            // раз, а запрос не ушёл» не отличить от «кнопка не работает».
+            checkLog.record(CheckEvent(
+                date: Date(),
+                trigger: .manual,
+                outcome: .skippedProbeInFlight,
+                fingerprint: snapshotReader.snapshot().verdictFingerprint
+            ))
+            return
+        }
         isProbing = true
         controller.probeNow()
 
