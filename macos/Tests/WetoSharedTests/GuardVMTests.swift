@@ -488,6 +488,31 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
+    /// Проба по кнопке не уступает автоматической.
+    ///
+    /// Нажатие создаёт пробу, но до своего запроса она доживает не сразу — между
+    /// созданием и стартом есть точка подвеса. Любой автоматический повод,
+    /// пришедший в этот зазор, снимал её, и она возвращалась по проверке отмены:
+    /// ни запроса, ни ошибки, ни записи в журнале. Снаружи это ровно «нажал
+    /// проверку и получил ничего».
+    func test_an_automatic_probe_does_not_displace_the_one_requested_by_the_button() async {
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        let h = makeDelayedHarness(snapshot: healthySnapshot(), checkLog: checks)
+
+        h.vm.recheckNow()
+        // Расписание подошло ровно в зазор — проба по кнопке ещё не стартовала.
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted()
+
+        await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
+        await settle()
+
+        XCTAssertFalse(
+            checks.all.filter { $0.trigger == .manual }.isEmpty,
+            "нажатие обязано оставить след: запрос ушёл, был отбит или отброшен"
+        )
+    }
+
     /// Автоматические поводы пропускают пробу каждый такт — и в журнал это
     /// не идёт. Иначе за пять секунд ожидания ipinfo они вытеснили бы
     /// из полусотни записей ровно ту, ради которой журнал и ведётся.
