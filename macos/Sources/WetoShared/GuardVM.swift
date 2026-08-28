@@ -244,9 +244,15 @@ public final class GuardVM {
 
         if case .appLaunched(let bundleID) = trigger {
 
-            guard settings.targets.contains(bundleID) else { return }
+            // VPN-приложение целью не бывает: его выбор снимает его из целей.
+            // Но его запуск — то самое событие, ради которого вердикт и пересчитывают,
+            // и раньше проверка «это цель?» отправляла его в никуда. Закрытие клиента
+            // при этом обрабатывалось, то есть охрана замечала уход защиты сразу,
+            // а её возвращение — только следующим тактом.
+            let isVPNApp = settings.vpnAppRule == bundleID
+            guard isVPNApp || settings.targets.contains(bundleID) else { return }
 
-            if case .unsafe(let reason) = state {
+            if !isVPNApp, case .unsafe(let reason) = state {
                 enforce(reason: reason)
                 return
             }

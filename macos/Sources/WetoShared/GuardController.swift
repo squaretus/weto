@@ -215,8 +215,21 @@ final class GuardController {
         startProbe(after: 0)
     }
 
+    /// Запрос уходит один и доводится до конца.
+    ///
+    /// Отменять можно только ожидание в окне коалесценции — ради него `cancel`
+    /// здесь и стоит. Отменять сам запрос нельзя: пока вердикт несвеж, каждый такт
+    /// заново объявляет fail-closed и просит пробу, а такт идёт раз в секунду
+    /// против пятисекундного таймаута ipinfo. На медленном канале — например, сразу
+    /// после подъёма второго VPN — проба не успевала ответить никогда, вердикт
+    /// не приходил вовсе, и кнопка «проверить» не давала ничего.
     private func startProbe(after interval: TimeInterval) {
+        guard !isProbeInFlight else { return }
+
         let expected = revision
+        // Отпечаток на момент старта: ответ про прежний путь нельзя применять
+        // к новому. Раньше от этого спасала отмена — теперь спасать должно явно.
+        let expectedFingerprint = snapshotReader.snapshot().verdictFingerprint
 
         probeTask?.cancel()
         probeTask = Task { [weak self] in
@@ -229,19 +242,30 @@ final class GuardController {
             let report = await self?.geoProbe.probe()
             self?.isProbeInFlight = false
 
-            guard let report, !Task.isCancelled else { return }
+            guard let report else { return }
 
-            self?.applyLatestNetworkOutcome(report, revision: expected)
+            self?.applyLatestNetworkOutcome(
+                report, revision: expected, fingerprint: expectedFingerprint
+            )
         }
     }
 
-    private func applyLatestNetworkOutcome(_ report: GeoProbeReport, revision expected: Int) {
+    private func applyLatestNetworkOutcome(
+        _ report: GeoProbeReport,
+        revision expected: Int,
+        fingerprint expectedFingerprint: String
+    ) {
         guard revision == expected else { return }
 
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
         let vpn = vpnAppStatus()
         let fingerprint = snapshot.verdictFingerprint
+
+        // Путь наружу сменился, пока проба летела: её ответ описывает уже не нас,
+        // и объявлять по нему вердикт значит открыть цели на чужих показаниях.
+        // Следующий такт запросит пробу заново — теперь ему есть чем.
+        guard fingerprint == expectedFingerprint else { return }
 
         // Отчёт отдаётся и при отказе: попап обязан показать, кто именно молчал.
         onReport(report)
