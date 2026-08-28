@@ -12,8 +12,9 @@ public enum MaintenanceStep: Equatable, Sendable {
     case clearSettings
     case removeToken
     case removeCaches
+    case removeJournals
     case removeHelper
-    case scheduleBundleRemoval
+    case removeBundle
 
     public var displayText: String {
         switch self {
@@ -22,8 +23,9 @@ public enum MaintenanceStep: Equatable, Sendable {
         case .clearSettings: return "очистка настроек и журнала"
         case .removeToken: return "удаление токена ipinfo"
         case .removeCaches: return "удаление кэша флагов"
+        case .removeJournals: return "удаление журналов"
         case .removeHelper: return "снятие демона обновления"
-        case .scheduleBundleRemoval: return "удаление самого приложения"
+        case .removeBundle: return "удаление самого приложения"
         }
     }
 }
@@ -64,9 +66,13 @@ public struct Maintenance {
     private let secrets: SecretStoring
     private let defaultsSuite: String
     private let cachesDirectory: URL?
+
+    /// Журналы завершений и проверок: отдельный каталог, и удаление про него
+    /// не знало вовсе — после «удалить приложение» на диске оставалась история.
+    private let journalsDirectory: URL?
+
     private let bundlePath: String?
     private let fileManager: FileManager
-    private let removeBundle: @Sendable (String) -> Result<Void, Error>
     private let helper: HelperUninstalling?
 
     public init(
@@ -77,20 +83,22 @@ public struct Maintenance {
         cachesDirectory: URL? = FileManager.default
             .urls(for: .cachesDirectory, in: .userDomainMask).first?
             .appendingPathComponent("com.weto.app", isDirectory: true),
+        journalsDirectory: URL? = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent(JournalFile.directoryName, isDirectory: true),
         bundlePath: String? = Bundle.main.bundlePath.hasSuffix(".app")
             ? Bundle.main.bundlePath
             : nil,
-        fileManager: FileManager = .default,
-        removeBundle: @escaping @Sendable (String) -> Result<Void, Error> = Maintenance.scheduleBundleRemoval
+        fileManager: FileManager = .default
     ) {
         self.agent = agent
         self.helper = helper
         self.secrets = secrets
         self.defaultsSuite = defaultsSuite
         self.cachesDirectory = cachesDirectory
+        self.journalsDirectory = journalsDirectory
         self.bundlePath = bundlePath
         self.fileManager = fileManager
-        self.removeBundle = removeBundle
     }
 
     /// Приложение уходит до следующего входа в систему: агент выгружается,
@@ -116,6 +124,8 @@ public struct Maintenance {
         UserDefaults.standard.removePersistentDomain(forName: defaultsSuite)
         result.completed.append(.clearSettings)
 
+        remove(journalsDirectory, as: .removeJournals, into: &result)
+
         switch secrets.write(nil, account: "token") {
         case .success:
             result.completed.append(.removeToken)
@@ -123,14 +133,7 @@ public struct Maintenance {
             result.failures.append((.removeToken, error.displayText))
         }
 
-        if let cachesDirectory, fileManager.fileExists(atPath: cachesDirectory.path) {
-            do {
-                try fileManager.removeItem(at: cachesDirectory)
-                result.completed.append(.removeCaches)
-            } catch {
-                result.failures.append((.removeCaches, error.localizedDescription))
-            }
-        }
+        remove(cachesDirectory, as: .removeCaches, into: &result)
 
         // Демон снимает сам себя: у приложения нет прав на /Library.
         if let helper {
@@ -142,16 +145,37 @@ public struct Maintenance {
             }
         }
 
+        // Бандл сносит демон: он принадлежит root, потому что его ставит PKG,
+        // и у приложения нет прав ни на запись в него, ни на его удаление.
+        // Результат проверяется, а не предполагается: раньше удаление запускало
+        // скрипт от пользователя, рапортовало об успехе по факту запуска —
+        // и приложение оставалось на диске без единого слова об этом.
         if let bundlePath {
-            switch removeBundle(bundlePath) {
-            case .success:
-                result.completed.append(.scheduleBundleRemoval)
-            case .failure(let error):
-                result.failures.append((.scheduleBundleRemoval, error.localizedDescription))
+            if fileManager.fileExists(atPath: bundlePath) {
+                result.failures.append((
+                    .removeBundle,
+                    "приложение осталось в \(bundlePath) — удалите его вручную"
+                ))
+            } else {
+                result.completed.append(.removeBundle)
             }
         }
 
         return result
+    }
+
+    private func remove(
+        _ directory: URL?,
+        as step: MaintenanceStep,
+        into result: inout MaintenanceResult
+    ) {
+        guard let directory, fileManager.fileExists(atPath: directory.path) else { return }
+        do {
+            try fileManager.removeItem(at: directory)
+            result.completed.append(step)
+        } catch {
+            result.failures.append((step, error.localizedDescription))
+        }
     }
 
     /// Ответ демона ждём ограниченное время: удаление не должно зависнуть,
@@ -171,23 +195,4 @@ public struct Maintenance {
         return box.value
     }
 
-    /// Бандл нельзя удалить из самого работающего приложения, поэтому удаление
-    /// делает отдельный процесс, дождавшись выхода нашего.
-    public static let scheduleBundleRemoval: @Sendable (String) -> Result<Void, Error> = { path in
-        let pid = ProcessInfo.processInfo.processIdentifier
-        let script = """
-            while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
-            rm -rf '\(path.replacingOccurrences(of: "'", with: "'\\''"))'
-            """
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", script]
-        do {
-            try process.run()
-            return .success(())
-        } catch {
-            return .failure(error)
-        }
-    }
 }

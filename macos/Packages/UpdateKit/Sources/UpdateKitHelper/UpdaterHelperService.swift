@@ -102,20 +102,44 @@ public final class UpdaterHelperService: NSObject, NSXPCListenerDelegate, Update
         reply(triple.phase, triple.fraction, triple.failure)
     }
 
+    /// Самоудаление демона — и приложения, которое он обслуживает.
+    ///
+    /// Бандл сносится здесь, а не приложением: его ставит установщик под root,
+    /// и `/Applications/<app>` принадлежит root:wheel. Приложение пыталось
+    /// удалить его само, `rm -rf` упирался в права, а об отказе никто не узнавал —
+    /// приложение оставалось на диске после «удалить полностью».
+    ///
+    /// Удалять бандл работающего приложения безопасно: образы уже отображены
+    /// в память, и процесс доживает до своего выхода.
     public func uninstallHelper(reply: @escaping (String?) -> Void) {
         var failures: [String] = []
 
-        for path in [
+        let paths = [
+            configuration.installedAppPath,
             configuration.daemonPlistPath,
             configuration.daemonBinaryPath,
             configuration.workingDirectory,
-        ] {
+        ] + configuration.additionalUninstallPaths
+
+        for path in paths {
             guard FileManager.default.fileExists(atPath: path) else { continue }
             do {
                 try FileManager.default.removeItem(atPath: path)
             } catch {
                 failures.append("\(path): \(error.localizedDescription)")
             }
+        }
+
+        // Чек установки: без этого система считает пакет установленным, хотя
+        // ни одного его файла на диске уже нет.
+        if let identifier = configuration.packageIdentifier {
+            let forget = Process()
+            forget.executableURL = URL(fileURLWithPath: "/usr/sbin/pkgutil")
+            forget.arguments = ["--forget", identifier]
+            forget.standardOutput = Pipe()
+            forget.standardError = Pipe()
+            try? forget.run()
+            forget.waitUntilExit()
         }
 
         logger.log(failures.isEmpty ? "самоудаление: файлы убраны" : "самоудаление с ошибками")
