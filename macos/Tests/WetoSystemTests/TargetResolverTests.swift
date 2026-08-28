@@ -27,7 +27,9 @@ final class TargetResolverTests: XCTestCase {
     }
 
     private func resolver(_ directories: [String]) -> TargetResolver {
-        TargetResolver(searchPaths: directories.map { root.appendingPathComponent($0).path })
+        TargetResolver(paths: StaticSearchPaths(directories.map {
+            root.appendingPathComponent($0).path
+        }))
     }
 
     /// Тот самый случай: `claude` лежит в `~/.local/bin`, и по имени он обязан
@@ -77,18 +79,51 @@ final class TargetResolverTests: XCTestCase {
         XCTAssertNil(resolver([".local/bin"]).resolve("такого-нет"))
     }
 
-    /// Список каталогов по умолчанию обязан содержать те, куда ставят инструменты
-    /// без пакетного менеджера: именно оттуда и не находилась цель.
-    func test_the_default_list_covers_the_user_bin_directories() {
-        let defaults = TargetResolver.defaultSearchPaths
-        let home = NSHomeDirectory()
-
-        XCTAssertTrue(defaults.contains("\(home)/.local/bin"))
-        XCTAssertTrue(defaults.contains("/opt/homebrew/bin"))
-        XCTAssertLessThan(
-            defaults.firstIndex(of: "\(home)/.local/bin") ?? .max,
-            defaults.firstIndex(of: "/usr/bin") ?? .max,
-            "каталоги пользователя спрашиваются раньше системных"
+    /// Ненайденное имя заставляет перечитать каталоги: инструмент могли
+    /// поставить минуту назад, и перезапускать приложение ради этого незачем.
+    func test_a_miss_asks_for_a_fresh_list_of_directories() throws {
+        let expected = makeExecutable("mise-tool", in: ".local/bin")
+        let paths = GrowingSearchPaths(
+            initial: [root.appendingPathComponent("usr/bin").path],
+            afterRefresh: [root.appendingPathComponent(".local/bin").path]
         )
+
+        let rule = try XCTUnwrap(TargetResolver(paths: paths).resolve("mise-tool"))
+
+        XCTAssertEqual(rule.path, expected)
+        XCTAssertEqual(paths.refreshes, 1)
+    }
+
+    /// Найденное имя перечитывать не заставляет: разрешение идёт раз в две
+    /// секунды на каждую цель, и лишний запуск шелла тут недопустим.
+    func test_a_hit_never_asks_for_a_refresh() throws {
+        _ = makeExecutable("claude", in: ".local/bin")
+        let paths = GrowingSearchPaths(
+            initial: [root.appendingPathComponent(".local/bin").path],
+            afterRefresh: []
+        )
+
+        _ = try XCTUnwrap(TargetResolver(paths: paths).resolve("claude"))
+
+        XCTAssertEqual(paths.refreshes, 0)
+    }
+}
+
+/// Каталоги, которых при первом чтении ещё не было.
+private final class GrowingSearchPaths: SearchPathProviding, @unchecked Sendable {
+    private let initial: [String]
+    private let afterRefresh: [String]
+    private(set) var refreshes = 0
+
+    init(initial: [String], afterRefresh: [String]) {
+        self.initial = initial
+        self.afterRefresh = afterRefresh
+    }
+
+    func searchPaths() -> [String] { initial }
+
+    func refreshedSearchPaths() -> [String] {
+        refreshes += 1
+        return afterRefresh
     }
 }
