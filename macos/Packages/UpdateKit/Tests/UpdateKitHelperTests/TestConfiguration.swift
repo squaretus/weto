@@ -21,3 +21,33 @@ extension UpdateFeedConfiguration {
         defaultsSuite: "com.example.shared"
     )
 }
+
+extension UpdateFeedConfiguration {
+
+    /// Тот же набор, но с путями во временном каталоге: самоудаление проверяется
+    /// на настоящих файлах, а не на системных.
+    static func testing(
+        installedAppPath: String,
+        workingDirectory: String,
+        daemonPlistPath: String,
+        daemonBinaryPath: String,
+        additionalUninstallPaths: [String] = []
+    ) -> UpdateFeedConfiguration {
+        UpdateFeedConfiguration(
+            owner: "example",
+            repository: "sample",
+            appDisplayName: "Sample",
+            assetSuffix: ".pkg",
+            machServiceName: "com.example.helper",
+            installedAppPath: installedAppPath,
+            clientExecutablePaths: ["\(installedAppPath)/Contents/MacOS/Sample"],
+            debugClientExecutableSuffixes: [],
+            workingDirectory: workingDirectory,
+            daemonPlistPath: daemonPlistPath,
+            daemonBinaryPath: daemonBinaryPath,
+            logSubsystem: "com.example.helper",
+            defaultsSuite: "com.example.shared",
+            additionalUninstallPaths: additionalUninstallPaths
+        )
+    }
+}
