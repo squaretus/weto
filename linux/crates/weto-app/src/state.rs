@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use weto_config::checks::{CheckEvent, CheckLog};
 use weto_config::journal::{GeoReadingPatch, Journal, KillContext, KillEvent, KillEventKind};
 use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
@@ -21,7 +22,9 @@ use weto_core::geo::SourceOutcome;
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::presentation::GuardState;
 use weto_core::process::MatchedProcess;
-use weto_guard::controller::{GuardController, GuardSnapshot, KillReporting, SettingsProviding};
+use weto_guard::controller::{
+    CheckReporting, GuardController, GuardSnapshot, KillReporting, SettingsProviding,
+};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
@@ -298,6 +301,25 @@ impl KillReporting for JournalWriter {
     }
 }
 
+/// Журнал проверок приложения: пишется сразу на диск, как и журнал завершений,
+/// и в интерфейс не попадает — это материал выгрузки.
+struct CheckWriter {
+    paths: Paths,
+    log: Arc<Mutex<CheckLog>>,
+}
+
+impl CheckReporting for CheckWriter {
+    fn record(&self, event: CheckEvent) {
+        let mut log = self.log.lock().expect("журнал проверок");
+        if !log.append(event) {
+            return;
+        }
+        if let Err(error) = log.save(&self.paths.checks_file()) {
+            eprintln!("weto: журнал проверок не сохранился: {error}");
+        }
+    }
+}
+
 /// Идентификатор эпизода. UUID сюда тянуть незачем: хватает монотонного счётчика
 /// с отметкой запуска — записи живут внутри одного файла одного пользователя.
 fn new_id() -> String {
@@ -316,6 +338,8 @@ pub struct AppState {
     pub settings: Arc<SharedSettings>,
     controller: Arc<GuardController>,
     journal: Arc<Mutex<Journal>>,
+    /// Журнал проверок — рядом с журналом завершений и отдельным файлом.
+    checks: Arc<Mutex<CheckLog>>,
     /// Проба в полёте. На месте кнопки проверки крутится индикатор, а повторное
     /// нажатие запроса не порождает: у подтверждающего сервиса лимит.
     probing: Arc<AtomicBool>,
@@ -325,6 +349,7 @@ impl AppState {
     pub fn new(paths: Paths) -> Arc<AppState> {
         let settings = SharedSettings::load(&paths);
         let journal = Arc::new(Mutex::new(Journal::load(&paths.journal_file())));
+        let checks = Arc::new(Mutex::new(CheckLog::load(&paths.checks_file())));
 
         let writer = JournalWriter {
             paths: paths.clone(),
@@ -343,6 +368,10 @@ impl AppState {
             Box::new(SettingsSource(settings.clone())),
             ProcessEnforcer::new(Box::new(ProcRegistry::new()), Box::new(SigtermKiller)),
             Box::new(writer),
+            Box::new(CheckWriter {
+                paths: paths.clone(),
+                log: checks.clone(),
+            }),
         ));
 
         Arc::new(AppState {
@@ -350,6 +379,7 @@ impl AppState {
             settings,
             controller,
             journal,
+            checks,
             probing: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -376,10 +406,17 @@ impl AppState {
             .flatten()
             .is_some_and(|token| !token.is_empty());
         let events = self.journal().entries().to_vec();
+        let checks = self
+            .checks
+            .lock()
+            .expect("журнал проверок")
+            .entries()
+            .to_vec();
 
         let export = weto_config::export::JournalExport::build(
             &settings,
             events,
+            checks,
             has_token,
             std::time::SystemTime::now(),
             os_version(),

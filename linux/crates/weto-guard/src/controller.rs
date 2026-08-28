@@ -18,9 +18,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use weto_config::settings::Settings;
+use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading, SourceOutcome};
 use weto_core::network::NetworkSnapshot;
@@ -59,6 +60,13 @@ pub enum ProbeTrigger {
 
 pub trait SettingsProviding: Send + Sync {
     fn settings(&self) -> Settings;
+}
+
+/// Куда уходит запись о каждой попытке проверки — включая ту, где запрос
+/// так и не ушёл. Журнал завершений про это молчит: проверка, не породившая
+/// завершения, следа не оставляет.
+pub trait CheckReporting: Send + Sync {
+    fn record(&self, event: CheckEvent);
 }
 
 pub trait KillReporting: Send + Sync {
@@ -123,6 +131,7 @@ pub struct GuardController {
     settings: Box<dyn SettingsProviding>,
     enforcer: ProcessEnforcer,
     reporter: Box<dyn KillReporting>,
+    checks: Box<dyn CheckReporting>,
     inner: Mutex<Inner>,
     probe_in_flight: Arc<AtomicBool>,
     coalesce_window: Duration,
@@ -137,6 +146,7 @@ impl GuardController {
         settings: Box<dyn SettingsProviding>,
         enforcer: ProcessEnforcer,
         reporter: Box<dyn KillReporting>,
+        checks: Box<dyn CheckReporting>,
     ) -> GuardController {
         GuardController {
             network,
@@ -145,6 +155,7 @@ impl GuardController {
             settings,
             enforcer,
             reporter,
+            checks,
             inner: Mutex::new(Inner {
                 verdict: None,
                 previous_verdict: None,
@@ -229,7 +240,12 @@ impl GuardController {
             if trigger == ProbeTrigger::Manual
                 || (armed && stale && self.coalescing_window_passed())
             {
-                self.probe_and_store(&settings, &fingerprint);
+                let trigger = if trigger == ProbeTrigger::Manual {
+                    CheckTrigger::Manual
+                } else {
+                    self.staleness_trigger(settings.revision)
+                };
+                self.probe_and_store(&settings, &fingerprint, trigger);
             }
             return decision;
         }
@@ -240,7 +256,12 @@ impl GuardController {
             let armed = settings.is_enabled && !config.targets.is_empty();
             let refreshed = if armed && (trigger == ProbeTrigger::Manual || self.geo_schedule_due())
             {
-                self.probe_and_store(&settings, &fingerprint)
+                let reason = if trigger == ProbeTrigger::Manual {
+                    CheckTrigger::Manual
+                } else {
+                    CheckTrigger::Schedule
+                };
+                self.probe_and_store(&settings, &fingerprint, reason)
             } else {
                 None
             };
@@ -269,7 +290,12 @@ impl GuardController {
         self.apply(&settings, pending.clone(), None, &network);
 
         if trigger == ProbeTrigger::Manual || self.coalescing_window_passed() {
-            if let Some(outcome) = self.probe_and_store(&settings, &fingerprint) {
+            let reason = if trigger == ProbeTrigger::Manual {
+                CheckTrigger::Manual
+            } else {
+                self.staleness_trigger(settings.revision)
+            };
+            if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
                 let decision = decide(&GuardSignals {
                     is_enabled: settings.is_enabled,
                     vpn,
@@ -333,6 +359,57 @@ impl GuardController {
         }
     }
 
+    /// Запись о состоявшейся пробе: показания и трассы сервисов как есть.
+    fn note_check(
+        &self,
+        trigger: CheckTrigger,
+        outcome: &GeoOutcome,
+        report: &GeoProbeReport,
+        fingerprint: &str,
+        milliseconds: u64,
+    ) {
+        let reading = match outcome {
+            GeoOutcome::Resolved(reading) => Some(reading.clone()),
+            _ => None,
+        };
+        let detail = match outcome {
+            GeoOutcome::Resolved(_) => None,
+            GeoOutcome::Degraded { detail, .. } => Some(detail.clone()),
+            GeoOutcome::Unavailable(detail) => Some(detail.clone()),
+        };
+
+        self.checks.record(CheckEvent {
+            id: new_check_id(),
+            at: SystemTime::now(),
+            trigger,
+            outcome: if reading.is_some() {
+                CheckOutcome::Answered
+            } else {
+                CheckOutcome::Failed
+            },
+            fingerprint: Some(fingerprint.to_string()),
+            duration_milliseconds: Some(milliseconds),
+            ip: report.ip.clone(),
+            country: reading.as_ref().map(|r| r.primary_country.clone()),
+            confirmed_country: reading.as_ref().and_then(|r| r.confirmed_country.clone()),
+            confirm_source: reading
+                .as_ref()
+                .and_then(|r| r.confirm_source.map(|s| s.name().to_string())),
+            services: report.traces.clone(),
+            detail,
+        });
+    }
+
+    /// Повод пробы выводится из того, что именно перестало быть свежим: ревизия
+    /// настроек или отпечаток выхода.
+    fn staleness_trigger(&self, revision: u64) -> CheckTrigger {
+        let inner = self.inner.lock().expect("состояние охраны");
+        match inner.previous_verdict.as_ref() {
+            Some((previous, _)) if *previous != revision => CheckTrigger::SettingsChange,
+            _ => CheckTrigger::NetworkChange,
+        }
+    }
+
     /// Вердикт годен, только если и настройки, и сеть те же самые.
     fn fresh_verdict(&self, revision: u64, fingerprint: &str) -> Option<CachedVerdict> {
         let inner = self.inner.lock().expect("состояние охраны");
@@ -361,14 +438,38 @@ impl GuardController {
     }
 
     /// Запрос к сервисам. Повторное нажатие в полёте запроса второго не порождает.
-    fn probe_and_store(&self, settings: &Settings, fingerprint: &str) -> Option<GeoOutcome> {
+    fn probe_and_store(
+        &self,
+        settings: &Settings,
+        fingerprint: &str,
+        trigger: CheckTrigger,
+    ) -> Option<GeoOutcome> {
         if self.probe_in_flight.swap(true, Ordering::SeqCst) {
+            // Ровно этот случай и означает «нажал пять раз, а запрос так и не ушёл».
+            self.checks.record(CheckEvent {
+                id: new_check_id(),
+                at: SystemTime::now(),
+                trigger,
+                outcome: CheckOutcome::SkippedProbeInFlight,
+                fingerprint: Some(fingerprint.to_string()),
+                duration_milliseconds: None,
+                ip: None,
+                country: None,
+                confirmed_country: None,
+                confirm_source: None,
+                services: Vec::new(),
+                detail: None,
+            });
             return None;
         }
 
         let token = self.secrets.load().ok().flatten();
+        let started = Instant::now();
         let report = self.geo.probe(token.as_deref());
+        let elapsed = started.elapsed().as_millis() as u64;
         let outcome = self.admissible_outcome(&report, fingerprint);
+
+        self.note_check(trigger, &outcome, &report, fingerprint, elapsed);
 
         {
             let mut inner = self.inner.lock().expect("состояние охраны");
@@ -567,4 +668,17 @@ impl UnsafeReasonText {
     fn pending() -> String {
         UnsafeReason::VerificationPending.display_text()
     }
+}
+
+/// Идентификатор записи проверки. UUID сюда тянуть незачем: хватает монотонного
+/// счётчика с отметкой времени — записи живут в одном файле одного пользователя.
+fn new_check_id() -> String {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let order = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let since_epoch = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    format!("check-{since_epoch:x}-{order:x}")
 }

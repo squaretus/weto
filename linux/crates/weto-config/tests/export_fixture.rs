@@ -12,6 +12,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::Value;
 
+use weto_config::checks::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_config::export::JournalExport;
 use weto_config::journal::{
     GeoServiceTrace, KillDiagnostics, KillEvent, KillEventKind, VerdictStaleness, BODY_LIMIT,
@@ -30,6 +31,9 @@ struct Contract {
     diagnostics_keys: Vec<String>,
     staleness_keys: Vec<String>,
     trace_keys: Vec<String>,
+    check_keys: Vec<String>,
+    check_triggers: Vec<String>,
+    check_outcomes: Vec<String>,
     staleness_causes: Vec<String>,
     event_kinds: Vec<String>,
     timestamp_fields: Vec<String>,
@@ -120,9 +124,34 @@ fn export() -> (Value, String) {
         }),
     };
 
+    let check = CheckEvent {
+        id: "check-0".to_string(),
+        at: moment,
+        trigger: CheckTrigger::Manual,
+        outcome: CheckOutcome::SkippedProbeInFlight,
+        fingerprint: Some("out=wg0/10.2.0.5".to_string()),
+        duration_milliseconds: Some(42),
+        ip: Some("176.12.76.15".to_string()),
+        country: Some("KZ".to_string()),
+        confirmed_country: Some("KZ".to_string()),
+        confirm_source: Some("freeipapi".to_string()),
+        services: vec![GeoServiceTrace {
+            service: "ipinfo".to_string(),
+            url: "https://v4.api.ipinfo.io/lite/me".to_string(),
+            http_status: Some(200),
+            duration_milliseconds: Some(42),
+            body: Some(r#"{"ip":"176.12.76.15","country_code":"KZ"}"#.to_string()),
+            failure: Some("нет".to_string()),
+            from_cache: true,
+            cache_age_seconds: Some(7),
+        }],
+        detail: Some("проба уже в полёте".to_string()),
+    };
+
     let export = JournalExport::build(
         &settings,
         vec![event],
+        vec![check],
         true,
         UNIX_EPOCH + Duration::from_secs(1_787_000_100),
         "Linux 6.8.0".to_string(),
@@ -196,6 +225,28 @@ fn event_matches_the_shared_contract() {
             .unwrap()
             .to_string()
     ));
+}
+
+/// Проверки — второй журнал в том же файле: «нажал и ничего не произошло»
+/// разбирают именно по нему.
+#[test]
+fn check_matches_the_shared_contract() {
+    let contract = contract();
+    let (object, _) = export();
+    let check = &object["checks"][0];
+
+    assert_eq!(keys(check), expected(&contract.check_keys), "проверка");
+    assert!(contract
+        .check_triggers
+        .contains(&check["trigger"].as_str().unwrap().to_string()));
+    assert!(contract
+        .check_outcomes
+        .contains(&check["outcome"].as_str().unwrap().to_string()));
+    assert_eq!(
+        keys(&check["services"][0]),
+        expected(&contract.trace_keys),
+        "трасса проверки"
+    );
 }
 
 /// `SystemTime` по умолчанию сериализуется объектом, а не строкой: без этой

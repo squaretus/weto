@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use weto_config::paths::Paths;
 use weto_config::settings::Settings;
+use weto_core::check::CheckEvent;
 use weto_core::diagnostics::KillContext;
 use weto_core::policy::GuardDecision;
 use weto_core::process::MatchedProcess;
-use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
+use weto_guard::controller::{CheckReporting, GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
@@ -39,6 +40,13 @@ impl SettingsProviding for FileSettings {
 }
 
 struct PrintingReporter;
+
+/// Демон журнал проверок не ведёт: он инструмент отладки, а не резидент.
+struct SilentChecks;
+
+impl CheckReporting for SilentChecks {
+    fn record(&self, _event: CheckEvent) {}
+}
 
 impl KillReporting for PrintingReporter {
     fn report(&self, killed: &[MatchedProcess], context: &KillContext) {
@@ -64,6 +72,7 @@ fn build_controller(paths: &Paths) -> GuardController {
         Box::new(FileSettings(paths.settings_file())),
         ProcessEnforcer::new(Box::new(ProcRegistry::new()), Box::new(SigtermKiller)),
         Box::new(PrintingReporter),
+        Box::new(SilentChecks),
     )
 }
 
