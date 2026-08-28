@@ -13,6 +13,7 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `macos/Sources/WetoSystem/NetworkSnapshotReader.swift` — one question: who carries the traffic
 - `macos/Sources/WetoSystem/RouteProbe.swift` — `RouteProbing`, `KernelRouteProbe`, `InterfaceAddresses`
 - `macos/Sources/WetoSystem/NetworkEventSource.swift`
+- `macos/Sources/WetoSystem/SearchPaths.swift` — `PATH` логин-шелла для поиска целей по имени
 - `macos/Sources/WetoSystem/GeoProbe.swift`
 - `macos/Sources/WetoSystem/NetworkPathReporter.swift` (also `NetworkPathReporting`)
 - `macos/Sources/WetoSystem/HTTPFetching.swift`
