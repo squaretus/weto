@@ -123,6 +123,11 @@ Everything the policy decides is shared. What the system dictates is not:
   and by the time the verdict is known the targets are already dead, so `refine` and
   `resolved_safe` exist as separate calls. Without them the records keep saying "not verified yet"
   forever. `Journal::refine_episode` rewrites every record of the episode.
+- The episode ledger lives in `weto_core::episode::EpisodeLedger`, not in the app layer:
+  the rule is identical on both platforms, and the app crate has no tests — a mistake in it
+  showed up only on a live machine, as "launch blocked" records for a process killed for the
+  first time. `episode_finished` fires on **every** transition to safe, not just for an episode
+  that began before the verdict: that call is where the ledger is reset.
 - Dedup is by the pair **reason + pid**. It used to be by reason alone, which never let a target
   launched mid-episode into the journal at all: the user saw a kill the journal did not remember,
   and no notification either.

@@ -129,12 +129,13 @@ impl Journal {
 
     /// Проход охраны пишется целиком: сколько процессов завершено, столько
     /// и записей.
+    ///
+    /// Свежие сверху — так же, как на macOS. Порядок здесь не косметика: файл
+    /// выгрузки общий и уходит на разбор, и «первая запись» обязана значить
+    /// одно и то же на обеих платформах.
     pub fn append(&mut self, events: Vec<KillEvent>) {
-        self.entries.extend(events);
-        if self.entries.len() > CAPACITY {
-            let excess = self.entries.len() - CAPACITY;
-            self.entries.drain(0..excess);
-        }
+        self.entries.splice(0..0, events);
+        self.entries.truncate(CAPACITY);
     }
 
     /// Причина эпизода, ставшая известной, дописывается всем его записям.

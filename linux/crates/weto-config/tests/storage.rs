@@ -155,8 +155,12 @@ fn journal_keeps_the_last_hundred_entries() {
     }
 
     assert_eq!(journal.entries().len(), CAPACITY);
-    assert_eq!(journal.entries()[0].pid, 5);
-    assert_eq!(journal.entries()[CAPACITY - 1].pid, CAPACITY as i32 + 4);
+    assert_eq!(
+        journal.entries()[0].pid,
+        CAPACITY as i32 + 4,
+        "свежие сверху"
+    );
+    assert_eq!(journal.entries()[CAPACITY - 1].pid, 5);
 }
 
 /// Проход охраны пишется целиком: завершили четыре процесса — четыре записи,
@@ -211,7 +215,14 @@ fn journal_refines_every_record_of_the_episode() {
             "Адрес 185.228.113.231 в чёрном списке"
         ]
     );
-    assert_eq!(journal.entries()[0].reason_text, "чужое");
+    // Ищем по эпизоду, а не по индексу: порядок записей — свежие сверху,
+    // и привязка к позиции ломается на первом же изменении порядка.
+    let other = journal
+        .entries()
+        .iter()
+        .find(|event| event.episode_id == "другой")
+        .expect("чужая запись на месте");
+    assert_eq!(other.reason_text, "чужое");
 }
 
 /// Эпизод, начавшийся до вердикта и закончившийся безопасным выходом, обязан

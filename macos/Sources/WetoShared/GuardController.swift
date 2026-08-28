@@ -244,13 +244,19 @@ final class GuardController {
         let expectedFingerprint = snapshotReader.snapshot().verdictFingerprint
 
         guard !isProbeInFlight else {
-            // Ровно этот случай и означает «нажал пять раз, а запрос так и не ушёл».
-            onCheck(CheckEvent(
-                date: Date(),
-                trigger: trigger,
-                outcome: .skippedProbeInFlight,
-                fingerprint: expectedFingerprint
-            ))
+            // Записывается только нажатие: «нажал пять раз, а запрос так и не ушёл»
+            // объяснить нечем иначе. Автоматические поводы приходят каждый такт,
+            // и их пропуски — нормальное состояние, а не событие: за пять секунд
+            // ожидания ipinfo они вытеснили бы из полусотни записей ровно ту одну,
+            // ради которой журнал и ведётся.
+            if trigger == .manual {
+                onCheck(CheckEvent(
+                    date: Date(),
+                    trigger: trigger,
+                    outcome: .skippedProbeInFlight,
+                    fingerprint: expectedFingerprint
+                ))
+            }
             return
         }
 
@@ -268,7 +274,11 @@ final class GuardController {
             let report = await self?.geoProbe.probe()
             self?.isProbeInFlight = false
 
-            guard let report else { return }
+            // Отмена бывает ровно одна: `stop()` при завершении работы. Проба,
+            // вытесняемая другой, здесь больше не появляется — но применить ответ
+            // после остановки охраны значило бы заново поднять сторожевой таймер
+            // у выключённого приложения.
+            guard let report, !Task.isCancelled else { return }
 
             let elapsed = ContinuousClock.now - started
             let milliseconds = Int(
