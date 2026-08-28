@@ -48,6 +48,12 @@ impl Paths {
     pub fn journal_file(&self) -> PathBuf {
         self.state_dir.join("journal.json")
     }
+
+    /// Журнал проверок подключения — рядом с журналом завершений и отдельным
+    /// файлом: это разные вопросы, и одно не должно вытеснять другое.
+    pub fn checks_file(&self) -> PathBuf {
+        self.state_dir.join("checks.json")
+    }
 }
 
 fn xdg(variable: &str, home: &std::path::Path, fallback: &str) -> PathBuf {

@@ -12,11 +12,13 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+use crate::checks::CheckEvent;
 use crate::journal::KillEvent;
 use crate::settings::Settings;
 
 /// Версия формата. Меняется, когда старый разбор перестаёт понимать новый файл.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Версия 2: рядом с завершениями появились проверки.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +29,10 @@ pub struct JournalExport {
     pub app: ExportedApp,
     pub settings: ExportedSettings,
     pub events: Vec<KillEvent>,
+    /// Попытки проверки подключения — включая те, где запрос так и не ушёл.
+    /// Журнал завершений про них молчит: проверка, не породившая завершения,
+    /// следа не оставляет, а «нажал и ничего не произошло» разбирают именно тут.
+    pub checks: Vec<CheckEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +66,7 @@ impl JournalExport {
     pub fn build(
         settings: &Settings,
         events: Vec<KillEvent>,
+        checks: Vec<CheckEvent>,
         has_token: bool,
         exported_at: SystemTime,
         os_version: String,
@@ -88,6 +95,7 @@ impl JournalExport {
                 has_ipinfo_token: has_token,
             },
             events,
+            checks,
         }
     }
 

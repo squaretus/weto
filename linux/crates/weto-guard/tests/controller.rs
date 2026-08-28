@@ -8,11 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use weto_config::settings::{Settings, Target};
+use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::KillContext;
 use weto_core::geo::{ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
 use weto_core::network::{NetworkSnapshot, OutgoingRoute};
 use weto_core::policy::{GuardDecision, UnsafeReason};
 use weto_core::process::{ProcessSnapshot, TargetKind};
+use weto_guard::controller::CheckReporting;
 use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::GeoProbing;
@@ -205,6 +207,17 @@ impl SettingsProviding for FakeSettings {
     }
 }
 
+/// Приёмник проверок: тесты смотрят, что записалось про попытки — включая те,
+/// где запрос так и не ушёл.
+#[derive(Clone, Default)]
+struct RecordingChecks(Arc<Mutex<Vec<CheckEvent>>>);
+
+impl CheckReporting for RecordingChecks {
+    fn record(&self, event: CheckEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
 #[derive(Clone, Default)]
 struct RecordingReporter(
     Arc<Mutex<Vec<String>>>,
@@ -234,6 +247,7 @@ struct Harness {
     processes: FakeProcesses,
     killer: RecordingKiller,
     reporter: RecordingReporter,
+    checks: RecordingChecks,
 }
 
 /// Без окна коалесценции: почти всем случаям оно только мешает, а проверяется
@@ -248,6 +262,7 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
     let settings = FakeSettings::armed();
     let killer = RecordingKiller::default();
     let reporter = RecordingReporter::default();
+    let checks = RecordingChecks::default();
     let processes = FakeProcesses(Arc::new(Mutex::new(vec![
         ProcessSnapshot {
             pid: 42,
@@ -271,6 +286,7 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
         Box::new(settings.clone()),
         ProcessEnforcer::new(Box::new(processes.clone()), Box::new(killer.clone())),
         Box::new(reporter.clone()),
+        Box::new(checks.clone()),
     )
     .with_coalesce_window(window);
 
@@ -282,6 +298,7 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
         settings,
         killer,
         reporter,
+        checks,
     }
 }
 
@@ -525,6 +542,41 @@ fn the_settled_reason_is_offered_for_refinement() {
     assert!(
         refinements.iter().any(|r| r.contains("RU")),
         "настоящая причина обязана дойти до журнала: {refinements:?}"
+    );
+}
+
+/// Нажатие, пославшее запрос, записывается вместе с трассами сервисов.
+///
+/// Журнал завершений про проверки молчит: та, что не породила завершения, следа
+/// не оставляет. «Нажал, и ничего не произошло» разбирают по журналу проверок.
+#[test]
+fn a_manual_check_is_recorded_with_its_traces() {
+    let h = harness();
+
+    h.controller.probe_now();
+
+    let checks = h.checks.0.lock().unwrap();
+    let manual = checks
+        .iter()
+        .find(|c| c.trigger == CheckTrigger::Manual)
+        .expect("проверка по кнопке обязана записаться");
+    assert_eq!(manual.outcome, CheckOutcome::Answered);
+    assert!(manual.duration_milliseconds.is_some());
+    assert!(manual.fingerprint.is_some());
+}
+
+/// Рутинная удача расписания в журнал не идёт: раз в пять секунд она съела бы
+/// ёмкость за четыре минуты и не сказала бы ничего.
+#[test]
+fn a_routine_scheduled_success_leaves_no_record() {
+    let h = harness();
+
+    h.controller.tick();
+
+    let checks = h.checks.0.lock().unwrap();
+    assert!(
+        checks.iter().all(|c| c.trigger != CheckTrigger::Schedule),
+        "успешная рутина расписания в журнале не нужна"
     );
 }
 
