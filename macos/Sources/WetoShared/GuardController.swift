@@ -36,6 +36,11 @@ final class GuardController {
     private let vpnAppStatus: () -> VPNAppStatus
 
     private let onDecision: (GuardDecision) -> Void
+
+    /// Каждая попытка проверки — включая ту, где запрос так и не ушёл.
+    /// Журнал завершений про это молчит: нажатие, не породившее завершения,
+    /// следа не оставляет.
+    private let onCheck: (CheckEvent) -> Void
     /// `nil` гасит показания: устаревшие адрес и страна на экране
     /// читаются как «я всё ещё под VPN», хотя защиты уже нет.
     private let onReport: (GeoProbeReport?) -> Void
@@ -74,7 +79,8 @@ final class GuardController {
         debounceInterval: TimeInterval,
         vpnAppStatus: @escaping () -> VPNAppStatus,
         onDecision: @escaping (GuardDecision) -> Void,
-        onReport: @escaping (GeoProbeReport?) -> Void
+        onReport: @escaping (GeoProbeReport?) -> Void,
+        onCheck: @escaping (CheckEvent) -> Void = { _ in }
     ) {
         self.settings = settings
         self.snapshotReader = snapshotReader
@@ -82,6 +88,7 @@ final class GuardController {
         self.debounceInterval = debounceInterval
         self.vpnAppStatus = vpnAppStatus
         self.onDecision = onDecision
+        self.onCheck = onCheck
         self.onReport = onReport
 
         // Подписка живёт с момента создания, а не со `start()`: настройка, изменённая
@@ -129,7 +136,7 @@ final class GuardController {
             // Один запрос на смену состояния сети, и только пока охрана на посту:
             // выключенной охране и охране без целей сеть не нужна вовсе.
             if isArmed && isStale {
-                startProbe(after: debounceInterval)
+                startProbe(after: debounceInterval, trigger: stalenessTrigger(for: snapshot))
             } else {
                 probeTask?.cancel()
                 probeTask = nil
@@ -165,7 +172,7 @@ final class GuardController {
             onDecision(local)
         }
 
-        startProbe(after: 0)
+        startProbe(after: 0, trigger: .manual)
     }
 
     /// Судьба целей решается сетью. Запрос при этом уходит не на каждом такте:
@@ -200,7 +207,15 @@ final class GuardController {
             config: config
         ))
 
-        startProbe(after: debounceInterval)
+        startProbe(after: debounceInterval, trigger: stalenessTrigger(for: snapshot))
+    }
+
+    /// Повод пробы выводится из того, что именно перестало быть свежим: ревизия
+    /// настроек или отпечаток выхода. Отдельного канала для этого не нужно —
+    /// обе величины у контроллера и так под рукой.
+    private func stalenessTrigger(for snapshot: NetworkSnapshot) -> CheckEvent.Trigger {
+        guard let previousVerdict else { return .networkChange }
+        return previousVerdict.revision != revision ? .settingsChange : .networkChange
     }
 
     /// Запрос по расписанию: страна выхода меняется и на неизменном пути — например,
@@ -212,7 +227,7 @@ final class GuardController {
     func probeOnSchedule() {
         let config = settings.guardConfig
         guard settings.isEnabled, config.hasTargets, !isProbeInFlight else { return }
-        startProbe(after: 0)
+        startProbe(after: 0, trigger: .schedule)
     }
 
     /// Запрос уходит один и доводится до конца.
@@ -223,13 +238,23 @@ final class GuardController {
     /// против пятисекундного таймаута ipinfo. На медленном канале — например, сразу
     /// после подъёма второго VPN — проба не успевала ответить никогда, вердикт
     /// не приходил вовсе, и кнопка «проверить» не давала ничего.
-    private func startProbe(after interval: TimeInterval) {
-        guard !isProbeInFlight else { return }
-
-        let expected = revision
+    private func startProbe(after interval: TimeInterval, trigger: CheckEvent.Trigger) {
         // Отпечаток на момент старта: ответ про прежний путь нельзя применять
         // к новому. Раньше от этого спасала отмена — теперь спасать должно явно.
         let expectedFingerprint = snapshotReader.snapshot().verdictFingerprint
+
+        guard !isProbeInFlight else {
+            // Ровно этот случай и означает «нажал пять раз, а запрос так и не ушёл».
+            onCheck(CheckEvent(
+                date: Date(),
+                trigger: trigger,
+                outcome: .skippedProbeInFlight,
+                fingerprint: expectedFingerprint
+            ))
+            return
+        }
+
+        let expected = revision
 
         probeTask?.cancel()
         probeTask = Task { [weak self] in
@@ -238,14 +263,25 @@ final class GuardController {
             try? await Task.sleep(for: .seconds(interval))
             guard !Task.isCancelled else { return }
 
+            let started = ContinuousClock.now
             self?.isProbeInFlight = true
             let report = await self?.geoProbe.probe()
             self?.isProbeInFlight = false
 
             guard let report else { return }
 
+            let elapsed = ContinuousClock.now - started
+            let milliseconds = Int(
+                (Double(elapsed.components.seconds)
+                    + Double(elapsed.components.attoseconds) / 1e18) * 1000
+            )
+
             self?.applyLatestNetworkOutcome(
-                report, revision: expected, fingerprint: expectedFingerprint
+                report,
+                revision: expected,
+                fingerprint: expectedFingerprint,
+                trigger: trigger,
+                durationMilliseconds: milliseconds
             )
         }
     }
@@ -253,9 +289,15 @@ final class GuardController {
     private func applyLatestNetworkOutcome(
         _ report: GeoProbeReport,
         revision expected: Int,
-        fingerprint expectedFingerprint: String
+        fingerprint expectedFingerprint: String,
+        trigger: CheckEvent.Trigger,
+        durationMilliseconds: Int
     ) {
-        guard revision == expected else { return }
+        guard revision == expected else {
+            note(report, trigger: trigger, outcome: .discardedSettingsChanged,
+                 fingerprint: expectedFingerprint, milliseconds: durationMilliseconds)
+            return
+        }
 
         let config = settings.guardConfig
         let snapshot = snapshotReader.snapshot()
@@ -265,7 +307,19 @@ final class GuardController {
         // Путь наружу сменился, пока проба летела: её ответ описывает уже не нас,
         // и объявлять по нему вердикт значит открыть цели на чужих показаниях.
         // Следующий такт запросит пробу заново — теперь ему есть чем.
-        guard fingerprint == expectedFingerprint else { return }
+        guard fingerprint == expectedFingerprint else {
+            note(report, trigger: trigger, outcome: .discardedPathChanged,
+                 fingerprint: expectedFingerprint, milliseconds: durationMilliseconds)
+            return
+        }
+
+        note(
+            report,
+            trigger: trigger,
+            outcome: report.outcome.isResolved ? .answered : .failed,
+            fingerprint: fingerprint,
+            milliseconds: durationMilliseconds
+        )
 
         // Отчёт отдаётся и при отказе: попап обязан показать, кто именно молчал.
         onReport(report)
@@ -282,6 +336,32 @@ final class GuardController {
             geo: geo,
             config: config
         )))
+    }
+
+    /// Запись о состоявшейся пробе: показания и трассы сервисов как есть.
+    private func note(
+        _ report: GeoProbeReport,
+        trigger: CheckEvent.Trigger,
+        outcome: CheckEvent.Outcome,
+        fingerprint: String,
+        milliseconds: Int
+    ) {
+        var reading: GeoReading?
+        if case .resolved(let value) = report.outcome { reading = value }
+
+        onCheck(CheckEvent(
+            date: Date(),
+            trigger: trigger,
+            outcome: outcome,
+            fingerprint: fingerprint,
+            durationMilliseconds: milliseconds,
+            ip: report.ip,
+            country: reading?.primaryCountry,
+            confirmedCountry: reading?.confirmedCountry,
+            confirmSource: reading?.confirmSource?.rawValue,
+            services: report.traces,
+            detail: report.outcome.unavailableDetail
+        ))
     }
 
     /// Что из отчёта годится в основание вердикта.

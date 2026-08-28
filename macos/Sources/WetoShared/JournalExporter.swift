@@ -11,6 +11,7 @@ public enum JournalExporter {
     public static func make(
         settings: SettingsStore,
         events: [KillEvent],
+        checks: [CheckEvent] = [],
         at moment: Date = Date(),
         osVersion: String = ProcessInfo.processInfo.operatingSystemVersionString
     ) -> JournalExport {
@@ -33,7 +34,8 @@ public enum JournalExporter {
                 allowedIPRanges: config.allowedIPRanges.map(\.text),
                 hasIPInfoToken: !settings.ipinfoToken.isEmpty
             ),
-            events: events
+            events: events,
+            checks: checks
         )
     }
 }

@@ -14,6 +14,10 @@ public final class AppCoordinator {
 
     public let settings: SettingsStore
     public let eventLog: EventLogStore
+
+    /// Журнал проверок: в интерфейс не попадает, но выгружается вместе
+    /// с завершениями — «нажал и ничего не произошло» разбирают именно по нему.
+    public let checkLog: CheckLogStore
     public let guardVM: GuardVM
     public let update: UpdateController
 
@@ -28,8 +32,10 @@ public final class AppCoordinator {
 
         let settings = SettingsStore()
         let eventLog = EventLogStore()
+        let checkLog = CheckLogStore()
         self.settings = settings
         self.eventLog = eventLog
+        self.checkLog = checkLog
 
         // Механизм обновления собирается из конфигурации проекта: сам пакет
         // не знает ни адреса репозитория, ни имени сервиса демона.
@@ -46,6 +52,7 @@ public final class AppCoordinator {
         self.guardVM = GuardVM(
             settings: settings,
             eventLog: eventLog,
+            checkLog: checkLog,
             snapshotReader: NetworkSnapshotReader(),
             geoProbe: GeoProbe(
                 fetcher: URLSessionHTTPFetcher(),

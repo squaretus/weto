@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "about": [
     "Контракт формата выгрузки журнала. Одну и ту же форму обязаны давать обе",
     "реализации: macOS/Tests/WetoSharedTests/JournalExportFixtureTests.swift и",
@@ -14,15 +14,30 @@
     "берётся полностью заполненный — иначе списки ключей разъедутся на пустых",
     "полях, которые Swift опускает, а serde печатает как null.",
     "",
+    "checks — попытки проверки подключения, включая те, где запрос так и не ушёл.",
+    "Журнал завершений про них молчит: проверка, не породившая завершения, следа",
+    "не оставляет, а «нажал и ничего не произошло» разбирают именно тут.",
+    "",
     "timestampPattern — отметки времени строкой ISO 8601 в UTC. SystemTime в Rust",
     "по умолчанию сериализуется объектом, поэтому на Linux стоит свой сериализатор.",
     "",
     "forbiddenSubstrings — то, чего в файле не должно быть никогда: токен ipinfo",
     "уходит заголовком, а заголовки в журнал не записываются вовсе."
   ],
-  "schemaVersion": 1,
-  "envelopeKeys": ["app", "events", "exportedAt", "schemaVersion", "settings"],
-  "appKeys": ["osVersion", "platform", "version"],
+  "schemaVersion": 2,
+  "envelopeKeys": [
+    "app",
+    "checks",
+    "events",
+    "exportedAt",
+    "schemaVersion",
+    "settings"
+  ],
+  "appKeys": [
+    "osVersion",
+    "platform",
+    "version"
+  ],
   "settingsKeys": [
     "allowedCountries",
     "allowedIPRanges",
@@ -79,15 +94,53 @@
     "service",
     "url"
   ],
+  "checkKeys": [
+    "confirmSource",
+    "confirmedCountry",
+    "country",
+    "date",
+    "detail",
+    "durationMilliseconds",
+    "fingerprint",
+    "id",
+    "ip",
+    "outcome",
+    "services",
+    "trigger"
+  ],
+  "checkTriggers": [
+    "manual",
+    "networkChange",
+    "schedule",
+    "settingsChange"
+  ],
+  "checkOutcomes": [
+    "answered",
+    "failed",
+    "skippedProbeInFlight",
+    "discardedPathChanged",
+    "discardedSettingsChanged"
+  ],
   "stalenessCauses": [
     "coldStart",
     "configurationChanged",
     "networkChanged",
     "configurationAndNetworkChanged"
   ],
-  "eventKinds": ["terminated", "launchBlocked"],
+  "eventKinds": [
+    "terminated",
+    "launchBlocked"
+  ],
   "timestampPattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
-  "timestampFields": ["exportedAt", "date", "probedAt"],
+  "timestampFields": [
+    "exportedAt",
+    "date",
+    "probedAt"
+  ],
   "bodyLimit": 4096,
-  "forbiddenSubstrings": ["Bearer ", "Authorization", "authorization"]
+  "forbiddenSubstrings": [
+    "Bearer ",
+    "Authorization",
+    "authorization"
+  ]
 }

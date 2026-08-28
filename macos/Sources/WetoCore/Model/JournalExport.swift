@@ -9,13 +9,19 @@ import Foundation
 public struct JournalExport: Codable, Equatable, Sendable {
 
     /// Версия формата. Меняется, когда старый разбор перестаёт понимать новый файл.
-    public static let currentSchemaVersion = 1
+    /// Версия 2: рядом с завершениями появились проверки.
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let exportedAt: Date
     public let app: App
     public let settings: Settings
     public let events: [KillEvent]
+
+    /// Попытки проверки подключения — включая те, где запрос так и не ушёл.
+    /// Журнал завершений про них молчит: проверка, не породившая завершения,
+    /// следа не оставляет, а «нажал и ничего не произошло» разбирают именно тут.
+    public let checks: [CheckEvent]
 
     public struct App: Codable, Equatable, Sendable {
         public let version: String
@@ -69,6 +75,7 @@ public struct JournalExport: Codable, Equatable, Sendable {
         app: App,
         settings: Settings,
         events: [KillEvent],
+        checks: [CheckEvent],
         schemaVersion: Int = JournalExport.currentSchemaVersion
     ) {
         self.schemaVersion = schemaVersion
@@ -76,6 +83,7 @@ public struct JournalExport: Codable, Equatable, Sendable {
         self.app = app
         self.settings = settings
         self.events = events
+        self.checks = checks
     }
 
     /// Файл читают и человек, и агент, поэтому он отсортирован по ключам,
