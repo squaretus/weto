@@ -101,7 +101,8 @@ public actor GeoProbe: GeoProbing {
                 url: url.absoluteString,
                 httpStatus: answer.statusCode,
                 durationMilliseconds: Int((answer.duration * 1000).rounded()),
-                body: String(data: answer.data, encoding: .utf8)
+                body: String(data: answer.data, encoding: .utf8),
+                phases: answer.phases
             ))
             return answer
         } catch let failure as HTTPFetchError {
@@ -111,9 +112,18 @@ public actor GeoProbe: GeoProbing {
                 httpStatus: failure.statusCode,
                 durationMilliseconds: Int((failure.response.duration * 1000).rounded()),
                 body: String(data: failure.response.data, encoding: .utf8),
-                failure: GeoFailure(failure).displayText
+                failure: GeoFailure(failure).displayText,
+                phases: failure.response.phases
             ))
             throw failure
+        } catch let transport as HTTPTransportError {
+            traces.append(GeoServiceTrace(
+                service: service,
+                url: url.absoluteString,
+                failure: GeoFailure(transport).displayText,
+                phases: transport.phases
+            ))
+            throw transport
         } catch {
             traces.append(GeoServiceTrace(
                 service: service,
@@ -274,6 +284,13 @@ extension GeoFailure {
     /// только то, что о них знает Foundation.
     init(_ error: Error) {
         switch error {
+        case let transport as HTTPTransportError:
+            if let url = transport.underlying as? URLError {
+                self = GeoFailure(urlErrorCode: url.errorCode, description: url.localizedDescription,
+                                  phases: transport.phases)
+            } else {
+                self = .other(transport.underlying.localizedDescription)
+            }
         case let http as HTTPFetchError:
             self = GeoFailure(httpStatus: http.statusCode)
         case is DecodingError:

@@ -88,7 +88,7 @@ final class StatusPresentationTests: XCTestCase {
     func test_silent_ipinfo_shows_who_failed_instead_of_blank_dashes() {
         let report = GeoProbeReport(
             ip: nil,
-            ipinfo: .failed(.timedOut),
+            ipinfo: .failed(.timedOut(nil)),
             confirmation: .notRequested,
             confirmSource: nil,
             hasNetworkPath: true,

@@ -52,6 +52,7 @@ final class JournalExportFixtureTests: XCTestCase {
 
         let trace = (diagnostics?["services"] as? [[String: Any]])?.first
         assertKeys(of: trace, equal: contract.traceKeys, at: "трасса сервиса")
+        assertKeys(of: trace?["phases"], equal: contract.phasesKeys, at: "фазы трассы")
 
         XCTAssertTrue(contract.eventKinds.contains(event["kind"] as? String ?? ""))
         XCTAssertTrue(
@@ -199,6 +200,10 @@ final class JournalExportFixtureTests: XCTestCase {
                         durationMilliseconds: 42,
                         body: #"{"ip":"203.0.113.15","country_code":"KZ"}"#,
                         failure: "нет",
+                        phases: NetworkPhases(
+                            dnsMilliseconds: 3, connectMilliseconds: 20,
+                            tlsMilliseconds: 41, firstByteMilliseconds: 300
+                        ),
                         fromCache: true,
                         cacheAgeSeconds: 7
                     )
@@ -226,6 +231,10 @@ final class JournalExportFixtureTests: XCTestCase {
                     durationMilliseconds: 42,
                     body: #"{"ip":"203.0.113.15","country_code":"KZ"}"#,
                     failure: "нет",
+                    phases: NetworkPhases(
+                        dnsMilliseconds: 3, connectMilliseconds: 20,
+                        tlsMilliseconds: 41, firstByteMilliseconds: 300
+                    ),
                     fromCache: true,
                     cacheAgeSeconds: 7
                 )
@@ -274,6 +283,7 @@ final class JournalExportFixtureTests: XCTestCase {
         let diagnosticsKeys: [String]
         let stalenessKeys: [String]
         let traceKeys: [String]
+        let phasesKeys: [String]
         let checkKeys: [String]
         let checkTriggers: [String]
         let checkOutcomes: [String]

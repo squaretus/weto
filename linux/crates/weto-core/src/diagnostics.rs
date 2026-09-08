@@ -85,6 +85,18 @@ impl VerdictStaleness {
     }
 }
 
+/// Длительности фаз запроса в миллисекундах. Порт `NetworkPhases` с macOS: `None` — фаза
+/// не завершилась, `Some(0)` — фазы не было. На Linux пока не заполняется: ureq
+/// таймингов по фазам не отдаёт, поле держит формат выгрузки общим.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPhases {
+    pub dns_milliseconds: Option<u64>,
+    pub connect_milliseconds: Option<u64>,
+    pub tls_milliseconds: Option<u64>,
+    pub first_byte_milliseconds: Option<u64>,
+}
+
 /// Что ответил один гео-сервис в одной пробе — как есть, до разбора.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +109,8 @@ pub struct GeoServiceTrace {
     pub duration_milliseconds: Option<u64>,
     pub body: Option<String>,
     pub failure: Option<String>,
+    #[serde(default)]
+    pub phases: Option<NetworkPhases>,
     pub from_cache: bool,
     pub cache_age_seconds: Option<u64>,
 }

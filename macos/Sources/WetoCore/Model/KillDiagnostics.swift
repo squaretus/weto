@@ -91,6 +91,10 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
     public let body: String?
     public let failure: String?
 
+    /// Длительности фаз запроса: единственный способ отличить мёртвый туннель
+    /// от медленного сервиса. `nil` у ответа из кэша и у запроса, до которого не дошло.
+    public let phases: NetworkPhases?
+
     /// Ответ взят из кэша подтверждения, а не получен сейчас.
     public let fromCache: Bool
     public let cacheAgeSeconds: Int?
@@ -102,6 +106,7 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
         durationMilliseconds: Int? = nil,
         body: String? = nil,
         failure: String? = nil,
+        phases: NetworkPhases? = nil,
         fromCache: Bool = false,
         cacheAgeSeconds: Int? = nil
     ) {
@@ -111,6 +116,7 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
         self.durationMilliseconds = durationMilliseconds
         self.body = body.map(Self.trimmed)
         self.failure = failure
+        self.phases = phases
         self.fromCache = fromCache
         self.cacheAgeSeconds = cacheAgeSeconds
     }

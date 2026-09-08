@@ -29,7 +29,7 @@ final class GeoProbeReportTests: XCTestCase {
     func test_failed_ipinfo_carries_its_reason_into_the_verdict() {
         let report = GeoProbeReport(
             ip: nil,
-            ipinfo: .failed(.timedOut),
+            ipinfo: .failed(.timedOut(nil)),
             confirmation: .notRequested,
             confirmSource: nil,
             hasNetworkPath: true,
