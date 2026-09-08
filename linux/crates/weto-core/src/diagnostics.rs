@@ -140,6 +140,10 @@ pub struct KillDiagnostics {
     pub has_network_path: Option<bool>,
     pub vpn_app_entry: Option<String>,
     pub vpn_app_status: Option<String>,
+    /// Откуда взяты адрес и страна этой записи: из пробы, только что ответившей,
+    /// или из прошлого вердикта. Зеркало macOS `VerdictOrigin`, здесь — строкой
+    /// (`established`/`current`), потому что вычисляется на стороне вызывающего.
+    pub verdict_origin: Option<String>,
     #[serde(default)]
     pub services: Vec<GeoServiceTrace>,
     #[serde(default, with = "crate::timestamp::iso8601_option")]

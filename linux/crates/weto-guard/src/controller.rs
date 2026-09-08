@@ -354,6 +354,13 @@ impl GuardController {
                 has_network_path: report.map(|r| r.has_network_path),
                 vpn_app_entry: settings.vpn_app.as_ref().map(|app| app.entry.clone()),
                 vpn_app_status: Some(format!("{:?}", self.vpn_app_status(settings))),
+                verdict_origin: report.map(|r| {
+                    match r.outcome() {
+                        GeoOutcome::Resolved(_) => "current",
+                        _ => "established",
+                    }
+                    .to_string()
+                }),
                 services: report.map(|r| r.traces.clone()).unwrap_or_default(),
                 probed_at: report.map(|r| r.checked_at),
                 app_version: Some(env!("CARGO_PKG_VERSION").to_string()),

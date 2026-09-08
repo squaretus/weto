@@ -964,6 +964,33 @@ final class GuardVMTests: XCTestCase {
         h.vm.stop()
     }
 
+    /// Запись эпизода 19:31 несла адрес и страну прошлого вердикта под причиной «таймаут»
+    /// без пометки, что это прошлое. Плоские поля не меняем — пометка едет в diagnostics.
+    func test_silence_after_a_verdict_marks_the_readings_as_established() async {
+        let harness = makeDelayedHarness(snapshot: healthySnapshot())
+        harness.vm.start()
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: geoOutcome())
+        await harness.vm.awaitPendingProbe()
+
+        harness.vm.handle(.geoSchedule)
+        await harness.probe.waitUntilStarted(atLeast: 2)
+        await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await harness.vm.awaitPendingProbe()
+
+        let event = harness.log.events.first
+        XCTAssertEqual(event?.ip, "203.0.113.28", "плоские поля остаются прошлым чтением")
+        XCTAssertEqual(event?.diagnostics?.verdictOrigin, .established)
+    }
+
+    func test_a_fresh_blocked_country_marks_the_readings_as_current() async {
+        let harness = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "RU", confirmed: "RU"))
+        harness.vm.start()
+        await harness.vm.awaitPendingProbe()
+
+        XCTAssertEqual(harness.log.events.first?.diagnostics?.verdictOrigin, .current)
+    }
+
     /// Цели живут, но защита держится на том, что адрес не менялся, а не на свежем
     /// ответе ipinfo. Глаз обязан это видеть: зелёный тут врал бы.
     func test_grace_shows_yellow_while_ipinfo_stays_silent() async {
