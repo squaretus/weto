@@ -231,9 +231,12 @@ final class JournalExportFixtureTests: XCTestCase {
                     durationMilliseconds: 42,
                     body: #"{"ip":"176.12.76.15","country_code":"KZ"}"#,
                     failure: "нет",
+                    // Ответ из кэша: ни одна фаза не выполнялась, реальных длительностей
+                    // нет — только сам ключ `phases` обязан остаться в трассе проверки
+                    // (см. `contract.traceKeys`), фабриковать цифры незачем.
                     phases: NetworkPhases(
-                        dnsMilliseconds: 3, connectMilliseconds: 20,
-                        tlsMilliseconds: 41, firstByteMilliseconds: 300
+                        dnsMilliseconds: nil, connectMilliseconds: nil,
+                        tlsMilliseconds: nil, firstByteMilliseconds: nil
                     ),
                     fromCache: true,
                     cacheAgeSeconds: 7

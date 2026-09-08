@@ -3,6 +3,19 @@ import Darwin
 @testable import WetoSystem
 import WetoCore
 
+/// Читает один HTTP-запрос из сокета до `\r\n\r\n` — ровно чтобы сервер знал,
+/// что клиент закончил отправку, и мог не отвечать намеренно. Свободная функция,
+/// а не метод: используется из `Thread`-замыкания, и `self` там ловить незачем.
+private func readRequestHeaders(_ fd: Int32) {
+    var collected = [UInt8]()
+    var byte: UInt8 = 0
+    while collected.count < 4 || collected.suffix(4) != [13, 10, 13, 10] {
+        let n = read(fd, &byte, 1)
+        guard n > 0 else { return }
+        collected.append(byte)
+    }
+}
+
 final class HTTPFetcherPhasesTests: XCTestCase {
 
     /// Сокет, который слушает, но никогда не отвечает: соединение проходит через backlog,
@@ -46,6 +59,49 @@ final class HTTPFetcherPhasesTests: XCTestCase {
             XCTAssertNil(phases.firstByteMilliseconds, "первого байта не было")
             XCTAssertEqual(phases.stalledPhase, .firstByte)
             XCTAssertEqual((transport.underlying as? URLError)?.code, .timedOut)
+        }
+    }
+
+    /// Второй запрос через тот же `URLSessionHTTPFetcher` на тот же адрес обычно переиспользует
+    /// keep-alive-соединение: `connectStartDate`/`connectEndDate` у такой транзакции — `nil`
+    /// не потому что фаза не завершилась, а потому что её не было вовсе. Сервер отвечает
+    /// на первый запрос и держит то же соединение открытым, на второй — молчит, чтобы
+    /// запрос упёрся в ожидание первого байта на переиспользованном соединении.
+    func test_reused_connection_reports_connect_as_not_needed_not_stalled() async throws {
+        let (fd, port) = try silentListener()
+        defer { close(fd) }
+        let responder = Thread {
+            let client = accept(fd, nil, nil)
+            guard client >= 0 else { return }
+            readRequestHeaders(client)
+            let body = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            _ = body.withCString { write(client, $0, strlen($0)) }
+            // Соединение НЕ закрывается: второй запрос обязан прийти по нему же.
+            readRequestHeaders(client)
+            // На второй запрос сервер намеренно не отвечает.
+        }
+        responder.start()
+
+        let fetcher = URLSessionHTTPFetcher(timeout: 0.5)
+        let url = URL(string: "http://127.0.0.1:\(port)/")!
+
+        let first = try await fetcher.fetch(from: url, headers: [:])
+        XCTAssertEqual(first.statusCode, 200)
+
+        do {
+            _ = try await fetcher.fetch(from: url, headers: [:])
+            XCTFail("второй запрос не получает ответа — обязан упасть по таймауту")
+        } catch let transport as HTTPTransportError {
+            let phases = try XCTUnwrap(transport.phases, "фазы обязаны быть даже у упавшего запроса")
+            XCTAssertEqual(
+                phases.connectMilliseconds, 0,
+                "соединение переиспользовано — это «фазы не было», а не «не завершилась»"
+            )
+            XCTAssertNil(phases.firstByteMilliseconds, "первого байта не было")
+            XCTAssertEqual(
+                phases.stalledPhase, .firstByte,
+                "застряли на ожидании ответа, а не на соединении — оно уже было"
+            )
         }
     }
 

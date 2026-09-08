@@ -142,8 +142,10 @@ private final class MetricsCollector: NSObject, URLSessionDataDelegate, @uncheck
     }
 
     /// Длительность каждой фазы. Незавершённая фаза — `nil`; фаза, которой не было
-    /// (TLS у http, DNS у адреса-литерала) — `0`: иначе `stalledPhase` укажет на неё
-    /// у полностью успешного запроса.
+    /// (TLS у http, DNS у адреса-литерала, соединение у переиспользованного
+    /// keep-alive — `isReusedConnection`, а не только адрес-литерал) — `0`: иначе
+    /// `stalledPhase` укажет на неё у полностью успешного запроса, а на переиспользованном
+    /// соединении принял бы застрявший `firstByte` за застрявший `connect`.
     static func phases(of transaction: URLSessionTaskTransactionMetrics) -> NetworkPhases {
         func span(_ start: Date?, _ end: Date?) -> Int? {
             guard let start, let end else { return nil }
@@ -151,7 +153,8 @@ private final class MetricsCollector: NSObject, URLSessionDataDelegate, @uncheck
         }
         let dns = transaction.domainLookupStartDate == nil
             ? 0 : span(transaction.domainLookupStartDate, transaction.domainLookupEndDate)
-        let connect = span(transaction.connectStartDate, transaction.connectEndDate)
+        let connect = transaction.isReusedConnection
+            ? 0 : span(transaction.connectStartDate, transaction.connectEndDate)
         let tls = transaction.secureConnectionStartDate == nil
             ? 0 : span(transaction.secureConnectionStartDate, transaction.secureConnectionEndDate)
         let firstByte = span(transaction.requestStartDate, transaction.responseStartDate)
