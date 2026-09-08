@@ -60,6 +60,12 @@ public final class GuardVM {
     // Причины, уже описанные в журнале в рамках текущего небезопасного эпизода.
     @ObservationIgnored private var recordedReasons: Set<String> = []
 
+    // Текст причины, которым `apply` применил текущее небезопасное решение. Сторож
+    // и повторное включение цели во время того же решения обязаны звучать так же:
+    // `state` хранит для `.unproven` фиксированный `.pauseExpired` (временно, до
+    // задачи 14), и его `displayText` — не настоящая причина, а текст потолка паузы.
+    @ObservationIgnored private var lastUnsafeReasonText: String?
+
     // Решение только что принято по пробе, которая ответила сейчас, а не по старому
     // чтению. Взводится приёмом отчёта, гасится после того, как решение обработано:
     // задача 15 заменит это явным origin, вычисленным контроллером.
@@ -265,8 +271,8 @@ public final class GuardVM {
             let isVPNApp = settings.vpnAppRule == bundleID
             guard isVPNApp || settings.targets.contains(bundleID) else { return }
 
-            if !isVPNApp, case .unsafe(let reason) = state {
-                enforce(reasonText: reason.displayText)
+            if !isVPNApp, case .unsafe = state, let reasonText = lastUnsafeReasonText {
+                enforce(reasonText: reasonText)
                 return
             }
         }
@@ -321,6 +327,7 @@ public final class GuardVM {
             permissionFailure = nil
             recordedKills.removeAll()
             recordedReasons.removeAll()
+            lastUnsafeReasonText = nil
             state = settings.isEnabled && settings.guardConfig.hasTargets
                 ? .safe(lastReading)
                 : .disabled
@@ -331,11 +338,14 @@ public final class GuardVM {
             // в прежнем коде) сюда пока не переехало — задача 14 строит его заново
             // на `GuardMachine`, где решение и его повод не разъезжаются.
             state = .unsafe(.pauseExpired)
+            lastUnsafeReasonText = reason.displayText
             enforce(reasonText: reason.displayText, staleness: controller.lastStaleness)
+            decisionCameFromProbe = false
             startWatchdog()
 
         case .kill(let evidence):
             state = .unsafe(evidence)
+            lastUnsafeReasonText = evidence.displayText
             enforce(reasonText: evidence.displayText)
             decisionCameFromProbe = false
             startWatchdog()
@@ -446,8 +456,9 @@ public final class GuardVM {
                 try? await Task.sleep(for: .seconds(Constants.watchdogIntervalSeconds))
                 guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in
-                    guard let self, case .unsafe(let reason) = self.state else { return }
-                    self.enforce(reasonText: reason.displayText)
+                    guard let self, case .unsafe = self.state, let reasonText = self.lastUnsafeReasonText
+                    else { return }
+                    self.enforce(reasonText: reasonText)
                 }
             }
         }

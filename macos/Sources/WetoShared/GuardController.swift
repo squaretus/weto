@@ -219,6 +219,12 @@ final class GuardController {
                 : .safe
         )
 
+        // Показание одноразовое: относится только к этому объявлению fail-closed.
+        // Не погашенное здесь, оно приклеивалось бы и к решению уже ответившей
+        // пробы — таймаут через минуты после того, как вердикт устоялся, наследовал
+        // бы «сменилась сеть» от события, к которому уже не имеет отношения.
+        lastStaleness = nil
+
         startProbe(after: debounceInterval, trigger: stalenessTrigger(for: snapshot))
     }
 
