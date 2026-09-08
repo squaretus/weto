@@ -12,7 +12,8 @@ use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::KillContext;
 use weto_core::geo::{ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
 use weto_core::network::{NetworkSnapshot, OutgoingRoute};
-use weto_core::policy::{GuardDecision, UnsafeReason};
+use weto_core::policy::{UnprovenReason, UnsafeEvidence};
+use weto_core::presentation::AppliedDecision;
 use weto_core::process::{ProcessSnapshot, TargetKind};
 use weto_guard::controller::CheckReporting;
 use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
@@ -308,10 +309,10 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
     }
 }
 
-fn reason(decision: &GuardDecision) -> Option<&UnsafeReason> {
+fn reason(decision: &AppliedDecision) -> Option<&UnsafeEvidence> {
     match decision {
-        GuardDecision::Kill(reason) => Some(reason),
-        GuardDecision::Safe => None,
+        AppliedDecision::Kill(evidence) => Some(evidence),
+        AppliedDecision::Safe | AppliedDecision::Pending | AppliedDecision::Unproven(_) => None,
     }
 }
 
@@ -325,7 +326,7 @@ fn the_first_tick_is_fail_closed_and_then_resolves() {
 
     let decision = h.controller.tick();
 
-    assert_eq!(decision, GuardDecision::Safe);
+    assert_eq!(decision, AppliedDecision::Safe);
     assert_eq!(h.geo.call_count(), 1);
     assert_eq!(
         h.killer.killed(),
@@ -343,7 +344,7 @@ fn a_routine_tick_with_a_healthy_vpn_does_not_touch_the_targets() {
 
     let decision = h.controller.tick();
 
-    assert_eq!(decision, GuardDecision::Safe);
+    assert_eq!(decision, AppliedDecision::Safe);
     assert_eq!(h.killer.killed().len(), killed_after_first);
     assert_eq!(
         h.geo.call_count(),
@@ -367,7 +368,7 @@ fn a_foreign_vpn_reconnecting_does_not_touch_the_targets() {
     h.network.route_moves_to("wg0");
     let decision = h.controller.tick();
 
-    assert_eq!(decision, GuardDecision::Safe);
+    assert_eq!(decision, AppliedDecision::Safe);
     assert_eq!(h.killer.killed().len(), killed_after_first);
     assert_eq!(
         h.geo.call_count(),
@@ -412,7 +413,7 @@ fn a_closed_vpn_app_is_noticed_locally() {
     h.processes.vpn_app_closes();
     let decision = h.controller.tick();
 
-    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnAppNotRunning));
+    assert_eq!(reason(&decision), Some(&UnsafeEvidence::VpnAppNotRunning));
     assert!(!h.killer.killed().is_empty());
 }
 
@@ -489,8 +490,8 @@ fn a_burst_of_changes_does_not_become_a_burst_of_requests() {
         "второй запрос придержан окном"
     );
     assert_eq!(
-        reason(&decision),
-        Some(&UnsafeReason::VerificationPending),
+        decision,
+        AppliedDecision::Pending,
         "придержали запрос — значит вердикта нет, значит цели завершены"
     );
 
@@ -514,7 +515,7 @@ fn a_blocked_country_kills_and_names_the_source() {
 
     assert_eq!(
         reason(&decision),
-        Some(&UnsafeReason::BlockedCountry {
+        Some(&UnsafeEvidence::BlockedCountry {
             code: "RU".to_string(),
             source: "ipinfo".to_string()
         })
@@ -599,7 +600,7 @@ fn the_button_asks_the_network_even_when_the_verdict_is_local() {
 
     assert_eq!(
         reason(&decision),
-        Some(&UnsafeReason::VpnAppNotRunning),
+        Some(&UnsafeEvidence::VpnAppNotRunning),
         "локальное основание применяется сразу, жизни целям кнопка не продлевает"
     );
     assert_eq!(h.geo.call_count(), calls_before + 1);
@@ -619,7 +620,7 @@ fn the_button_does_not_cost_the_user_their_targets() {
 
     let decision = h.controller.probe_now();
 
-    assert_eq!(decision, GuardDecision::Safe);
+    assert_eq!(decision, AppliedDecision::Safe);
     assert_eq!(h.killer.killed().len(), killed_before);
 }
 
@@ -630,7 +631,7 @@ fn a_disabled_guard_leaves_everything_alone() {
 
     let decision = h.controller.tick();
 
-    assert_eq!(decision, GuardDecision::Safe);
+    assert_eq!(decision, AppliedDecision::Safe);
     assert!(h.killer.killed().is_empty());
     assert_eq!(h.geo.call_count(), 0, "выключенной охране сеть не нужна");
 }
@@ -642,18 +643,20 @@ fn without_targets_there_is_nothing_to_guard() {
 
     let decision = h.controller.tick();
 
-    assert_eq!(decision, GuardDecision::Safe);
+    assert_eq!(decision, AppliedDecision::Safe);
     assert_eq!(h.geo.call_count(), 0);
 }
 
+/// Невыбранное приложение оснований не даёт само по себе — охрана работает
+/// по гео одной, и в этом наборе показаний она безопасна.
 #[test]
-fn an_unchosen_vpn_app_is_its_own_reason() {
+fn an_unchosen_vpn_app_defers_to_geo() {
     let h = harness();
     h.settings.edit(|s| s.set_vpn_app(None));
 
     let decision = h.controller.tick();
 
-    assert_eq!(reason(&decision), Some(&UnsafeReason::VpnAppNotChosen));
+    assert_eq!(decision, AppliedDecision::Safe);
 }
 
 #[test]
@@ -725,7 +728,7 @@ fn a_settled_local_verdict_does_not_probe_every_tick() {
 #[test]
 fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
     let h = harness();
-    assert_eq!(h.controller.tick(), GuardDecision::Safe);
+    assert_eq!(h.controller.tick(), AppliedDecision::Safe);
     // Первый круг всегда fail-closed до ответа сети, и его завершения уже в списке.
     let killed_before = h.killer.killed().len();
 
@@ -734,7 +737,7 @@ fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
 
     assert_eq!(
         h.controller.probe_now(),
-        GuardDecision::Safe,
+        AppliedDecision::Safe,
         "адрес тот же — перепроверять нечего"
     );
     assert_eq!(
@@ -745,19 +748,21 @@ fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
 }
 
 /// Адрес другой, страны для него никто не назвал — вердикта нет, и снисхождения тоже.
+/// Непроверенное здесь по-прежнему применяется как kill: план порта паузы
+/// это меняет отдельно.
 #[test]
 fn silent_ipinfo_with_a_new_address_kills() {
     let h = harness();
-    assert_eq!(h.controller.tick(), GuardDecision::Safe);
+    assert_eq!(h.controller.tick(), AppliedDecision::Safe);
 
     h.geo.ipinfo_goes_silent("198.51.100.231");
     let decision = h.controller.probe_now();
 
     assert_eq!(
-        reason(&decision),
-        Some(&UnsafeReason::GeoUnavailable(
-            "адрес сменился, страна не проверена".to_string()
-        ))
+        decision,
+        AppliedDecision::Unproven(UnprovenReason::AddressChanged {
+            observed: "198.51.100.231".to_string()
+        })
     );
 }
 

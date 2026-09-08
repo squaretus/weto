@@ -26,10 +26,10 @@ use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, Verd
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading, SourceOutcome};
 use weto_core::network::NetworkSnapshot;
 use weto_core::network::VpnAppStatus;
-use weto_core::policy::{
-    decide, decide_local, pending_verification, GuardDecision, GuardSignals, UnsafeReason,
+use weto_core::policy::{decide, decide_local, GuardDecision, GuardSignals};
+use weto_core::presentation::{
+    status_presentation, AppliedDecision, GuardState, StatusPresentation,
 };
-use weto_core::presentation::{status_presentation, GuardState, StatusPresentation};
 use weto_core::process::RunningTarget;
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
@@ -98,7 +98,7 @@ struct CachedVerdict {
 
 #[derive(Debug, Clone, Default)]
 pub struct GuardSnapshot {
-    pub decision: Option<GuardDecision>,
+    pub decision: Option<AppliedDecision>,
     pub presentation: Option<StatusPresentation>,
     pub report: Option<GeoProbeReport>,
     pub running: Vec<RunningTarget>,
@@ -188,7 +188,7 @@ impl GuardController {
     }
 
     /// Штатный такт охраны.
-    pub fn tick(&self) -> GuardDecision {
+    pub fn tick(&self) -> AppliedDecision {
         self.run(ProbeTrigger::Scheduled)
     }
 
@@ -200,13 +200,13 @@ impl GuardController {
     /// в тот момент, когда пользователь хочет увидеть свою страну.
     ///
     /// Свежесть прежнего вердикта при этом не сбрасывается: иначе нажатие
-    /// при исправном VPN роняло бы состояние в `VerificationPending`,
+    /// при исправном VPN роняло бы состояние в ожидание проверки,
     /// то есть стоило бы пользователю целей.
-    pub fn probe_now(&self) -> GuardDecision {
+    pub fn probe_now(&self) -> AppliedDecision {
         self.run(ProbeTrigger::Manual)
     }
 
-    fn run(&self, trigger: ProbeTrigger) -> GuardDecision {
+    fn run(&self, trigger: ProbeTrigger) -> AppliedDecision {
         let settings = self.settings.settings();
         let network = self.network.snapshot();
         let config = settings.guard_config();
@@ -219,6 +219,7 @@ impl GuardController {
         // Локальное основание применяется сразу, до ответа сети: жизни целям
         // сетевой запрос не продлевает ни на такте, ни по кнопке.
         if let Some(decision) = local.clone() {
+            let decision = applied(decision);
             self.apply(&settings, decision.clone(), None, &network);
 
             // Показания обновляются и здесь. Экономия запросов относится
@@ -269,12 +270,12 @@ impl GuardController {
             };
 
             let geo = refreshed.unwrap_or_else(|| cached.outcome.clone());
-            let decision = decide(&GuardSignals {
+            let decision = applied(decide(&GuardSignals {
                 is_enabled: settings.is_enabled,
                 vpn,
                 geo,
                 config,
-            });
+            }));
             let report = self
                 .inner
                 .lock()
@@ -288,7 +289,14 @@ impl GuardController {
         }
 
         // Вердикта нет или он потерял свежесть: fail-closed до ответа сети.
-        let pending = pending_verification(settings.is_enabled, &config);
+        // Не то же, что решение политики: пока обеих сторон вердикта нет вовсе,
+        // а не «политика решила подождать» — потому и не через `decide`/`decide_local`.
+        let armed = settings.is_enabled && config.has_targets();
+        let pending = if armed {
+            AppliedDecision::Pending
+        } else {
+            AppliedDecision::Safe
+        };
         self.apply(&settings, pending.clone(), None, &network);
 
         if trigger == ProbeTrigger::Manual || self.coalescing_window_passed() {
@@ -298,12 +306,12 @@ impl GuardController {
                 self.staleness_trigger(settings.revision)
             };
             if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
-                let decision = decide(&GuardSignals {
+                let decision = applied(decide(&GuardSignals {
                     is_enabled: settings.is_enabled,
                     vpn,
                     geo: outcome,
                     config,
-                });
+                }));
                 let report = self
                     .inner
                     .lock()
@@ -385,6 +393,10 @@ impl GuardController {
             GeoOutcome::Resolved(_) => None,
             GeoOutcome::Degraded { detail, .. } => Some(detail.clone()),
             GeoOutcome::Unavailable(detail) => Some(detail.clone()),
+            GeoOutcome::AddressChanged { observed, previous } => Some(format!(
+                "адрес сменился: был {}, стал {observed}",
+                previous.ip
+            )),
         };
 
         self.checks.record(CheckEvent {
@@ -548,7 +560,10 @@ impl GuardController {
         };
 
         if address != established.reading.ip {
-            return GeoOutcome::Unavailable("адрес сменился, страна не проверена".to_string());
+            return GeoOutcome::AddressChanged {
+                observed: address.to_string(),
+                previous: established.reading.clone(),
+            };
         }
         GeoOutcome::Degraded {
             previous: established.reading.clone(),
@@ -568,14 +583,14 @@ impl GuardController {
     fn apply(
         &self,
         settings: &Settings,
-        decision: GuardDecision,
+        decision: AppliedDecision,
         report: Option<GeoProbeReport>,
         network: &NetworkSnapshot,
     ) {
         let rules = settings.target_rules();
 
         let running = match &decision {
-            GuardDecision::Safe => {
+            AppliedDecision::Safe => {
                 // Эпизод кончился. Сообщать об этом надо всегда, а не только
                 // когда он был неразобранным: учёт «что уже описано» обнуляется
                 // именно здесь, и без вызова следующее падение по той же причине
@@ -602,9 +617,12 @@ impl GuardController {
 
                 self.enforcer.running(&rules)
             }
-            GuardDecision::Kill(reason) => {
-                let text = reason.display_text();
-                let is_pending = matches!(reason, UnsafeReason::VerificationPending);
+            // Пока Linux не портировал паузу, `Pending` и `Unproven` применяются
+            // как прежний kill: fail-closed до ответа сети и непроверенный вердикт
+            // завершают цели, а не приостанавливают их.
+            AppliedDecision::Pending | AppliedDecision::Unproven(_) | AppliedDecision::Kill(_) => {
+                let text = decision.display_text();
+                let is_pending = matches!(decision, AppliedDecision::Pending);
                 let mut context =
                     self.kill_context(settings, text.clone(), report.as_ref(), network);
                 context.is_pending = is_pending;
@@ -645,12 +663,14 @@ impl GuardController {
         let country = report.as_ref().and_then(|r| match r.outcome() {
             GeoOutcome::Resolved(reading) => Some(reading.primary_country),
             GeoOutcome::Degraded { previous, .. } => Some(previous.primary_country),
-            GeoOutcome::Unavailable(_) => r.reference_country().map(str::to_string),
+            GeoOutcome::Unavailable(_) | GeoOutcome::AddressChanged { .. } => {
+                r.reference_country().map(str::to_string)
+            }
         });
 
         // Цели живут, но защита держится на том, что адрес не менялся, а не на свежем
         // ответе ipinfo. Глаз обязан это видеть: зелёный тут врал бы.
-        let is_degraded = matches!(decision, GuardDecision::Safe)
+        let is_degraded = matches!(decision, AppliedDecision::Safe)
             && report
                 .as_ref()
                 .is_some_and(|r| matches!(r.ipinfo, SourceOutcome::Failed(_)));
@@ -673,13 +693,24 @@ impl GuardController {
     }
 }
 
+/// Что политика решила применить к целям на время, пока Linux не портировал
+/// паузу: `Safe`/`Unproven`/`Kill` переходят в `AppliedDecision` без изменений
+/// по смыслу — только `Unproven` до порта поведения применяется как kill.
+fn applied(decision: GuardDecision) -> AppliedDecision {
+    match decision {
+        GuardDecision::Safe => AppliedDecision::Safe,
+        GuardDecision::Unproven(reason) => AppliedDecision::Unproven(reason),
+        GuardDecision::Kill(evidence) => AppliedDecision::Kill(evidence),
+    }
+}
+
 /// Текст причины «подключение ещё не проверено» одним местом: он и ключ эпизода,
 /// и то, что видит пользователь, — расходиться этим двум нельзя.
 struct UnsafeReasonText;
 
 impl UnsafeReasonText {
     fn pending() -> String {
-        UnsafeReason::VerificationPending.display_text()
+        AppliedDecision::PENDING_TEXT.to_string()
     }
 }
 
