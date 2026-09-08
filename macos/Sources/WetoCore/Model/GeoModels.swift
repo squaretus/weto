@@ -50,6 +50,10 @@ public enum GeoOutcome: Equatable, Sendable {
 
     case unavailable(String)
 
+    /// Резервный сервис назвал адрес, и он не совпал с адресом прошлого вердикта:
+    /// страна не проверена, прошлое чтение к новому адресу не относится.
+    case addressChanged(observed: String, previous: GeoReading)
+
     /// Проба дала годный ответ: адрес и страна названы источником, а не взяты
     /// из прошлого вердикта.
     public var isResolved: Bool {
@@ -63,6 +67,8 @@ public enum GeoOutcome: Equatable, Sendable {
         case .resolved: return nil
         case .degraded(_, let detail): return detail
         case .unavailable(let detail): return detail
+        case .addressChanged(let observed, let previous):
+            return "адрес сменился: был \(previous.ip), стал \(observed)"
         }
     }
 
@@ -72,6 +78,7 @@ public enum GeoOutcome: Equatable, Sendable {
         case .resolved(let reading): return reading
         case .degraded(let previous, _): return previous
         case .unavailable: return nil
+        case .addressChanged: return nil
         }
     }
 }

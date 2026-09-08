@@ -210,10 +210,14 @@ final class GuardController {
             fingerprint: fingerprint
         )
 
-        onDecision(GuardPolicy.pendingVerification(
-            isEnabled: settings.isEnabled,
-            config: config
-        ))
+        // Временно, до задачи 14: место `GuardPolicy.pendingVerification` занимает
+        // фиксированный unproven-повод. Настоящая fail-closed пауза приходит вместе
+        // с `GuardMachine`.
+        onDecision(
+            settings.isEnabled && config.hasTargets
+                ? .unproven(.geoUnavailable("подключение ещё не проверено"))
+                : .safe
+        )
 
         startProbe(after: debounceInterval, trigger: stalenessTrigger(for: snapshot))
     }

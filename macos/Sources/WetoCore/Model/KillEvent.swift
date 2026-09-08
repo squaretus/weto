@@ -215,50 +215,27 @@ private struct LegacyKillEvent: Decodable {
     }
 }
 
-extension UnsafeReason {
-
+extension UnprovenReason {
     public var displayText: String {
         switch self {
-        case .verificationPending:
-            return "Подключение ещё не проверено"
-        case .vpnAppNotChosen:
-            return "VPN-приложение не выбрано в настройках"
-        case .vpnAppNotRunning:
-            return "VPN-приложение не запущено"
-        case .geoUnavailable(let detail):
-            return "Не удалось определить внешний адрес: \(detail)"
-        case .blacklistedIP(let ip):
-            return "Адрес \(ip) в чёрном списке"
-        case .blockedCountry(let code, let source):
-            return "Обнаружена страна \(code) по данным \(source)"
-        case .confirmationUnavailable:
-            return "Подтверждающие сервисы недоступны"
+        case .geoUnavailable(let detail): return "Не удалось определить внешний адрес: \(detail)"
+        case .addressChanged(let observed): return "Адрес сменился на \(observed), страна не проверена"
+        case .confirmationUnavailable: return "Подтверждающие сервисы недоступны"
+        }
+    }
+}
+
+extension UnsafeEvidence {
+    public var displayText: String {
+        switch self {
+        case .vpnAppNotRunning: return "VPN-приложение не запущено"
+        case .blacklistedIP(let ip): return "Адрес \(ip) в чёрном списке"
+        case .blockedCountry(let code, let source): return "Обнаружена страна \(code) по данным \(source)"
         case .countryConflict(let primary, let confirmed):
             return "Расхождение стран: ipinfo — \(primary), подтверждение — \(confirmed)"
-        case .notWhitelistedIP(let ip):
-            return "Адрес \(ip) не входит в белый список"
-        case .notWhitelistedCountry(let code):
-            return "Страна \(code) не входит в белый список"
-        }
-    }
-
-    public var isDegradedRatherThanBlocked: Bool {
-        switch self {
-        case .confirmationUnavailable, .geoUnavailable: return true
-        default: return false
-        }
-    }
-
-    public var statusTitle: String {
-        switch self {
-        case .verificationPending:
-            return "Проверка подключения"
-        case .geoUnavailable:
-            return "Ipinfo недоступен"
-        case .confirmationUnavailable:
-            return "Подтверждение недоступно"
-        default:
-            return "Цели завершены"
+        case .notWhitelistedIP(let ip): return "Адрес \(ip) не входит в белый список"
+        case .notWhitelistedCountry(let code): return "Страна \(code) не входит в белый список"
+        case .pauseExpired: return "Подтверждение не получено за \(Int(Constants.pauseCeilingSeconds)) с"
         }
     }
 }

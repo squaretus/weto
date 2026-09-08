@@ -10,13 +10,15 @@ public enum GuardStatusColor: Equatable, Sendable {
 public enum GuardState: Equatable, Sendable {
     case disabled
     case safe(GeoReading?)
-    case unsafe(UnsafeReason)
+    case unsafe(UnsafeEvidence)
 
     public var statusColor: GuardStatusColor {
         switch self {
         case .disabled: return .grey
         case .safe: return .green
-        case .unsafe(let reason): return reason.isDegradedRatherThanBlocked ? .yellow : .red
+        // Красный для любой причины: разбор «помехи vs опасно» приходит вместе
+        // с GuardMachine (задача 8).
+        case .unsafe: return .red
         }
     }
 
@@ -57,14 +59,6 @@ public final class GuardVM {
 
     // Причины, уже описанные в журнале в рамках текущего небезопасного эпизода.
     @ObservationIgnored private var recordedReasons: Set<String> = []
-
-    // Эпизод, записанный до вердикта: причина в нём — «ещё не проверено»,
-    // и её положено уточнить у всех его записей, как только вердикт станет известен.
-    @ObservationIgnored private var pendingEpisodeID: UUID?
-
-    // Разбор свежести, с которым эпизод начался. Уточнение причины приходит
-    // после пробы, а «что потеряло свежесть» известно только в её начале.
-    @ObservationIgnored private var pendingStaleness: VerdictStaleness?
 
     // Решение только что принято по пробе, которая ответила сейчас, а не по старому
     // чтению. Взводится приёмом отчёта, гасится после того, как решение обработано:
@@ -184,7 +178,7 @@ public final class GuardVM {
             return reading?.primaryCountry
         case .unsafe(let reason):
             switch reason {
-            case .vpnAppNotChosen, .vpnAppNotRunning, .geoUnavailable:
+            case .vpnAppNotRunning, .pauseExpired:
                 return nil
             default:
                 return lastReading?.primaryCountry
@@ -272,7 +266,7 @@ public final class GuardVM {
             guard isVPNApp || settings.targets.contains(bundleID) else { return }
 
             if !isVPNApp, case .unsafe(let reason) = state {
-                enforce(reason: reason)
+                enforce(reasonText: reason.displayText)
                 return
             }
         }
@@ -325,89 +319,30 @@ public final class GuardVM {
         case .safe:
             watchdogTask?.cancel(); watchdogTask = nil
             permissionFailure = nil
-            resolvePendingEpisodeAsSafe()
             recordedKills.removeAll()
             recordedReasons.removeAll()
             state = settings.isEnabled && settings.guardConfig.hasTargets
                 ? .safe(lastReading)
                 : .disabled
 
-        case .kill(let reason):
-            state = .unsafe(reason)
-            refineEpisodeReason(to: reason)
-            enforce(reason: reason)
+        case .unproven(let reason):
+            // Временно, до задачи 14: непроверенность обрабатывается как прежний kill.
+            // Уточнение эпизода при последующем реальном вердикте (`refineEpisodeReason`
+            // в прежнем коде) сюда пока не переехало — задача 14 строит его заново
+            // на `GuardMachine`, где решение и его повод не разъезжаются.
+            state = .unsafe(.pauseExpired)
+            enforce(reasonText: reason.displayText, staleness: controller.lastStaleness)
+            startWatchdog()
+
+        case .kill(let evidence):
+            state = .unsafe(evidence)
+            enforce(reasonText: evidence.displayText)
             decisionCameFromProbe = false
             startWatchdog()
         }
     }
 
-    /// Причина эпизода, ставшая известной, дописывается всем его записям.
-    ///
-    /// Ключ причины в `recordedReasons` подменяется вместе с текстом: иначе
-    /// уточнённая причина считалась бы новой и завела бы второй набор записей
-    /// про то же самое падение.
-    private func refineEpisodeReason(to reason: UnsafeReason) {
-        if case .verificationPending = reason { return }
-        guard let episodeID = pendingEpisodeID else { return }
-
-        pendingEpisodeID = nil
-        let pending = UnsafeReason.verificationPending.displayText
-        recordedReasons.remove(pending)
-        recordedReasons.insert(reason.displayText)
-
-        // Ключ дедупликации переезжает вместе с текстом: те же процессы того же
-        // эпизода под уточнённой причиной выглядели бы новыми и завели бы второй
-        // набор записей про то же самое падение.
-        recordedKills = Set(recordedKills.map {
-            $0.reason == pending ? RecordedKill(pid: $0.pid, reason: reason.displayText) : $0
-        })
-
-        // Диагностика дописывается вместе с причиной: эпизод начался до пробы,
-        // и в момент записи трасс ещё не существовало.
-        eventLog.refine(
-            episodeID: episodeID,
-            reasonText: reason.displayText,
-            ip: lastReading?.ip,
-            country: lastReading?.primaryCountry,
-            confirmedCountry: lastReading?.confirmedCountry,
-            confirmSource: lastReading?.confirmSource?.rawValue,
-            diagnostics: currentDiagnostics(for: reason, staleness: pendingStaleness)
-        )
-    }
-
-    /// Эпизод, начавшийся до вердикта, закончился безопасным выходом.
-    ///
-    /// Это и есть случай, который выглядит как «weto завершает процессы случайно»:
-    /// вердикт потерял свежесть, fail-closed завершил цели, а через секунду проверка
-    /// сказала «всё в порядке». Уточнять причину нечем — она и была «ещё не проверено», —
-    /// но запись обязана сказать, чем дело кончилось, иначе в журнале навсегда
-    /// остаётся отговорка без единой цифры.
-    private func resolvePendingEpisodeAsSafe() {
-        guard let episodeID = pendingEpisodeID else { return }
-        pendingEpisodeID = nil
-
-        let outcome: String
-        if let reading = lastReading {
-            outcome = "проверка завершилась безопасным выходом: \(reading.ip), \(reading.primaryCountry)"
-        } else {
-            outcome = "проверка завершилась безопасным выходом"
-        }
-
-        eventLog.refine(
-            episodeID: episodeID,
-            reasonText: UnsafeReason.verificationPending.displayText,
-            resolutionText: outcome,
-            ip: lastReading?.ip,
-            country: lastReading?.primaryCountry,
-            confirmedCountry: lastReading?.confirmedCountry,
-            confirmSource: lastReading?.confirmSource?.rawValue,
-            diagnostics: currentDiagnostics(
-                for: .verificationPending, staleness: pendingStaleness
-            )
-        )
-    }
-
-    private func enforce(reason: UnsafeReason) {
+    private func enforce(reasonText: String, staleness: VerdictStaleness? = nil) {
         let outcome = enforcer.enforce(currentScan ?? enforcer.scan())
         let matched = outcome.matched
         guard !matched.isEmpty else { return }
@@ -419,26 +354,25 @@ public final class GuardVM {
             : "Не удалось завершить процессы \(refused.map(\.pid)) — недостаточно прав"
 
         let terminated = Set(results.filter(\.isTerminated).map(\.pid))
-        let reasonKey = reason.displayText
-        let isNewReason = !recordedReasons.contains(reasonKey)
+        let isNewReason = !recordedReasons.contains(reasonText)
 
         // Дедупликация по паре «причина + pid»: тот же процесс по той же причине
         // второй записи не заводит, а запущенный заново — заводит всегда.
         let fresh = matched.filter {
             terminated.contains($0.pid)
-                && !recordedKills.contains(RecordedKill(pid: $0.pid, reason: reasonKey))
+                && !recordedKills.contains(RecordedKill(pid: $0.pid, reason: reasonText))
         }
         guard !fresh.isEmpty else { return }
 
         let kind: KillEventKind = isNewReason ? .terminated : .launchBlocked
-        recordedReasons.insert(reasonKey)
-        recordedKills.formUnion(fresh.map { RecordedKill(pid: $0.pid, reason: reasonKey) })
+        recordedReasons.insert(reasonText)
+        recordedKills.formUnion(fresh.map { RecordedKill(pid: $0.pid, reason: reasonText) })
 
         // Один проход охраны — один эпизод: сколько процессов завершено,
         // столько и записей, и все они помнят, что это было одно событие.
         let episodeID = UUID()
         let moment = Date()
-        let diagnostics = currentDiagnostics(for: reason)
+        let diagnostics = currentDiagnostics(staleness: staleness)
         let batch = fresh.map { process in
             KillEvent(
                 episodeID: episodeID,
@@ -449,7 +383,7 @@ public final class GuardVM {
                 executablePath: process.executablePath,
                 matchedBy: process.matchedBy,
                 kind: kind,
-                reasonText: reason.displayText,
+                reasonText: reasonText,
                 ip: lastReading?.ip,
                 country: lastReading?.primaryCountry,
                 confirmedCountry: lastReading?.confirmedCountry,
@@ -458,34 +392,19 @@ public final class GuardVM {
             )
         }
         eventLog.record(batch)
-        if case .verificationPending = reason {
-            pendingEpisodeID = episodeID
-            pendingStaleness = diagnostics.staleness
-        }
 
         // Уведомление — на проход, а не на процесс: тридцать четыре баннера подряд
         // не сообщение, а помеха. Цели в нём перечислены с числом завершённого,
         // потому что «claude» и «claude ×34» — разные новости.
-        notifier.notify(reasonText: "\(Self.targetsSummary(of: fresh)): \(reason.displayText)",
+        notifier.notify(reasonText: "\(Self.targetsSummary(of: fresh)): \(reasonText)",
                         killedCount: fresh.count)
     }
 
     /// Отладочные показания эпизода: они не показываются пользователю и нужны
-    /// только выгрузке. Причина «подключение ещё не проверено» без них неотличима
-    /// от «изменили настройки», и завершение выглядит беспричинным.
-    private func currentDiagnostics(
-        for reason: UnsafeReason,
-        staleness explicit: VerdictStaleness? = nil
-    ) -> KillDiagnostics {
+    /// только выгрузке. `staleness` называется явно вызывающим: только решение
+    /// «непроверено» из-за потери свежести знает, что именно устарело.
+    private func currentDiagnostics(staleness: VerdictStaleness? = nil) -> KillDiagnostics {
         let snapshot = controller.lastSnapshot
-        let staleness: VerdictStaleness?
-        if let explicit {
-            staleness = explicit
-        } else if case .verificationPending = reason {
-            staleness = controller.lastStaleness
-        } else {
-            staleness = nil
-        }
 
         // Показания «текущие», если решение принято по пробе, которая только что ответила
         // адресом и страной; во всех остальных случаях они — прошлый вердикт.
@@ -528,7 +447,7 @@ public final class GuardVM {
                 guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in
                     guard let self, case .unsafe(let reason) = self.state else { return }
-                    self.enforce(reason: reason)
+                    self.enforce(reasonText: reason.displayText)
                 }
             }
         }

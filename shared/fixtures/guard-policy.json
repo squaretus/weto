@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "about": [
     "Голден-фикстуры политики охраны. Один и тот же набор случаев прогоняют обе",
     "реализации: macOS/Tests/WetoCoreTests/GuardPolicyFixtureTests.swift и",
@@ -12,15 +12,21 @@
     "это непрозрачная строка, важно лишь, выбрано ли что-нибудь.",
     "",
     "vpn.kind: notChosen | notRunning | running. Выбирается приложение, а не туннель:",
-    "вопрос «какой из utunN твой» пользователю задать нельзя.",
+    "вопрос «какой из utunN твой» пользователю задать нельзя. notChosen оснований",
+    "не даёт: охрана работает по гео одной.",
     "",
-    "geo.kind: resolved | degraded | unavailable. degraded — «ipinfo молчит,",
-    "но резервный сервис подтвердил, что адрес тот же»: решает прошлое чтение,",
-    "и все проверки по нему прогоняются полностью.",
+    "geo.kind: resolved | degraded | unavailable | addressChanged. degraded —",
+    "«ipinfo молчит, но резервный сервис подтвердил, что адрес тот же»: решает",
+    "прошлое чтение, и все проверки по нему прогоняются полностью. addressChanged",
+    "(observed, previous — чтение прошлого вердикта) — резервный сервис назвал",
+    "другой адрес: страна не проверена.",
     "",
-    "function: decide | decideLocal | pendingVerification.",
-    "expect.decision: safe | kill | none (none — только для decideLocal, означает",
-    "«локальных оснований нет, нужен сетевой вердикт»).",
+    "function: decide | decideLocal. expect.decision: safe | unproven | kill | none",
+    "(none — только для decideLocal).",
+    "",
+    "expect.reason.kind для unproven: geoUnavailable | addressChanged |",
+    "confirmationUnavailable; для kill: vpnAppNotRunning | blacklistedIP |",
+    "blockedCountry | countryConflict | notWhitelistedIP | notWhitelistedCountry.",
     "",
     "config.allowedCountries и config.allowedIPRanges — белый список. Поля",
     "необязательные: их отсутствие означает пустой whitelist, и такой случай",
@@ -111,7 +117,7 @@
       }
     },
     {
-      "name": "VPN-приложение не выбрано — цели завершаются",
+      "name": "VPN-приложение не выбрано — не причина, решает гео",
       "function": "decide",
       "isEnabled": true,
       "vpn": {
@@ -135,10 +141,7 @@
         ]
       },
       "expect": {
-        "decision": "kill",
-        "reason": {
-          "kind": "vpnAppNotChosen"
-        }
+        "decision": "safe"
       }
     },
     {
@@ -222,7 +225,7 @@
         ]
       },
       "expect": {
-        "decision": "kill",
+        "decision": "unproven",
         "reason": {
           "kind": "geoUnavailable",
           "detail": "timeout"
@@ -451,7 +454,7 @@
         ]
       },
       "expect": {
-        "decision": "kill",
+        "decision": "unproven",
         "reason": {
           "kind": "confirmationUnavailable"
         }
@@ -641,7 +644,7 @@
       }
     },
     {
-      "name": "локально: невыбранный VPN убивает",
+      "name": "локально: невыбранный VPN не даёт оснований",
       "function": "decideLocal",
       "isEnabled": true,
       "vpn": {
@@ -659,71 +662,7 @@
         ]
       },
       "expect": {
-        "decision": "kill",
-        "reason": {
-          "kind": "vpnAppNotChosen"
-        }
-      }
-    },
-    {
-      "name": "ожидание проверки убивает при заряженной охране",
-      "function": "pendingVerification",
-      "isEnabled": true,
-      "vpn": null,
-      "geo": null,
-      "config": {
-        "vpnApp": "su.ffg.happ",
-        "blockedCountries": [
-          "RU"
-        ],
-        "blockedIPRanges": [],
-        "targets": [
-          "com.example.target"
-        ]
-      },
-      "expect": {
-        "decision": "kill",
-        "reason": {
-          "kind": "verificationPending"
-        }
-      }
-    },
-    {
-      "name": "ожидание проверки безвредно при выключенной охране",
-      "function": "pendingVerification",
-      "isEnabled": false,
-      "vpn": null,
-      "geo": null,
-      "config": {
-        "vpnApp": "su.ffg.happ",
-        "blockedCountries": [
-          "RU"
-        ],
-        "blockedIPRanges": [],
-        "targets": [
-          "com.example.target"
-        ]
-      },
-      "expect": {
-        "decision": "safe"
-      }
-    },
-    {
-      "name": "ожидание проверки безвредно без целей",
-      "function": "pendingVerification",
-      "isEnabled": true,
-      "vpn": null,
-      "geo": null,
-      "config": {
-        "vpnApp": "su.ffg.happ",
-        "blockedCountries": [
-          "RU"
-        ],
-        "blockedIPRanges": [],
-        "targets": []
-      },
-      "expect": {
-        "decision": "safe"
+        "decision": "none"
       }
     },
     {
@@ -1060,7 +999,7 @@
         ]
       },
       "expect": {
-        "decision": "kill",
+        "decision": "unproven",
         "reason": {
           "kind": "confirmationUnavailable"
         }
@@ -1100,6 +1039,38 @@
           "kind": "countryConflict",
           "primary": "KZ",
           "confirmed": "DE"
+        }
+      }
+    },
+    {
+      "name": "адрес сменился по резервному сервису — непроверено",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "running"
+      },
+      "geo": {
+        "kind": "addressChanged",
+        "ip": "198.51.100.7",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": "su.ffg.happ",
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "com.example.target"
+        ]
+      },
+      "expect": {
+        "decision": "unproven",
+        "reason": {
+          "kind": "addressChanged",
+          "ip": "198.51.100.7"
         }
       }
     }
