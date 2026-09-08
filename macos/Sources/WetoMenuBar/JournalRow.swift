@@ -50,7 +50,7 @@ struct JournalRow: View {
         if let confirmed = event.confirmedCountry {
             parts.append("\(event.confirmSource ?? "подтверждение"): \(confirmed)")
         }
-        if event.isDescendant { parts.append("потомок \(event.parentPID)") }
+        if event.matchedBy == .descendant { parts.append("потомок \(event.parentPID)") }
         return parts.joined(separator: " · ")
     }
 

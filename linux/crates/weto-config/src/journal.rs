@@ -20,6 +20,7 @@ pub use weto_core::diagnostics::{
     GeoReadingPatch, GeoServiceTrace, KillContext, KillDiagnostics, NetworkPhases, StalenessCause,
     VerdictStaleness, BODY_LIMIT,
 };
+pub use weto_core::process::MatchBasis;
 
 /// Сто записей, а не десять: запись теперь на процесс, и одно падение VPN
 /// на тридцати четырёх процессах вытесняло прежний журнал целиком.
@@ -60,8 +61,12 @@ pub struct KillEvent {
     pub parent_pid: i32,
     #[serde(default)]
     pub executable_path: String,
-    #[serde(default)]
-    pub is_descendant: bool,
+    #[serde(
+        default,
+        alias = "isDescendant",
+        deserialize_with = "matched_by_compat"
+    )]
+    pub matched_by: MatchBasis,
 
     pub kind: KillEventKind,
     pub reason_text: String,
@@ -97,6 +102,30 @@ impl KillEvent {
         };
         format!("{name} · pid {}", self.pid)
     }
+}
+
+/// Журналы до переименования писали булев признак `isDescendant`: читаем его,
+/// но больше не пишем.
+fn matched_by_compat<'de, D>(deserializer: D) -> Result<MatchBasis, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Basis(MatchBasis),
+        Legacy(bool),
+    }
+    Ok(match Compat::deserialize(deserializer)? {
+        Compat::Basis(basis) => basis,
+        Compat::Legacy(is_descendant) => {
+            if is_descendant {
+                MatchBasis::Descendant
+            } else {
+                MatchBasis::Rule
+            }
+        }
+    })
 }
 
 /// Аббревиатуру не трогаем: «VPN не поднят» не должно стать «vPN не поднят».
@@ -253,7 +282,7 @@ impl LegacyJournal {
                     pid: *pid,
                     parent_pid: 0,
                     executable_path: String::new(),
-                    is_descendant: false,
+                    matched_by: MatchBasis::Rule,
                     kind: legacy.kind,
                     reason_text: legacy.reason_text.clone(),
                     resolution_text: None,

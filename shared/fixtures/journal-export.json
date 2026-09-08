@@ -65,8 +65,8 @@
     "executablePath",
     "id",
     "ip",
-    "isDescendant",
     "kind",
+    "matchedBy",
     "parentPID",
     "pid",
     "reasonText",
@@ -149,6 +149,10 @@
   "verdictOrigins": [
     "established",
     "current"
+  ],
+  "matchBases": [
+    "rule",
+    "descendant"
   ],
   "timestampPattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
   "timestampFields": [

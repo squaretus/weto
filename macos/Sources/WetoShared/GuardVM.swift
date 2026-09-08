@@ -447,7 +447,7 @@ public final class GuardVM {
                 pid: process.pid,
                 parentPID: process.parentPID,
                 executablePath: process.executablePath,
-                isDescendant: process.isDescendant,
+                matchedBy: process.matchedBy,
                 kind: kind,
                 reasonText: reason.displayText,
                 ip: lastReading?.ip,

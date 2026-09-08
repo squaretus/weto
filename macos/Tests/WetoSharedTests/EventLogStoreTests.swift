@@ -248,10 +248,10 @@ final class EventLogStoreTests: XCTestCase {
     func test_descendant_is_marked_with_its_parent() {
         let event = KillEvent(
             episodeID: UUID(), date: Date(), targetName: "claude", pid: 102,
-            parentPID: 100, executablePath: "/opt/homebrew/bin/rg", isDescendant: true,
+            parentPID: 100, executablePath: "/opt/homebrew/bin/rg", matchedBy: .descendant,
             kind: .terminated, reasonText: "причина", ip: nil, country: nil
         )
-        XCTAssertTrue(event.isDescendant)
+        XCTAssertEqual(event.matchedBy, .descendant)
         XCTAssertEqual(event.parentPID, 100)
         XCTAssertEqual(event.executablePath, "/opt/homebrew/bin/rg")
     }

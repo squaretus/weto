@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use weto_config::journal::{Journal, KillEvent, KillEventKind, CAPACITY};
+use weto_config::journal::{Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY};
 use weto_config::paths::Paths;
 use weto_config::settings::{GeoListEntryError, GeoListKind, Settings, Target};
 use weto_core::process::TargetKind;
@@ -20,7 +20,7 @@ fn episode_event(pid: i32, reason: &str, episode_id: &str) -> KillEvent {
         pid,
         parent_pid: 1,
         executable_path: "/usr/bin/nano".to_string(),
-        is_descendant: false,
+        matched_by: MatchBasis::Rule,
         kind: KillEventKind::Terminated,
         reason_text: reason.to_string(),
         resolution_text: None,

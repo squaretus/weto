@@ -17,7 +17,7 @@ final class KillEventTests: XCTestCase {
             pid: pid,
             parentPID: 1,
             executablePath: "/Users/square/.local/bin/claude",
-            isDescendant: false,
+            matchedBy: .rule,
             kind: .terminated,
             reasonText: reason,
             ip: nil,
@@ -108,5 +108,29 @@ final class KillEventTests: XCTestCase {
     /// мешать не должны.
     func test_broken_log_reads_as_empty() {
         XCTAssertEqual(try? KillEvent.decodeLog(Data("не json".utf8)), nil)
+    }
+
+    // MARK: - matchedBy
+
+    /// Поле означало «совпал только как потомок», а читалось как «имеет родителя».
+    func test_matched_by_is_encoded_instead_of_is_descendant() throws {
+        let event = KillEvent(
+            episodeID: UUID(), date: Date(), targetName: "codex", pid: 7, parentPID: 3,
+            executablePath: "/x", matchedBy: .descendant, kind: .terminated,
+            reasonText: "r", ip: nil, country: nil
+        )
+        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode([event])) as? [[String: Any]]
+        XCTAssertEqual(object?.first?["matchedBy"] as? String, "descendant")
+        XCTAssertNil(object?.first?["isDescendant"])
+    }
+
+    func test_legacy_is_descendant_is_read_as_matched_by() throws {
+        let legacy = """
+        [{"id":"5D2C1F1E-0000-4000-8000-000000000001","episodeID":"5D2C1F1E-0000-4000-8000-000000000002",
+          "date":0,"targetName":"claude","pid":5,"parentPID":1,"executablePath":"/c",
+          "isDescendant":true,"kind":"terminated","reasonText":"r"}]
+        """
+        let events = try KillEvent.decodeLog(Data(legacy.utf8))
+        XCTAssertEqual(events.first?.matchedBy, .descendant)
     }
 }

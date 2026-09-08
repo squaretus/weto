@@ -25,7 +25,7 @@ public enum ProcessMatcher {
                     targetName: rule.displayName,
                     parentPID: process.parentPID,
                     executablePath: process.executablePath,
-                    isDescendant: false
+                    matchedBy: .rule
                 ))
                 nameByRoot[process.pid] = rule.displayName
             }
@@ -40,7 +40,7 @@ public enum ProcessMatcher {
                 targetName: name,
                 parentPID: snapshot?.parentPID ?? 0,
                 executablePath: snapshot?.executablePath ?? "",
-                isDescendant: true
+                matchedBy: .descendant
             ))
         }
         return result

@@ -27,6 +27,16 @@ pub enum TargetKind {
     Script,
 }
 
+/// Чем процесс попал под охрану: сам совпал с правилом или оказался потомком
+/// совпавшего. Потомки объясняют, почему у одной цели десятки завершений.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum MatchBasis {
+    #[default]
+    Rule,
+    Descendant,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetRule {
     pub entry: String,
@@ -70,7 +80,7 @@ pub struct MatchedProcess {
     pub executable_path: String,
     /// Процесс попал под охрану не сам по себе, а как потомок совпавшего.
     /// Именно потомки объясняют, откуда у одной цели десятки завершений.
-    pub is_descendant: bool,
+    pub matched_by: MatchBasis,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +213,7 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
                 target_name: rule.display_name.clone(),
                 parent_pid: process.parent_pid,
                 executable_path: process.executable_path.clone(),
-                is_descendant: false,
+                matched_by: MatchBasis::Rule,
             });
             name_by_root.insert(process.pid, rule.display_name.clone());
         }
@@ -221,7 +231,7 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
                     .get(&pid)
                     .map(|p| p.executable_path.clone())
                     .unwrap_or_default(),
-                is_descendant: true,
+                matched_by: MatchBasis::Descendant,
             });
         }
     }
