@@ -66,6 +66,11 @@ public final class GuardVM {
     // после пробы, а «что потеряло свежесть» известно только в её начале.
     @ObservationIgnored private var pendingStaleness: VerdictStaleness?
 
+    // Решение только что принято по пробе, которая ответила сейчас, а не по старому
+    // чтению. Взводится приёмом отчёта, гасится после того, как решение обработано:
+    // задача 15 заменит это явным origin, вычисленным контроллером.
+    @ObservationIgnored private var decisionCameFromProbe = false
+
     private struct RecordedKill: Hashable {
         let pid: Int32
         let reason: String
@@ -304,6 +309,7 @@ public final class GuardVM {
 
     private func receive(_ report: GeoProbeReport?) {
         lastReport = report
+        decisionCameFromProbe = true
         guard let report else {
             // Гасим и запасное чтение: попап падает на него, когда отчёта нет,
             // и без этого на экране осталась бы всё та же чужая страна.
@@ -330,6 +336,7 @@ public final class GuardVM {
             state = .unsafe(reason)
             refineEpisodeReason(to: reason)
             enforce(reason: reason)
+            decisionCameFromProbe = false
             startWatchdog()
         }
     }
@@ -480,6 +487,11 @@ public final class GuardVM {
             staleness = nil
         }
 
+        // Показания «текущие», если решение принято по пробе, которая только что ответила
+        // адресом и страной; во всех остальных случаях они — прошлый вердикт.
+        let origin: VerdictOrigin? = lastReading == nil ? nil
+            : (lastReport?.outcome.isResolved == true && decisionCameFromProbe ? .current : .established)
+
         return KillDiagnostics(
             staleness: staleness,
             outgoingInterface: snapshot?.outgoing?.interface,
@@ -487,6 +499,7 @@ public final class GuardVM {
             hasNetworkPath: lastReport?.hasNetworkPath,
             vpnAppEntry: settings.vpnAppRule,
             vpnAppStatus: String(describing: vpnAppStatus()),
+            verdictOrigin: origin,
             services: lastReport?.traces ?? [],
             probedAt: lastReport?.checkedAt,
             appVersion: Constants.appVersion

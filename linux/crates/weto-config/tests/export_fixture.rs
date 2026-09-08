@@ -38,6 +38,7 @@ struct Contract {
     check_outcomes: Vec<String>,
     staleness_causes: Vec<String>,
     event_kinds: Vec<String>,
+    verdict_origins: Vec<String>,
     timestamp_fields: Vec<String>,
     body_limit: usize,
     forbidden_substrings: Vec<String>,
@@ -112,6 +113,7 @@ fn export() -> (Value, String) {
             has_network_path: Some(true),
             vpn_app_entry: Some("org.happ.Happ".to_string()),
             vpn_app_status: Some("Running".to_string()),
+            verdict_origin: Some("established".to_string()),
             services: vec![GeoServiceTrace {
                 service: "ipinfo".to_string(),
                 url: "https://v4.api.ipinfo.io/lite/me".to_string(),
@@ -238,6 +240,12 @@ fn event_matches_the_shared_contract() {
         &diagnostics["staleness"]["cause"]
             .as_str()
             .unwrap()
+            .to_string()
+    ));
+    assert!(contract.verdict_origins.contains(
+        &diagnostics["verdictOrigin"]
+            .as_str()
+            .unwrap_or_default()
             .to_string()
     ));
 }

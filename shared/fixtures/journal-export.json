@@ -81,6 +81,7 @@
     "probedAt",
     "services",
     "staleness",
+    "verdictOrigin",
     "vpnAppEntry",
     "vpnAppStatus"
   ],
@@ -144,6 +145,10 @@
   "eventKinds": [
     "terminated",
     "launchBlocked"
+  ],
+  "verdictOrigins": [
+    "established",
+    "current"
   ],
   "timestampPattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
   "timestampFields": [

@@ -60,6 +60,7 @@ final class JournalExportFixtureTests: XCTestCase {
                 (diagnostics?["staleness"] as? [String: Any])?["cause"] as? String ?? ""
             )
         )
+        XCTAssertTrue(contract.verdictOrigins.contains(diagnostics?["verdictOrigin"] as? String ?? ""))
     }
 
     /// `SystemTime` в Rust по умолчанию сериализуется объектом, а не строкой:
@@ -192,6 +193,7 @@ final class JournalExportFixtureTests: XCTestCase {
                 hasNetworkPath: true,
                 vpnAppEntry: "su.ffg.happ",
                 vpnAppStatus: "running",
+                verdictOrigin: .established,
                 services: [
                     GeoServiceTrace(
                         service: "ipinfo",
@@ -292,6 +294,7 @@ final class JournalExportFixtureTests: XCTestCase {
         let checkOutcomes: [String]
         let stalenessCauses: [String]
         let eventKinds: [String]
+        let verdictOrigins: [String]
         let timestampPattern: String
         let timestampFields: [String]
         let bodyLimit: Int

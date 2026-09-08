@@ -127,6 +127,13 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
     }
 }
 
+/// Откуда в записи адрес и страна: из пробы, породившей это решение, или из прошлого вердикта.
+/// Без пометки запись «таймаут запроса» с адресом и страной читается как противоречие.
+public enum VerdictOrigin: String, Codable, Equatable, Sendable {
+    case established
+    case current
+}
+
 /// Всё, что известно о завершении, но не показывается пользователю.
 ///
 /// Живёт в записи журнала и уходит в выгрузку. В интерфейсе не появляется:
@@ -143,6 +150,10 @@ public struct KillDiagnostics: Codable, Equatable, Sendable {
     public let vpnAppEntry: String?
     public let vpnAppStatus: String?
 
+    /// Откуда взяты адрес и страна этой записи: из пробы, только что ответившей,
+    /// или из прошлого вердикта.
+    public let verdictOrigin: VerdictOrigin?
+
     public let services: [GeoServiceTrace]
 
     public let probedAt: Date?
@@ -155,6 +166,7 @@ public struct KillDiagnostics: Codable, Equatable, Sendable {
         hasNetworkPath: Bool? = nil,
         vpnAppEntry: String? = nil,
         vpnAppStatus: String? = nil,
+        verdictOrigin: VerdictOrigin? = nil,
         services: [GeoServiceTrace] = [],
         probedAt: Date? = nil,
         appVersion: String? = nil
@@ -165,6 +177,7 @@ public struct KillDiagnostics: Codable, Equatable, Sendable {
         self.hasNetworkPath = hasNetworkPath
         self.vpnAppEntry = vpnAppEntry
         self.vpnAppStatus = vpnAppStatus
+        self.verdictOrigin = verdictOrigin
         self.services = services
         self.probedAt = probedAt
         self.appVersion = appVersion
