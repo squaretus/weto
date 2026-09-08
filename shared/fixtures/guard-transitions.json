@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "about": [
+    "Голден-фикстуры машины состояний охраны. Читает macos/Tests/WetoCoreTests/GuardMachineFixtureTests.swift;",
+    "Linux начнёт читать этот же файл в плане порта паузы.",
+    "",
+    "Каждый случай — стартовая фаза, терпимость и потолок, затем шаги: момент (секунды от нуля), вход,",
+    "ожидаемые фаза и эффект. Фазы: disabled | verifying | protected | interference | paused | danger.",
+    "Эффекты: none | pause | resume | terminate. Чтение kz — 203.0.113.177 / KZ / KZ / freeipapi.",
+    "",
+    "Входы: verdictLost{cause}, verdict{decision, geo}, reassessment{decision}, evidence{evidence{kind}}, tick, disarmed.",
+    "decision: safe | unproven{reason{kind, detail|observed}} | kill{evidence{kind, ...}}.",
+    "geo: resolved | degraded{detail} | unavailable{detail} | addressChanged{observed}; чтение и прошлое чтение берутся из reading.",
+    "Ожидаемая фаза сверяется по kind, по failures и evidence.kind, если они заданы; момент постановки на паузу не сверяется.",
+    "",
+    "Два первых случая — эпизоды реального журнала 2026-09-07: 18:03:21Z и 19:31:51Z."
+  ],
+  "reading": { "ip": "203.0.113.177", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
+  "cases": [
+    {
+      "name": "18:03 — холодный старт, safe через 2 с: цели стоят и возобновляются",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "disabled" },
+      "steps": [
+        { "at": 0, "input": { "kind": "verdictLost", "cause": "coldStart" }, "phase": { "kind": "verifying" }, "effect": "pause" },
+        { "at": 2, "input": { "kind": "verdict", "decision": { "kind": "safe" }, "geo": { "kind": "resolved" } }, "phase": { "kind": "protected" }, "effect": "resume" }
+      ]
+    },
+    {
+      "name": "19:31 — оба сервиса молчат три минуты: терпимость, пауза, завершение по потолку",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "protected" },
+      "steps": [
+        { "at": 0, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "interference", "failures": 1 }, "effect": "none" },
+        { "at": 10, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "paused" }, "effect": "pause" },
+        { "at": 20, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "paused" }, "effect": "none" },
+        { "at": 69, "input": { "kind": "tick" }, "phase": { "kind": "paused" }, "effect": "none" },
+        { "at": 70, "input": { "kind": "tick" }, "phase": { "kind": "danger", "evidence": { "kind": "pauseExpired" } }, "effect": "terminate" }
+      ]
+    },
+    {
+      "name": "правка настроек при действующем вердикте не трогает цели",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "protected" },
+      "steps": [
+        { "at": 1, "input": { "kind": "reassessment", "decision": { "kind": "safe" } }, "phase": { "kind": "protected" }, "effect": "none" }
+      ]
+    },
+    {
+      "name": "смена пути — пауза сразу, без терпимости",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "protected" },
+      "steps": [
+        { "at": 1, "input": { "kind": "verdictLost", "cause": "networkChanged" }, "phase": { "kind": "verifying" }, "effect": "pause" }
+      ]
+    },
+    {
+      "name": "доказательство завершает из паузы",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "disabled" },
+      "steps": [
+        { "at": 0, "input": { "kind": "verdictLost", "cause": "coldStart" }, "phase": { "kind": "verifying" }, "effect": "pause" },
+        { "at": 1, "input": { "kind": "evidence", "evidence": { "kind": "vpnAppNotRunning" } }, "phase": { "kind": "danger", "evidence": { "kind": "vpnAppNotRunning" } }, "effect": "terminate" }
+      ]
+    },
+    {
+      "name": "совпавший адрес от резерва — Помехи без счёта",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "protected" },
+      "steps": [
+        { "at": 5, "input": { "kind": "verdict", "decision": { "kind": "safe" }, "geo": { "kind": "degraded", "detail": "таймаут запроса" } }, "phase": { "kind": "interference", "failures": 0 }, "effect": "none" }
+      ]
+    },
+    {
+      "name": "другой адрес от резерва — пауза с первой пробы",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "protected" },
+      "steps": [
+        { "at": 5, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "addressChanged", "observed": "198.51.100.7" } }, "geo": { "kind": "addressChanged", "observed": "198.51.100.7" } }, "phase": { "kind": "paused" }, "effect": "pause" }
+      ]
+    },
+    {
+      "name": "выключение охраны снимает паузу",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "disabled" },
+      "steps": [
+        { "at": 0, "input": { "kind": "verdictLost", "cause": "coldStart" }, "phase": { "kind": "verifying" }, "effect": "pause" },
+        { "at": 1, "input": { "kind": "disarmed" }, "phase": { "kind": "disabled" }, "effect": "resume" }
+      ]
+    }
+  ]
+}
