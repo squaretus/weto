@@ -51,76 +51,67 @@ public struct GuardSignals: Equatable, Sendable {
     }
 }
 
-public enum UnsafeReason: Equatable, Sendable {
-    case verificationPending
-    case vpnAppNotChosen
-    case vpnAppNotRunning
+/// Нет доказательства ни утечки, ни защиты. Ответ на такое — пауза, а не завершение.
+public enum UnprovenReason: Equatable, Sendable {
+    /// ipinfo молчит, и адрес никем не назван.
     case geoUnavailable(String)
+    /// Резервный сервис назвал другой адрес: страна не проверена. Терпимости не получает.
+    case addressChanged(observed: String)
+    /// ipinfo ответил, подтверждающие сервисы молчат. Safe без подтверждения не бывает.
+    case confirmationUnavailable
+}
+
+/// Положительное доказательство опасности. Только оно завершает цели.
+public enum UnsafeEvidence: Equatable, Sendable {
+    case vpnAppNotRunning
     case blacklistedIP(String)
     case blockedCountry(code: String, source: String)
-    case confirmationUnavailable
     case countryConflict(primary: String, confirmed: String)
     case notWhitelistedIP(String)
     case notWhitelistedCountry(String)
+    /// Потолок паузы: подтверждения не дождались.
+    case pauseExpired
 }
 
 public enum GuardDecision: Equatable, Sendable {
     case safe
-    case kill(UnsafeReason)
+    case unproven(UnprovenReason)
+    case kill(UnsafeEvidence)
 }
 
 public enum GuardPolicy {
 
-    /// Решение на время, пока локальные основания исчерпаны, а свежего гео-вердикта ещё нет.
-    /// Это окно обязано быть fail-closed: иначе цели живут все секунды, что идёт запрос
-    /// к ipinfo и подтверждающим сервисам.
-    public static func pendingVerification(
-        isEnabled: Bool,
-        config: GuardConfig
-    ) -> GuardDecision {
-        guard isEnabled, config.hasTargets else { return .safe }
-        return .kill(.verificationPending)
-    }
-
+    /// Основания, видные без сети. `nil` — «локальных оснований нет, решает гео».
+    /// Невыбранное приложение оснований не даёт: это дешёвый дополнительный сигнал,
+    /// а не условие работы охраны.
     public static func decideLocal(
         isEnabled: Bool,
         vpn: VPNAppStatus,
         config: GuardConfig
     ) -> GuardDecision? {
         guard isEnabled, config.hasTargets else { return .safe }
-
-        // Пустой выбор в настройках убивает сам по себе, не спрашивая статус.
-        // Статус считает вызывающий, и разойтись с настройками он не должен —
-        // но если разойдётся, ошибка обязана быть в сторону fail-closed.
-        guard config.vpnAppRule != nil else { return .kill(.vpnAppNotChosen) }
+        guard config.vpnAppRule != nil else { return nil }
 
         switch vpn {
-        case .notChosen:
-            return .kill(.vpnAppNotChosen)
+        case .notChosen, .running:
+            // Запущенное приложение — ещё не доказательство, что трафик в туннеле.
+            return nil
         case .notRunning:
             return .kill(.vpnAppNotRunning)
-        case .running:
-            // Запущенное приложение — ещё не доказательство, что трафик идёт
-            // через VPN: клиент умеет висеть в менюбаре с выключенным подключением.
-            // Отвечает на это гео, и ответ обязателен.
-            return nil
         }
     }
 
     public static func decide(_ signals: GuardSignals) -> GuardDecision {
-        if let local = decideLocal(
-            isEnabled: signals.isEnabled,
-            vpn: signals.vpn,
-            config: signals.config
-        ) {
+        if let local = decideLocal(isEnabled: signals.isEnabled, vpn: signals.vpn, config: signals.config) {
             return local
         }
 
         guard let reading = signals.geo.reading else {
-            if case .unavailable(let detail) = signals.geo {
-                return .kill(.geoUnavailable(detail))
+            switch signals.geo {
+            case .addressChanged(let observed, _): return .unproven(.addressChanged(observed: observed))
+            case .unavailable(let detail): return .unproven(.geoUnavailable(detail))
+            case .resolved, .degraded: return .unproven(.geoUnavailable("нет данных"))
             }
-            return .kill(.geoUnavailable("нет данных"))
         }
 
         if signals.config.blockedIPRanges.contains(where: { $0.contains(reading.ip) }) {
@@ -129,41 +120,28 @@ public enum GuardPolicy {
 
         let blocked = Set(signals.config.blockedCountries.map { $0.uppercased() })
         let primary = reading.primaryCountry.uppercased()
-
         if blocked.contains(primary) {
             return .kill(.blockedCountry(code: primary, source: "ipinfo"))
         }
 
+        // Без подтверждения safe не бывает — но и утечка не доказана: пауза, не завершение.
         guard let confirmedRaw = reading.confirmedCountry else {
-            return .kill(.confirmationUnavailable)
+            return .unproven(.confirmationUnavailable)
         }
         let confirmed = confirmedRaw.uppercased()
 
         if blocked.contains(confirmed) {
-            let source = reading.confirmSource?.rawValue ?? "confirm"
-            return .kill(.blockedCountry(code: confirmed, source: source))
+            return .kill(.blockedCountry(code: confirmed, source: reading.confirmSource?.rawValue ?? "confirm"))
         }
-
         if primary != confirmed {
             return .kill(.countryConflict(primary: primary, confirmed: confirmed))
         }
 
-        // Whitelist спрашивают последним и только у согласованного вердикта:
-        // раньше решают чёрный список, отсутствие подтверждения и расхождение
-        // стран — иначе разрешённая страна отменяла бы строгий fail-closed.
         let config = signals.config
         guard config.hasWhitelist else { return .safe }
-
-        let allowedRanges = config.allowedIPRanges
-        if allowedRanges.contains(where: { $0.contains(reading.ip) }) { return .safe }
-
-        let allowedCountries = Set(config.allowedCountries.map { $0.uppercased() })
-        if allowedCountries.contains(confirmed) { return .safe }
-
-        // Диагностический приоритет у адреса: если пользователь перечислил
-        // диапазоны и выход в них не попал, объяснять надо именно адресом.
-        // На решение выбор причины не влияет.
-        if !allowedRanges.isEmpty { return .kill(.notWhitelistedIP(reading.ip)) }
+        if config.allowedIPRanges.contains(where: { $0.contains(reading.ip) }) { return .safe }
+        if Set(config.allowedCountries.map { $0.uppercased() }).contains(confirmed) { return .safe }
+        if !config.allowedIPRanges.isEmpty { return .kill(.notWhitelistedIP(reading.ip)) }
         return .kill(.notWhitelistedCountry(confirmed))
     }
 }

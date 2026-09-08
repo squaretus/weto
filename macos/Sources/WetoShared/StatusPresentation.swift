@@ -47,7 +47,9 @@ public enum StatusPresentation {
         switch state {
         case .disabled: return "Охрана выключена"
         case .safe: return "На страже"
-        case .unsafe(let reason): return reason.statusTitle
+        // Разбор по причине (иное для «ipinfo недоступен», иное для «подтверждение
+        // недоступно») придёт вместе с заголовками фаз GuardMachine (задача 8).
+        case .unsafe: return "Цели завершены"
         }
     }
 
@@ -114,7 +116,9 @@ public enum StatusPresentation {
     }
 
     private static func knownReading(for state: GuardState, reading: GeoReading?) -> GeoReading? {
-        if case .unsafe(let reason) = state, case .geoUnavailable = reason { return nil }
+        // Временно, до задачи 14/15: `.pauseExpired` — единственный заместитель
+        // непроверенности, и раньше эту роль играл `.geoUnavailable`.
+        if case .unsafe(.pauseExpired) = state { return nil }
         if case .safe(let current) = state { return current ?? reading }
         return reading
     }

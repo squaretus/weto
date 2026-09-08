@@ -39,9 +39,6 @@ final class GuardPolicyFixtureTests: XCTestCase {
             let local = GuardPolicy.decideLocal(isEnabled: fixture.isEnabled, vpn: vpn, config: config)
             return local.map(Decision.some) ?? .none
 
-        case "pendingVerification":
-            return .some(GuardPolicy.pendingVerification(isEnabled: fixture.isEnabled, config: config))
-
         default:
             throw Failure("неизвестная функция «\(fixture.function)» в случае «\(fixture.name)»")
         }
@@ -103,12 +100,25 @@ final class GuardPolicyFixtureTests: XCTestCase {
         let kind: String
         let detail: String?
         let ip: String?
+        /// Адрес прошлого чтения у `addressChanged`: фикстуры его почти никогда
+        /// не называют явно, потому что во всех имеющихся случаях он один и тот же.
+        let previousIP: String?
         let primaryCountry: String?
         let confirmedCountry: String?
         let confirmSource: String?
 
         func asOutcome() throws -> GeoOutcome {
             if kind == "unavailable" { return .unavailable(detail ?? "") }
+            if kind == "addressChanged" {
+                guard let ip else { throw Failure("addressChanged без наблюдаемого адреса") }
+                let previous = GeoReading(
+                    ip: previousIP ?? "203.0.113.28",
+                    primaryCountry: primaryCountry ?? "",
+                    confirmedCountry: confirmedCountry,
+                    confirmSource: confirmSource.flatMap(ConfirmSource.init(rawValue:))
+                )
+                return .addressChanged(observed: ip, previous: previous)
+            }
             guard let ip, let primaryCountry else {
                 throw Failure("\(kind) без ip или страны")
             }
@@ -164,7 +174,8 @@ final class GuardPolicyFixtureTests: XCTestCase {
             switch decision {
             case "none": return .none
             case "safe": return .some(.safe)
-            default: return .some(.kill(reason!.asUnsafeReason))
+            case "unproven": return .some(.unproven(reason!.asUnproven))
+            default: return .some(.kill(reason!.asEvidence))
             }
         }
     }
@@ -178,21 +189,27 @@ final class GuardPolicyFixtureTests: XCTestCase {
         let primary: String?
         let confirmed: String?
 
-        var asUnsafeReason: UnsafeReason {
+        var asUnproven: UnprovenReason {
             switch kind {
-            case "verificationPending": return .verificationPending
-            case "vpnAppNotChosen": return .vpnAppNotChosen
-            case "vpnAppNotRunning": return .vpnAppNotRunning
             case "geoUnavailable": return .geoUnavailable(detail ?? "")
+            case "addressChanged": return .addressChanged(observed: ip ?? "")
+            case "confirmationUnavailable": return .confirmationUnavailable
+            default:
+                fatalError("неизвестная unproven-причина «\(kind)» в фикстурах")
+            }
+        }
+
+        var asEvidence: UnsafeEvidence {
+            switch kind {
+            case "vpnAppNotRunning": return .vpnAppNotRunning
             case "blacklistedIP": return .blacklistedIP(ip ?? "")
             case "blockedCountry": return .blockedCountry(code: code ?? "", source: source ?? "")
-            case "confirmationUnavailable": return .confirmationUnavailable
             case "countryConflict":
                 return .countryConflict(primary: primary ?? "", confirmed: confirmed ?? "")
             case "notWhitelistedIP": return .notWhitelistedIP(ip ?? "")
             case "notWhitelistedCountry": return .notWhitelistedCountry(code ?? "")
             default:
-                fatalError("неизвестная причина «\(kind)» в фикстурах")
+                fatalError("неизвестная evidence-причина «\(kind)» в фикстурах")
             }
         }
     }
