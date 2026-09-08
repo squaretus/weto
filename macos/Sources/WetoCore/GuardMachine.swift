@@ -121,18 +121,29 @@ public struct GuardMachine: Equatable, Sendable {
 
         case .verdictLost(let cause):
             switch phase {
+            case .verifying(_, let current) where cause == current:
+                // Пока вердикт несвеж, такт заново объявляет fail-closed каждую секунду:
+                // перезапуск отсчёта на каждом объявлении значил бы, что потолок
+                // не срабатывает никогда.
+                return .none
             case .verifying:
-                // Повторная потеря в той же проверке отсчёт не перезапускает.
+                // Причина другая — путь сменился уже в проверке, и у нового пути свой
+                // отсчёт. Эффекта нет: цели и так стоят.
+                phase = .verifying(since: now, cause: cause)
                 return .none
-            case .danger where cause == .coldStart:
-                // Вердикта не было и нет: завершение в силе, пока проба не скажет иного.
-                // Иначе истёкшая пауза каждый такт превращалась бы в новую проверку.
-                return .none
+            case .danger:
+                // Завершение снимает только смена пути: у нового пути свой шанс.
+                // Ни холодный старт (констатация, что вердикта по-прежнему нет),
+                // ни правка настроек (п. 11: вердикт она не обесценивает) путь не меняют,
+                // и доказательство остаётся в силе, пока проба не скажет иного.
+                guard cause.includesNetworkChange else { return .none }
+                phase = .verifying(since: now, cause: cause)
+                return .pause
             case .paused:
                 // Путь сменился, пока стояли: отсчёт идёт по новому пути, цели уже стоят.
                 phase = .verifying(since: now, cause: cause)
                 return .none
-            case .disabled, .protected, .interference, .danger:
+            case .disabled, .protected, .interference:
                 // Момент смены пути и есть возможная утечка: пауза сразу, без терпимости.
                 phase = .verifying(since: now, cause: cause)
                 return .pause
@@ -210,7 +221,8 @@ public struct GuardMachine: Equatable, Sendable {
         }
     }
 
-    /// Терпимость к молчанию: вердикт считается действующим первые `tolerance` неудач.
+    /// Терпимость к молчанию: первые `tolerance` неудачных проб ничего не меняют,
+    /// пауза приходит с `tolerance + 1`-й — при N = 2 это ~10 с пятисекундного расписания.
     /// Смена адреса терпимости не получает — прошлое чтение про новый адрес ничего не говорит.
     private mutating func tolerate(
         reading: GeoReading, reason: UnprovenReason, failures: Int, at now: Date
@@ -219,7 +231,7 @@ public struct GuardMachine: Equatable, Sendable {
             phase = .paused(since: now, reason: reason)
             return .pause
         }
-        if failures < tolerance {
+        if failures <= tolerance {
             phase = .interference(reading, reason: reason, failures: failures)
             return .none
         }

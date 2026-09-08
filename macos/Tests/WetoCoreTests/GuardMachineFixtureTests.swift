@@ -89,6 +89,10 @@ final class GuardMachineFixtureTests: XCTestCase {
     }
 
     /// Ожидаемая фаза: сверяются `kind`, а также `failures` и `evidence.kind`, если заданы.
+    /// Полезная нагрузка узлов (`detail`, `observed`, `ip`, `code`, `source`, `primary`,
+    /// `confirmed`) обязательна: молчаливое умолчание в пустую строку означало бы,
+    /// что Rust-раннер разойдётся с этим на первом же случае с нагрузкой, и оба
+    /// останутся зелёными.
     /// Момент постановки на паузу не сверяется — он вычисляется из `at` шага, и сверять
     /// его значило бы сверять раннер с самим собой.
     private struct Phase: Decodable {
@@ -105,11 +109,8 @@ final class GuardMachineFixtureTests: XCTestCase {
             case "disabled": return .disabled
             case "protected": return .protected(reading)
             case "interference":
-                return .interference(
-                    reading,
-                    reason: try (reason ?? Reason.geoUnavailable).asUnproven,
-                    failures: failures ?? 0
-                )
+                guard let reason else { throw Failure("стартовая фаза interference без причины") }
+                return .interference(reading, reason: try reason.asUnproven, failures: failures ?? 0)
             case "danger":
                 guard let evidence else { throw Failure("стартовая фаза danger без улики") }
                 return .danger(try evidence.asEvidence)
@@ -195,8 +196,12 @@ final class GuardMachineFixtureTests: XCTestCase {
         func asOutcome(reading: GeoReading) throws -> GeoOutcome {
             switch kind {
             case "resolved": return .resolved(reading)
-            case "degraded": return .degraded(previous: reading, detail: detail ?? "")
-            case "unavailable": return .unavailable(detail ?? "")
+            case "degraded":
+                guard let detail else { throw Failure("degraded без подробности") }
+                return .degraded(previous: reading, detail: detail)
+            case "unavailable":
+                guard let detail else { throw Failure("unavailable без подробности") }
+                return .unavailable(detail)
             case "addressChanged":
                 guard let observed else { throw Failure("addressChanged без наблюдаемого адреса") }
                 return .addressChanged(observed: observed, previous: reading)
@@ -211,12 +216,12 @@ final class GuardMachineFixtureTests: XCTestCase {
         let detail: String?
         let observed: String?
 
-        static let geoUnavailable = Reason(kind: "geoUnavailable", detail: "", observed: nil)
-
         var asUnproven: UnprovenReason {
             get throws {
                 switch kind {
-                case "geoUnavailable": return .geoUnavailable(detail ?? "")
+                case "geoUnavailable":
+                    guard let detail else { throw Failure("geoUnavailable без подробности") }
+                    return .geoUnavailable(detail)
                 case "addressChanged":
                     guard let observed else { throw Failure("addressChanged без наблюдаемого адреса") }
                     return .addressChanged(observed: observed)
@@ -240,12 +245,21 @@ final class GuardMachineFixtureTests: XCTestCase {
             get throws {
                 switch kind {
                 case "vpnAppNotRunning": return .vpnAppNotRunning
-                case "blacklistedIP": return .blacklistedIP(ip ?? "")
-                case "blockedCountry": return .blockedCountry(code: code ?? "", source: source ?? "")
+                case "blacklistedIP":
+                    guard let ip else { throw Failure("blacklistedIP без адреса") }
+                    return .blacklistedIP(ip)
+                case "blockedCountry":
+                    guard let code, let source else { throw Failure("blockedCountry без страны или источника") }
+                    return .blockedCountry(code: code, source: source)
                 case "countryConflict":
-                    return .countryConflict(primary: primary ?? "", confirmed: confirmed ?? "")
-                case "notWhitelistedIP": return .notWhitelistedIP(ip ?? "")
-                case "notWhitelistedCountry": return .notWhitelistedCountry(code ?? "")
+                    guard let primary, let confirmed else { throw Failure("countryConflict без пары стран") }
+                    return .countryConflict(primary: primary, confirmed: confirmed)
+                case "notWhitelistedIP":
+                    guard let ip else { throw Failure("notWhitelistedIP без адреса") }
+                    return .notWhitelistedIP(ip)
+                case "notWhitelistedCountry":
+                    guard let code else { throw Failure("notWhitelistedCountry без страны") }
+                    return .notWhitelistedCountry(code)
                 case "pauseExpired": return .pauseExpired
                 default:
                     throw Failure("неизвестная улика «\(kind)»")

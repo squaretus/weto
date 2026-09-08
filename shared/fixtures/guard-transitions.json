@@ -12,6 +12,8 @@
     "decision: safe | unproven{reason{kind, detail|observed}} | kill{evidence{kind, ...}}.",
     "geo: resolved | degraded{detail} | unavailable{detail} | addressChanged{observed}; чтение и прошлое чтение берутся из reading.",
     "Ожидаемая фаза сверяется по kind, по failures и evidence.kind, если они заданы; момент постановки на паузу не сверяется.",
+    "Полезная нагрузка узла обязательна для тех kind, у которых она есть (detail, observed, ip, code, source, primary, confirmed),",
+    "как и reason у стартовой фазы interference: умолчаний нет, отсутствие поля — ошибка раннера, а не пустая строка.",
     "",
     "Два первых случая — эпизоды реального журнала 2026-09-07: 18:03:21Z и 19:31:51Z."
   ],
@@ -30,10 +32,11 @@
       "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "protected" },
       "steps": [
         { "at": 0, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "interference", "failures": 1 }, "effect": "none" },
-        { "at": 10, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "paused" }, "effect": "pause" },
+        { "at": 10, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "interference", "failures": 2 }, "effect": "none" },
+        { "at": 15, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "paused" }, "effect": "pause" },
         { "at": 20, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "paused" }, "effect": "none" },
-        { "at": 69, "input": { "kind": "tick" }, "phase": { "kind": "paused" }, "effect": "none" },
-        { "at": 70, "input": { "kind": "tick" }, "phase": { "kind": "danger", "evidence": { "kind": "pauseExpired" } }, "effect": "terminate" }
+        { "at": 74, "input": { "kind": "tick" }, "phase": { "kind": "paused" }, "effect": "none" },
+        { "at": 75, "input": { "kind": "tick" }, "phase": { "kind": "danger", "evidence": { "kind": "pauseExpired" } }, "effect": "terminate" }
       ]
     },
     {
@@ -70,6 +73,33 @@
       "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "protected" },
       "steps": [
         { "at": 5, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "addressChanged", "observed": "198.51.100.7" } }, "geo": { "kind": "addressChanged", "observed": "198.51.100.7" } }, "phase": { "kind": "paused" }, "effect": "pause" }
+      ]
+    },
+    {
+      "name": "повторное «вердикта нет» отсчёт не перезапускает",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "disabled" },
+      "steps": [
+        { "at": 0, "input": { "kind": "verdictLost", "cause": "coldStart" }, "phase": { "kind": "verifying" }, "effect": "pause" },
+        { "at": 30, "input": { "kind": "verdictLost", "cause": "coldStart" }, "phase": { "kind": "verifying" }, "effect": "none" },
+        { "at": 60, "input": { "kind": "tick" }, "phase": { "kind": "danger", "evidence": { "kind": "pauseExpired" } }, "effect": "terminate" }
+      ]
+    },
+    {
+      "name": "другая причина в проверке — отсчёт по новому пути",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "disabled" },
+      "steps": [
+        { "at": 0, "input": { "kind": "verdictLost", "cause": "coldStart" }, "phase": { "kind": "verifying" }, "effect": "pause" },
+        { "at": 50, "input": { "kind": "verdictLost", "cause": "networkChanged" }, "phase": { "kind": "verifying" }, "effect": "none" },
+        { "at": 100, "input": { "kind": "tick" }, "phase": { "kind": "verifying" }, "effect": "none" },
+        { "at": 110, "input": { "kind": "tick" }, "phase": { "kind": "danger", "evidence": { "kind": "pauseExpired" } }, "effect": "terminate" }
+      ]
+    },
+    {
+      "name": "правка настроек в «Опасно» завершение не снимает",
+      "tolerance": 2, "ceilingSeconds": 60, "start": { "kind": "danger", "evidence": { "kind": "vpnAppNotRunning" } },
+      "steps": [
+        { "at": 1, "input": { "kind": "verdictLost", "cause": "configurationChanged" }, "phase": { "kind": "danger", "evidence": { "kind": "vpnAppNotRunning" } }, "effect": "none" },
+        { "at": 2, "input": { "kind": "verdictLost", "cause": "networkChanged" }, "phase": { "kind": "verifying" }, "effect": "pause" }
       ]
     },
     {

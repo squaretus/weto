@@ -13,6 +13,21 @@ final class GuardMachineTests: XCTestCase {
         return machine
     }
 
+    private func dangerMachine() -> GuardMachine {
+        var machine = protectedMachine()
+        _ = machine.apply(.evidence(.vpnAppNotRunning), at: at(1))
+        return machine
+    }
+
+    // Умолчания — не украшение конструктора: боевой код идёт именно через них,
+    // а все тесты и фикстуры передают числа явно.
+    func test_the_default_machine_carries_the_project_constants() {
+        let machine = GuardMachine()
+        XCTAssertEqual(machine.phase, .disabled)
+        XCTAssertEqual(machine.tolerance, Constants.silenceToleranceProbes)
+        XCTAssertEqual(machine.pauseCeiling, Constants.pauseCeilingSeconds)
+    }
+
     // Холодный старт: вердикта нет — пауза, не завершение.
     func test_cold_start_pauses_until_the_verdict() {
         var machine = GuardMachine(tolerance: 2, pauseCeiling: 60)
@@ -38,13 +53,32 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertEqual(machine.phase, .interference(kz, reason: .geoUnavailable("таймаут запроса"), failures: 1))
         XCTAssertEqual(machine.phase.action, .run)
 
-        XCTAssertEqual(machine.apply(.verdict(silence, geo: .unavailable("таймаут запроса")), at: at(10)), .pause)
-        XCTAssertEqual(machine.phase, .paused(since: at(10), reason: .geoUnavailable("таймаут запроса")))
+        XCTAssertEqual(
+            machine.apply(.verdict(silence, geo: .unavailable("таймаут запроса")), at: at(10)),
+            .none,
+            "вторая неудача — ещё терпимость"
+        )
+        XCTAssertEqual(machine.phase, .interference(kz, reason: .geoUnavailable("таймаут запроса"), failures: 2))
+        XCTAssertEqual(machine.phase.action, .run)
 
-        XCTAssertEqual(machine.apply(.tick, at: at(69)), .none, "потолок ещё не истёк")
-        XCTAssertEqual(machine.remainingPause(at: at(69)), 1)
-        XCTAssertEqual(machine.apply(.tick, at: at(70)), .terminate)
+        XCTAssertEqual(machine.apply(.verdict(silence, geo: .unavailable("таймаут запроса")), at: at(15)), .pause)
+        XCTAssertEqual(machine.phase, .paused(since: at(15), reason: .geoUnavailable("таймаут запроса")))
+
+        XCTAssertEqual(machine.apply(.tick, at: at(74)), .none, "потолок ещё не истёк")
+        XCTAssertEqual(machine.remainingPause(at: at(74)), 1)
+        XCTAssertEqual(machine.apply(.tick, at: at(75)), .terminate)
         XCTAssertEqual(machine.phase, .danger(.pauseExpired))
+    }
+
+    // Терпимость — это N терпимых проб, а не N−1: с единицей терпится ровно одна.
+    func test_the_tolerance_counts_the_probes_it_lets_pass() {
+        var machine = GuardMachine(phase: .protected(kz), tolerance: 1, pauseCeiling: 60)
+        let silence = GuardDecision.unproven(.geoUnavailable("таймаут"))
+
+        XCTAssertEqual(machine.apply(.verdict(silence, geo: .unavailable("таймаут")), at: at(5)), .none)
+        XCTAssertEqual(machine.phase, .interference(kz, reason: .geoUnavailable("таймаут"), failures: 1))
+        XCTAssertEqual(machine.apply(.verdict(silence, geo: .unavailable("таймаут")), at: at(10)), .pause)
+        XCTAssertEqual(machine.phase, .paused(since: at(10), reason: .geoUnavailable("таймаут")))
     }
 
     func test_safe_verdict_resets_the_tolerance_counter() {
@@ -84,6 +118,27 @@ final class GuardMachineTests: XCTestCase {
         _ = machine.apply(.verdictLost(.coldStart), at: t0)
         XCTAssertEqual(machine.apply(.verdictLost(.coldStart), at: at(30)), .none)
         XCTAssertEqual(machine.phase.pausedSince, t0)
+
+        // Пока вердикт несвеж, такт объявляет fail-closed каждую секунду: перезапуск
+        // на каждом объявлении значил бы, что потолок не срабатывает никогда.
+        XCTAssertEqual(machine.apply(.verdictLost(.coldStart), at: at(59)), .none)
+        XCTAssertEqual(machine.phase.pausedSince, t0)
+        XCTAssertEqual(machine.apply(.tick, at: at(60)), .terminate)
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired))
+    }
+
+    // Путь сменился уже в проверке: причина другая, и у нового пути свой отсчёт —
+    // иначе он доедал бы минуту, начатую по прежней причине.
+    func test_a_different_cause_restarts_the_verification_countdown() {
+        var machine = GuardMachine(tolerance: 2, pauseCeiling: 60)
+        _ = machine.apply(.verdictLost(.coldStart), at: t0)
+
+        XCTAssertEqual(machine.apply(.verdictLost(.networkChanged), at: at(50)), .none, "цели уже стоят")
+        XCTAssertEqual(machine.phase, .verifying(since: at(50), cause: .networkChanged))
+        XCTAssertEqual(machine.apply(.tick, at: at(100)), .none, "отсчёт идёт от смены пути")
+        XCTAssertEqual(machine.remainingPause(at: at(100)), 10)
+        XCTAssertEqual(machine.apply(.tick, at: at(110)), .terminate)
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired))
     }
 
     // Истёкшая пауза без установленного вердикта: каждый такт «вердикта нет» — и это не новость.
@@ -98,10 +153,33 @@ final class GuardMachineTests: XCTestCase {
 
     // А смена пути из «Опасно» — новая проверка: у нового пути свой шанс.
     func test_network_change_after_danger_starts_a_new_verification() {
-        var machine = protectedMachine()
-        _ = machine.apply(.evidence(.vpnAppNotRunning), at: at(1))
+        var machine = dangerMachine()
         XCTAssertEqual(machine.apply(.verdictLost(.networkChanged), at: at(2)), .pause)
         XCTAssertEqual(machine.phase, .verifying(since: at(2), cause: .networkChanged))
+    }
+
+    // п. 11: правка настроек вердикт не обесценивает — в том числе доказанное «Опасно».
+    // Иначе одна правка снимала бы завершение, и цель, запущенная в это окно,
+    // всего лишь встала бы на паузу.
+    func test_a_settings_edit_does_not_lift_a_danger() {
+        var machine = dangerMachine()
+        XCTAssertEqual(machine.apply(.verdictLost(.configurationChanged), at: at(2)), .none)
+        XCTAssertEqual(machine.phase, .danger(.vpnAppNotRunning))
+        XCTAssertEqual(machine.phase.action, .terminate)
+    }
+
+    // Все четыре причины несвежести из «Опасно»: выпускает только та, что меняет путь.
+    func test_only_a_path_change_lifts_a_danger_into_a_new_verification() {
+        for cause in [VerdictStaleness.Cause.networkChanged, .configurationAndNetworkChanged] {
+            var machine = dangerMachine()
+            XCTAssertEqual(machine.apply(.verdictLost(cause), at: at(2)), .pause, "\(cause)")
+            XCTAssertEqual(machine.phase, .verifying(since: at(2), cause: cause), "\(cause)")
+        }
+        for cause in [VerdictStaleness.Cause.coldStart, .configurationChanged] {
+            var machine = dangerMachine()
+            XCTAssertEqual(machine.apply(.verdictLost(cause), at: at(2)), .none, "\(cause)")
+            XCTAssertEqual(machine.phase, .danger(.vpnAppNotRunning), "\(cause)")
+        }
     }
 
     // Доказательство завершает из любого состояния.
@@ -155,7 +233,8 @@ final class GuardMachineTests: XCTestCase {
         var machine = protectedMachine()
         _ = machine.apply(.verdict(.unproven(.geoUnavailable("т")), geo: .unavailable("т")), at: at(5))
         _ = machine.apply(.verdict(.unproven(.geoUnavailable("т")), geo: .unavailable("т")), at: at(10))
-        _ = machine.apply(.tick, at: at(70))
+        _ = machine.apply(.verdict(.unproven(.geoUnavailable("т")), geo: .unavailable("т")), at: at(15))
+        _ = machine.apply(.tick, at: at(80))
         XCTAssertEqual(machine.apply(.reassessment(.safe, reading: kz), at: at(71)), .none)
         XCTAssertEqual(machine.phase, .danger(.pauseExpired))
     }
@@ -188,7 +267,8 @@ final class GuardMachineTests: XCTestCase {
         let silence = GuardDecision.unproven(.geoUnavailable("таймаут"))
         _ = machine.apply(.verdict(silence, geo: .unavailable("таймаут")), at: at(5))
         _ = machine.apply(.verdict(silence, geo: .unavailable("таймаут")), at: at(10))
-        XCTAssertEqual(machine.phase.pausedSince, at(10))
+        _ = machine.apply(.verdict(silence, geo: .unavailable("таймаут")), at: at(15))
+        XCTAssertEqual(machine.phase.pausedSince, at(15))
 
         XCTAssertEqual(machine.apply(.verdictLost(.networkChanged), at: at(20)), .none, "цели уже стоят")
         XCTAssertEqual(machine.phase, .verifying(since: at(20), cause: .networkChanged))
