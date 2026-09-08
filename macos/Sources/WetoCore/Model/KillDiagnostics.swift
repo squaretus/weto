@@ -16,6 +16,16 @@ public struct VerdictStaleness: Codable, Equatable, Sendable {
         case networkChanged
         case configurationAndNetworkChanged
 
+        /// Сменился ли путь, через который ядро выпускает трафик. Правка настроек
+        /// путь не меняет, а холодный старт про путь ничего не утверждает: только
+        /// смена пути обесценивает знание о выходе.
+        public var includesNetworkChange: Bool {
+            switch self {
+            case .networkChanged, .configurationAndNetworkChanged: return true
+            case .coldStart, .configurationChanged: return false
+            }
+        }
+
         public var displayText: String {
             switch self {
             case .coldStart: return "вердикта ещё не было"
@@ -61,8 +71,7 @@ public struct VerdictStaleness: Codable, Equatable, Sendable {
     /// «сменился выход в сеть: utun6/10.2.0.2 → utun6/10.2.0.5» — то, ради чего
     /// диагностика и собирается.
     public var displayText: String {
-        guard cause == .networkChanged || cause == .configurationAndNetworkChanged,
-              let previousFingerprint
+        guard cause.includesNetworkChange, let previousFingerprint
         else { return cause.displayText }
         return "\(cause.displayText): \(previousFingerprint) → \(fingerprint)"
     }
