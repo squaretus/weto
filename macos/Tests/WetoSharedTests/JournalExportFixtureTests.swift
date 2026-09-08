@@ -61,6 +61,7 @@ final class JournalExportFixtureTests: XCTestCase {
             )
         )
         XCTAssertTrue(contract.verdictOrigins.contains(diagnostics?["verdictOrigin"] as? String ?? ""))
+        XCTAssertTrue(contract.matchBases.contains(event["matchedBy"] as? String ?? ""))
     }
 
     /// `SystemTime` в Rust по умолчанию сериализуется объектом, а не строкой:
@@ -173,7 +174,7 @@ final class JournalExportFixtureTests: XCTestCase {
             pid: 92594,
             parentPID: 1,
             executablePath: "/Users/square/.local/bin/claude",
-            isDescendant: true,
+            matchedBy: .descendant,
             kind: .terminated,
             reasonText: "Подключение ещё не проверено",
             resolutionText: "проверка завершилась безопасным выходом: 176.12.76.15, KZ",
@@ -295,6 +296,7 @@ final class JournalExportFixtureTests: XCTestCase {
         let stalenessCauses: [String]
         let eventKinds: [String]
         let verdictOrigins: [String]
+        let matchBases: [String]
         let timestampPattern: String
         let timestampFields: [String]
         let bodyLimit: Int

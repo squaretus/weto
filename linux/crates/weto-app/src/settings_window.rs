@@ -912,7 +912,7 @@ fn diagnostics(event: &weto_config::journal::KillEvent) -> String {
     if let (Some(source), Some(country)) = (&event.confirm_source, &event.confirmed_country) {
         parts.push(format!("{source}: {country}"));
     }
-    if event.is_descendant {
+    if event.matched_by == weto_config::journal::MatchBasis::Descendant {
         parts.push(format!("потомок {}", event.parent_pid));
     }
     if let Some(resolution) = &event.resolution_text {

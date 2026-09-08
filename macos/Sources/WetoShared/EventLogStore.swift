@@ -85,7 +85,7 @@ public final class EventLogStore {
                 pid: event.pid,
                 parentPID: event.parentPID,
                 executablePath: event.executablePath,
-                isDescendant: event.isDescendant,
+                matchedBy: event.matchedBy,
                 kind: event.kind,
                 reasonText: reasonText,
                 resolutionText: resolutionText ?? event.resolutionText,

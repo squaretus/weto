@@ -36,7 +36,7 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
 
     /// Процесс попал под охрану не сам по себе, а как потомок совпавшего.
     /// Именно потомки объясняют, почему у одной цели десятки записей.
-    public let isDescendant: Bool
+    public let matchedBy: MatchBasis
 
     public let kind: KillEventKind
     public let reasonText: String
@@ -67,7 +67,7 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         pid: Int32,
         parentPID: Int32 = 0,
         executablePath: String = "",
-        isDescendant: Bool = false,
+        matchedBy: MatchBasis = .rule,
         kind: KillEventKind,
         reasonText: String,
         resolutionText: String? = nil,
@@ -84,7 +84,7 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         self.pid = pid
         self.parentPID = parentPID
         self.executablePath = executablePath
-        self.isDescendant = isDescendant
+        self.matchedBy = matchedBy
         self.kind = kind
         self.reasonText = reasonText
         self.resolutionText = resolutionText
@@ -93,6 +93,56 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         self.confirmedCountry = confirmedCountry
         self.confirmSource = confirmSource
         self.diagnostics = diagnostics
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, episodeID, date, targetName, pid, parentPID, executablePath, matchedBy, isDescendant,
+             kind, reasonText, resolutionText, ip, country, confirmedCountry, confirmSource, diagnostics
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        episodeID = try c.decode(UUID.self, forKey: .episodeID)
+        date = try c.decode(Date.self, forKey: .date)
+        targetName = try c.decode(String.self, forKey: .targetName)
+        pid = try c.decode(Int32.self, forKey: .pid)
+        parentPID = try c.decodeIfPresent(Int32.self, forKey: .parentPID) ?? 0
+        executablePath = try c.decodeIfPresent(String.self, forKey: .executablePath) ?? ""
+        // Журналы до переименования писали булев признак: читаем его, но не пишем.
+        if let basis = try c.decodeIfPresent(MatchBasis.self, forKey: .matchedBy) {
+            matchedBy = basis
+        } else {
+            matchedBy = (try c.decodeIfPresent(Bool.self, forKey: .isDescendant) ?? false) ? .descendant : .rule
+        }
+        kind = try c.decode(KillEventKind.self, forKey: .kind)
+        reasonText = try c.decode(String.self, forKey: .reasonText)
+        resolutionText = try c.decodeIfPresent(String.self, forKey: .resolutionText)
+        ip = try c.decodeIfPresent(String.self, forKey: .ip)
+        country = try c.decodeIfPresent(String.self, forKey: .country)
+        confirmedCountry = try c.decodeIfPresent(String.self, forKey: .confirmedCountry)
+        confirmSource = try c.decodeIfPresent(String.self, forKey: .confirmSource)
+        diagnostics = try c.decodeIfPresent(KillDiagnostics.self, forKey: .diagnostics)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(episodeID, forKey: .episodeID)
+        try c.encode(date, forKey: .date)
+        try c.encode(targetName, forKey: .targetName)
+        try c.encode(pid, forKey: .pid)
+        try c.encode(parentPID, forKey: .parentPID)
+        try c.encode(executablePath, forKey: .executablePath)
+        try c.encode(matchedBy, forKey: .matchedBy)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(reasonText, forKey: .reasonText)
+        try c.encodeIfPresent(resolutionText, forKey: .resolutionText)
+        try c.encodeIfPresent(ip, forKey: .ip)
+        try c.encodeIfPresent(country, forKey: .country)
+        try c.encodeIfPresent(confirmedCountry, forKey: .confirmedCountry)
+        try c.encodeIfPresent(confirmSource, forKey: .confirmSource)
+        try c.encodeIfPresent(diagnostics, forKey: .diagnostics)
     }
 
     public var summaryText: String {

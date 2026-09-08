@@ -236,7 +236,7 @@ impl KillReporting for JournalWriter {
                 pid: process.pid,
                 parent_pid: process.parent_pid,
                 executable_path: process.executable_path.clone(),
-                is_descendant: process.is_descendant,
+                matched_by: process.matched_by,
                 kind,
                 reason_text: context.reason.clone(),
                 resolution_text: None,
