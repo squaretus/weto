@@ -46,6 +46,19 @@ public struct ProcessTree {
         return result
     }
 
+    /// Предки от родителя к корню. Ограничен числом процессов: цикл в дереве не должен вешать обход.
+    public func ancestors(of pid: Int32) -> [Int32] {
+        var result: [Int32] = []
+        var current = parentByPID[pid] ?? 0
+        var steps = 0
+        while current > 0, current != pid, steps < parentByPID.count + 1 {
+            result.append(current)
+            current = parentByPID[current] ?? 0
+            steps += 1
+        }
+        return result
+    }
+
     /// Самый верхний предок, который сам является совпавшим процессом.
     /// Нужен, чтобы совпавший потомок не выглядел отдельным сеансом.
     public func topmostMatch(of pid: Int32, among matched: Set<Int32>) -> Int32 {
