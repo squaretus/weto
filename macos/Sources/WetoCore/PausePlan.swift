@@ -47,12 +47,25 @@ public enum PausePlanner {
         for root in active where root.matchedBy == .rule {
             guard let snapshot = byPID[root.pid], snapshot.terminalForegroundGroup != 0 else { continue }
             guard snapshot.processGroup == snapshot.terminalForegroundGroup else {
+                // Группа root'а не передняя группа терминала — обычно фоновое задание.
+                // Но root может сам быть интерактивным шеллом, ждущим СВОЙ передний план:
+                // тогда терминал занят его ребёнком (лидером terminalForegroundGroup),
+                // а не root'ом, и это нормальное состояние шелла, а не «фон».
+                if let foregroundLeader = byPID[snapshot.terminalForegroundGroup],
+                   foregroundLeader.parentPID == root.pid {
+                    continue
+                }
                 backgrounded.append(root.pid)
                 continue
             }
+            // Лидер группы обычно и есть сама цель. Если лидер уже вышел и в снимке его нет,
+            // намеренно считаем root'а собственным лидером: родителя-шелла всё равно ищем
+            // через parentPID, а не через факт лидерства, так что отсутствие лидера в снимке
+            // на поиск шелла не влияет.
             let leader = byPID[snapshot.processGroup] ?? snapshot
             guard let shell = byPID[leader.parentPID],
                   shell.processGroup != snapshot.processGroup,
+                  !shell.isStopped,
                   !matchedPIDs.contains(shell.pid),
                   !shells.contains(shell.pid)
             else { continue }
