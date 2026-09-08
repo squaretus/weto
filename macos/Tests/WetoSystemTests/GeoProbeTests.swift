@@ -384,4 +384,36 @@ final class GeoProbeTests: XCTestCase {
         let confirmCalls = await fetcher.count("freeipapi")
         XCTAssertEqual(confirmCalls, 2)
     }
+
+    /// ipinfo и geojs молчат разом — это стало поводом менять политику. Третий источник
+    /// адреса делает молчание всех редкостью: тот же адрес — та же страна.
+    func test_third_self_ip_source_names_the_address_when_the_first_two_are_silent() async {
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .failure(FetchFailure()),
+            "geojs.io": .failure(FetchFailure()),
+            "checkip.amazonaws.com": .success(Data("91.224.74.177\n".utf8)),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, networkPath: FakeNetworkPath(hasPath: true), token: { "t" })
+
+        let report = await probe.probe()
+
+        XCTAssertEqual(report.ip, "91.224.74.177")
+        XCTAssertEqual(report.confirmation, .notRequested, "источник знает адрес, но не страну")
+        XCTAssertNil(report.confirmSource)
+        XCTAssertEqual(report.traces.map(\.service), ["ipinfo", "geojs-self", "checkip-aws"])
+    }
+
+    func test_third_source_is_not_asked_while_geojs_answers() async {
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .failure(FetchFailure()),
+            "geojs.io": .success(geojsSelfKZ),
+            "checkip.amazonaws.com": .success(Data("1.2.3.4".utf8)),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, networkPath: FakeNetworkPath(hasPath: true), token: { "t" })
+
+        _ = await probe.probe()
+
+        let checkipCalls = await fetcher.count("checkip.amazonaws.com")
+        XCTAssertEqual(checkipCalls, 0)
+    }
 }

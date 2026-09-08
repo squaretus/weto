@@ -28,6 +28,7 @@ exit shares that exit's address, so per-client-IP quotas are effectively per-VPN
 | ipinfo Lite | none declared | IP source, asked every 5 s |
 | `free.freeipapi.com` | 60 requests/minute — our spend is ~1 | primary confirmation |
 | `get.geojs.io` | no declared limit | fallback |
+| `checkip.amazonaws.com` | not declared | third address source, IP only; asked after geojs-self |
 | `ipwho.is` | 1000/day **per client IP** | rejected: burned out in ~1.4 h behind one VPN exit |
 | `ipquery.io` | — | rejected: stale registration data on reassigned ranges |
 | `ifconfig.co` | — | rejected: same, gives a false country mismatch |
