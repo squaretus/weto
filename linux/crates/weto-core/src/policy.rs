@@ -44,36 +44,43 @@ pub struct GuardSignals {
     pub config: GuardConfig,
 }
 
+/// Нет доказательства ни утечки, ни защиты. Ответ на такое — пауза, а не завершение
+/// (пока — порт ядра; поведение паузы на Linux придёт отдельным планом).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UnsafeReason {
-    VerificationPending,
-    VpnAppNotChosen,
-    VpnAppNotRunning,
+pub enum UnprovenReason {
+    /// ipinfo молчит, и адрес никем не назван.
     GeoUnavailable(String),
-    BlacklistedIp(String),
-    BlockedCountry { code: String, source: String },
+    /// Резервный сервис назвал другой адрес: страна не проверена. Терпимости не получает.
+    AddressChanged { observed: String },
+    /// ipinfo ответил, подтверждающие сервисы молчат. Safe без подтверждения не бывает.
     ConfirmationUnavailable,
-    CountryConflict { primary: String, confirmed: String },
+}
+
+/// Положительное доказательство опасности. Только оно завершает цели.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsafeEvidence {
+    VpnAppNotRunning,
+    BlacklistedIp(String),
+    BlockedCountry {
+        code: String,
+        source: String,
+    },
+    CountryConflict {
+        primary: String,
+        confirmed: String,
+    },
     NotWhitelistedIp(String),
     NotWhitelistedCountry(String),
+    /// Потолок паузы: подтверждения не дождались. На Linux пока не производится
+    /// политикой — вариант существует ради общего типа с macOS.
+    PauseExpired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardDecision {
     Safe,
-    Kill(UnsafeReason),
-}
-
-/// Решение на время, пока локальные основания исчерпаны, а свежего гео-вердикта
-/// ещё нет.
-///
-/// Это окно обязано быть fail-closed: иначе цели живут все секунды, что идёт
-/// запрос к ipinfo и подтверждающим сервисам.
-pub fn pending_verification(is_enabled: bool, config: &GuardConfig) -> GuardDecision {
-    if !is_enabled || !config.has_targets() {
-        return GuardDecision::Safe;
-    }
-    GuardDecision::Kill(UnsafeReason::VerificationPending)
+    Unproven(UnprovenReason),
+    Kill(UnsafeEvidence),
 }
 
 /// Основания, видные без обращения в сеть.
@@ -90,20 +97,15 @@ pub fn decide_local(
         return Some(GuardDecision::Safe);
     }
 
-    // Пустой выбор в настройках убивает сам по себе, не спрашивая статус.
-    // Статус считает вызывающий, и разойтись с настройками он не должен —
-    // но если разойдётся, ошибка обязана быть в сторону fail-closed.
-    if config.vpn_app.is_none() {
-        return Some(GuardDecision::Kill(UnsafeReason::VpnAppNotChosen));
-    }
+    // Невыбранное приложение оснований не даёт: охрана работает по гео одной.
+    config.vpn_app.as_ref()?;
 
     match vpn {
-        VpnAppStatus::NotChosen => Some(GuardDecision::Kill(UnsafeReason::VpnAppNotChosen)),
-        VpnAppStatus::NotRunning => Some(GuardDecision::Kill(UnsafeReason::VpnAppNotRunning)),
         // Запущенное приложение — ещё не доказательство, что трафик идёт через VPN:
         // клиент умеет висеть в трее с выключенным подключением. Отвечает на это
         // гео, и ответ обязателен.
-        VpnAppStatus::Running => None,
+        VpnAppStatus::NotChosen | VpnAppStatus::Running => None,
+        VpnAppStatus::NotRunning => Some(GuardDecision::Kill(UnsafeEvidence::VpnAppNotRunning)),
     }
 }
 
@@ -113,11 +115,17 @@ pub fn decide(signals: &GuardSignals) -> GuardDecision {
     }
 
     let Some(reading) = signals.geo.reading() else {
-        let detail = match &signals.geo {
-            GeoOutcome::Unavailable(detail) => detail.clone(),
+        return match &signals.geo {
+            GeoOutcome::AddressChanged { observed, .. } => {
+                GuardDecision::Unproven(UnprovenReason::AddressChanged {
+                    observed: observed.clone(),
+                })
+            }
+            GeoOutcome::Unavailable(detail) => {
+                GuardDecision::Unproven(UnprovenReason::GeoUnavailable(detail.clone()))
+            }
             GeoOutcome::Resolved(_) | GeoOutcome::Degraded { .. } => unreachable!(),
         };
-        return GuardDecision::Kill(UnsafeReason::GeoUnavailable(detail));
     };
 
     if signals
@@ -126,7 +134,7 @@ pub fn decide(signals: &GuardSignals) -> GuardDecision {
         .iter()
         .any(|range| range.contains(&reading.ip))
     {
-        return GuardDecision::Kill(UnsafeReason::BlacklistedIp(reading.ip.clone()));
+        return GuardDecision::Kill(UnsafeEvidence::BlacklistedIp(reading.ip.clone()));
     }
 
     let blocked: HashSet<String> = signals
@@ -138,21 +146,21 @@ pub fn decide(signals: &GuardSignals) -> GuardDecision {
     let primary = reading.primary_country.to_uppercase();
 
     if blocked.contains(&primary) {
-        return GuardDecision::Kill(UnsafeReason::BlockedCountry {
+        return GuardDecision::Kill(UnsafeEvidence::BlockedCountry {
             code: primary,
             source: "ipinfo".to_string(),
         });
     }
 
-    // Fail-closed строгий: отсутствие подтверждения завершает цели, даже когда
-    // ipinfo уверенно назвал безопасную страну. Осознанное решение владельца.
+    // Без подтверждения safe не бывает — но и утечка не доказана: непроверено,
+    // не завершение.
     let Some(confirmed_raw) = &reading.confirmed_country else {
-        return GuardDecision::Kill(UnsafeReason::ConfirmationUnavailable);
+        return GuardDecision::Unproven(UnprovenReason::ConfirmationUnavailable);
     };
     let confirmed = confirmed_raw.to_uppercase();
 
     if blocked.contains(&confirmed) {
-        return GuardDecision::Kill(UnsafeReason::BlockedCountry {
+        return GuardDecision::Kill(UnsafeEvidence::BlockedCountry {
             code: confirmed,
             source: reading
                 .confirm_source
@@ -162,7 +170,7 @@ pub fn decide(signals: &GuardSignals) -> GuardDecision {
     }
 
     if primary != confirmed {
-        return GuardDecision::Kill(UnsafeReason::CountryConflict { primary, confirmed });
+        return GuardDecision::Kill(UnsafeEvidence::CountryConflict { primary, confirmed });
     }
 
     // Whitelist спрашивают последним и только у согласованного вердикта:
@@ -194,9 +202,9 @@ pub fn decide(signals: &GuardSignals) -> GuardDecision {
     // диапазоны и выход в них не попал, объяснять надо именно адресом.
     // На решение выбор причины не влияет.
     if !config.allowed_ip_ranges.is_empty() {
-        return GuardDecision::Kill(UnsafeReason::NotWhitelistedIp(reading.ip.clone()));
+        return GuardDecision::Kill(UnsafeEvidence::NotWhitelistedIp(reading.ip.clone()));
     }
-    GuardDecision::Kill(UnsafeReason::NotWhitelistedCountry(confirmed))
+    GuardDecision::Kill(UnsafeEvidence::NotWhitelistedCountry(confirmed))
 }
 
 #[cfg(test)]
@@ -283,7 +291,7 @@ mod tests {
         let s = signals("KZ", Some("KZ"), config(&["RU"], &[], &["DE"], &[]));
         assert_eq!(
             decide(&s),
-            GuardDecision::Kill(UnsafeReason::NotWhitelistedCountry("KZ".to_string()))
+            GuardDecision::Kill(UnsafeEvidence::NotWhitelistedCountry("KZ".to_string()))
         );
     }
 
@@ -298,7 +306,7 @@ mod tests {
         );
         assert_eq!(
             decide(&s),
-            GuardDecision::Kill(UnsafeReason::NotWhitelistedIp("203.0.113.28".to_string()))
+            GuardDecision::Kill(UnsafeEvidence::NotWhitelistedIp("203.0.113.28".to_string()))
         );
     }
 
@@ -308,7 +316,7 @@ mod tests {
         let s = signals("KZ", Some("KZ"), config(&["KZ"], &[], &["KZ"], &[]));
         assert_eq!(
             decide(&s),
-            GuardDecision::Kill(UnsafeReason::BlockedCountry {
+            GuardDecision::Kill(UnsafeEvidence::BlockedCountry {
                 code: "KZ".to_string(),
                 source: "ipinfo".to_string(),
             })
@@ -321,16 +329,16 @@ mod tests {
         );
         assert_eq!(
             decide(&s),
-            GuardDecision::Kill(UnsafeReason::BlacklistedIp("203.0.113.28".to_string()))
+            GuardDecision::Kill(UnsafeEvidence::BlacklistedIp("203.0.113.28".to_string()))
         );
     }
 
     #[test]
-    fn missing_confirmation_kills_before_the_whitelist_is_consulted() {
+    fn missing_confirmation_is_unproven_before_the_whitelist_is_consulted() {
         let s = signals("KZ", None, config(&["RU"], &[], &["KZ"], &[]));
         assert_eq!(
             decide(&s),
-            GuardDecision::Kill(UnsafeReason::ConfirmationUnavailable)
+            GuardDecision::Unproven(UnprovenReason::ConfirmationUnavailable)
         );
     }
 
@@ -339,7 +347,7 @@ mod tests {
         let s = signals("KZ", Some("DE"), config(&["RU"], &[], &["KZ"], &[]));
         assert_eq!(
             decide(&s),
-            GuardDecision::Kill(UnsafeReason::CountryConflict {
+            GuardDecision::Kill(UnsafeEvidence::CountryConflict {
                 primary: "KZ".to_string(),
                 confirmed: "DE".to_string(),
             })

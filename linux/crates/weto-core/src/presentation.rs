@@ -2,11 +2,11 @@
 //! журнала.
 //!
 //! Живёт в ядре, а не в UI: это чистое вычисление из состояния, и тестируется
-//! оно синхронно, без единого виджета. Порт `UnsafeReason.displayText`
-//! и `StatusPresentation` с macOS — тексты обязаны совпадать на обеих
-//! платформах дословно.
+//! оно синхронно, без единого виджета. Порт `UnprovenReason.displayText`,
+//! `UnsafeEvidence.displayText` и `StatusPresentation` с macOS — тексты обязаны
+//! совпадать на обеих платформах дословно.
 
-use crate::policy::{GuardDecision, UnsafeReason};
+use crate::policy::{UnprovenReason, UnsafeEvidence};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShieldState {
@@ -30,31 +30,65 @@ pub struct StatusPresentation {
     pub shield: ShieldState,
 }
 
-impl UnsafeReason {
+impl UnprovenReason {
     pub fn display_text(&self) -> String {
         match self {
-            UnsafeReason::VerificationPending => "Подключение ещё не проверено".to_string(),
-            UnsafeReason::VpnAppNotChosen => "VPN-приложение не выбрано в настройках".to_string(),
-            UnsafeReason::VpnAppNotRunning => "VPN-приложение не запущено".to_string(),
-            UnsafeReason::GeoUnavailable(detail) => {
+            UnprovenReason::GeoUnavailable(detail) => {
                 format!("Не удалось определить внешний адрес: {detail}")
             }
-            UnsafeReason::BlacklistedIp(ip) => format!("Адрес {ip} в чёрном списке"),
-            UnsafeReason::BlockedCountry { code, source } => {
-                format!("Обнаружена страна {code} по данным {source}")
+            UnprovenReason::AddressChanged { observed } => {
+                format!("Адрес сменился на {observed}, страна не проверена")
             }
-            UnsafeReason::ConfirmationUnavailable => {
+            UnprovenReason::ConfirmationUnavailable => {
                 "Подтверждающие сервисы недоступны".to_string()
             }
-            UnsafeReason::CountryConflict { primary, confirmed } => {
+        }
+    }
+}
+
+impl UnsafeEvidence {
+    pub fn display_text(&self) -> String {
+        match self {
+            UnsafeEvidence::VpnAppNotRunning => "VPN-приложение не запущено".to_string(),
+            UnsafeEvidence::BlacklistedIp(ip) => format!("Адрес {ip} в чёрном списке"),
+            UnsafeEvidence::BlockedCountry { code, source } => {
+                format!("Обнаружена страна {code} по данным {source}")
+            }
+            UnsafeEvidence::CountryConflict { primary, confirmed } => {
                 format!("Расхождение стран: ipinfo — {primary}, подтверждение — {confirmed}")
             }
-            UnsafeReason::NotWhitelistedIp(ip) => {
+            UnsafeEvidence::NotWhitelistedIp(ip) => {
                 format!("Адрес {ip} не входит в белый список")
             }
-            UnsafeReason::NotWhitelistedCountry(code) => {
+            UnsafeEvidence::NotWhitelistedCountry(code) => {
                 format!("Страна {code} не входит в белый список")
             }
+            UnsafeEvidence::PauseExpired => "Подтверждение не получено за 60 с".to_string(),
+        }
+    }
+}
+
+/// Что охрана применила к целям — на время, пока Linux не портировал паузу.
+///
+/// `Pending` — прежний «подключение ещё не проверено»; `Unproven` применяется
+/// как kill. План порта поведения паузы (SIGSTOP/SIGCONT) этот тип убирает.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppliedDecision {
+    Safe,
+    Pending,
+    Unproven(UnprovenReason),
+    Kill(UnsafeEvidence),
+}
+
+impl AppliedDecision {
+    pub const PENDING_TEXT: &'static str = "Подключение ещё не проверено";
+
+    pub fn display_text(&self) -> String {
+        match self {
+            AppliedDecision::Safe => String::new(),
+            AppliedDecision::Pending => Self::PENDING_TEXT.to_string(),
+            AppliedDecision::Unproven(reason) => reason.display_text(),
+            AppliedDecision::Kill(evidence) => evidence.display_text(),
         }
     }
 
@@ -64,21 +98,14 @@ impl UnsafeReason {
     /// не говорит ничего. Разница дешёвая, а польза ежедневная.
     pub fn status_title(&self) -> &'static str {
         match self {
-            UnsafeReason::VerificationPending => "Проверка подключения",
-            UnsafeReason::GeoUnavailable(_) => "Ipinfo недоступен",
-            UnsafeReason::ConfirmationUnavailable => "Подтверждение недоступно",
-            _ => "Цели завершены",
+            AppliedDecision::Safe => "На страже",
+            AppliedDecision::Pending => "Проверка подключения",
+            AppliedDecision::Unproven(UnprovenReason::ConfirmationUnavailable) => {
+                "Подтверждение недоступно"
+            }
+            AppliedDecision::Unproven(_) => "Ipinfo недоступен",
+            AppliedDecision::Kill(_) => "Цели завершены",
         }
-    }
-
-    /// Отличает «мы ослепли» от «мы точно в плохой стране». Первое —
-    /// деградация сервиса, второе — сработавшая защита; выглядеть они должны
-    /// по-разному, хотя цели завершаются в обоих случаях.
-    pub fn is_degraded_rather_than_blocked(&self) -> bool {
-        matches!(
-            self,
-            UnsafeReason::ConfirmationUnavailable | UnsafeReason::GeoUnavailable(_)
-        )
     }
 }
 
@@ -181,7 +208,7 @@ pub struct IdleTargetsNotice {
 }
 
 pub fn idle_targets(state: &GuardState) -> IdleTargetsNotice {
-    let is_safe = state.is_enabled && state.has_targets && state.decision == GuardDecision::Safe;
+    let is_safe = state.is_enabled && state.has_targets && state.decision == AppliedDecision::Safe;
     IdleTargetsNotice {
         text: "Цели не запущены".to_string(),
         hint: is_safe.then(|| "— VPN можно выключать".to_string()),
@@ -193,7 +220,7 @@ pub fn idle_targets(state: &GuardState) -> IdleTargetsNotice {
 pub struct GuardState {
     pub is_enabled: bool,
     pub has_targets: bool,
-    pub decision: GuardDecision,
+    pub decision: AppliedDecision,
     /// Страна, которую показываем, даже когда вердикта нет.
     pub country: Option<String>,
     /// Вердикт держится на прошлом чтении: ipinfo молчит, адрес доказанно тот же.
@@ -218,7 +245,7 @@ pub fn status_presentation(state: &GuardState) -> StatusPresentation {
     }
 
     match &state.decision {
-        GuardDecision::Safe => StatusPresentation {
+        AppliedDecision::Safe => StatusPresentation {
             title: "На страже".to_string(),
             subtitle: match &state.country {
                 Some(country) => format!("Трафик идёт через VPN, страна {country}"),
@@ -230,13 +257,20 @@ pub fn status_presentation(state: &GuardState) -> StatusPresentation {
                 ShieldState::Guarded
             },
         },
-        GuardDecision::Kill(reason) => StatusPresentation {
-            title: reason.status_title().to_string(),
-            subtitle: reason.display_text(),
-            shield: match reason {
-                UnsafeReason::VerificationPending => ShieldState::Pending,
-                _ => ShieldState::Killed,
-            },
+        AppliedDecision::Pending => StatusPresentation {
+            title: state.decision.status_title().to_string(),
+            subtitle: state.decision.display_text(),
+            shield: ShieldState::Pending,
+        },
+        AppliedDecision::Unproven(_) => StatusPresentation {
+            title: state.decision.status_title().to_string(),
+            subtitle: state.decision.display_text(),
+            shield: ShieldState::Degraded,
+        },
+        AppliedDecision::Kill(_) => StatusPresentation {
+            title: state.decision.status_title().to_string(),
+            subtitle: state.decision.display_text(),
+            shield: ShieldState::Killed,
         },
     }
 }
@@ -250,24 +284,16 @@ mod tests {
     #[test]
     fn whitelist_reasons_speak_russian() {
         assert_eq!(
-            UnsafeReason::NotWhitelistedIp("203.0.113.28".to_string()).display_text(),
+            UnsafeEvidence::NotWhitelistedIp("203.0.113.28".to_string()).display_text(),
             "Адрес 203.0.113.28 не входит в белый список"
         );
         assert_eq!(
-            UnsafeReason::NotWhitelistedCountry("DE".to_string()).display_text(),
+            UnsafeEvidence::NotWhitelistedCountry("DE".to_string()).display_text(),
             "Страна DE не входит в белый список"
         );
     }
 
-    /// Непопадание в whitelist — сработавшая защита, а не отказ сервиса.
-    #[test]
-    fn whitelist_reasons_are_not_degradation() {
-        let reason = UnsafeReason::NotWhitelistedCountry("DE".to_string());
-        assert!(!reason.is_degraded_rather_than_blocked());
-        assert_eq!(reason.status_title(), "Цели завершены");
-    }
-
-    fn state(decision: GuardDecision) -> GuardState {
+    fn state(decision: AppliedDecision) -> GuardState {
         GuardState {
             is_enabled: true,
             has_targets: true,
@@ -280,9 +306,10 @@ mod tests {
     /// Цвет щита никогда не единственный носитель смысла: рядом всегда текст.
     #[test]
     fn every_state_has_words_not_just_a_colour() {
-        let guarded = status_presentation(&state(GuardDecision::Safe));
-        let killed =
-            status_presentation(&state(GuardDecision::Kill(UnsafeReason::VpnAppNotRunning)));
+        let guarded = status_presentation(&state(AppliedDecision::Safe));
+        let killed = status_presentation(&state(AppliedDecision::Kill(
+            UnsafeEvidence::VpnAppNotRunning,
+        )));
 
         assert_eq!(guarded.title, "На страже");
         assert_eq!(killed.title, "Цели завершены");
@@ -291,27 +318,27 @@ mod tests {
 
     #[test]
     fn the_failing_service_is_named_in_the_title() {
-        let presentation = status_presentation(&state(GuardDecision::Kill(
-            UnsafeReason::GeoUnavailable("таймаут запроса".into()),
+        let presentation = status_presentation(&state(AppliedDecision::Unproven(
+            UnprovenReason::GeoUnavailable("таймаут запроса".into()),
         )));
 
         assert_eq!(presentation.title, "Ipinfo недоступен");
         assert_ne!(presentation.title, "Сервис недоступен");
         assert!(presentation.subtitle.contains("таймаут запроса"));
+        assert_eq!(presentation.shield, ShieldState::Degraded);
     }
 
     /// Ожидание проверки — не то же, что сработавшая защита: цели завершены
     /// в обоих случаях, но объяснять их надо по-разному.
     #[test]
     fn pending_verification_looks_different_from_a_blocked_country() {
-        let pending = status_presentation(&state(GuardDecision::Kill(
-            UnsafeReason::VerificationPending,
-        )));
-        let blocked =
-            status_presentation(&state(GuardDecision::Kill(UnsafeReason::BlockedCountry {
+        let pending = status_presentation(&state(AppliedDecision::Pending));
+        let blocked = status_presentation(&state(AppliedDecision::Kill(
+            UnsafeEvidence::BlockedCountry {
                 code: "RU".into(),
                 source: "ipinfo".into(),
-            })));
+            },
+        )));
 
         assert_eq!(pending.shield, ShieldState::Pending);
         assert_eq!(blocked.shield, ShieldState::Killed);
@@ -322,11 +349,11 @@ mod tests {
     fn disabled_guard_and_empty_targets_are_told_apart() {
         let disabled = status_presentation(&GuardState {
             is_enabled: false,
-            ..state(GuardDecision::Safe)
+            ..state(AppliedDecision::Safe)
         });
         let targetless = status_presentation(&GuardState {
             has_targets: false,
-            ..state(GuardDecision::Safe)
+            ..state(AppliedDecision::Safe)
         });
 
         assert_eq!(disabled.title, "Охрана выключена");
@@ -391,11 +418,13 @@ mod tests {
     /// и тот же совет там был бы обманом.
     #[test]
     fn the_vpn_hint_appears_only_while_on_guard() {
-        let guarded = idle_targets(&state(GuardDecision::Safe));
-        let killed = idle_targets(&state(GuardDecision::Kill(UnsafeReason::VpnAppNotRunning)));
+        let guarded = idle_targets(&state(AppliedDecision::Safe));
+        let killed = idle_targets(&state(AppliedDecision::Kill(
+            UnsafeEvidence::VpnAppNotRunning,
+        )));
         let off = idle_targets(&GuardState {
             is_enabled: false,
-            ..state(GuardDecision::Safe)
+            ..state(AppliedDecision::Safe)
         });
 
         assert_eq!(guarded.hint.as_deref(), Some("— VPN можно выключать"));
@@ -405,23 +434,30 @@ mod tests {
         assert_eq!(killed.text, guarded.text);
     }
 
+    /// Непроверенное — деградация сервиса, а не сработавшая защита: цвет щита
+    /// обязан их различать, хотя цели завершаются в обоих случаях.
     #[test]
-    fn degradation_is_told_apart_from_a_working_block() {
-        assert!(UnsafeReason::ConfirmationUnavailable.is_degraded_rather_than_blocked());
-        assert!(UnsafeReason::GeoUnavailable("x".into()).is_degraded_rather_than_blocked());
-        assert!(!UnsafeReason::BlockedCountry {
-            code: "RU".into(),
-            source: "ipinfo".into()
-        }
-        .is_degraded_rather_than_blocked());
+    fn unproven_reasons_show_as_degraded_not_a_working_block() {
+        let unproven = status_presentation(&state(AppliedDecision::Unproven(
+            UnprovenReason::ConfirmationUnavailable,
+        )));
+        let blocked = status_presentation(&state(AppliedDecision::Kill(
+            UnsafeEvidence::BlockedCountry {
+                code: "RU".into(),
+                source: "ipinfo".into(),
+            },
+        )));
+
+        assert_eq!(unproven.shield, ShieldState::Degraded);
+        assert_eq!(blocked.shield, ShieldState::Killed);
     }
 
     #[test]
     fn country_is_shown_when_it_is_known() {
-        let with_country = status_presentation(&state(GuardDecision::Safe));
+        let with_country = status_presentation(&state(AppliedDecision::Safe));
         let without = status_presentation(&GuardState {
             country: None,
-            ..state(GuardDecision::Safe)
+            ..state(AppliedDecision::Safe)
         });
 
         assert!(with_country.subtitle.contains("NL"));

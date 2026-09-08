@@ -20,8 +20,7 @@ use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
 use weto_core::episode::EpisodeLedger;
 use weto_core::geo::SourceOutcome;
-use weto_core::policy::{GuardDecision, UnsafeReason};
-use weto_core::presentation::GuardState;
+use weto_core::presentation::{AppliedDecision, GuardState};
 use weto_core::process::MatchedProcess;
 use weto_guard::controller::{
     CheckReporting, GuardController, GuardSnapshot, KillReporting, SettingsProviding,
@@ -148,7 +147,7 @@ impl KillReporting for JournalWriter {
             return;
         }
 
-        let pending = UnsafeReason::VerificationPending.display_text();
+        let pending = AppliedDecision::PENDING_TEXT.to_string();
         let settled: Option<String> = self
             .episode
             .lock()
@@ -428,14 +427,14 @@ impl AppState {
         let decision = snapshot
             .decision
             .clone()
-            .unwrap_or(GuardDecision::Kill(UnsafeReason::VerificationPending));
+            .unwrap_or(AppliedDecision::Pending);
 
         GuardState {
             is_enabled: settings.is_enabled,
             has_targets: !settings.targets.is_empty(),
             // Цели живут, но ipinfo молчит: защита держится на доказанной
             // неизменности адреса, и щит обязан быть жёлтым, а не зелёным.
-            is_degraded: matches!(decision, GuardDecision::Safe)
+            is_degraded: matches!(decision, AppliedDecision::Safe)
                 && snapshot
                     .report
                     .as_ref()
@@ -476,8 +475,10 @@ impl AppState {
                     // Шаг штатного тика перечитывается каждый раз: правка
                     // в настройках применяется со следующего же круга.
                     let interval = match decision {
-                        GuardDecision::Safe => TICK_SAFE,
-                        GuardDecision::Kill(_) => TICK_UNSAFE,
+                        AppliedDecision::Safe => TICK_SAFE,
+                        AppliedDecision::Pending
+                        | AppliedDecision::Unproven(_)
+                        | AppliedDecision::Kill(_) => TICK_UNSAFE,
                     };
                     // Событие сети прерывает ожидание: реакция на падение
                     // туннеля не должна ждать конца интервала.

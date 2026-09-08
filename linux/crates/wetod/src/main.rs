@@ -15,7 +15,7 @@ use weto_config::paths::Paths;
 use weto_config::settings::Settings;
 use weto_core::check::CheckEvent;
 use weto_core::diagnostics::KillContext;
-use weto_core::policy::GuardDecision;
+use weto_core::presentation::AppliedDecision;
 use weto_core::process::MatchedProcess;
 use weto_guard::controller::{CheckReporting, GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
@@ -139,7 +139,7 @@ fn check(paths: &Paths) {
 fn watch(paths: &Paths) {
     let controller = build_controller(paths);
     let events = NetlinkEventSource.subscribe();
-    let mut previous: Option<GuardDecision> = None;
+    let mut previous: Option<AppliedDecision> = None;
 
     println!("охрана запущена, Ctrl-C для выхода");
     loop {
@@ -147,9 +147,11 @@ fn watch(paths: &Paths) {
 
         if previous.as_ref() != Some(&decision) {
             match &decision {
-                GuardDecision::Safe => println!("на страже"),
-                GuardDecision::Kill(reason) => {
-                    println!("небезопасно: {}", reason.display_text())
+                AppliedDecision::Safe => println!("на страже"),
+                AppliedDecision::Pending
+                | AppliedDecision::Unproven(_)
+                | AppliedDecision::Kill(_) => {
+                    println!("небезопасно: {}", decision.display_text())
                 }
             }
             previous = Some(decision.clone());
@@ -158,8 +160,10 @@ fn watch(paths: &Paths) {
         // Событие сети прерывает ожидание: реакция на падение туннеля не должна
         // ждать конца интервала.
         let interval = match decision {
-            GuardDecision::Safe => TICK_SAFE,
-            GuardDecision::Kill(_) => TICK_UNSAFE,
+            AppliedDecision::Safe => TICK_SAFE,
+            AppliedDecision::Pending | AppliedDecision::Unproven(_) | AppliedDecision::Kill(_) => {
+                TICK_UNSAFE
+            }
         };
         match events.recv_timeout(interval) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}

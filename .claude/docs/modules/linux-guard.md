@@ -7,7 +7,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 
 | Crate | File | Responsibility |
 |---|---|---|
-| `weto-core` | `policy.rs` | `decide`, `decide_local`, `pending_verification` — port of `GuardPolicy` |
+| `weto-core` | `policy.rs` | `decide`, `decide_local` — port of `GuardPolicy`, three-outcome `GuardDecision` |
 | `weto-core` | `network.rs` | `NetworkSnapshot`, `verdict_fingerprint`, `resolve_vpn_status` |
 | `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
 | `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
@@ -192,3 +192,8 @@ checklists in `linux/docs/manual-check.md` and `linux/docs/manual-ui-check.md`.
 
 Secret Service over D-Bus — the token lives in a `0600` file. Country flags and
 per-target icons are not fetched, so the status window shows generic glyphs.
+
+**Pause instead of kill.** The core mirrors the three-outcome policy
+(`Unproven` / `Kill(evidence)`), but the controller still applies *unproven* as the old kill
+(`AppliedDecision`). SIGSTOP/SIGCONT, the stopped ledger and the pause pill are the next plan;
+the transitions fixture `shared/fixtures/guard-transitions.json` is not yet read here.

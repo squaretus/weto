@@ -54,6 +54,12 @@ pub enum GeoOutcome {
     /// Текст объясняет, кто именно промолчал: «Ipinfo недоступен» полезнее,
     /// чем «сервис недоступен».
     Unavailable(String),
+    /// Резервный сервис назвал адрес, и он не совпал с адресом прошлого вердикта:
+    /// страна не проверена, прошлое чтение к новому адресу не относится.
+    AddressChanged {
+        observed: String,
+        previous: GeoReading,
+    },
 }
 
 impl GeoOutcome {
@@ -63,6 +69,7 @@ impl GeoOutcome {
             GeoOutcome::Resolved(reading) => Some(reading),
             GeoOutcome::Degraded { previous, .. } => Some(previous),
             GeoOutcome::Unavailable(_) => None,
+            GeoOutcome::AddressChanged { .. } => None,
         }
     }
 }
