@@ -17,7 +17,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 pub use weto_core::diagnostics::{
-    GeoReadingPatch, GeoServiceTrace, KillContext, KillDiagnostics, StalenessCause,
+    GeoReadingPatch, GeoServiceTrace, KillContext, KillDiagnostics, NetworkPhases, StalenessCause,
     VerdictStaleness, BODY_LIMIT,
 };
 

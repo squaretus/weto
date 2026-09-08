@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "about": [
     "Контракт формата выгрузки журнала. Одну и ту же форму обязаны давать обе",
     "реализации: macOS/Tests/WetoSharedTests/JournalExportFixtureTests.swift и",
@@ -26,7 +26,10 @@
     "по умолчанию сериализуется объектом, поэтому на Linux стоит свой сериализатор.",
     "",
     "forbiddenSubstrings — то, чего в файле не должно быть никогда: токен ipinfo",
-    "уходит заголовком, а заголовки в журнал не записываются вовсе."
+    "уходит заголовком, а заголовки в журнал не записываются вовсе.",
+    "",
+    "phases — длительности фаз запроса (DNS, соединение, TLS, первый байт), nil у фазы,",
+    "которая не завершилась, 0 — у фазы, которой не было. Linux пока пишет null: ureq фаз не отдаёт."
   ],
   "schemaVersion": 2,
   "envelopeKeys": [
@@ -95,8 +98,15 @@
     "failure",
     "fromCache",
     "httpStatus",
+    "phases",
     "service",
     "url"
+  ],
+  "phasesKeys": [
+    "connectMilliseconds",
+    "dnsMilliseconds",
+    "firstByteMilliseconds",
+    "tlsMilliseconds"
   ],
   "checkKeys": [
     "confirmSource",

@@ -7,7 +7,7 @@ import Foundation
 public enum GeoFailure: Error, Equatable, Sendable {
     case noNetwork
     case unreachable
-    case timedOut
+    case timedOut(NetworkPhase?)
     case unauthorized(Int)
     case rateLimited(Int)
     case serviceError(Int)
@@ -19,7 +19,9 @@ public enum GeoFailure: Error, Equatable, Sendable {
         switch self {
         case .noNetwork: return "нет сети"
         case .unreachable: return "сервис недоступен"
-        case .timedOut: return "таймаут запроса"
+        case .timedOut(let phase):
+            guard let phase else { return "таймаут запроса" }
+            return "таймаут запроса (\(phase.displayText))"
         case .unauthorized(let status): return "токен отвергнут (\(status))"
         case .rateLimited(let status): return "лимит запросов (\(status))"
         case .serviceError(let status): return "сервис ответил ошибкой (\(status))"
@@ -37,10 +39,10 @@ extension GeoFailure {
         }
     }
 
-    public init(urlErrorCode: Int, description: String) {
+    public init(urlErrorCode: Int, description: String, phases: NetworkPhases? = nil) {
         switch urlErrorCode {
         case -1009: self = .noNetwork
-        case -1001: self = .timedOut
+        case -1001: self = .timedOut(phases?.stalledPhase)
         case -1003, -1004, -1005, -1006: self = .unreachable
         default: self = .other(description)
         }

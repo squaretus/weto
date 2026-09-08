@@ -15,7 +15,8 @@ use serde_json::Value;
 use weto_config::checks::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_config::export::JournalExport;
 use weto_config::journal::{
-    GeoServiceTrace, KillDiagnostics, KillEvent, KillEventKind, VerdictStaleness, BODY_LIMIT,
+    GeoServiceTrace, KillDiagnostics, KillEvent, KillEventKind, NetworkPhases, VerdictStaleness,
+    BODY_LIMIT,
 };
 use weto_config::settings::{Settings, Target};
 use weto_core::process::TargetKind;
@@ -31,6 +32,7 @@ struct Contract {
     diagnostics_keys: Vec<String>,
     staleness_keys: Vec<String>,
     trace_keys: Vec<String>,
+    phases_keys: Vec<String>,
     check_keys: Vec<String>,
     check_triggers: Vec<String>,
     check_outcomes: Vec<String>,
@@ -117,6 +119,12 @@ fn export() -> (Value, String) {
                 duration_milliseconds: Some(42),
                 body: Some(r#"{"ip":"176.12.76.15","country_code":"KZ"}"#.to_string()),
                 failure: Some("нет".to_string()),
+                phases: Some(NetworkPhases {
+                    dns_milliseconds: Some(3),
+                    connect_milliseconds: Some(20),
+                    tls_milliseconds: Some(41),
+                    first_byte_milliseconds: Some(300),
+                }),
                 from_cache: true,
                 cache_age_seconds: Some(7),
             }],
@@ -143,6 +151,7 @@ fn export() -> (Value, String) {
             duration_milliseconds: Some(42),
             body: Some(r#"{"ip":"176.12.76.15","country_code":"KZ"}"#.to_string()),
             failure: Some("нет".to_string()),
+            phases: None,
             from_cache: true,
             cache_age_seconds: Some(7),
         }],
@@ -215,6 +224,11 @@ fn event_matches_the_shared_contract() {
         keys(&diagnostics["services"][0]),
         expected(&contract.trace_keys),
         "трасса сервиса"
+    );
+    assert_eq!(
+        keys(&diagnostics["services"][0]["phases"]),
+        expected(&contract.phases_keys),
+        "фазы трассы"
     );
 
     assert!(contract

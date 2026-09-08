@@ -217,6 +217,7 @@ impl HttpGeoProbe {
             duration_milliseconds: None,
             body: Some(cached.country.clone()),
             failure: None,
+            phases: None,
             from_cache: true,
             cache_age_seconds: Some(age.as_secs()),
         });
@@ -285,6 +286,7 @@ impl HttpGeoProbe {
                             duration_milliseconds: Some(elapsed),
                             body: Some(GeoServiceTrace::trimmed(&body)),
                             failure: None,
+                            phases: None,
                             from_cache: false,
                             cache_age_seconds: None,
                         });
@@ -299,6 +301,7 @@ impl HttpGeoProbe {
                             duration_milliseconds: Some(elapsed),
                             body: None,
                             failure: Some(failure.display_text()),
+                            phases: None,
                             from_cache: false,
                             cache_age_seconds: None,
                         });
@@ -319,6 +322,7 @@ impl HttpGeoProbe {
                     duration_milliseconds: Some(elapsed),
                     body: body.as_deref().map(GeoServiceTrace::trimmed),
                     failure: Some(failure.display_text()),
+                    phases: None,
                     from_cache: false,
                     cache_age_seconds: None,
                 });
@@ -333,6 +337,7 @@ impl HttpGeoProbe {
                     duration_milliseconds: Some(elapsed),
                     body: None,
                     failure: Some(failure.display_text()),
+                    phases: None,
                     from_cache: false,
                     cache_age_seconds: None,
                 });
