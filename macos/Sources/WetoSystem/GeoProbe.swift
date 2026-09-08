@@ -168,14 +168,20 @@ public actor GeoProbe: GeoProbing {
                 traces: traces
             )
         } catch {
+            let geojsFailure = GeoFailure(error)
+            // Второй резерв знает только адрес — и этого достаточно для доказательства
+            // «адрес тот же». Страну по нему не спрашиваем: источник её не называет.
+            if let thirdURL = URL(string: Constants.selfIPFallbackURL),
+               let address = try? await fetch(service: "checkip-aws", url: thirdURL, headers: [:], using: confirmationFetcher),
+               let ip = try? GeoResponses.decodePlainIP(address.data) {
+                return GeoProbeReport(
+                    ip: ip, ipinfo: noToken, confirmation: .notRequested, confirmSource: nil,
+                    hasNetworkPath: networkPath.hasPath, checkedAt: Date(), traces: traces
+                )
+            }
             return GeoProbeReport(
-                ip: nil,
-                ipinfo: noToken,
-                confirmation: .failed(GeoFailure(error)),
-                confirmSource: nil,
-                hasNetworkPath: networkPath.hasPath,
-                checkedAt: Date(),
-                traces: traces
+                ip: nil, ipinfo: noToken, confirmation: .failed(geojsFailure), confirmSource: nil,
+                hasNetworkPath: networkPath.hasPath, checkedAt: Date(), traces: traces
             )
         }
     }

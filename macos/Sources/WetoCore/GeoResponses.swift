@@ -46,6 +46,13 @@ public enum GeoResponses {
         try decoder.decode(GeoJSSelfResponse.self, from: data)
     }
 
+    /// Ответ вида «203.0.113.177\n». Не адрес — значит заглушка провайдера или капча.
+    public static func decodePlainIP(_ data: Data) throws -> String {
+        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard IPAddress.isValid(text) else { throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "не адрес")) }
+        return text
+    }
+
     public static func makeReading(
         ipinfo: IPInfoLiteResponse,
         confirmedCountry: String?,
