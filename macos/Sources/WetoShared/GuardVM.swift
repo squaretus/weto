@@ -129,7 +129,7 @@ public final class GuardVM {
             geoProbe: geoProbe,
             debounceInterval: debounceInterval,
             vpnAppStatus: { [weak self] in self?.vpnAppStatus() ?? .notChosen },
-            onDecision: { [weak self] decision in self?.apply(decision) },
+            onPhase: { [weak self] phase, _, _ in self?.apply(phase) },
             onReport: { [weak self] report in self?.receive(report) },
             onCheck: { [weak self] check in self?.checkLog.record(check) }
         )
@@ -323,6 +323,30 @@ public final class GuardVM {
         guard case .resolved(let reading) = report.outcome else { return }
         lastReading = reading
     }
+
+    /// Фаза машины состояний, сведённая к прежнему решению.
+    ///
+    /// Временно, до задачи 15: действие над целями остаётся прежним завершением — эффект
+    /// (`SIGSTOP`/`SIGCONT`), эпизоды паузы, её потолок в интерфейсе и `verdictOrigin`
+    /// от контроллера подключаются там. Здесь фаза лишь переводится в то, что `apply`
+    /// умеет применять сегодня: работающие цели — safe, стоящие — непроверенность,
+    /// завершённые — доказательство.
+    private func apply(_ phase: GuardPhase) {
+        switch phase {
+        case .disabled, .protected, .interference:
+            apply(.safe)
+        case .verifying:
+            // Тот же текст, что объявлял fail-closed до машины состояний: журнал и попап
+            // читают его как «пока не знаю», а не как причину.
+            apply(.unproven(.geoUnavailable(Self.pendingVerificationText)))
+        case .paused(_, let reason):
+            apply(.unproven(reason))
+        case .danger(let evidence):
+            apply(.kill(evidence))
+        }
+    }
+
+    private static let pendingVerificationText = "подключение ещё не проверено"
 
     private func apply(_ decision: GuardDecision) {
         switch decision {
