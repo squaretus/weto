@@ -76,14 +76,39 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertEqual(e.next, "Проверка повторяется каждые 5 с")
     }
 
+    /// Счёт «ещё N проб — и пауза» обязан совпадать с тем, что реально сделает
+    /// `GuardMachine.tolerate`, а не с формулой, переписанной рядом. Поэтому здесь
+    /// не подставляется `failures` в готовую строку — состояние добывается прогоном
+    /// настоящей машины через `.unproven`, и ожидание после каждого шага сверяется
+    /// с тем, что делает следующий вызов `apply` (а не с `tolerance - failures`).
     func test_interference_counts_down_the_tolerance() {
-        let e = StatusPresentation.explanation(
-            for: .interference(reading, reason: .geoUnavailable("таймаут запроса"), failures: 1), remainingPause: nil, tolerance: 2
-        )
-        XCTAssertEqual(e.title, "Помехи")
-        XCTAssertEqual(e.action, "Ничего не сделано")
-        XCTAssertEqual(e.evidence, "Не удалось определить внешний адрес: таймаут запроса")
-        XCTAssertEqual(e.next, "Цели работают по вердикту KZ; ещё 1 неудачная проба — и пауза")
+        var machine = GuardMachine(phase: .protected(reading), tolerance: 2)
+        let reason = UnprovenReason.geoUnavailable("таймаут запроса")
+        let input = GuardInput.verdict(.unproven(reason), geo: .unavailable("таймаут запроса"))
+
+        // Первая непроверенность из «Защищено»: тормозит на failures == 1, терпимость 2 —
+        // впереди ещё две неудачи, прежде чем реальный `apply` уйдёт в паузу.
+        _ = machine.apply(input, at: t0)
+        XCTAssertEqual(machine.phase, .interference(reading, reason: reason, failures: 1))
+        let e1 = StatusPresentation.explanation(for: machine.phase, remainingPause: nil, tolerance: machine.tolerance)
+        XCTAssertEqual(e1.title, "Помехи")
+        XCTAssertEqual(e1.action, "Ничего не сделано")
+        XCTAssertEqual(e1.evidence, "Не удалось определить внешний адрес: таймаут запроса")
+        XCTAssertEqual(e1.next, "Цели работают по вердикту KZ; ещё 2 неудачные пробы — и пауза")
+
+        // Вторая подряд: осталась ровно одна терпимая проба.
+        _ = machine.apply(input, at: t0)
+        XCTAssertEqual(machine.phase, .interference(reading, reason: reason, failures: 2))
+        let e2 = StatusPresentation.explanation(for: machine.phase, remainingPause: nil, tolerance: machine.tolerance)
+        XCTAssertEqual(e2.next, "Цели работают по вердикту KZ; ещё 1 неудачная проба — и пауза")
+
+        // Третья — обещанная «ещё 1» — обязана реально поставить на паузу, иначе
+        // строка на предыдущем шаге солгала.
+        let effect = machine.apply(input, at: t0)
+        XCTAssertEqual(effect, .pause)
+        guard case .paused = machine.phase else {
+            return XCTFail("после обещанной последней пробы фаза обязана стать .paused, а не \(machine.phase)")
+        }
     }
 
     func test_interference_from_a_proven_address_has_no_countdown() {

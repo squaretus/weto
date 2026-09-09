@@ -79,7 +79,12 @@ public enum StatusPresentation {
             if failures == 0 {
                 next = "Цели работают: адрес \(reading.ip) доказанно тот же"
             } else {
-                let left = max(1, tolerance - failures)
+                // `GuardMachine.tolerate` остаётся в `.interference(failures: f)`, пока
+                // `f <= tolerance`, и переходит в `.paused` только когда `f + 1 > tolerance`.
+                // Значит дальше терпится ровно `tolerance - failures + 1` неудач, а не
+                // `tolerance - failures`: при failures == tolerance следующий провал —
+                // уже потолок, и это одна проба, а не ноль.
+                let left = max(1, tolerance - failures + 1)
                 next = "Цели работают по вердикту \(reading.primaryCountry); ещё \(left) \(pluralProbes(left)) — и пауза"
             }
             return StatusExplanation(title: phase.title, action: "Ничего не сделано", evidence: reason.displayText, next: next)
