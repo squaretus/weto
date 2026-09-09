@@ -27,10 +27,10 @@ final class StatusPresentationTests: XCTestCase {
     /// одинаковых на обеих платформах. Своего заголовка у представления больше нет.
     func test_phase_titles_are_the_six_canonical_words() {
         XCTAssertEqual(GuardPhase.disabled.title, "Выключено")
-        XCTAssertEqual(GuardPhase.verifying(since: t0, cause: .coldStart).title, "Проверка")
+        XCTAssertEqual(GuardPhase.verifying(cause: .coldStart).title, "Проверка")
         XCTAssertEqual(GuardPhase.protected(reading).title, "На страже")
         XCTAssertEqual(
-            GuardPhase.interference(reading, reason: .confirmationUnavailable, failures: 1).title,
+            GuardPhase.interference(reading, reason: .confirmationUnavailable).title,
             "Помехи"
         )
         XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Пауза")
@@ -43,11 +43,11 @@ final class StatusPresentationTests: XCTestCase {
     func test_every_phase_and_reason_combination_has_three_lines() {
         var phases: [GuardPhase] = [.disabled, .protected(reading)]
         for cause in [VerdictStaleness.Cause.coldStart, .networkChanged] {
-            phases.append(.verifying(since: t0, cause: cause))
+            phases.append(.verifying(cause: cause))
         }
         for reason in allReasons {
             phases.append(.paused(since: t0, reason: reason))
-            for failures in 0...2 { phases.append(.interference(reading, reason: reason, failures: failures)) }
+            phases.append(.interference(reading, reason: reason))
         }
         for evidence in allEvidence { phases.append(.danger(evidence)) }
 
@@ -62,7 +62,7 @@ final class StatusPresentationTests: XCTestCase {
     }
 
     func test_verifying_explains_pause_reason_and_countdown() {
-        let e = StatusPresentation.explanation(for: .verifying(since: t0, cause: .coldStart), remainingPause: 43)
+        let e = StatusPresentation.explanation(for: .verifying(cause: .coldStart), remainingPause: 43)
         XCTAssertEqual(e.title, "Проверка")
         XCTAssertEqual(e.action, "Цели на паузе")
         XCTAssertEqual(e.evidence, "Подключение ещё не проверено: вердикта ещё не было")
@@ -76,46 +76,32 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertEqual(e.next, "Дальше ничего делать не нужно")
     }
 
-    /// Счёт «ещё N проб — и пауза» обязан совпадать с тем, что реально сделает
-    /// `GuardMachine.tolerate`, а не с формулой, переписанной рядом. Поэтому здесь
-    /// не подставляется `failures` в готовую строку — состояние добывается прогоном
-    /// настоящей машины через `.unproven`, и ожидание после каждого шага сверяется
-    /// с тем, что делает следующий вызов `apply` (а не с `tolerance - failures`).
-    func test_interference_counts_down_the_tolerance() {
-        var machine = GuardMachine(phase: .protected(reading), tolerance: 2)
-        let reason = UnprovenReason.geoUnavailable("таймаут запроса")
-        let input = GuardInput.verdict(.unproven(reason), geo: .unavailable("таймаут запроса"))
+    /// Обещать «ещё N проб — и пауза» больше нечем: счёта неудачных проб у охраны нет,
+    /// и первый же неответ ставит на паузу. Поэтому строка «что дальше» у Помех говорит
+    /// про улику, а не про отсчёт, — и обещание проверяется прогоном настоящей машины:
+    /// «Помехи» существуют ровно на доказанной неизменности адреса, а неответ из них
+    /// уводит в паузу немедленно.
+    func test_interference_promises_no_countdown_because_silence_pauses_at_once() {
+        var machine = GuardMachine(phase: .protected(reading))
+        let detail = "таймаут запроса"
 
-        // Первая непроверенность из «На страже»: тормозит на failures == 1, терпимость 2 —
-        // впереди ещё две неудачи, прежде чем реальный `apply` уйдёт в паузу.
-        _ = machine.apply(input, at: t0)
-        XCTAssertEqual(machine.phase, .interference(reading, reason: reason, failures: 1))
-        let e1 = StatusPresentation.explanation(for: machine.phase, remainingPause: nil, tolerance: machine.tolerance)
-        XCTAssertEqual(e1.title, "Помехи")
-        XCTAssertEqual(e1.action, "Цели работают")
-        XCTAssertEqual(e1.evidence, "Не удалось определить внешний адрес: таймаут запроса")
-        XCTAssertEqual(e1.next, "Цели работают по вердикту KZ; ещё 2 неудачные пробы — и пауза")
-
-        // Вторая подряд: осталась ровно одна терпимая проба.
-        _ = machine.apply(input, at: t0)
-        XCTAssertEqual(machine.phase, .interference(reading, reason: reason, failures: 2))
-        let e2 = StatusPresentation.explanation(for: machine.phase, remainingPause: nil, tolerance: machine.tolerance)
-        XCTAssertEqual(e2.next, "Цели работают по вердикту KZ; ещё 1 неудачная проба — и пауза")
-
-        // Третья — обещанная «ещё 1» — обязана реально поставить на паузу, иначе
-        // строка на предыдущем шаге солгала.
-        let effect = machine.apply(input, at: t0)
-        XCTAssertEqual(effect, .pause)
-        guard case .paused = machine.phase else {
-            return XCTFail("после обещанной последней пробы фаза обязана стать .paused, а не \(machine.phase)")
-        }
-    }
-
-    func test_interference_from_a_proven_address_has_no_countdown() {
-        let e = StatusPresentation.explanation(
-            for: .interference(reading, reason: .geoUnavailable("таймаут запроса"), failures: 0), remainingPause: nil
-        )
+        // Единственный вход в «Помехи»: ipinfo молчит, резерв назвал прежний адрес.
+        XCTAssertEqual(machine.apply(.verdict(.safe, geo: .degraded(previous: reading, detail: detail)), at: t0), .none)
+        XCTAssertEqual(machine.phase, .interference(reading, reason: .geoUnavailable(detail)))
+        let e = StatusPresentation.explanation(for: machine.phase, remainingPause: nil)
+        XCTAssertEqual(e.title, "Помехи")
+        XCTAssertEqual(e.action, "Цели работают")
+        XCTAssertEqual(e.evidence, "Не удалось определить внешний адрес: таймаут запроса")
         XCTAssertEqual(e.next, "Цели работают: адрес 203.0.113.28 доказанно тот же")
+
+        // Ответа нет вовсе — цели встают той же пробой, без всякого «ещё N».
+        XCTAssertEqual(
+            machine.apply(.verdict(.unproven(.geoUnavailable(detail)), geo: .unavailable(detail)), at: t0),
+            .pause
+        )
+        guard case .paused = machine.phase else {
+            return XCTFail("первый же неответ обязан ставить на паузу, а не \(machine.phase)")
+        }
     }
 
     func test_paused_explains_the_ceiling() {
@@ -154,7 +140,7 @@ final class StatusPresentationTests: XCTestCase {
     /// `remainingPause` может не подъехать вовремя (например, `pauseDeadline` ещё не выставлен) —
     /// строка не имеет права падать или показывать отрицательное число.
     func test_countdown_survives_a_missing_deadline() {
-        let e = StatusPresentation.explanation(for: .verifying(since: t0, cause: .coldStart), remainingPause: nil)
+        let e = StatusPresentation.explanation(for: .verifying(cause: .coldStart), remainingPause: nil)
         XCTAssertEqual(e.next, "Ждём подтверждения безопасного выхода, 0 с до завершения")
     }
 
@@ -167,8 +153,8 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertFalse(StatusPresentation.shouldExplain(.disabled))
         XCTAssertFalse(StatusPresentation.shouldExplain(.protected(reading)))
 
-        XCTAssertTrue(StatusPresentation.shouldExplain(.verifying(since: t0, cause: .coldStart)))
-        XCTAssertTrue(StatusPresentation.shouldExplain(.interference(reading, reason: .confirmationUnavailable, failures: 0)))
+        XCTAssertTrue(StatusPresentation.shouldExplain(.verifying(cause: .coldStart)))
+        XCTAssertTrue(StatusPresentation.shouldExplain(.interference(reading, reason: .confirmationUnavailable)))
         XCTAssertTrue(StatusPresentation.shouldExplain(.paused(since: t0, reason: .confirmationUnavailable)))
         XCTAssertTrue(StatusPresentation.shouldExplain(.danger(.pauseExpired)))
     }
@@ -203,7 +189,7 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertNil(
             StatusPresentation.idleTargets(for: .paused(since: t0, reason: .confirmationUnavailable)).hint
         )
-        XCTAssertNil(StatusPresentation.idleTargets(for: .verifying(since: t0, cause: .coldStart)).hint)
+        XCTAssertNil(StatusPresentation.idleTargets(for: .verifying(cause: .coldStart)).hint)
     }
 
     func test_idle_targets_hint_is_silent_when_guard_is_off() {
@@ -225,7 +211,7 @@ final class StatusPresentationTests: XCTestCase {
 
     func test_lines_hide_the_reading_while_verifying() {
         XCTAssertEqual(
-            StatusPresentation.lines(for: .verifying(since: t0, cause: .coldStart), reading: reading),
+            StatusPresentation.lines(for: .verifying(cause: .coldStart), reading: reading),
             [StatusLine(key: "IP", value: "неизвестен"), StatusLine(key: "ipinfo", value: "—"),
              StatusLine(key: "подтверждение", value: "—")]
         )
