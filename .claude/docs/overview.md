@@ -47,7 +47,8 @@ turns a decision into one of six phases and either keeps targets running, pauses
    terminated — only a real probe answer moves those phases.
 5. **Probe.** `GeoProbe.probe()`: Keychain token → ipinfo Lite (`v4.api.ipinfo.io`),
    `IPAddress.isValid` on the returned address *before* it goes into a URL, then confirmation
-   `free.freeipapi.com` → `get.geojs.io` fallback, and that confirmation is served from the
+   from either interchangeable confirmer (`get.geojs.io`, `free.freeipapi.com` — a refusal puts
+   that one on a 300 s cooldown and the other is asked), and that confirmation is served from the
    per-address cache while the 60 s soft ceiling holds. Address and primary country are never
    cached. When ipinfo refuses, the probe asks the geojs "who am I" endpoint instead: the address
    is what lets the guard decide whether the previous verdict may stand. The return value is a
@@ -123,9 +124,11 @@ turns a decision into one of six phases and either keeps targets running, pauses
     tests).
 11. **Recover from a crash.** `GuardVM.start()` calls `ProcessEnforcer.resumeOrphans()` once,
     before anything else starts: it `SIGCONT`s only pids that are still stopped *and* still the
-    same executable (pid reuse must not resume a stranger) and keeps every entry it did not
+    same executable (pid reuse must not resume a stranger), in the exact reverse of the order the
+    ledger recorded — that file preserves the real stop order — and keeps every entry it did not
     resolve, leaving it to the tick loop above to observe and re-signal. Whatever survives that
-    call is surfaced at once — `GuardVM.surfaceRecovered` seeds the popup's standing list (badge,
+    call is surfaced at once, off the same walk (`resumeOrphans` hands its scan back rather than
+    have the caller repeat it) — `GuardVM.surfaceRecovered` seeds the popup's standing list (badge,
     `fg` hint, «Показать терминал») and writes one `CheckEvent(trigger: .startupRecovery,
     outcome: .standingProcessesRemain)`, one per recovery — because this launch has no pause
     episode and the kill-journal is silent about it by construction. A

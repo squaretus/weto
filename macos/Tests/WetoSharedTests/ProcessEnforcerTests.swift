@@ -41,6 +41,7 @@ private final class MutableResolver: TargetResolving, @unchecked Sendable {
 private final class MutableProcessLocator: ProcessLocating, @unchecked Sendable {
     private let lock = NSLock()
     private var stored: [ProcessSnapshot]
+    private var walks = 0
 
     init(_ processes: [ProcessSnapshot]) { self.stored = processes }
 
@@ -52,7 +53,15 @@ private final class MutableProcessLocator: ProcessLocating, @unchecked Sendable 
 
     func allProcesses(includeArguments: Bool) -> [ProcessSnapshot] {
         lock.lock(); defer { lock.unlock() }
+        walks += 1
         return stored
+    }
+
+    /// Сколько раз обходили процессы: обход стоит денег, и «один обход на событие» —
+    /// заявленное свойство `ProcessEnforcer`, а не пожелание.
+    var walkCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return walks
     }
 }
 
@@ -434,10 +443,12 @@ final class ProcessEnforcerTests: XCTestCase {
     /// После падения: SIGCONT тем, кто стоит и остался тем же процессом; чужой pid не трогаем.
     func test_orphans_are_resumed_only_when_still_stopped_and_the_same_executable() {
         let ledgerStorage = InMemoryStoppedLedger()
+        // Порядок — как его пишет `pause`: шелл первым, дальше цели. Продолжение обязано
+        // быть точным обратным ему, поэтому и учёт сеется в настоящем стоп-порядке.
         ledgerStorage.save([
+            StoppedProcess(pid: 100, executablePath: "/bin/zsh", stoppedAt: Date(), isShell: true),
             StoppedProcess(pid: 200, executablePath: target.executablePath, stoppedAt: Date(), isShell: false),
             StoppedProcess(pid: 201, executablePath: "/usr/bin/node", stoppedAt: Date(), isShell: false),
-            StoppedProcess(pid: 100, executablePath: "/bin/zsh", stoppedAt: Date(), isShell: true),
         ])
         let signaler = RecordingSignaler()
         let alive = [
@@ -453,16 +464,16 @@ final class ProcessEnforcerTests: XCTestCase {
 
         XCTAssertEqual(signaler.batches.first?.signal, .resume)
         XCTAssertEqual(signaler.batches.first?.pids, [200, 100], "цель раньше шелла, чужой pid пропущен")
-        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 100],
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200],
                        "обязательство снимает наблюдение: запись, которую этот проход "
                         + "не увидел идущей, из учёта не уходит")
     }
 
-    /// Тест выше сеет учёт вручную в порядке «цель, потомок, шелл» — так `pause()` его
-    /// никогда не напишет (шелл там всегда идёт первым). Этот тест строит учёт настоящим
-    /// `pause()`, затем поднимает НАД ТЕМ ЖЕ ФАЙЛОМ свежий `ProcessEnforcer` — ровно так,
-    /// как выглядел бы перезапуск после падения, — и проверяет порядок, который
-    /// `resumeOrphans` даёт из подлинной записи, а не из порядка, придуманного тестом.
+    /// Порядок возобновления после падения — точный обратный стоп-порядку, и берётся он
+    /// из подлинной записи на диске. Этот тест строит учёт настоящим `pause()`, затем
+    /// поднимает НАД ТЕМ ЖЕ ФАЙЛОМ свежий `ProcessEnforcer` — ровно так, как выглядел бы
+    /// перезапуск после падения, — и проверяет, что `resumeOrphans` разворачивает
+    /// записанный порядок, а не пересобирает его по признаку `isShell`.
     func test_resumeOrphans_round_trips_through_a_ledger_written_by_a_real_pause() {
         let ledgerStorage = InMemoryStoppedLedger()
         let firstEnforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
@@ -492,16 +503,38 @@ final class ProcessEnforcerTests: XCTestCase {
 
         secondEnforcer.resumeOrphans()
 
-        // Учёт на диске несёт только `isShell`, не глубину дерева: «потомок раньше цели»
-        // из настоящего стоп-порядка восстановить нечем. Ближайшее и уже принятое на
-        // ревью приближение — все не-шеллы раньше шеллов, порядок внутри группы как
-        // в файле, а файл писала pause() в порядке [шелл, цель, потомок]. После вычитания
-        // шелла из не-шелльной группы остаётся [цель, потомок], затем шелл.
+        // Файл писала pause() в порядке [шелл, цель, потомок] — это и есть подлинный
+        // стоп-порядок. Продолжение обязано быть его точным обратным: потомок, цель,
+        // шелл. Глубина дерева для этого не нужна, нужен порядок отправки стопов,
+        // и он доезжает до нового запуска сам.
         XCTAssertEqual(secondSignaler.batches.first?.signal, .resume)
-        XCTAssertEqual(secondSignaler.batches.first?.pids, [200, 201, 100],
-                       "обе цели продолжены раньше шелла; порядок внутри группы — как записал pause()")
+        XCTAssertEqual(secondSignaler.batches.first?.pids, [201, 200, 100],
+                       "точный обратный порядок записанному: потомок, цель, шелл")
         XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200, 201],
                        "все трое всё ещё стоят: до наблюдения обязательство держится")
+    }
+
+    /// Обход после падения ровно один: `resumeOrphans` уже прошёл по всем процессам,
+    /// чтобы отличить стоящих от исчезнувших, и возвращает этот же обход вызывающему —
+    /// показывать пользователю стоящие цели вторым таким же проходом незачем.
+    func test_resumeOrphans_hands_its_single_walk_to_the_caller() {
+        let ledgerStorage = InMemoryStoppedLedger()
+        ledgerStorage.save([
+            StoppedProcess(pid: 200, executablePath: target.executablePath, stoppedAt: Date(), isShell: false),
+        ])
+        let locator = MutableProcessLocator([Self.stopped(target)])
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: locator, clock: TestClock(),
+                                    signaler: RecordingSignaler(), ledger: StoppedLedger(storage: ledgerStorage))
+
+        let recovered = enforcer.resumeOrphans()
+
+        XCTAssertEqual(locator.walkCount, 1, "один обход на восстановление, а не два")
+        XCTAssertEqual(recovered.outcome.unresolved.map(\.pid), [200])
+        XCTAssertEqual(recovered.observed.processes.map(\.pid), [200],
+                       "вызывающий получает тот самый обход, по которому принято решение")
+        XCTAssertEqual(recovered.observed.rules.count, 1,
+                       "и правила к нему: без них стоящую цель не назвать по имени")
     }
 
     /// Учёт после падения не вычёркивается отправкой сигнала: пока ядро показывает

@@ -121,6 +121,13 @@ pub struct GeoServiceTrace {
 pub const BODY_LIMIT: usize = 4096;
 
 impl GeoServiceTrace {
+    /// Причина в трассе сервиса, которого не спрашивали: он остывает после отказа,
+    /// а спросили взаимозаменяемого соседа. Молчанием это не считается, поэтому
+    /// в разборе обязано быть видно, что запроса не было. Текст общий с macOS
+    /// (`GeoServiceTrace.coolingDown`) — выгрузку читают одними глазами
+    /// на обеих платформах.
+    pub const COOLING_DOWN: &'static str = "остывает после отказа";
+
     pub fn trimmed(body: &str) -> String {
         if body.chars().count() <= BODY_LIMIT {
             return body.to_string();

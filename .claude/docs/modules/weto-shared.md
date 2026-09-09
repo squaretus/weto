@@ -20,7 +20,11 @@ this layer decides *when* to ask and *what to do* with the answer.
   print `suspended (tty input)` to the user once a second) — it stays on the books, and
   `terminate`/`stop` still signal it. `stop()` cannot observe anything after its own SIGCONT,
   so its outcome is «не подтверждено: … weto проверит их при следующем запуске» — neither the
-  optimistic nor the pessimistic lie.
+  optimistic nor the pessimistic lie. A pill that survives into a *new* episode (the target never
+  came back up, and the verdict went bad again) adopts the new episode's moment: the countdown on
+  it runs to `pauseCeilingSeconds`, which is measured from the start of *this* pause, so keeping
+  the old `since` showed a start nobody counts from. Only `isBackgrounded` is inherited — that one
+  was written by observation, not by the plan's guess.
 - `macos/Sources/WetoShared/GuardController.swift` — owns the one live `GuardMachine` (the reducer
   lives in `WetoCore`, see `weto-core.md`) plus the network probe: turns triggers into
   `GuardInput`, applies it, and asks `GuardVM` to enact whatever `GuardEffect` came back
@@ -32,7 +36,13 @@ this layer decides *when* to ask and *what to do* with the answer.
   the ledger holds (minus the entries that stopped being poked) and
   returns a `ResumeOutcome` (`released` / `unresolved`), `resumeOrphans()`
   is the crash-recovery path (only pids that are still stopped *and* still the same executable get
-  `SIGCONT` — pid reuse must not resume a stranger). Neither one clears the ledger: an entry is
+  `SIGCONT` — pid reuse must not resume a stranger). It reverses the ledger too: the file keeps
+  entries in the order they were added, and `pause` adds them in the order the SIGSTOPs went out,
+  so the real stop order survives into the next launch and the resume is its exact reverse.
+  Reconstructing it from `isShell` ("non-shells, then shells") was an approximation that swapped a
+  target and its own child. `resumeOrphans` also returns the walk it made
+  (`(outcome:, observed:)`), and `GuardVM.surfaceRecovered` names the standing targets from that
+  scan rather than walking every process a second time. Neither one clears the ledger: an entry is
   struck off only when the process is gone or the kernel showed it running, so a target that
   falls back to `T` via `SIGTTIN` keeps its entry and gets SIGCONT again next pass
 - `macos/Sources/WetoShared/StoppedLedger.swift` — `StoppedProcess` (pid + path + `isShell`),
@@ -287,7 +297,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   immediately takes `SIGTTIN` and stops again), so a still-stopped entry stays on the books and
   the tick loop keeps signalling it — that is the bug that left three of the owner's processes
   in state `T` for hours with an empty `stopped.json`. An entry that survives that recovery is
-  made visible in the same call: `GuardVM.surfaceRecovered` seeds `pausedProcesses` from it (badge,
+  made visible in the same call, off the walk `resumeOrphans` already made:
+  `GuardVM.surfaceRecovered` seeds `pausedProcesses` from it (badge,
   `fg` hint and «Показать терминал» — there is no pause episode in this launch, so the
   kill-journal is silent by construction) and writes one `CheckEvent(trigger: .startupRecovery,
   outcome: .standingProcessesRemain)` per recovery, not per tick.
