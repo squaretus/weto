@@ -14,63 +14,64 @@ struct StatusPopupView: View {
 
     var body: some View {
         WetoPanel(width: WetoTokens.popupWidth) {
-            VStack(alignment: .leading, spacing: WetoTokens.space4) {
-                header
-                explanation
-                readout
-
-                if let failure = coordinator.guardVM.permissionFailure {
-                    Text(failure)
-                        .font(WetoTokens.caption)
-                        .foregroundStyle(WetoTokens.red.resolve(scheme))
-                        .fixedSize(horizontal: false, vertical: true)
+            // Один тикающий таймер на весь попап: три строки объяснения и отсчёт
+            // на бейдже каждой стоящей цели обязаны показывать одно и то же число
+            // в один и тот же момент, а не два независимых `TimelineView`
+            // с собственной точкой отсчёта, расходящихся на секунду.
+            if coordinator.guardVM.pauseDeadline != nil {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    content(at: context.date)
                 }
-
-                // Новость об обновлении видна там, где пользователь бывает чаще всего,
-                // а не только в футере настроек. Пропущенная и отложенная версии
-                // сюда не попадают: их прячет bannerUpdate.
-                if let update = coordinator.update.bannerUpdate {
-                    WetoBanner(
-                        tone: coordinator.update.progress.phase == .failed ? .warning : .info,
-                        systemImage: "arrow.down.circle.fill",
-                        text: coordinator.update.strings.bannerProgress(
-                            coordinator.update.progress,
-                            version: update.latestVersion
-                        )
-                    ) {
-                        if coordinator.update.progress.isInFlight {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Button("Подробнее") { coordinator.update.presentDialog() }
-                                .buttonStyle(WetoPillButtonStyle(.primary))
-                        }
-                    }
-                }
-
-                if coordinator.settings.guardConfig.hasTargets {
-                    WetoDivider()
-                    processes
-                }
+            } else {
+                content(at: Date())
             }
         }
         .environment(\.colorScheme, scheme)
         .onAppear { coordinator.guardVM.refreshRunningTargets() }
     }
 
-    /// Три строки: что сделал weto, почему, что дальше. Секундный таймер — только пока
-    /// цели стоят: без него отсчёт бы всё равно поменялся при следующем такте охраны,
-    /// но пользователь смотрел бы на замерший на экране номер до тех пор.
-    @ViewBuilder
-    private var explanation: some View {
-        if coordinator.guardVM.pauseDeadline != nil {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                explanationLines(at: context.date)
+    private func content(at now: Date) -> some View {
+        VStack(alignment: .leading, spacing: WetoTokens.space4) {
+            header
+            explanationLines(at: now)
+            readout
+
+            if let failure = coordinator.guardVM.permissionFailure {
+                Text(failure)
+                    .font(WetoTokens.caption)
+                    .foregroundStyle(WetoTokens.red.resolve(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        } else {
-            explanationLines(at: Date())
+
+            // Новость об обновлении видна там, где пользователь бывает чаще всего,
+            // а не только в футере настроек. Пропущенная и отложенная версии
+            // сюда не попадают: их прячет bannerUpdate.
+            if let update = coordinator.update.bannerUpdate {
+                WetoBanner(
+                    tone: coordinator.update.progress.phase == .failed ? .warning : .info,
+                    systemImage: "arrow.down.circle.fill",
+                    text: coordinator.update.strings.bannerProgress(
+                        coordinator.update.progress,
+                        version: update.latestVersion
+                    )
+                ) {
+                    if coordinator.update.progress.isInFlight {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("Подробнее") { coordinator.update.presentDialog() }
+                            .buttonStyle(WetoPillButtonStyle(.primary))
+                    }
+                }
+            }
+
+            if coordinator.settings.guardConfig.hasTargets {
+                WetoDivider()
+                processes(at: now)
+            }
         }
     }
 
+    /// Три строки: что сделал weto, почему, что дальше.
     private func explanationLines(at now: Date) -> some View {
         let vm = coordinator.guardVM
         let remaining = vm.pauseDeadline.map { max(0, $0.timeIntervalSince(now)) }
@@ -91,7 +92,7 @@ struct StatusPopupView: View {
     }
 
     @ViewBuilder
-    private var processes: some View {
+    private func processes(at now: Date) -> some View {
         let vm = coordinator.guardVM
         let running = vm.runningTargets
 
@@ -132,6 +133,7 @@ struct StatusPopupView: View {
                         if let paused {
                             WetoPauseBadge(
                                 deadline: vm.pauseDeadline,
+                                now: now,
                                 hint: paused.isBackgrounded
                                     ? "Процесс вернулся в фон. Откройте терминал и введите fg"
                                     : nil,
