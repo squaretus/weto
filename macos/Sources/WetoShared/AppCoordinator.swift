@@ -62,7 +62,7 @@ public final class AppCoordinator {
                 token: { [box = settings.tokenBox] in box.value }
             ),
             locator: ProcessRegistry(),
-            killer: ProcessKiller(),
+            killer: ProcessSignaler(),
             notifier: UserNotificationKillNotifier(),
             events: NetworkEventSource(),
             launchAgent: LaunchAgentController()

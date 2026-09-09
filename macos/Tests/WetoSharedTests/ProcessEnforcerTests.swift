@@ -56,8 +56,10 @@ private final class MutableProcessLocator: ProcessLocating, @unchecked Sendable 
     }
 }
 
-private final class SilentKiller: ProcessKilling, @unchecked Sendable {
-    func kill(pids: [Int32]) -> [KillResult] { pids.map { KillResult(pid: $0, errorCode: nil) } }
+private final class SilentSignaler: ProcessSignaling, @unchecked Sendable {
+    func send(_ signal: ProcessSignal, to pids: [Int32]) -> [SignalResult] {
+        pids.map { SignalResult(pid: $0, errorCode: nil) }
+    }
 }
 
 /// Часы под управлением теста: обновление правил привязано ко времени,
@@ -107,7 +109,7 @@ final class ProcessEnforcerTests: XCTestCase {
             settings: settings,
             resolver: resolver,
             locator: locator,
-            killer: SilentKiller(),
+            signaler: SilentSignaler(),
             now: { clock.now }
         )
     }

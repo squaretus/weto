@@ -20,7 +20,7 @@ final class ProcessEnforcer {
 
     struct EnforcementResult {
         let matched: [MatchedProcess]
-        let results: [KillResult]
+        let results: [SignalResult]
 
         static let none = EnforcementResult(matched: [], results: [])
     }
@@ -28,7 +28,7 @@ final class ProcessEnforcer {
     private let settings: SettingsStore
     private let resolver: TargetResolving
     private let locator: ProcessLocating
-    private let killer: ProcessKilling
+    private let signaler: ProcessSignaling
 
     private var cachedEntries: [String]?
     private var cachedRules: [TargetRule] = []
@@ -45,13 +45,13 @@ final class ProcessEnforcer {
         settings: SettingsStore,
         resolver: TargetResolving,
         locator: ProcessLocating,
-        killer: ProcessKilling,
+        signaler: ProcessSignaling,
         now: @escaping () -> Date = Date.init
     ) {
         self.settings = settings
         self.resolver = resolver
         self.locator = locator
-        self.killer = killer
+        self.signaler = signaler
         self.now = now
     }
 
@@ -150,7 +150,7 @@ final class ProcessEnforcer {
         let matched = ProcessMatcher.matches(in: scan.processes, rules: scan.rules)
         guard !matched.isEmpty else { return .none }
 
-        return EnforcementResult(matched: matched, results: killer.kill(pids: matched.map(\.pid)))
+        return EnforcementResult(matched: matched, results: signaler.send(.kill, to: matched.map(\.pid)))
     }
 
     func runningTargets(in scan: Scan) -> [RunningTarget] {

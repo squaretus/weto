@@ -47,7 +47,7 @@ public final class GuardVM {
     @ObservationIgnored private let geoProbe: GeoProbing
     @ObservationIgnored private let locator: ProcessLocating
     @ObservationIgnored private let resolver: TargetResolving
-    @ObservationIgnored private let killer: ProcessKilling
+    @ObservationIgnored private let killer: ProcessSignaling
     @ObservationIgnored private let notifier: KillNotifying
     @ObservationIgnored private let events: NetworkEventSourcing
     @ObservationIgnored private let launchAgent: LaunchAgentManaging
@@ -94,7 +94,7 @@ public final class GuardVM {
         geoProbe: GeoProbing,
         locator: ProcessLocating,
         resolver: TargetResolving = TargetResolver(),
-        killer: ProcessKilling,
+        killer: ProcessSignaling,
         notifier: KillNotifying,
         events: NetworkEventSourcing,
         launchAgent: LaunchAgentManaging = LaunchAgentController(),
@@ -116,7 +116,7 @@ public final class GuardVM {
             settings: settings,
             resolver: resolver,
             locator: locator,
-            killer: killer
+            signaler: killer
         )
 
         self.controller = GuardController(
@@ -358,12 +358,12 @@ public final class GuardVM {
         guard !matched.isEmpty else { return }
 
         let results = outcome.results
-        let refused = results.filter { !$0.isTerminated }
+        let refused = results.filter { !$0.isDelivered }
         permissionFailure = refused.isEmpty
             ? nil
             : "Не удалось завершить процессы \(refused.map(\.pid)) — недостаточно прав"
 
-        let terminated = Set(results.filter(\.isTerminated).map(\.pid))
+        let terminated = Set(results.filter(\.isDelivered).map(\.pid))
         let isNewReason = !recordedReasons.contains(reasonText)
 
         // Дедупликация по паре «причина + pid»: тот же процесс по той же причине

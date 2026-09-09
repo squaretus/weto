@@ -192,26 +192,29 @@ private final class StubResolver: TargetResolving, @unchecked Sendable {
     }
 }
 
-private final class SpyKiller: ProcessKilling, @unchecked Sendable {
+private final class SpySignaler: ProcessSignaling, @unchecked Sendable {
     private let lock = NSLock()
-    private var batches: [[Int32]] = []
+    private var batches: [(signal: ProcessSignal, pids: [Int32])] = []
     private var errors: [Int32: Int32] = [:]
 
+    /// Пакеты, отправленные `.kill`: единственный сигнал, который отдаёт
+    /// `ProcessEnforcer` до задачи 13, — поэтому большинство тестов смотрят
+    /// на них так же, как раньше смотрели на `SpyKiller`.
     var killedBatches: [[Int32]] {
         lock.lock(); defer { lock.unlock() }
-        return batches
+        return batches.filter { $0.signal == .kill }.map(\.pids)
     }
 
     func setError(_ code: Int32, forPID pid: Int32) {
         lock.lock(); errors[pid] = code; lock.unlock()
     }
 
-    func kill(pids: [Int32]) -> [KillResult] {
+    func send(_ signal: ProcessSignal, to pids: [Int32]) -> [SignalResult] {
         lock.lock()
-        batches.append(pids)
+        batches.append((signal: signal, pids: pids))
         let snapshot = errors
         lock.unlock()
-        return pids.map { KillResult(pid: $0, errorCode: snapshot[$0]) }
+        return pids.map { SignalResult(pid: $0, errorCode: snapshot[$0]) }
     }
 }
 
@@ -296,7 +299,7 @@ final class GuardVMTests: XCTestCase {
 
     private struct Harness {
         let vm: GuardVM
-        let killer: SpyKiller
+        let killer: SpySignaler
         let probe: StubGeoProbe
         let notifier: SpyNotifier
         let events: ManualEventSource
@@ -320,7 +323,7 @@ final class GuardVMTests: XCTestCase {
         settings.targets = [targetBundleID]
         settings.targets += executables
 
-        let killer = SpyKiller()
+        let killer = SpySignaler()
         let probe = StubGeoProbe(geo)
         let notifier = SpyNotifier()
         let events = ManualEventSource()
@@ -356,7 +359,7 @@ final class GuardVMTests: XCTestCase {
 
     private struct DelayedHarness {
         let vm: GuardVM
-        let killer: SpyKiller
+        let killer: SpySignaler
         let probe: DelayedGeoProbe
         let settings: SettingsStore
         let log: EventLogStore
@@ -373,7 +376,7 @@ final class GuardVMTests: XCTestCase {
         settings.blockedCountryCodes = ["RU"]
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let killer = SpySignaler()
         let probe = DelayedGeoProbe()
         let log = EventLogStore(storage: InMemoryEventLog())
         let network = StubSnapshotReader(snapshotValue: snapshot)
@@ -1309,7 +1312,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: resolverMapping),
-            killer: SpyKiller(),
+            killer: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0
@@ -1378,7 +1381,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: StubLocator(bundlePaths: [targetBundleID: targetPath], processes: processes),
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpyKiller(),
+            killer: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0
@@ -1468,7 +1471,7 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let killer = SpySignaler()
         let vm = GuardVM(
             settings: settings,
             eventLog: EventLogStore(storage: InMemoryEventLog()),
@@ -1516,7 +1519,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpyKiller(),
+            killer: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1561,7 +1564,7 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let killer = SpySignaler()
         let probe = StubGeoProbe(geoOutcome())
         let vm = GuardVM(
             settings: settings,
@@ -1609,7 +1612,7 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let killer = SpySignaler()
         let vm = GuardVM(
             settings: settings,
             eventLog: EventLogStore(storage: InMemoryEventLog()),
@@ -1660,7 +1663,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: ProcessRegistry(),
             resolver: TargetResolver(),
-            killer: SpyKiller(),
+            killer: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1707,7 +1710,7 @@ final class GuardVMTests: XCTestCase {
 
     /// На живой машине эпизод, начатый до вердикта, не заводит второй набор
     /// записей: те же pid к моменту настоящего вердикта уже мертвы, завершать
-    /// нечего. `SpyKiller` в тесте не выполняет завершение по-настоящему, поэтому
+    /// нечего. `SpySignaler` в тесте не выполняет завершение по-настоящему, поэтому
     /// второй проход снова находит процессы «живыми» и — временно, до задачи 15,
     /// без уточнения эпизода (см. `test_journal_entry_of_an_episode_gets_the_settled_reason`) —
     /// заводит второй эпизод.
@@ -1819,7 +1822,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(.unavailable("таймаут запроса")),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpyKiller(),
+            killer: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 10
@@ -1870,7 +1873,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: probe,
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpyKiller(),
+            killer: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             // Проба не должна успеть уйти за время теста: иначе настоящий ответ
@@ -1904,7 +1907,7 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let killer = SpySignaler()
         let log = EventLogStore(storage: InMemoryEventLog())
         let locator = MutableLocator(
             bundlePaths: [targetBundleID: targetPath],
@@ -2051,7 +2054,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpyKiller(),
+            killer: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
