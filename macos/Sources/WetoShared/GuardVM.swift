@@ -223,14 +223,28 @@ public final class GuardVM {
         phase = .disabled
     }
 
-    /// Цвет статуса для глаза. Стоящие цели — не полноценная зелёная защита,
-    /// но и не доказанная опасность: жёлтый оставлен всему, что не доказано.
+    /// Цвет статуса для глаза. Решается по действию над целями (`GuardPhase.action`),
+    /// а не по факту летящей пробы: «Проверяю выход» — рабочая фаза, и жёлтый
+    /// у неё был бы тревогой без единой улики. Тревожный цвет держат только
+    /// стоящая и завершённая фазы; между ними стоит «Помехи»-как-цвет —
+    /// та же «На страже» в заголовке, но с доказанно не идеальным ответом,
+    /// и щит обязан это показать, раз слово больше не показывает.
     public var statusColor: GuardStatusColor {
         switch phase {
-        case .disabled: return .grey
-        case .protected: return .green
-        case .interference, .verifying, .paused: return .yellow
-        case .danger: return .red
+        case .disabled, .verifying:
+            // Работают, но про выход ничего не известно — не тревога, а отсутствие
+            // данных, тот же серый, что у выключенной охраны.
+            return .grey
+        case .protected:
+            return .green
+        case .interference:
+            // Работают, но не идеально: адрес доказанно тот же, а не свежий safe.
+            return .yellow
+        case .paused:
+            // Стоят — тревожный цвет держится за паузой, а не за пробой в полёте.
+            return .yellow
+        case .danger:
+            return .red
         }
     }
 

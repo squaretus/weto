@@ -61,14 +61,14 @@ public enum StatusPresentation {
                 evidence: "Цели не выбраны — охрана ничего не завершает",
                 next: "Добавьте приложение или команду в настройках"
             )
-        // ВРЕМЕННО: строки «Цели на паузе» и отсчёт у «Проверки» остались от стоящей
-        // фазы и теперь неверны — цели в проверке работают. Их правит отдельная задача
-        // про формулировки (respec-wording), она же уносит `remainingPause` из этой ветки.
         case .verifying(let cause):
+            // Проба в полёте, вердикта про текущий путь ещё нет — и цели работают:
+            // пауза начинается с плохого результата, а не с его ожидания. Ни «на паузе»,
+            // ни отсчёта здесь быть не может — считать нечего, пока ответа нет.
             return StatusExplanation(
-                title: phase.title, action: "Цели на паузе",
-                evidence: "Подключение ещё не проверено: \(cause.displayText)",
-                next: "Ждём подтверждения безопасного выхода, \(remaining) с до завершения"
+                title: phase.title, action: "Цели работают",
+                evidence: "Прежний вердикт не годится: \(cause.displayText)",
+                next: "Жду ответа сервисов о безопасности выхода"
             )
         case .protected(let reading):
             return StatusExplanation(
@@ -77,15 +77,15 @@ public enum StatusPresentation {
                 next: "Дальше ничего делать не нужно"
             )
         case .interference(let reading, let reason):
-            // «Помехи» — это ответ, а не тишина: резервный сервис назвал прежний адрес.
+            // Это ответ, а не тишина: резервный сервис назвал прежний адрес.
             // Считать тут нечего — отсчёта неудачных проб у охраны больше нет.
             return StatusExplanation(
                 title: phase.title, action: "Цели работают", evidence: reason.displayText,
-                next: "Цели работают: адрес \(reading.ip) доказанно тот же"
+                next: "Адрес \(reading.ip) доказанно тот же — жду восстановления ipinfo"
             )
         case .paused(_, let reason):
             return StatusExplanation(
-                title: phase.title, action: "Цели на паузе", evidence: reason.displayText,
+                title: phase.title, action: "Цели остановлены", evidence: reason.displayText,
                 next: "Ждём ответа сервисов, \(remaining) с до завершения; возобновятся при подтверждении безопасного выхода"
             )
         case .danger(let evidence):

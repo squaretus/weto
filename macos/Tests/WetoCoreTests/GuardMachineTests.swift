@@ -359,12 +359,14 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertNil(GuardPhase.danger(.pauseExpired).pausedSince)
     }
 
+    // «На страже» у protected и interference — не опечатка: заголовок отвечает
+    // «я защищён?», причина и цвет щита — отдельно (StatusPresentation, GuardVM.statusColor).
     func test_titles_are_the_six_states() {
-        XCTAssertEqual(GuardPhase.disabled.title, "Выключено")
-        XCTAssertEqual(GuardPhase.verifying(cause: .coldStart).title, "Проверка")
+        XCTAssertEqual(GuardPhase.disabled.title, "Охрана выключена")
+        XCTAssertEqual(GuardPhase.verifying(cause: .coldStart).title, "Проверяю выход")
         XCTAssertEqual(GuardPhase.protected(kz).title, "На страже")
-        XCTAssertEqual(GuardPhase.interference(kz, reason: .confirmationUnavailable).title, "Помехи")
-        XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Пауза")
-        XCTAssertEqual(GuardPhase.danger(.pauseExpired).title, "Опасно")
+        XCTAssertEqual(GuardPhase.interference(kz, reason: .confirmationUnavailable).title, "На страже")
+        XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Выход не подтверждён")
+        XCTAssertEqual(GuardPhase.danger(.pauseExpired).title, "Небезопасно")
     }
 }
