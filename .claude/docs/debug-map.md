@@ -62,7 +62,11 @@ nothing ever un-froze them because the process that owns the countdown is gone.
   startup is never blocked by it) and `GuardVM.start()` writes a `CheckEvent(trigger:
   .startupRecovery, outcome: .ledgerUnreadable)` into the check-journal
   (`~/Library/Application Support/weto/checks.json`) — that entry is the only trace that the
-  "resume everyone we stopped" obligation went unmet this run.
+  "resume everyone we stopped" obligation went unmet this run. An entry that *survives* the
+  recovery (the process is still stopped after its `SIGCONT`) writes a
+  `standingProcessesRemain` entry with the same trigger and shows up as a badge with the `fg`
+  hint in the popup — if a target is stopped after a relaunch and neither is there, the seeding
+  in `GuardVM.surfaceRecovered` is the suspect.
 - A target stuck stopped *while weto is running* is a different bug: check `GuardVM.phase.action`
   — if it is not `.pause`, `applyCurrentAction`/`pauseTargets` should not be touching it at all, and
   the suspect is `ProcessEnforcer.pause`'s "already stopped" de-dup (`StoppedIdentity`, keyed on

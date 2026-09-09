@@ -104,7 +104,9 @@ turns a decision into one of six phases and either keeps targets running, pauses
    `ProcessEnforcer.resume(observing:)`: `ProcessSignaling.send(.resume, …)` over every live entry,
    reversed. An entry is struck off only once the process is gone or the kernel showed it running:
    `kill(SIGCONT)` returns 0 for a background job that immediately takes `SIGTTIN` and stops again,
-   so a target still in state `T` keeps its entry and is signalled again next tick.
+   so a target still in state `T` keeps its entry and is signalled again next tick — up to
+   `Constants.resumeRetryLimit` answers, after which it keeps the entry but stops being poked
+   (zsh's `notify` prints `suspended (tty input)` on every answer).
    `resolvePauseEpisode` refines the open episode with how it ended — «возобновлено» only for an
    observed resume, «не возобновлено: …» otherwise, and the popup keeps its badge with the `fg`
    hint instead of pretending the target came back. A `.terminate` effect
@@ -122,7 +124,11 @@ turns a decision into one of six phases and either keeps targets running, pauses
 11. **Recover from a crash.** `GuardVM.start()` calls `ProcessEnforcer.resumeOrphans()` once,
     before anything else starts: it `SIGCONT`s only pids that are still stopped *and* still the
     same executable (pid reuse must not resume a stranger) and keeps every entry it did not
-    resolve, leaving it to the tick loop above to observe and re-signal. A
+    resolve, leaving it to the tick loop above to observe and re-signal. Whatever survives that
+    call is surfaced at once — `GuardVM.surfaceRecovered` seeds the popup's standing list (badge,
+    `fg` hint, «Показать терминал») and writes one `CheckEvent(trigger: .startupRecovery,
+    outcome: .standingProcessesRemain)`, one per recovery — because this launch has no pause
+    episode and the kill-journal is silent about it by construction. A
     corrupted `stopped.json` is read as empty (never blocks startup) but writes one
     `CheckEvent(trigger: .startupRecovery, outcome: .ledgerUnreadable)` to the check-journal,
     since the kill-journal has no way to record an unmet obligation that killed nothing.

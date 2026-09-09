@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "about": [
     "Контракт формата выгрузки журнала. Одну и ту же форму обязаны давать обе",
     "реализации: macOS/Tests/WetoSharedTests/JournalExportFixtureTests.swift и",
@@ -38,7 +38,10 @@
     "",
     "checkTriggers.startupRecovery — не проверка подключения, а единственный след",
     "невыполненного обязательства: учёт остановленных процессов не прочитался",
-    "(outcome ledgerUnreadable), и SIGCONT в этот запуск никто не получил."
+    "(outcome ledgerUnreadable), и SIGCONT в этот запуск никто не получил. Он же —",
+    "след обязательства, дожившего до нового запуска: процессы из учёта на старте",
+    "всё ещё стояли (outcome standingProcessesRemain), сигнал им ушёл, а эпизода",
+    "паузы в этом запуске нет — журнал завершений про них молчит по построению."
   ],
   "schemaVersion": 3,
   "envelopeKeys": [
@@ -145,7 +148,8 @@
     "skippedProbeInFlight",
     "discardedPathChanged",
     "discardedSettingsChanged",
-    "ledgerUnreadable"
+    "ledgerUnreadable",
+    "standingProcessesRemain"
   ],
   "stalenessCauses": [
     "coldStart",

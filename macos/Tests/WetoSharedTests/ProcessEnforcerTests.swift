@@ -323,9 +323,14 @@ final class ProcessEnforcerTests: XCTestCase {
 
     /// Запись, которую SIGCONT уже разбудил, а наблюдения ещё не было, остаётся в учёте.
     /// Ожившая цель обязана снова получить SIGSTOP — иначе «мы её уже остановили»
-    /// молча выпускало бы работающий процесс из-под паузы, — но второй записи в журнал
-    /// она не заводит: про этот pid эпизод уже рассказал.
-    func test_pause_stops_a_ledger_entry_that_is_running_again_without_recording_it_twice() {
+    /// молча выпускало бы работающий процесс из-под паузы, — и обязана попасть
+    /// в `fresh`: она честно остановлена этим проходом, а значит это событие.
+    ///
+    /// Повторов в журнале граница не сторожит: отбор «про этот pid эпизод уже рассказал»
+    /// живёт у эпизода (`GuardVM.pausedEpisodePIDs`). Здесь его хватало ровно до конца
+    /// эпизода, а цель, остановленную заново уже в следующем, глушило совсем — ни записи,
+    /// ни пилюли, ни уведомления про честно стоящий процесс.
+    func test_pause_stops_a_ledger_entry_that_is_running_again_and_calls_it_fresh() {
         let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
         let locator = MutableProcessLocator([shell, target, child])
         let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
@@ -338,8 +343,9 @@ final class ProcessEnforcerTests: XCTestCase {
 
         XCTAssertEqual(signaler.batches.map(\.signal), [.stop, .stop])
         XCTAssertEqual(signaler.batches.last?.pids, [100, 200, 201], "идущая цель встаёт заново")
-        XCTAssertTrue(second.fresh.isEmpty, "повторной записи о том же pid журнал не допускает")
-        XCTAssertEqual(ledger.pids, [100, 200, 201])
+        XCTAssertEqual(second.fresh.map(\.pid), [200, 201],
+                       "остановлена заново — значит остановлена этим проходом")
+        XCTAssertEqual(ledger.pids, [100, 200, 201], "вторых записей учёт не заводит")
     }
 
     func test_resume_walks_the_ledger_backwards_and_clears_it() {

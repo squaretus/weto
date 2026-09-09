@@ -15,13 +15,21 @@ this layer decides *when* to ask and *what to do* with the answer.
   `settleResume()` runs on every pass with running targets while the ledger is non-empty
   (the `.resume` effect is not a one-shot): the obligation is discharged by observation, so
   the episode is refined «возобновлено» only once the process was seen running again, and
-  «не возобновлено: …» when SIGCONT did not stick (background job) or was refused.
+  «не возобновлено: …» when SIGCONT did not stick (background job) or was refused. An entry that
+  answered with a stop `Constants.resumeRetryLimit` times stops being poked (zsh's `notify` would
+  print `suspended (tty input)` to the user once a second) — it stays on the books, and
+  `terminate`/`stop` still signal it. `stop()` cannot observe anything after its own SIGCONT,
+  so its outcome is «не подтверждено: … weto проверит их при следующем запуске» — neither the
+  optimistic nor the pessimistic lie.
 - `macos/Sources/WetoShared/GuardController.swift` — owns the one live `GuardMachine` (the reducer
   lives in `WetoCore`, see `weto-core.md`) plus the network probe: turns triggers into
   `GuardInput`, applies it, and asks `GuardVM` to enact whatever `GuardEffect` came back
 - `macos/Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event;
-  `pause(_:)` builds a `PausePlan` (skips pids already in the ledger) and sends `.stop` in
-  `stopOrder`, `resume(observing:)` sends `.resume` in the reverse of what the ledger holds and
+  `pause(_:)` builds a `PausePlan` (skips only pids the kernel shows stopped *and* the ledger
+  knows) and sends `.stop` in `stopOrder`; everything it actually stopped comes back in `fresh`,
+  including a revived ledger entry — per-episode dedup of journal records lives one layer up, in
+  `GuardVM.pausedEpisodePIDs`. `resume(observing:skipping:)` sends `.resume` in the reverse of what
+  the ledger holds (minus the entries that stopped being poked) and
   returns a `ResumeOutcome` (`released` / `unresolved`), `resumeOrphans()`
   is the crash-recovery path (only pids that are still stopped *and* still the same executable get
   `SIGCONT` — pid reuse must not resume a stranger). Neither one clears the ledger: an entry is
@@ -278,7 +286,11 @@ this layer decides *when* to ask and *what to do* with the answer.
   not resolve: sending SIGCONT is not resuming (`kill` returns 0 for a background job that
   immediately takes `SIGTTIN` and stops again), so a still-stopped entry stays on the books and
   the tick loop keeps signalling it — that is the bug that left three of the owner's processes
-  in state `T` for hours with an empty `stopped.json`.
+  in state `T` for hours with an empty `stopped.json`. An entry that survives that recovery is
+  made visible in the same call: `GuardVM.surfaceRecovered` seeds `pausedProcesses` from it (badge,
+  `fg` hint and «Показать терминал» — there is no pause episode in this launch, so the
+  kill-journal is silent by construction) and writes one `CheckEvent(trigger: .startupRecovery,
+  outcome: .standingProcessesRemain)` per recovery, not per tick.
 - **Two notifications, two purposes, one delegate.** `notifyTerminated` is the pre-existing "your
   targets died" banner; `notifyBackgrounded` exists because a paused terminal target that loses its
   foreground job otherwise just vanishes from its terminal with no explanation — the notification

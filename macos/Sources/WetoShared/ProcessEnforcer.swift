@@ -48,7 +48,8 @@ final class ProcessEnforcer {
 
     struct PauseOutcome {
         let plan: PausePlan
-        /// Цели, остановленные этим проходом: без шеллов и без уже стоявших.
+        /// Цели, остановленные этим проходом: без шеллов и без уже стоявших. Ожившая
+        /// запись учёта сюда входит — её остановили заново, и это событие.
         let fresh: [MatchedProcess]
         let results: [SignalResult]
         /// Всё, что под правилами прямо сейчас, — включая стоящих с прошлых проходов.
@@ -236,11 +237,13 @@ final class ProcessEnforcer {
                            stoppedAt: moment, isShell: plan.shells.contains(pid))
         })
 
-        // Остановлены этим проходом — доставленный SIGSTOP тому, кого в учёте ещё не было.
-        // Запись, ожившая между проходами (SIGCONT дошёл, наблюдения ещё не было), снова
-        // получает SIGSTOP, но второй записи в журнал не заводит: про этот pid эпизод
-        // уже рассказал, а повторов журнал не допускает.
-        return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) && !isKnown($0.pid) },
+        // Остановлены этим проходом — все, кому доставлен SIGSTOP, включая ожившую запись
+        // учёта: она шла, значит останавливаем её заново, и это событие, а не повтор.
+        // Отбор «про этот pid эпизод уже рассказал» живёт слоем выше, у эпизода
+        // (`GuardVM.pausedEpisodePIDs`): здесь его хватало ровно до конца эпизода,
+        // а цель, остановленную заново уже в следующем, глушило совсем — ни записи,
+        // ни пилюли, ни уведомления про честно стоящий процесс.
+        return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) },
                             results: results, matched: matched)
     }
 
@@ -284,8 +287,13 @@ final class ProcessEnforcer {
     /// же миг нельзя — процесс успеет проснуться и встать уже после нашего чтения.
     /// Поэтому проход, отправивший сигнал, обязательства не снимает; разбирает его
     /// следующий, и всё ещё стоящая цель получает SIGCONT снова.
+    ///
+    /// `skipping` — записи, которым досылать сигнал перестали: настоящее фоновое задание
+    /// отвечает стопом на каждый SIGCONT, а `notify` у zsh включён по умолчанию и печатает
+    /// пользователю `suspended (tty input)` раз в секунду до самого `fg`. Из учёта такая
+    /// запись не уходит: обязательство остаётся, его исполнят `terminate` и штатный выход.
     @discardableResult
-    func resume(observing scan: Scan? = nil) -> ResumeOutcome {
+    func resume(observing scan: Scan? = nil, skipping: Set<Int32> = []) -> ResumeOutcome {
         let entries = ledger.entries
         guard !entries.isEmpty else { return .none }
 
@@ -296,7 +304,8 @@ final class ProcessEnforcer {
         // Сигнал уходит всем живым записям, а не только стоящим: наблюдение снимает
         // обязательство, но порядок «потомки, цели, шеллы» — часть контракта, и рвать
         // его из-за одной записи, успевшей проснуться, нельзя.
-        let results = living.isEmpty ? [] : signaler.send(.resume, to: Array(living.map(\.pid).reversed()))
+        let order = living.map(\.pid).reversed().filter { !skipping.contains($0) }
+        let results = order.isEmpty ? [] : signaler.send(.resume, to: order)
         if !released.isEmpty { ledger.remove(released) }
         return ResumeOutcome(results: results, released: released, unresolved: standing)
     }

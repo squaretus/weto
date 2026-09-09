@@ -2749,6 +2749,163 @@ final class GuardVMTests: XCTestCase {
         h.vm.stop()
     }
 
+    /// Тот же сеанс с фоновым заданием, но собранный один раз: локатор меняет состояние
+    /// процессов по ходу теста, учёт живёт своим хранилищем.
+    private func makeBackgroundJobHarness(
+        stopped: Bool = false,
+        checkLog: CheckLogStore = CheckLogStore(storage: InMemoryCheckLog()),
+        ledgerStorage: InMemoryStoppedLedger = InMemoryStoppedLedger()
+    ) -> (h: DelayedHarness, locator: MutableLocator, ledgerStorage: InMemoryStoppedLedger) {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: backgroundJobTree(stopped: stopped)
+        )
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), checkLog: checkLog,
+                                   executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+        return (h, locator, ledgerStorage)
+    }
+
+    /// Штатный выход при стоящих целях — самый частый способ закончить паузу, и заявлять
+    /// в нём отказ нельзя: стоящими записи показал обход, снятый ДО SIGCONT, а такта,
+    /// который увидел бы ответ, больше не будет. Журнал говорит ровно установленное:
+    /// сигнал отправлен, результат не наблюдался, проверка — при следующем запуске.
+    func test_stopping_the_guard_while_targets_stand_reports_an_unconfirmed_signal() async {
+        let (h, locator, ledgerStorage) = makeBackgroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop])
+        locator.processes = backgroundJobTree(stopped: true)
+
+        h.vm.stop()
+
+        XCTAssertEqual(h.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200],
+                       "обязательство исполняется и на выходе: продолжение в обратном порядке")
+        XCTAssertEqual(
+            h.log.events.first?.resolutionText,
+            "не подтверждено: сигнал продолжения отправлен процессам [200, 201], "
+                + "а охрана остановлена — результат наблюдать нечем, weto проверит их "
+                + "при следующем запуске",
+            "ни «возобновлено», ни «не возобновлено»: наблюдения не было вовсе"
+        )
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "записи достаются следующему запуску — восстановление настоящее")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200],
+                       "цель по-прежнему стоит: пилюля не имеет права исчезнуть")
+    }
+
+    /// Учёт, доживший до нового запуска, обязан быть видимым. Эпизода паузы в этом
+    /// запуске нет — журнал завершений про такие записи молчит по построению, — и без
+    /// этого пользователь после падения weto получал SIGCONT раз в секунду и ни слова:
+    /// ни пилюли, ни подсказки про `fg`, ни следа в журналах.
+    func test_a_standing_orphan_is_visible_after_a_restart() async {
+        let ledgerStorage = InMemoryStoppedLedger()
+        let moment = Date(timeIntervalSince1970: 1_000)
+        ledgerStorage.save([
+            StoppedProcess(pid: 200, executablePath: "/usr/bin/pico", stoppedAt: moment, isShell: false),
+            StoppedProcess(pid: 201, executablePath: "/usr/bin/node", stoppedAt: moment, isShell: false)
+        ])
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        let (h, _, _) = makeBackgroundJobHarness(stopped: true, checkLog: checks,
+                                                 ledgerStorage: ledgerStorage)
+
+        h.vm.start()
+
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "стоящая цель обязана быть в попапе")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true,
+                       "цель ответила стопом на свой SIGCONT — подсказка про fg и «Показать терминал»")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.since, moment, "стоит она с прошлой жизни weto")
+        XCTAssertEqual(h.notifier.backgrounded, ["nano"], "уведомление одно")
+
+        let traces = checks.all.filter { $0.trigger == .startupRecovery }
+        XCTAssertEqual(traces.count, 1, "одна запись на восстановление, а не на такт")
+        XCTAssertEqual(traces.first?.outcome, .standingProcessesRemain)
+        XCTAssertEqual(traces.first?.detail,
+                       "учёт остановленных: процессы [200, 201] стояли на старте — "
+                           + "продолжение отправлено, дальше их ведёт такт охраны")
+        XCTAssertTrue(h.log.events.isEmpty, "журнал завершений про эпизод, которого не было, молчит")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "обязательство держится до наблюдения и после перезапуска")
+        h.vm.stop()
+    }
+
+    /// Плохой результат внутри окна наблюдения: SIGCONT ушёл, цель ожила, эпизод уже
+    /// закрыт исходом — и вердикт снова стал плохим. Цель честно останавливается заново,
+    /// и это событие: прежде запись в учёте, дожившая с прошлой паузы, глушила его совсем
+    /// (ни записи, ни пилюли, ни уведомления про стоящий процесс).
+    func test_a_target_stopped_again_after_the_episode_closed_is_recorded_anew() async {
+        let (h, locator, _) = makeBackgroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        let firstEpisode = h.log.events.first?.episodeID
+        XCTAssertEqual(h.log.events.map(\.pid), [200, 201])
+
+        // Цели стоят, проверка сказала «безопасно» — SIGCONT ушёл, ответ ещё не наблюдался.
+        locator.processes = backgroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+
+        // Следующий проход видит их стоящими: это ответ, и эпизод получает исход.
+        h.vm.handle(.tick)
+        XCTAssertNotNil(h.log.events.first?.resolutionText)
+
+        // Пользователь ввёл `fg`, цели пошли — а вердикт тем же проходом стал плохим.
+        locator.processes = backgroundJobTree(stopped: false)
+        await pauseWithABadResult(h, after: 2)
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume, .resume, .stop])
+        XCTAssertEqual(h.signaler.batches.last?.pids, [200, 201], "ожившая цель встаёт заново")
+        XCTAssertEqual(h.log.events.count, 4, "новое стояние — новые записи")
+        XCTAssertEqual(h.log.events.prefix(2).map(\.pid), [200, 201], "свежие записи первыми")
+        XCTAssertNotEqual(h.log.events.first?.episodeID, firstEpisode, "эпизод другой")
+        XCTAssertNil(h.log.events.first?.resolutionText, "новое стояние ещё не кончилось")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200])
+
+        // Внутри одного эпизода повтора нет: цель, ожившая под паузой, получает SIGSTOP
+        // снова, но второй записи о том же pid журнал не заводит.
+        locator.processes = backgroundJobTree(stopped: false)
+        h.vm.handle(.appLaunched(bundleID: targetBundleID))
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume, .resume, .stop, .stop])
+        XCTAssertEqual(h.log.events.count, 4, "повторной записи о том же pid эпизод не допускает")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "и второй пилюли тоже")
+    }
+
+    /// Настоящее фоновое задание отвечает стопом на каждый SIGCONT, и досылать ему
+    /// сигнал вечно нельзя: свои запись и уведомление weto не повторяет, а `notify`
+    /// у zsh включён по умолчанию — терминал печатал `suspended (tty input)` раз
+    /// в секунду до самого `fg`. Обязательство при этом остаётся: его исполняет
+    /// штатный выход.
+    func test_a_job_that_keeps_answering_with_a_stop_is_no_longer_poked() async {
+        let (h, locator, ledgerStorage) = makeBackgroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = backgroundJobTree(stopped: true)
+
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        for _ in 0..<10 { h.vm.handle(.tick) }
+
+        let resumes = h.signaler.batches.filter { $0.signal == .resume }
+        XCTAssertEqual(resumes.count, Constants.resumeRetryLimit + 1,
+                       "первый сигнал плюс попытки — и ни одной сверх лимита")
+        XCTAssertTrue(resumes.allSatisfy { $0.pids == [201, 200] }, "порядок продолжения не меняется")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "перестали трогать — не значит забыли: обязательство держит учёт")
+        XCTAssertEqual(h.notifier.backgrounded, ["nano"], "уведомление одно на стояние")
+
+        h.vm.stop()
+
+        XCTAssertEqual(h.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200],
+                       "штатный выход исполняет обязательство несмотря на остановленные попытки")
+    }
+
     /// Потолок паузы виден интерфейсу только пока цели стоят — то есть с плохого
     /// результата пробы и до его отмены. У «Проверки» отсчёта нет вовсе.
     func test_pause_deadline_exists_only_while_the_targets_stand() async {

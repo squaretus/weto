@@ -67,6 +67,11 @@ pub enum CheckOutcome {
     /// Учёт остановленных процессов не прочитался: обязательство «вернуть
     /// остановленным SIGCONT» в этот запуск выполнено не было.
     LedgerUnreadable,
+    /// Учёт прочитан, и процессы из него на старте всё ещё стояли: SIGCONT им ушёл,
+    /// но эпизода паузы в этом запуске нет, и журнал завершений про них молчит
+    /// по построению. На Linux паузы пока нет вовсе — вариант приезжает вместе
+    /// с форматом, чтобы выгрузка описывала одно и то же на обеих платформах.
+    StandingProcessesRemain,
 }
 
 impl CheckOutcome {
@@ -78,6 +83,7 @@ impl CheckOutcome {
             CheckOutcome::DiscardedPathChanged => "ответ отброшен: путь сменился",
             CheckOutcome::DiscardedSettingsChanged => "ответ отброшен: настройки изменились",
             CheckOutcome::LedgerUnreadable => "учёт остановленных не прочитан",
+            CheckOutcome::StandingProcessesRemain => "остановленные процессы остались стоять",
         }
     }
 
