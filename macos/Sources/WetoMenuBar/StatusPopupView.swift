@@ -33,7 +33,11 @@ struct StatusPopupView: View {
     private func content(at now: Date) -> some View {
         VStack(alignment: .leading, spacing: WetoTokens.space4) {
             header
-            explanationLines(at: now)
+            // Скрыто там, где охрана ничего не сделала с целями (`.disabled`, `.protected`):
+            // попап выглядит как заголовок → гео-показания → футер, без строк объяснения.
+            if StatusPresentation.shouldExplain(coordinator.guardVM.phase) {
+                explanationLines(at: now)
+            }
             readout
 
             if let failure = coordinator.guardVM.permissionFailure {

@@ -538,7 +538,7 @@ final class GuardVMTests: XCTestCase {
             starts, 1,
             "такт запустил вторую пробу поверх летящей: первая отменена, запрос выброшен"
         )
-        XCTAssertEqual(h.vm.phase.title, "Защищено", "ответ пробы обязан примениться")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "ответ пробы обязан примениться")
     }
 
     /// То же про кнопку: пользователь нажал, запрос ушёл, и следующий такт
@@ -555,7 +555,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
         await settle()
 
-        XCTAssertEqual(h.vm.phase.title, "Защищено", "проверка по кнопке обязана доехать")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "проверка по кнопке обязана доехать")
     }
 
     /// Ответ пробы про прежний путь нельзя применять к новому.
@@ -632,7 +632,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         let killsBefore = h.signaler.killedBatches.count
 
@@ -641,7 +641,7 @@ final class GuardVMTests: XCTestCase {
         for _ in 0..<5 { h.vm.handle(.tick) }
         await settle()
 
-        XCTAssertEqual(h.vm.phase.title, "Защищено", "вердикт не трогается")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "вердикт не трогается")
         XCTAssertEqual(
             h.signaler.killedBatches.count, killsBefore,
             "обновление цели — не повод завершать её сеанс"
@@ -708,7 +708,7 @@ final class GuardVMTests: XCTestCase {
         await settle()
 
         // Остановка гасит и фазу: цели возобновлены, и отсчёт до потолка считать
-        // больше некому. Применённый ответ дал бы «Защищено» и показания на экране —
+        // больше некому. Применённый ответ дал бы «На страже» и показания на экране —
         // ни того, ни другого быть не должно.
         XCTAssertEqual(h.vm.phase.title, "Выключено", "остановленная охрана фазу за собой не тянет")
         XCTAssertNil(h.vm.pauseDeadline, "стоящих целей нет — нет и отсчёта")
@@ -760,7 +760,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.resumeFirst(with: geoOutcome())
         await settle()
 
-        XCTAssertEqual(h.vm.phase.title, "Защищено", "путь тот же — ответ про нас")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "путь тот же — ответ про нас")
     }
 
     func test_old_config_probe_result_is_ignored_after_blacklist_change() async {
@@ -803,7 +803,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.settings.allowedCountryCodes = ["DE"]
         h.vm.handle(.networkPath)
@@ -846,7 +846,7 @@ final class GuardVMTests: XCTestCase {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.settings.vpnAppRule = "com.example.absent"
 
@@ -863,7 +863,7 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.tick)
 
         XCTAssertEqual(
-            h.vm.phase.title, "Защищено",
+            h.vm.phase.title, "На страже",
             "штатный тик при неизменном снимке и настройках не обязан ронять цели"
         )
         await h.vm.awaitPendingProbe()
@@ -884,7 +884,7 @@ final class GuardVMTests: XCTestCase {
 
         let callsAfterTick = await h.probe.calls()
         XCTAssertEqual(callsAfterTick, callsAfterVerdict, "тик в сеть не ходит")
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
     }
 
     /// А расписание гео — ходит: страна выхода может смениться и на неизменном пути.
@@ -933,7 +933,7 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.networkPath)
 
         XCTAssertEqual(
-            h.vm.phase.title, "Защищено",
+            h.vm.phase.title, "На страже",
             "чужой туннель не повод объявлять подключение непроверенным"
         )
         await h.vm.awaitPendingProbe()
@@ -964,7 +964,7 @@ final class GuardVMTests: XCTestCase {
         h.vm.recheckNow()
 
         XCTAssertEqual(
-            h.vm.phase.title, "Защищено",
+            h.vm.phase.title, "На страже",
             "нажатие кнопки — не повод объявлять подключение непроверенным"
         )
         await h.vm.awaitPendingProbe()
@@ -1001,7 +1001,7 @@ final class GuardVMTests: XCTestCase {
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(
-            h.vm.phase.title, "Защищено",
+            h.vm.phase.title, "На страже",
             "восстановившийся сервис снимает блокировку сразу, а не через тик поллинга"
         )
         h.vm.stop()
@@ -1020,7 +1020,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
         let batchesAfterVerdict = h.signaler.batches.count
 
         h.vm.recheckNow()
@@ -1145,7 +1145,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         // Подтверждения нет — непроверенность, но терпимость держит первые пробы:
         // цели встают, только когда она исчерпана.
@@ -1162,7 +1162,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted(atLeast: started + 1)
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
@@ -1216,7 +1216,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.network.snapshotValue = NetworkSnapshot(
             outgoing: OutgoingRoute(interface: "utun9", address: "198.18.0.1")
@@ -1323,7 +1323,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
@@ -1346,7 +1346,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
         let eventsAfterVerdict = h.log.events.count
         let killsAfterVerdict = h.signaler.killedBatches.count
         let callsAfterVerdict = await h.probe.calls()
@@ -1355,7 +1355,7 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.tick)
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.phase.title, "Защищено", "правка списков вердикт не обесценивает")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "правка списков вердикт не обесценивает")
         XCTAssertEqual(h.log.events.count, eventsAfterVerdict, "эпизода нет: цели не трогали")
         XCTAssertEqual(h.signaler.killedBatches.count, killsAfterVerdict)
         let calls = await h.probe.calls()
@@ -1372,7 +1372,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
@@ -1384,7 +1384,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted(atLeast: 2)
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено", "вердикт на новом пути состоялся")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "вердикт на новом пути состоялся")
 
         await spendSilenceTolerance(h, after: 2)
 
@@ -1428,7 +1428,7 @@ final class GuardVMTests: XCTestCase {
 
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
         XCTAssertEqual(
             h.log.events.first?.resolutionText,
             "возобновлено: проверка подтвердила безопасный выход: 203.0.113.28, KZ"
@@ -1446,7 +1446,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
         XCTAssertEqual(h.log.events.count, 2)
         let firstEpisode = h.log.events[0].episodeID
 
@@ -1628,7 +1628,7 @@ final class GuardVMTests: XCTestCase {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
@@ -1665,7 +1665,7 @@ final class GuardVMTests: XCTestCase {
 
         vm.handle(.networkPath)
         await vm.awaitPendingProbe()
-        XCTAssertEqual(vm.phase.title, "Защищено")
+        XCTAssertEqual(vm.phase.title, "На страже")
 
         locator.processes = processesWithoutVPNApp
         vm.handle(.appTerminated(bundleID: vpnAppID))
@@ -1715,7 +1715,7 @@ final class GuardVMTests: XCTestCase {
         vm.handle(.appLaunched(bundleID: vpnAppID))
         await vm.awaitPendingProbe()
 
-        XCTAssertEqual(vm.phase.title, "Защищено", "клиент поднялся — вердикт пересчитан")
+        XCTAssertEqual(vm.phase.title, "На страже", "клиент поднялся — вердикт пересчитан")
     }
 
     /// Выбранное VPN-приложение не завершается никогда: охрана, убившая свой
@@ -1767,7 +1767,7 @@ final class GuardVMTests: XCTestCase {
 
         vm.handle(.networkPath)
         await vm.awaitPendingProbe()
-        XCTAssertEqual(vm.phase.title, "Защищено")
+        XCTAssertEqual(vm.phase.title, "На страже")
         XCTAssertFalse(
             vm.runningTargets.contains { $0.entry == "nano" },
             "цели ещё нет в списке — проверяем именно её появление"
@@ -1884,7 +1884,7 @@ final class GuardVMTests: XCTestCase {
 
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
         XCTAssertEqual(h.vm.lastReading?.ip, "203.0.113.28")
         XCTAssertEqual(h.vm.statusColor, .green)
         XCTAssertEqual(h.vm.currentCountryCode, "KZ")
@@ -2360,7 +2360,7 @@ final class GuardVMTests: XCTestCase {
             ip: "203.0.113.177", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .freeipapi)))
         await harness.vm.awaitPendingProbe()
 
-        XCTAssertEqual(harness.vm.phase.title, "Защищено")
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
         XCTAssertEqual(harness.signaler.batches.last?.signal, .resume)
         XCTAssertEqual(harness.signaler.batches.last?.pids, [501, 500], "потомок раньше родителя")
         XCTAssertFalse(harness.signaler.batches.contains { $0.signal == .kill }, "ни одного SIGKILL")
@@ -2385,7 +2385,7 @@ final class GuardVMTests: XCTestCase {
         await harness.probe.waitUntilStarted()
         await harness.probe.resumeFirst(with: geoOutcome())
         await harness.vm.awaitPendingProbe()
-        XCTAssertEqual(harness.vm.phase.title, "Защищено")
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
         let batchesBeforeSilence = harness.signaler.batches.count
         let eventsBeforeSilence = harness.log.events.count
 
@@ -2444,14 +2444,14 @@ final class GuardVMTests: XCTestCase {
         let harness = makeHarness(snapshot: utun5Snapshot(), geo: geoOutcome())
         harness.vm.start()
         await harness.vm.awaitPendingProbe()
-        XCTAssertEqual(harness.vm.phase.title, "Защищено")
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
         let probes = await harness.probe.calls()
         let batches = harness.signaler.batches.count
         let events = harness.log.events.count
 
         harness.settings.targets += ["nano"]
 
-        XCTAssertEqual(harness.vm.phase.title, "Защищено")
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
         XCTAssertEqual(harness.signaler.batches.count, batches, "ни стопа, ни завершения")
         let probesAfter = await harness.probe.calls()
         XCTAssertEqual(probesAfter, probes, "пробы нет — вердикт в силе")
@@ -2582,7 +2582,7 @@ final class GuardVMTests: XCTestCase {
 
     /// Завершение после «Помех» — первое завершение своего эпизода, а не «запуск запрещён».
     ///
-    /// Дедупликация записей и причин снималась только на «Защищено», а «Помехи» — путь
+    /// Дедупликация записей и причин снималась только на «На страже», а «Помехи» — путь
     /// рабочий: 429 от ipinfo приходит регулярно, и адрес называет резервный сервис.
     /// Доказательство после них получало `kind: .launchBlocked`, а при совпавшем pid
     /// не давало ни записи, ни уведомления — ровно в тот момент, когда цели умирают.
@@ -2616,7 +2616,7 @@ final class GuardVMTests: XCTestCase {
         await probe.waitUntilStarted()
         await probe.resumeFirst(with: geoOutcome())
         await vm.awaitPendingProbe()
-        XCTAssertEqual(vm.phase.title, "Защищено")
+        XCTAssertEqual(vm.phase.title, "На страже")
 
         // Клиент закрылся: доказательство и завершение.
         locator.processes = processesWithoutVPNApp
@@ -2668,7 +2668,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.phase.title, "Защищено")
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         await spendSilenceTolerance(h, after: 1)
         XCTAssertEqual(h.vm.phase.title, "Пауза")

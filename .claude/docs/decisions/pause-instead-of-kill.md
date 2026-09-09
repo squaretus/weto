@@ -24,7 +24,7 @@ a timeout means a black hole, not a leak.
    address named by the fallback — is *unproven* and pauses the targets (SIGSTOP) instead.
 2. **Two axes, six states.** Knowledge about the exit (none / safe / safe-but-silent /
    unreachable / unsafe) × action on targets (running / paused with a countdown / terminated
-   with launch blocked). User-visible states: **Выключено**, **Проверка**, **Защищено**,
+   with launch blocked). User-visible states: **Выключено**, **Проверка**, **На страже**,
    **Помехи**, **Пауза**, **Опасно**. The reason is attached as evidence; it does not define
    the state. The policy stays a pure function (`GuardPolicy.decide` → safe / unproven / kill);
    the transitions live in a pure reducer (`GuardMachine`) owned by `GuardController`.
