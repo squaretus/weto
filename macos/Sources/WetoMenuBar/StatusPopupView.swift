@@ -16,6 +16,7 @@ struct StatusPopupView: View {
         WetoPanel(width: WetoTokens.popupWidth) {
             VStack(alignment: .leading, spacing: WetoTokens.space4) {
                 header
+                explanation
                 readout
 
                 if let failure = coordinator.guardVM.permissionFailure {
@@ -56,15 +57,49 @@ struct StatusPopupView: View {
         .onAppear { coordinator.guardVM.refreshRunningTargets() }
     }
 
+    /// Три строки: что сделал weto, почему, что дальше. Секундный таймер — только пока
+    /// цели стоят: без него отсчёт бы всё равно поменялся при следующем такте охраны,
+    /// но пользователь смотрел бы на замерший на экране номер до тех пор.
+    @ViewBuilder
+    private var explanation: some View {
+        if coordinator.guardVM.pauseDeadline != nil {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                explanationLines(at: context.date)
+            }
+        } else {
+            explanationLines(at: Date())
+        }
+    }
+
+    private func explanationLines(at now: Date) -> some View {
+        let vm = coordinator.guardVM
+        let remaining = vm.pauseDeadline.map { max(0, $0.timeIntervalSince(now)) }
+        let text = StatusPresentation.explanation(for: vm.phase, remainingPause: remaining)
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(text.action)
+                .font(WetoTokens.label)
+                .foregroundStyle(WetoTokens.ink.resolve(scheme))
+            Text(text.evidence)
+                .font(WetoTokens.caption)
+                .foregroundStyle(WetoTokens.dim.resolve(scheme))
+            Text(text.next)
+                .font(WetoTokens.caption)
+                .foregroundStyle(WetoTokens.faint.resolve(scheme))
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
+    }
+
     @ViewBuilder
     private var processes: some View {
-        let running = coordinator.guardVM.runningTargets
+        let vm = coordinator.guardVM
+        let running = vm.runningTargets
 
         if running.isEmpty {
             // Цвет и совет берём из состояния охраны, а не из самого факта
             // «целей нет»: после срабатывания kill switch цели молчат именно
             // потому, что VPN уже выключен.
-            let notice = StatusPresentation.idleTargets(for: coordinator.guardVM.phase)
+            let notice = StatusPresentation.idleTargets(for: vm.phase)
 
             HStack(spacing: WetoTokens.space2) {
                 Image(systemName: notice.hint == nil ? "circle.slash" : "checkmark")
@@ -84,12 +119,28 @@ struct StatusPopupView: View {
         } else {
             VStack(spacing: WetoTokens.space2) {
                 ForEach(running) { target in
+                    // Пилюля приложения объединяет несколько корней в одну строку
+                    // с pid: min(...); pausedProcesses хранит все корни `.rule`,
+                    // поэтому совпадение есть, пока стоит хотя бы главный процесс.
+                    let paused = vm.pausedProcesses.first { $0.pid == target.pid }
                     WetoProcessPill(
                         icon: TargetIconStore.shared.icon(for: iconKind(for: target), size: 32),
                         title: target.displayName,
                         isCommandLine: target.kind != .appBundle,
                         childCount: target.extraProcessCount
-                    )
+                    ) {
+                        if let paused {
+                            WetoPauseBadge(
+                                deadline: vm.pauseDeadline,
+                                hint: paused.isBackgrounded
+                                    ? "Процесс вернулся в фон. Откройте терминал и введите fg"
+                                    : nil,
+                                onShowTerminal: paused.isBackgrounded
+                                    ? { vm.showTerminal(for: paused.pid) }
+                                    : nil
+                            )
+                        }
+                    }
                 }
             }
         }
