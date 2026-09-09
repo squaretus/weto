@@ -528,3 +528,37 @@ fn the_guard_config_carries_the_whitelist() {
     assert_eq!(config.allowed_ip_ranges.len(), 1);
     assert!(config.allowed_ip_ranges[0].contains("198.51.100.7"));
 }
+
+/// Тексты видов записи общие с macOS дословно: файл выгрузки читают на обеих
+/// платформах, и «на паузе» обязано звучать одинаково. Сама пауза на Linux —
+/// следующий план, но формат её записи обязан совпадать уже сейчас.
+#[test]
+fn kind_texts_and_wire_names_match_macos() {
+    assert_eq!(KillEventKind::Terminated.display_text(), "завершено");
+    assert_eq!(
+        KillEventKind::LaunchBlocked.display_text(),
+        "запуск запрещён"
+    );
+    assert_eq!(KillEventKind::Paused.display_text(), "на паузе");
+    assert_eq!(
+        serde_json::to_value(KillEventKind::Paused).unwrap(),
+        serde_json::json!("paused"),
+        "имя в файле — часть общего формата"
+    );
+}
+
+/// Эпизод паузы отличается от завершения только видом и исходом: запись читается
+/// и пишется тем же путём, иначе выгрузка с macOS не разобралась бы на Linux.
+#[test]
+fn a_paused_record_round_trips_with_its_resolution() {
+    let mut paused = event(500, "Подключение ещё не проверено: вердикта ещё не было");
+    paused.kind = KillEventKind::Paused;
+    paused.resolution_text =
+        Some("завершено по потолку: Подтверждение не получено за 60 с".to_string());
+
+    let json = serde_json::to_string(&paused).unwrap();
+    let back: KillEvent = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(back, paused);
+    assert_eq!(back.kind, KillEventKind::Paused);
+}

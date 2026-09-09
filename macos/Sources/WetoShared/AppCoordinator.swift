@@ -63,7 +63,8 @@ public final class AppCoordinator {
             ),
             locator: ProcessRegistry(),
             signaler: ProcessSignaler(),
-            notifier: UserNotificationKillNotifier(),
+            ledger: StoppedLedger(),
+            notifier: UserNotificationGuardNotifier(),
             events: NetworkEventSource(),
             launchAgent: LaunchAgentController()
         )
@@ -84,7 +85,7 @@ public final class AppCoordinator {
     }
 
     public func start() {
-        UserNotificationKillNotifier.activate()
+        UserNotificationGuardNotifier.activate()
         applyAppIcon()
         dockPresence.start()
         guardVM.start()

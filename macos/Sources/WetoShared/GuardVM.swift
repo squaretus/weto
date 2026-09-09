@@ -7,28 +7,33 @@ public enum GuardStatusColor: Equatable, Sendable {
     case green, yellow, red, grey
 }
 
-public enum GuardState: Equatable, Sendable {
-    case disabled
-    case safe(GeoReading?)
-    case unsafe(UnsafeEvidence)
+/// Корень цели, стоящий сейчас: то, что интерфейс показывает пилюлей с отсчётом.
+public struct PausedProcess: Equatable, Sendable, Identifiable {
+    public let pid: Int32
+    public let targetName: String
+    public let since: Date
+    /// Терминал этой цели после SIGCONT не вернётся сам: фоновое задание.
+    /// Пользователю — подсказка про `fg`.
+    public let isBackgrounded: Bool
 
-    public var statusColor: GuardStatusColor {
-        switch self {
-        case .disabled: return .grey
-        case .safe: return .green
-        // Красный для любой причины: разбор «помехи vs опасно» — на задаче 15,
-        // где `statusColor` получает все шесть состояний `GuardMachine`.
-        case .unsafe: return .red
-        }
+    public var id: Int32 { pid }
+
+    public init(pid: Int32, targetName: String, since: Date, isBackgrounded: Bool) {
+        self.pid = pid
+        self.targetName = targetName
+        self.since = since
+        self.isBackgrounded = isBackgrounded
     }
-
 }
 
+/// Применяет фазы и эффекты, которые посчитал `GuardController`, и объясняет их
+/// журналом. Сам не решает ничего: ни переходов, ни причин — только выполняет
+/// над процессами то, что решил редьюсер, и пишет, что именно случилось.
 @Observable
 @MainActor
 public final class GuardVM {
 
-    public private(set) var state: GuardState = .disabled
+    public private(set) var phase: GuardPhase = .disabled
     public private(set) var lastReading: GeoReading?
 
     /// Что ответил каждый сервис в последней пробе — материал попапа.
@@ -40,6 +45,14 @@ public final class GuardVM {
     public private(set) var permissionFailure: String?
     public private(set) var runningTargets: [RunningTarget] = []
 
+    /// Корни целей, стоящих сейчас.
+    public private(set) var pausedProcesses: [PausedProcess] = []
+
+    /// Когда истечёт потолок паузы. `nil` — цели не стоят.
+    public var pauseDeadline: Date? {
+        phase.pausedSince.map { $0.addingTimeInterval(Constants.pauseCeilingSeconds) }
+    }
+
     @ObservationIgnored private let settings: SettingsStore
     @ObservationIgnored private let eventLog: EventLogStore
     @ObservationIgnored private let checkLog: CheckLogStore
@@ -48,9 +61,12 @@ public final class GuardVM {
     @ObservationIgnored private let locator: ProcessLocating
     @ObservationIgnored private let resolver: TargetResolving
     @ObservationIgnored private let signaler: ProcessSignaling
-    @ObservationIgnored private let notifier: KillNotifying
+    @ObservationIgnored private let ledger: StoppedLedger
+    @ObservationIgnored private let terminalLocator: TerminalLocating
+    @ObservationIgnored private let notifier: GuardNotifying
     @ObservationIgnored private let events: NetworkEventSourcing
     @ObservationIgnored private let launchAgent: LaunchAgentManaging
+    @ObservationIgnored private let now: () -> Date
 
     // Пара «причина + pid»: тот же процесс по той же причине второй записи
     // не заводит, а новый — заводит всегда. Дедупликация только по pid съедала бы
@@ -60,16 +76,16 @@ public final class GuardVM {
     // Причины, уже описанные в журнале в рамках текущего небезопасного эпизода.
     @ObservationIgnored private var recordedReasons: Set<String> = []
 
-    // Текст причины, которым `apply` применил текущее небезопасное решение. Сторож
-    // и повторное включение цели во время того же решения обязаны звучать так же:
-    // `state` хранит для `.unproven` фиксированный `.pauseExpired` (временно, до
-    // задачи 15), и его `displayText` — не настоящая причина, а текст потолка паузы.
-    @ObservationIgnored private var lastUnsafeReasonText: String?
+    // Происхождение показаний, с которым контроллер применил текущую фазу:
+    // из только что ответившей пробы или из прошлого вердикта. Считает его
+    // контроллер — он единственный знает, чем принято решение.
+    @ObservationIgnored private var lastOrigin: VerdictOrigin?
 
-    // Решение только что принято по пробе, которая ответила сейчас, а не по старому
-    // чтению. Взводится приёмом отчёта, гасится после того, как решение обработано:
-    // задача 15 заменит это явным origin, вычисленным контроллером.
-    @ObservationIgnored private var decisionCameFromProbe = false
+    // Эпизод паузы: одна причина, один id на всё время стояния; pid из него при завершении
+    // новых записей не заводят — им дописывается исход.
+    @ObservationIgnored private var pauseEpisodeID: UUID?
+    @ObservationIgnored private var pausedEpisodePIDs: Set<Int32> = []
+    @ObservationIgnored private var pauseStaleness: VerdictStaleness?
 
     private struct RecordedKill: Hashable {
         let pid: Int32
@@ -80,7 +96,7 @@ public final class GuardVM {
     @ObservationIgnored private var enforcer: ProcessEnforcer!
 
     // Обход процессов, сделанный для текущего события: синхронное решение
-    // обязано убивать по нему же, а не запускать второй обход.
+    // обязано действовать по нему же, а не запускать второй обход.
     @ObservationIgnored private var currentScan: ProcessEnforcer.Scan?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var geoTickTask: Task<Void, Never>?
@@ -95,10 +111,15 @@ public final class GuardVM {
         locator: ProcessLocating,
         resolver: TargetResolving = TargetResolver(),
         signaler: ProcessSignaling,
-        notifier: KillNotifying,
+        // Не значение по умолчанию: `StoppedLedger` изолирован главным актором,
+        // а выражение по умолчанию считается вне него.
+        ledger: StoppedLedger? = nil,
+        terminalLocator: TerminalLocating = TerminalLocator(),
+        notifier: GuardNotifying,
         events: NetworkEventSourcing,
         launchAgent: LaunchAgentManaging = LaunchAgentController(),
-        debounceInterval: TimeInterval = Constants.networkEventDebounceSeconds
+        debounceInterval: TimeInterval = Constants.networkEventDebounceSeconds,
+        now: @escaping () -> Date = Date.init
     ) {
         self.settings = settings
         self.eventLog = eventLog
@@ -108,19 +129,21 @@ public final class GuardVM {
         self.locator = locator
         self.resolver = resolver
         self.signaler = signaler
+        let ledger = ledger ?? StoppedLedger(storage: InMemoryStoppedLedger())
+        self.ledger = ledger
+        self.terminalLocator = terminalLocator
         self.notifier = notifier
         self.events = events
         self.launchAgent = launchAgent
+        self.now = now
 
         self.enforcer = ProcessEnforcer(
             settings: settings,
             resolver: resolver,
             locator: locator,
             signaler: signaler,
-            // Учёт остановленных подключается целиком в задаче 15: до тех пор пауза
-            // в этом сторожевом цикле не вызывается, а `terminate` учётом пользуется
-            // как обычно — он просто пуст, раз `pause` его никогда не пополняет.
-            ledger: StoppedLedger(storage: InMemoryStoppedLedger())
+            ledger: ledger,
+            now: now
         )
 
         self.controller = GuardController(
@@ -128,8 +151,9 @@ public final class GuardVM {
             snapshotReader: snapshotReader,
             geoProbe: geoProbe,
             debounceInterval: debounceInterval,
+            now: now,
             vpnAppStatus: { [weak self] in self?.vpnAppStatus() ?? .notChosen },
-            onPhase: { [weak self] phase, _, _ in self?.apply(phase) },
+            onPhase: { [weak self] phase, effect, origin in self?.apply(phase, effect: effect, origin: origin) },
             onReport: { [weak self] report in self?.receive(report) },
             onCheck: { [weak self] check in self?.checkLog.record(check) }
         )
@@ -151,6 +175,21 @@ public final class GuardVM {
     }
 
     public func start() {
+        // Учёт не прочитался — обязательство «вернуть остановленным SIGCONT» не выполнено.
+        // Молча пустое чтение неотличимо от «возобновлять нечего», поэтому след остаётся
+        // в журнале проверок: там же, где и остальная диагностика.
+        if ledger.startedFromCorruptedFile {
+            checkLog.record(CheckEvent(
+                date: now(),
+                trigger: .startupRecovery,
+                outcome: .ledgerUnreadable,
+                fingerprint: snapshotReader.snapshot().verdictFingerprint,
+                detail: "учёт остановленных процессов не прочитан: возобновлять нечего"
+            ))
+        }
+
+        // После падения: SIGCONT всем из учёта, кто ещё стоит и остался тем же процессом.
+        enforcer.resumeOrphans()
         refreshRunningTargets()
         events.start { [weak self] trigger in
             Task { @MainActor [weak self] in self?.handle(trigger) }
@@ -166,34 +205,41 @@ public final class GuardVM {
         tickTask?.cancel(); tickTask = nil
         geoTickTask?.cancel(); geoTickTask = nil
         watchdogTask?.cancel(); watchdogTask = nil
+        // Штатный выход: замороженных целей не оставляем.
+        enforcer.resume()
+        resolvePauseEpisode("возобновлено: охрана остановлена")
+        pausedProcesses.removeAll()
     }
 
-    /// Цвет статуса для глаза.
-    ///
-    /// Отдельно от `state.statusColor`: «на страже, но ipinfo молчит» для целей —
-    /// по-прежнему safe, потому что адрес доказанно тот же, а для пользователя это
-    /// не полноценная зелёная защита. Зелёный тут врал бы.
+    /// Цвет статуса для глаза. Стоящие цели — не полноценная зелёная защита,
+    /// но и не доказанная опасность: жёлтый оставлен всему, что не доказано.
     public var statusColor: GuardStatusColor {
-        guard case .safe(let reading) = state, reading != nil,
-              let report = lastReport, case .failed = report.ipinfo
-        else { return state.statusColor }
-        return .yellow
+        switch phase {
+        case .disabled: return .grey
+        case .protected: return .green
+        case .interference, .verifying, .paused: return .yellow
+        case .danger: return .red
+        }
     }
 
     public var currentCountryCode: String? {
-        switch state {
-        case .disabled:
+        switch phase {
+        case .disabled, .verifying:
             return nil
-        case .safe(let reading):
-            return reading?.primaryCountry
-        case .unsafe(let reason):
-            switch reason {
-            case .vpnAppNotRunning, .pauseExpired:
-                return nil
-            default:
-                return lastReading?.primaryCountry
-            }
+        case .protected(let reading), .interference(let reading, _, _):
+            return reading.primaryCountry
+        case .paused:
+            return lastReading?.primaryCountry
+        case .danger(let evidence):
+            return evidence == .vpnAppNotRunning ? nil : lastReading?.primaryCountry
         }
+    }
+
+    /// Показать пользователю терминал стоящей цели: под паузой процесс не отвечает,
+    /// и найти его окно самому — задача не для человека.
+    @discardableResult
+    public func showTerminal(for pid: Int32) -> Bool {
+        terminalLocator.activateTerminal(owning: pid, in: (currentScan ?? enforcer.scan()).processes)
     }
 
     @discardableResult
@@ -217,8 +263,10 @@ public final class GuardVM {
             : .running
     }
 
+    /// Список живых целей — по уже снятому обходу, если он есть: событие охраны
+    /// обслуживает один обход процессов, а не столько, сколько у него шагов.
     public func refreshRunningTargets() {
-        runningTargets = enforcer.runningTargets(in: enforcer.scan())
+        runningTargets = enforcer.runningTargets(in: currentScan ?? enforcer.scan())
     }
 
     /// Считается по уже собранному списку: строка настроек не имеет права
@@ -275,8 +323,10 @@ public final class GuardVM {
             let isVPNApp = settings.vpnAppRule == bundleID
             guard isVPNApp || settings.targets.contains(bundleID) else { return }
 
-            if !isVPNApp, case .unsafe = state, let reasonText = lastUnsafeReasonText {
-                enforce(reasonText: reasonText)
+            // Цель запустилась под паузой или запретом — действие применяется сразу,
+            // не дожидаясь такта.
+            if !isVPNApp, phase.action != .run {
+                applyCurrentAction()
                 return
             }
         }
@@ -291,7 +341,7 @@ public final class GuardVM {
             // Нажатие, отбитое индикатором, тоже событие: без записи «нажал пять
             // раз, а запрос не ушёл» не отличить от «кнопка не работает».
             checkLog.record(CheckEvent(
-                date: Date(),
+                date: now(),
                 trigger: .manual,
                 outcome: .skippedProbeInFlight,
                 fingerprint: snapshotReader.snapshot().verdictFingerprint
@@ -313,7 +363,6 @@ public final class GuardVM {
 
     private func receive(_ report: GeoProbeReport?) {
         lastReport = report
-        decisionCameFromProbe = true
         guard let report else {
             // Гасим и запасное чтение: попап падает на него, когда отчёта нет,
             // и без этого на экране осталась бы всё та же чужая страна.
@@ -324,96 +373,186 @@ public final class GuardVM {
         lastReading = reading
     }
 
-    /// Фаза машины состояний, сведённая к прежнему решению.
+    // MARK: - Применение фазы
+
+    /// Фаза принята — остаётся выполнить её над процессами и объяснить журналом.
     ///
-    /// Временно, до задачи 15: действие над целями остаётся прежним завершением — эффект
-    /// (`SIGSTOP`/`SIGCONT`), эпизоды паузы, её потолок в интерфейсе и `verdictOrigin`
-    /// от контроллера подключаются там. Здесь фаза лишь переводится в то, что `apply`
-    /// умеет применять сегодня: работающие цели — safe, стоящие — непроверенность,
-    /// завершённые — доказательство.
-    private func apply(_ phase: GuardPhase) {
-        switch phase {
-        case .disabled, .protected, .interference:
-            apply(.safe)
-        case .verifying:
-            // Тот же текст, что объявлял fail-closed до машины состояний: журнал и попап
-            // читают его как «пока не знаю», а не как причину.
-            apply(.unproven(.geoUnavailable(Self.pendingVerificationText)))
-        case .paused(_, let reason):
-            apply(.unproven(reason))
-        case .danger(let evidence):
-            apply(.kill(evidence))
+    /// Обход процессов на всё применение один: своё событие приносит его с собой,
+    /// а ответ пробы приходит вне события — тогда обход снимается здесь и служит
+    /// и сигналам, и списку живых целей, и статусу VPN-приложения.
+    private func apply(_ phase: GuardPhase, effect: GuardEffect, origin: VerdictOrigin?) {
+        let ownsScan = currentScan == nil
+        if ownsScan { currentScan = enforcer.scan(includingVPNApp: true) }
+        defer { if ownsScan { currentScan = nil } }
+
+        self.phase = phase
+        lastOrigin = origin
+
+        switch effect {
+        case .pause: pauseTargets()
+        case .resume: resumeTargets()
+        case .terminate:
+            if case .danger(let evidence) = phase { terminateTargets(evidence) }
+        case .none: break
         }
-    }
 
-    private static let pendingVerificationText = "подключение ещё не проверено"
-
-    private func apply(_ decision: GuardDecision) {
-        switch decision {
-        case .safe:
+        switch phase.action {
+        case .run:
             watchdogTask?.cancel(); watchdogTask = nil
-            permissionFailure = nil
-            recordedKills.removeAll()
-            recordedReasons.removeAll()
-            lastUnsafeReasonText = nil
-            state = settings.isEnabled && settings.guardConfig.hasTargets
-                ? .safe(lastReading)
-                : .disabled
-
-        case .unproven(let reason):
-            // Временно, до задачи 15: непроверенность обрабатывается как прежний kill.
-            // Инвариант «эпизод, начавшийся до вердикта и закончившийся безопасным
-            // выходом, дописывает исход» (`.claude/rules/ARCHITECTURE.md`) сюда пока
-            // не переехал — прежний `refineEpisodeReason` его нёс, а задача 15 строит
-            // его заново на `resolutionText` / `kind: paused` `GuardMachine`, где решение
-            // и его повод не разъезжаются.
-            state = .unsafe(.pauseExpired)
-            lastUnsafeReasonText = reason.displayText
-            enforce(reasonText: reason.displayText, staleness: controller.lastStaleness)
-            decisionCameFromProbe = false
+            if case .protected = phase {
+                permissionFailure = nil
+                recordedKills.removeAll()
+                recordedReasons.removeAll()
+            }
+        case .pause, .terminate:
             startWatchdog()
+        }
+        refreshRunningTargets()
+    }
 
-        case .kill(let evidence):
-            state = .unsafe(evidence)
-            lastUnsafeReasonText = evidence.displayText
-            enforce(reasonText: evidence.displayText)
-            decisionCameFromProbe = false
-            startWatchdog()
+    /// Сторож под паузой доводит новорождённых потомков, под запретом — новые запуски.
+    private func applyCurrentAction() {
+        switch phase.action {
+        case .pause: pauseTargets()
+        case .terminate: if case .danger(let evidence) = phase { terminateTargets(evidence) }
+        case .run: break
         }
     }
 
-    private func enforce(reasonText: String, staleness: VerdictStaleness? = nil) {
+    /// Причина эпизода паузы человеческим текстом: она же уходит в журнал.
+    private var pauseReasonText: String {
+        switch phase {
+        case .verifying(_, let cause): return "Подключение ещё не проверено: \(cause.displayText)"
+        case .paused(_, let reason): return reason.displayText
+        default: return phase.title
+        }
+    }
+
+    private func pauseTargets() {
+        let outcome = enforcer.pause(currentScan ?? enforcer.scan())
+        let refused = outcome.results.filter { !$0.isDelivered }
+        permissionFailure = refused.isEmpty
+            ? nil
+            : "Не удалось приостановить процессы \(refused.map(\.pid)) — недостаточно прав"
+        guard !outcome.fresh.isEmpty else { return }
+
+        let episodeID = pauseEpisodeID ?? UUID()
+        if pauseEpisodeID == nil {
+            pauseEpisodeID = episodeID
+            // Разбор свежести есть только у паузы «вердикта нет»; у паузы по молчанию
+            // сервисов вердикт как раз в силе, и терять ему нечего.
+            if case .verifying = phase { pauseStaleness = controller.lastStaleness } else { pauseStaleness = nil }
+        }
+        let moment = now()
+        let diagnostics = currentDiagnostics(staleness: pauseStaleness)
+        eventLog.record(outcome.fresh.map { process in
+            KillEvent(
+                episodeID: episodeID,
+                date: moment,
+                targetName: process.targetName,
+                pid: process.pid,
+                parentPID: process.parentPID,
+                executablePath: process.executablePath,
+                matchedBy: process.matchedBy,
+                kind: .paused,
+                reasonText: pauseReasonText,
+                ip: lastReading?.ip,
+                country: lastReading?.primaryCountry,
+                confirmedCountry: lastReading?.confirmedCountry,
+                confirmSource: lastReading?.confirmSource?.rawValue,
+                diagnostics: diagnostics
+            )
+        })
+        pausedEpisodePIDs.formUnion(outcome.fresh.map(\.pid))
+
+        for root in outcome.fresh where root.matchedBy == .rule {
+            let backgrounded = outcome.plan.backgrounded.contains(root.pid)
+            pausedProcesses.append(PausedProcess(pid: root.pid, targetName: root.targetName,
+                                                 since: moment, isBackgrounded: backgrounded))
+            if backgrounded { notifier.notifyBackgrounded(targetName: root.targetName) }
+        }
+    }
+
+    private func resumeTargets() {
+        enforcer.resume()
+        if case .disabled = phase {
+            resolvePauseEpisode("возобновлено: охрана выключена или целей нет")
+            // Чтение самой фазы, а не последнее известное: паузу снимает конкретный
+            // вердикт, и в исходе обязан стоять его адрес.
+        } else if let reading = phase.reading ?? lastReading {
+            resolvePauseEpisode("возобновлено: проверка подтвердила безопасный выход: "
+                                + "\(reading.ip), \(reading.primaryCountry)")
+        } else {
+            resolvePauseEpisode("возобновлено: проверка подтвердила безопасный выход")
+        }
+        pausedProcesses.removeAll()
+    }
+
+    /// Исход эпизода паузы: записи те же, к ним дописывается, чем стояние кончилось.
+    /// Без исхода запись навсегда остаётся с «подключение ещё не проверено»,
+    /// и пауза выглядит случайной.
+    private func resolvePauseEpisode(_ outcome: String) {
+        guard let episodeID = pauseEpisodeID else { return }
+        eventLog.refine(
+            episodeID: episodeID,
+            resolutionText: outcome,
+            ip: lastReading?.ip,
+            country: lastReading?.primaryCountry,
+            confirmedCountry: lastReading?.confirmedCountry,
+            confirmSource: lastReading?.confirmSource?.rawValue,
+            diagnostics: currentDiagnostics(staleness: pauseStaleness)
+        )
+        pauseEpisodeID = nil
+        pausedEpisodePIDs.removeAll()
+        pauseStaleness = nil
+    }
+
+    private func terminateTargets(_ evidence: UnsafeEvidence) {
         let outcome = enforcer.terminate(currentScan ?? enforcer.scan())
         let matched = outcome.matched
-        guard !matched.isEmpty else { return }
-
-        let results = outcome.results
-        let refused = results.filter { !$0.isDelivered }
+        let refused = outcome.results.filter { !$0.isDelivered }
         permissionFailure = refused.isEmpty
             ? nil
             : "Не удалось завершить процессы \(refused.map(\.pid)) — недостаточно прав"
 
-        let terminated = Set(results.filter(\.isDelivered).map(\.pid))
-        let isNewReason = !recordedReasons.contains(reasonText)
+        let terminated = Set(outcome.results.filter(\.isDelivered).map(\.pid))
+        let reasonKey = evidence.displayText
+        let isNewReason = !recordedReasons.contains(reasonKey)
 
-        // Дедупликация по паре «причина + pid»: тот же процесс по той же причине
-        // второй записи не заводит, а запущенный заново — заводит всегда.
+        // Исход эпизода паузы: те же pid новых записей не заводят.
+        let skip = pausedEpisodePIDs
+        let prefix = evidence == .pauseExpired ? "завершено по потолку" : "завершено по доказательству"
+        resolvePauseEpisode("\(prefix): \(reasonKey)")
+        pausedProcesses.removeAll()
+
+        // Уведомление — про то, что действительно завершено сейчас, включая цели,
+        // стоявшие на паузе: запись у них уже есть, но новость «цели завершены»
+        // от этого не исчезает.
+        let killedNow = matched.filter { terminated.contains($0.pid) }
         let fresh = matched.filter {
-            terminated.contains($0.pid)
-                && !recordedKills.contains(RecordedKill(pid: $0.pid, reason: reasonText))
+            terminated.contains($0.pid) && !skip.contains($0.pid)
+                && !recordedKills.contains(RecordedKill(pid: $0.pid, reason: reasonKey))
+        }
+        if !killedNow.isEmpty, isNewReason || !fresh.isEmpty {
+            notifier.notifyTerminated(reasonText: "\(Self.targetsSummary(of: killedNow)): \(reasonKey)",
+                                      killedCount: killedNow.count)
+        }
+        // Причина и завершённые pid запоминаются независимо от записи: иначе сторож
+        // раз в 250 мс повторял бы и уведомление, и записи про уже мёртвые процессы.
+        if !killedNow.isEmpty {
+            recordedReasons.insert(reasonKey)
+            recordedKills.formUnion(killedNow.map { RecordedKill(pid: $0.pid, reason: reasonKey) })
         }
         guard !fresh.isEmpty else { return }
 
         let kind: KillEventKind = isNewReason ? .terminated : .launchBlocked
-        recordedReasons.insert(reasonText)
-        recordedKills.formUnion(fresh.map { RecordedKill(pid: $0.pid, reason: reasonText) })
 
         // Один проход охраны — один эпизод: сколько процессов завершено,
         // столько и записей, и все они помнят, что это было одно событие.
         let episodeID = UUID()
-        let moment = Date()
-        let diagnostics = currentDiagnostics(staleness: staleness)
-        let batch = fresh.map { process in
+        let moment = now()
+        let diagnostics = currentDiagnostics(staleness: nil)
+        eventLog.record(fresh.map { process in
             KillEvent(
                 episodeID: episodeID,
                 date: moment,
@@ -423,34 +562,21 @@ public final class GuardVM {
                 executablePath: process.executablePath,
                 matchedBy: process.matchedBy,
                 kind: kind,
-                reasonText: reasonText,
+                reasonText: reasonKey,
                 ip: lastReading?.ip,
                 country: lastReading?.primaryCountry,
                 confirmedCountry: lastReading?.confirmedCountry,
                 confirmSource: lastReading?.confirmSource?.rawValue,
                 diagnostics: diagnostics
             )
-        }
-        eventLog.record(batch)
-
-        // Уведомление — на проход, а не на процесс: тридцать четыре баннера подряд
-        // не сообщение, а помеха. Цели в нём перечислены с числом завершённого,
-        // потому что «claude» и «claude ×34» — разные новости.
-        notifier.notify(reasonText: "\(Self.targetsSummary(of: fresh)): \(reasonText)",
-                        killedCount: fresh.count)
+        })
     }
 
     /// Отладочные показания эпизода: они не показываются пользователю и нужны
-    /// только выгрузке. `staleness` называется явно вызывающим: только решение
-    /// «непроверено» из-за потери свежести знает, что именно устарело.
-    private func currentDiagnostics(staleness: VerdictStaleness? = nil) -> KillDiagnostics {
+    /// только выгрузке. `staleness` называется явно вызывающим: только пауза
+    /// «вердикта нет» знает, что именно устарело.
+    private func currentDiagnostics(staleness: VerdictStaleness?) -> KillDiagnostics {
         let snapshot = controller.lastSnapshot
-
-        // Показания «текущие», если решение принято по пробе, которая только что ответила
-        // адресом и страной; во всех остальных случаях они — прошлый вердикт.
-        let origin: VerdictOrigin? = lastReading == nil ? nil
-            : (lastReport?.outcome.isResolved == true && decisionCameFromProbe ? .current : .established)
-
         return KillDiagnostics(
             staleness: staleness,
             outgoingInterface: snapshot?.outgoing?.interface,
@@ -458,15 +584,15 @@ public final class GuardVM {
             hasNetworkPath: lastReport?.hasNetworkPath,
             vpnAppEntry: settings.vpnAppRule,
             vpnAppStatus: String(describing: vpnAppStatus()),
-            verdictOrigin: origin,
+            // Происхождение приходит от контроллера: он один знает, чем принято решение.
+            verdictOrigin: lastReading == nil ? nil : lastOrigin,
             services: lastReport?.traces ?? [],
             probedAt: lastReport?.checkedAt,
             appVersion: Constants.appVersion
         )
     }
 
-    /// «claude ×34, codex» — цели прохода с числом завершённых процессов там,
-    /// где их больше одного.
+    /// «claude ×34, codex» — цели прохода с числом процессов там, где их больше одного.
     private static func targetsSummary(of processes: [MatchedProcess]) -> String {
         var order: [String] = []
         var counts: [String: Int] = [:]
@@ -479,17 +605,15 @@ public final class GuardVM {
             .joined(separator: ", ")
     }
 
+    /// Сторож: под паузой ловит новорождённых потомков, под запретом — новые запуски.
+    /// Живого системного события про запуск терминального процесса не существует.
     private func startWatchdog() {
         guard watchdogTask == nil else { return }
         watchdogTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Constants.watchdogIntervalSeconds))
                 guard !Task.isCancelled else { return }
-                await MainActor.run { [weak self] in
-                    guard let self, case .unsafe = self.state, let reasonText = self.lastUnsafeReasonText
-                    else { return }
-                    self.enforce(reasonText: reasonText)
-                }
+                await MainActor.run { [weak self] in self?.applyCurrentAction() }
             }
         }
     }

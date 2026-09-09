@@ -6,10 +6,15 @@ public enum KillEventKind: String, Codable, Equatable, Sendable {
 
     case launchBlocked
 
+    /// Процесс остановлен (SIGSTOP), а не завершён. Чем кончилось стояние —
+    /// в `resolutionText`: возобновлено, завершено по доказательству или по потолку.
+    case paused
+
     public var displayText: String {
         switch self {
         case .terminated: return "завершено"
         case .launchBlocked: return "запуск запрещён"
+        case .paused: return "на паузе"
         }
     }
 }

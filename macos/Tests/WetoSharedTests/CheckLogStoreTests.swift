@@ -75,6 +75,21 @@ final class CheckLogStoreTests: XCTestCase {
         XCTAssertEqual(log.all.count, 2)
     }
 
+    /// Старт с непрочитанным учётом остановленных — не проверка подключения, но
+    /// единственный след невыполненного обязательства: он обязан писаться всегда.
+    func test_startup_recovery_trace_is_always_recorded() {
+        let store = CheckLogStore(storage: InMemoryCheckLog())
+
+        store.record(CheckEvent(date: Date(), trigger: .startupRecovery, outcome: .ledgerUnreadable,
+                                detail: "учёт остановленных процессов не прочитан: возобновлять нечего"))
+
+        XCTAssertEqual(store.all.count, 1)
+        XCTAssertEqual(CheckEvent.Trigger.startupRecovery.displayText, "восстановление после падения")
+        XCTAssertEqual(CheckEvent.Outcome.ledgerUnreadable.displayText, "учёт остановленных не прочитан")
+        XCTAssertEqual(CheckEvent.Trigger.startupRecovery.rawValue, "startupRecovery")
+        XCTAssertEqual(CheckEvent.Outcome.ledgerUnreadable.rawValue, "ledgerUnreadable")
+    }
+
     func test_capacity_is_fifty_and_the_freshest_stay() {
         XCTAssertEqual(Constants.checkLogCapacity, 50)
 

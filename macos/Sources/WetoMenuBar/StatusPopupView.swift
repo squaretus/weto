@@ -64,7 +64,7 @@ struct StatusPopupView: View {
             // Цвет и совет берём из состояния охраны, а не из самого факта
             // «целей нет»: после срабатывания kill switch цели молчат именно
             // потому, что VPN уже выключен.
-            let notice = StatusPresentation.idleTargets(for: coordinator.guardVM.state)
+            let notice = StatusPresentation.idleTargets(for: coordinator.guardVM.phase)
 
             HStack(spacing: WetoTokens.space2) {
                 Image(systemName: notice.hint == nil ? "circle.slash" : "checkmark")
@@ -110,7 +110,7 @@ struct StatusPopupView: View {
         HStack(spacing: WetoTokens.space3) {
             StatusShield(tone: tone)
 
-            Text(StatusPresentation.title(for: coordinator.guardVM.state))
+            Text(coordinator.guardVM.phase.title)
                 .font(WetoTokens.status)
                 .foregroundStyle(tone.color.resolve(scheme))
 
@@ -151,10 +151,10 @@ struct StatusPopupView: View {
     /// последнего известного чтения; дальше говорит отчёт последней пробы.
     private var lines: [StatusLine] {
         if let report = coordinator.guardVM.lastReport {
-            return StatusPresentation.lines(for: coordinator.guardVM.state, report: report)
+            return StatusPresentation.lines(for: coordinator.guardVM.phase, report: report)
         }
         return StatusPresentation.lines(
-            for: coordinator.guardVM.state,
+            for: coordinator.guardVM.phase,
             reading: coordinator.guardVM.lastReading
         )
     }
