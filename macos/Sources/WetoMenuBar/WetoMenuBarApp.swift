@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let coordinator = AppCoordinator()
     private let instanceGuard = SingleInstanceGuard()
+    private let popupPresenter = MenuBarPopupPresenter()
 
     /// Токен активности держит процесс вне App Nap. Отпускать его нельзя:
     /// с концом активности возвращается и throttling таймеров охраны.
@@ -54,6 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             options: .userInitiatedAllowingIdleSystemSleep,
             reason: "охрана целей опрашивает процессы раз в секунду"
         )
+
+        UserNotificationGuardNotifier.onOpen = { [popupPresenter] in popupPresenter.openPopup() }
 
         coordinator.start()
     }
