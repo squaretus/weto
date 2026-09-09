@@ -2754,13 +2754,14 @@ final class GuardVMTests: XCTestCase {
     private func makeBackgroundJobHarness(
         stopped: Bool = false,
         checkLog: CheckLogStore = CheckLogStore(storage: InMemoryCheckLog()),
-        ledgerStorage: InMemoryStoppedLedger = InMemoryStoppedLedger()
+        ledgerStorage: InMemoryStoppedLedger = InMemoryStoppedLedger(),
+        now: @escaping () -> Date = Date.init
     ) -> (h: DelayedHarness, locator: MutableLocator, ledgerStorage: InMemoryStoppedLedger) {
         let locator = MutableLocator(
             bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
             processes: backgroundJobTree(stopped: stopped)
         )
-        let h = makeDelayedHarness(snapshot: utun5Snapshot(), checkLog: checkLog,
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), checkLog: checkLog, now: now,
                                    executables: ["nano"],
                                    ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
         return (h, locator, ledgerStorage)
@@ -2872,6 +2873,43 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume, .resume, .stop, .stop])
         XCTAssertEqual(h.log.events.count, 4, "повторной записи о том же pid эпизод не допускает")
         XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "и второй пилюли тоже")
+    }
+
+    /// Пилюля, дожившая до нового эпизода, обязана взять его момент: отсчёт на ней идёт
+    /// до потолка паузы, а потолок считается от начала ЭТОЙ паузы. Со старым `since`
+    /// пилюля показывала стояние тем более давнее, чем дольше цель простояла в прошлый
+    /// раз, — то есть отсчёт, который у охраны не значит ничего.
+    func test_a_pill_surviving_into_a_new_episode_adopts_the_new_moment() async {
+        let clock = TestClock()
+        let (h, locator, _) = makeBackgroundJobHarness(now: { clock.now })
+
+        await pauseWithABadResult(h, after: 0)
+        let firstMoment = h.vm.pausedProcesses.first?.since
+        XCTAssertEqual(firstMoment, clock.now, "первая пауза началась сейчас")
+
+        // Проверка сказала «безопасно»: SIGCONT ушёл, следующий проход увидел цели
+        // идущими — эпизод закрыт исходом. Пилюля при этом уходит вместе с эпизодом.
+        locator.processes = backgroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        h.vm.handle(.tick)
+
+        // Цель всё ещё стоит по своему SIGTTIN, поэтому пилюля с прошлого эпизода жива —
+        // и именно она доживает до нового стояния.
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "пилюля дожила до нового эпизода")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.since, firstMoment, "пока эпизод один — момент прежний")
+
+        clock.advance(by: 120)
+        locator.processes = backgroundJobTree(stopped: false)
+        await pauseWithABadResult(h, after: 2)
+
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200])
+        XCTAssertEqual(h.vm.pausedProcesses.first?.since, clock.now,
+                       "новый эпизод — новый момент: отсчёт идёт от начала этой паузы")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true,
+                       "признак «вернулось в фон» остаётся от наблюдения, а не от догадки плана")
     }
 
     /// Настоящее фоновое задание отвечает стопом на каждый SIGCONT, и досылать ему

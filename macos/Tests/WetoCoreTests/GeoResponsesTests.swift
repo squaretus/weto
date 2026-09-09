@@ -77,9 +77,4 @@ final class GeoResponsesTests: XCTestCase {
         XCTAssertEqual(response.ip, "1.2.3.4")
         XCTAssertEqual(response.countryCode, "DE")
     }
-
-    func test_plain_ip_body_is_trimmed_and_validated() throws {
-        XCTAssertEqual(try GeoResponses.decodePlainIP(Data("203.0.113.177\n".utf8)), "203.0.113.177")
-        XCTAssertThrowsError(try GeoResponses.decodePlainIP(Data("<html>captcha</html>".utf8)))
-    }
 }

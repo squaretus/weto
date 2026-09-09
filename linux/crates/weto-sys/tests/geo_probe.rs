@@ -10,7 +10,10 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use weto_core::diagnostics::GeoServiceTrace;
 use weto_core::geo::{GeoFailure, GeoOutcome, SourceOutcome};
+use weto_core::network::VpnAppStatus;
+use weto_core::policy::{self, GuardConfig, GuardDecision, GuardSignals, UnprovenReason};
 use weto_sys::geo_probe::{
     GeoEndpoints, GeoProbing, HttpGeoProbe, NetworkPathReporting, CONFIRMATION_HARD_TTL,
     CONFIRMATION_SOFT_TTL,
@@ -452,6 +455,148 @@ fn failed_refresh_keeps_the_previous_confirmation() {
     assert_eq!(
         report.confirmation,
         SourceOutcome::Answered("NL".to_string())
+    );
+}
+
+/// Подтверждающие сервисы взаимозаменяемы: отказавший уходит остывать, и его место
+/// занимает сосед. Переспрашивать только что отказавший — тратить общую с соседями
+/// по выходу квоту на заведомое «нет».
+#[test]
+fn a_rate_limited_confirmation_is_replaced_and_then_skipped() {
+    let service = FakeGeoService::start()
+        .answers(
+            "/ipinfo",
+            200,
+            r#"{"ip":"203.0.113.7","country_code":"NL"}"#,
+        )
+        .answers("/freeipapi/203.0.113.7", 429, "")
+        .answers("/geojs/203.0.113.7", 200, r#"{"country":"NL"}"#);
+    let clock = MovableClock::start();
+    let probe = probe_with_clock(&service, &clock);
+
+    let first = probe.probe(Some("token"));
+    assert_eq!(
+        first.confirm_source.map(|s| s.name()),
+        Some("geojs"),
+        "место отказавшего занимает сосед"
+    );
+
+    clock.advance(CONFIRMATION_SOFT_TTL + std::time::Duration::from_secs(1));
+    let second = probe.probe(Some("token"));
+
+    assert_eq!(
+        second.confirmation,
+        SourceOutcome::Answered("NL".to_string())
+    );
+    assert_eq!(
+        service.hits("/freeipapi/203.0.113.7"),
+        1,
+        "остывающий сервис не спрашивается заново"
+    );
+    assert_eq!(
+        service.hits("/geojs/203.0.113.7"),
+        2,
+        "обновление по мягкому потолку идёт к тому, кто отвечает"
+    );
+}
+
+/// Остывающий сервис молчанием не считается: его не спрашивали, подтверждение
+/// получено, и в разборе обязано быть видно, что запроса не было.
+#[test]
+fn a_cooling_confirmation_is_not_counted_as_silence() {
+    let service = FakeGeoService::start()
+        .answers(
+            "/ipinfo",
+            200,
+            r#"{"ip":"203.0.113.7","country_code":"NL"}"#,
+        )
+        .answers("/freeipapi/203.0.113.7", 429, "")
+        .answers("/geojs/203.0.113.7", 200, r#"{"country":"NL"}"#);
+    let clock = MovableClock::start();
+    let probe = probe_with_clock(&service, &clock);
+
+    let _ = probe.probe(Some("token"));
+    clock.advance(CONFIRMATION_SOFT_TTL + std::time::Duration::from_secs(1));
+    let report = probe.probe(Some("token"));
+
+    assert!(matches!(report.outcome(), GeoOutcome::Resolved(_)));
+    let skipped = report
+        .traces
+        .iter()
+        .find(|trace| trace.service == "freeipapi")
+        .expect("пропуск обязан оставить след");
+    assert_eq!(
+        skipped.failure.as_deref(),
+        Some(GeoServiceTrace::COOLING_DOWN)
+    );
+    assert!(
+        skipped.http_status.is_none(),
+        "запроса не было — статуса быть не может"
+    );
+}
+
+/// Остывание — предпочтение между равными, а не запрет. Круг, в котором отказали все,
+/// иначе оставлял бы охрану без подтверждения на все пять минут, и вернуть его
+/// было бы нечем.
+#[test]
+fn when_every_confirmation_is_cooling_they_are_asked_anyway() {
+    let service = FakeGeoService::start()
+        .answers(
+            "/ipinfo",
+            200,
+            r#"{"ip":"203.0.113.7","country_code":"NL"}"#,
+        )
+        .answers("/freeipapi/203.0.113.7", 429, "")
+        .answers("/geojs/203.0.113.7", 503, "");
+    let probe = probe_of(&service, true);
+
+    let _ = probe.probe(Some("token"));
+    service.answers_now("/freeipapi/203.0.113.7", 200, r#"{"countryCode":"NL"}"#);
+    let report = probe.probe(Some("token"));
+
+    assert_eq!(
+        report.confirmation,
+        SourceOutcome::Answered("NL".to_string())
+    );
+    assert_eq!(
+        service.hits("/freeipapi/203.0.113.7"),
+        2,
+        "спрашиваются все, когда остывают все"
+    );
+}
+
+/// Молчание всех подтверждающих сервисов ничего в модели не меняет: подтверждения
+/// нет — safe не бывает.
+#[test]
+fn both_confirmations_unavailable_still_yields_the_unproven_path() {
+    let service = FakeGeoService::start()
+        .answers(
+            "/ipinfo",
+            200,
+            r#"{"ip":"203.0.113.7","country_code":"NL"}"#,
+        )
+        .answers("/freeipapi/203.0.113.7", 429, "")
+        .answers("/geojs/203.0.113.7", 503, "");
+
+    let report = probe_of(&service, true).probe(Some("token"));
+
+    let decision = policy::decide(&GuardSignals {
+        is_enabled: true,
+        vpn: VpnAppStatus::NotChosen,
+        geo: report.outcome(),
+        config: GuardConfig {
+            vpn_app: None,
+            blocked_countries: Default::default(),
+            blocked_ip_ranges: Vec::new(),
+            allowed_countries: Default::default(),
+            allowed_ip_ranges: Vec::new(),
+            targets: vec!["claude".to_string()],
+        },
+    });
+
+    assert_eq!(
+        decision,
+        GuardDecision::Unproven(UnprovenReason::ConfirmationUnavailable)
     );
 }
 

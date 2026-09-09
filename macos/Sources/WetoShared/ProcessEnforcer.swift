@@ -313,28 +313,42 @@ final class ProcessEnforcer {
     /// После падения weto: продолжить только тех, кто всё ещё стоит и остался тем же процессом.
     /// pid переиспользуются, и SIGCONT чужому процессу недопустим.
     ///
-    /// Учёт на диске не несёт глубины дерева — только `isShell`, поэтому точный
-    /// «потомки, затем цель, затем шелл» здесь недостижим; ближайшее приближение —
-    /// все цели раньше своих шеллов, порядок внутри каждой группы как в файле.
+    /// Порядок — точный обратный, как и в `resume`: файл учёта хранит записи в порядке
+    /// добавления, а добавляет их `pause` ровно в порядке отправки SIGSTOP («шеллы,
+    /// затем цели и потомки»). То есть подлинный стоп-порядок доезжает до нового запуска
+    /// сам, и восстанавливать его приближением («не-шеллы раньше шеллов») незачем:
+    /// приближение переставляло цель и её потомка местами, а порядок сигналов — контракт.
+    /// Глубину дерева знать для этого не нужно, нужен лишь порядок, в котором стопы ушли.
+    ///
+    /// Обход тот же самый, что уезжает вызывающему: `surfaceRecovered` показывает
+    /// пользователю стоящие цели по нему, а не вторым проходом по всем процессам.
+    /// Обход здесь настоящий даже при пустом списке правил — обязательство «вернуть
+    /// из паузы» от наличия целей не зависит, а `scan()` без правил не обходит ничего.
     ///
     /// Запись, которую этот проход не разрешил, из учёта не уходит: обязательство и здесь
     /// снимает наблюдение. Дальше её ведёт обычный такт охраны — он и досылает SIGCONT
     /// цели, вернувшейся в стоп по SIGTTIN.
     @discardableResult
-    func resumeOrphans() -> ResumeOutcome {
+    func resumeOrphans() -> (outcome: ResumeOutcome, observed: Scan) {
+        let rules = rules()
         let entries = ledger.entries
-        guard !entries.isEmpty else { return .none }
+        guard !entries.isEmpty else { return (.none, Scan(processes: [], rules: rules)) }
+
+        let needsArguments = rules.contains { $0.kind == .script }
+        let processes = locator.allProcesses(includeArguments: needsArguments)
         var alive: [Int32: ProcessSnapshot] = [:]
-        for process in locator.allProcesses() { alive[process.pid] = process }
+        for process in processes { alive[process.pid] = process }
         let (_, standing, released) = settle(entries, against: alive)
 
         var results: [SignalResult] = []
         if !standing.isEmpty {
-            let order = standing.filter { !$0.isShell }.map(\.pid) + standing.filter(\.isShell).map(\.pid)
-            results = signaler.send(.resume, to: order)
+            results = signaler.send(.resume, to: standing.map(\.pid).reversed())
         }
         if !released.isEmpty { ledger.remove(released) }
-        return ResumeOutcome(results: results, released: released, unresolved: standing)
+        return (
+            ResumeOutcome(results: results, released: released, unresolved: standing),
+            Scan(processes: processes, rules: rules)
+        )
     }
 
     /// Завершение стоящих целей: SIGKILL тем, кто под правилом, SIGCONT всем остальным

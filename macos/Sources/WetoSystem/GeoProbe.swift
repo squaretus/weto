@@ -25,6 +25,37 @@ public actor GeoProbe: GeoProbing {
         let at: Date
     }
 
+    /// До какого времени сервис не спрашивается. Отказ и исчерпанный лимит здесь равны:
+    /// подтверждение и так спрашивается примерно раз в минуту, и переспрашивать только что
+    /// отказавший сервис — тратить общую с соседями по выходу квоту на заведомое «нет».
+    private var cooldownUntil: [ConfirmSource: Date] = [:]
+
+    /// Кто ответил в прошлый раз. Спрашивается первым: пока сервис отвечает, трогать
+    /// второй незачем, а у freeipapi лимит теснее, чем у geojs.
+    private var preferredConfirmation: ConfirmSource?
+
+    /// Подтверждающие сервисы равноправны: оба отвечают на один и тот же вопрос —
+    /// «в какой стране вот этот адрес». Порядок в списке — только начальное
+    /// предпочтение, иерархии «основной и запасной» между ними нет.
+    private struct ConfirmationService {
+        let source: ConfirmSource
+        let url: (String) -> String
+        let decode: (Data) throws -> String?
+    }
+
+    private let confirmationServices: [ConfirmationService] = [
+        ConfirmationService(
+            source: .freeipapi,
+            url: Constants.freeipapiURL(ip:),
+            decode: GeoResponses.decodeFreeIPAPI
+        ),
+        ConfirmationService(
+            source: .geojs,
+            url: Constants.geojsURL(ip:),
+            decode: GeoResponses.decodeGeoJS
+        ),
+    ]
+
     /// Трассы текущей пробы. Собираются по ходу и уезжают в отчёт: журналу нужен
     /// не вывод, а то, из чего он сделан.
     private var traces: [GeoServiceTrace] = []
@@ -140,7 +171,13 @@ public actor GeoProbe: GeoProbing {
     /// и остаётся `.unavailable`, то есть fail-closed. Ценность в адресе. Совпал он
     /// с адресом прошлого вердикта — перепроверять страну не нужно, тот же адрес означает
     /// ту же страну; решает это охрана, у которой прошлое чтение и есть. Другой адрес
-    /// или молчание обоих сервисов оставляют вердикт недоказанным, и цели завершаются.
+    /// или молчание обоих сервисов оставляют вердикт недоказанным, и цели встают на паузу.
+    ///
+    /// Третьего источника собственного адреса здесь нет намеренно: годится только хост,
+    /// который провайдер на этой машине выпускает через выбранный профиль. Мимо туннеля
+    /// не идёт ничего, но выход провайдер выбирает у себя на сервере для каждого адресата
+    /// свой, и почти все ip-чекеры выпускает как RU. Такой хост назвал бы чужой адрес
+    /// при полностью исправном профиле, и это читалось бы как смена выхода — пауза по лжи.
     ///
     /// Этим же путём идёт проба без токена: на свежей установке пользователь должен узнать,
     /// где он, ещё до настройки ipinfo.
@@ -168,19 +205,8 @@ public actor GeoProbe: GeoProbing {
                 traces: traces
             )
         } catch {
-            let geojsFailure = GeoFailure(error)
-            // Второй резерв знает только адрес — и этого достаточно для доказательства
-            // «адрес тот же». Страну по нему не спрашиваем: источник её не называет.
-            if let thirdURL = URL(string: Constants.selfIPFallbackURL),
-               let address = try? await fetch(service: "checkip-aws", url: thirdURL, headers: [:], using: confirmationFetcher),
-               let ip = try? GeoResponses.decodePlainIP(address.data) {
-                return GeoProbeReport(
-                    ip: ip, ipinfo: noToken, confirmation: .notRequested, confirmSource: nil,
-                    hasNetworkPath: networkPath.hasPath, checkedAt: Date(), traces: traces
-                )
-            }
             return GeoProbeReport(
-                ip: nil, ipinfo: noToken, confirmation: .failed(geojsFailure), confirmSource: nil,
+                ip: nil, ipinfo: noToken, confirmation: .failed(GeoFailure(error)), confirmSource: nil,
                 hasNetworkPath: networkPath.hasPath, checkedAt: Date(), traces: traces
             )
         }
@@ -238,32 +264,70 @@ public actor GeoProbe: GeoProbing {
         ))
     }
 
-    /// Отказ первичного подтверждающего сервиса запоминается: когда молчат оба,
-    /// в отчёт идёт его причина, а не общая «недоступность».
+    /// Выбор подтверждающего сервиса адаптивный: отказавший уходит остывать,
+    /// и спрашивается взаимозаменяемый сосед. Отказ спрошенного запоминается —
+    /// когда молчат все, в отчёт идёт причина того, кого спросили первым,
+    /// а не общая «недоступность».
+    ///
+    /// Остывание — предпочтение, а не запрет: когда остывают все, спрашиваются все.
+    /// Иначе один круг, в котором отказали оба, оставлял бы охрану без подтверждения
+    /// на все пять минут, и вернуть его было бы нечем — а стоит это паузы.
     private func confirm(
         ip: String
     ) async -> (outcome: GeoProbeReport.SourceOutcome, source: ConfirmSource?) {
-        let primary = await fetchCountry(
-            service: ConfirmSource.freeipapi.rawValue,
-            urlString: Constants.freeipapiURL(ip: ip),
-            decode: GeoResponses.decodeFreeIPAPI
-        )
-        if case .success(let country) = primary {
-            return (.answered(country), .freeipapi)
+        let ordered = orderedConfirmationServices()
+        let ready = ordered.filter { !isCooling($0.source) }
+        let queue = ready.isEmpty ? ordered : ready
+        for skipped in ordered where !queue.contains(where: { $0.source == skipped.source }) {
+            noteCoolingConfirmation(skipped.source)
         }
 
-        if case .success(let country) = await fetchCountry(
-            service: ConfirmSource.geojs.rawValue,
-            urlString: Constants.geojsURL(ip: ip),
-            decode: GeoResponses.decodeGeoJS
-        ) {
-            return (.answered(country), .geojs)
+        var firstFailure: GeoFailure?
+        for service in queue {
+            switch await fetchCountry(
+                service: service.source.rawValue,
+                urlString: service.url(ip),
+                decode: service.decode
+            ) {
+            case .success(let country):
+                cooldownUntil[service.source] = nil
+                preferredConfirmation = service.source
+                return (.answered(country), service.source)
+            case .failure(let failure):
+                cooldownUntil[service.source] = now().addingTimeInterval(Constants.confirmationCooldownSeconds)
+                if preferredConfirmation == service.source { preferredConfirmation = nil }
+                if firstFailure == nil { firstFailure = failure }
+            }
         }
+        return (.failed(firstFailure ?? .unreachable), nil)
+    }
 
-        guard case .failure(let failure) = primary else {
-            return (.failed(.unreachable), nil)
+    /// Первым спрашивается тот, кто ответил в прошлый раз: у равных сервисов лимиты
+    /// разные, и незачем тратить более тесный, пока отвечает другой.
+    private func orderedConfirmationServices() -> [ConfirmationService] {
+        guard let preferred = preferredConfirmation,
+              let head = confirmationServices.first(where: { $0.source == preferred })
+        else { return confirmationServices }
+        return [head] + confirmationServices.filter { $0.source != preferred }
+    }
+
+    private func isCooling(_ source: ConfirmSource) -> Bool {
+        guard let until = cooldownUntil[source] else { return false }
+        guard now() < until else {
+            cooldownUntil[source] = nil
+            return false
         }
-        return (.failed(failure), nil)
+        return true
+    }
+
+    /// Пропуск остывающего сервиса — тоже событие пробы. Без отметки выходило бы,
+    /// что сервис промолчал, тогда как его не спрашивали вовсе.
+    private func noteCoolingConfirmation(_ source: ConfirmSource) {
+        traces.append(GeoServiceTrace(
+            service: source.rawValue,
+            url: "",
+            failure: GeoServiceTrace.coolingDown
+        ))
     }
 
     private func fetchCountry(

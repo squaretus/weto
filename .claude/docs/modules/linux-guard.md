@@ -110,9 +110,11 @@ Everything the policy decides is shared. What the system dictates is not:
   send a request; the stale report is dropped first. The fingerprint is `verdict_fingerprint()` —
   the traffic carrier and its local address, never the interface list: a second tunnel appearing or
   vanishing beside the working one must not cost the user their targets.
-- **The confirmation cache and the reference-address fallback are identical to macOS**, down to the
-  60 s / 15 min ceilings: the freeipapi quota counts per exit address and is shared with everyone
-  else on that node, so its 429 must not kill targets.
+- **The confirmation cache, the cooldown and the reference-address fallback are identical to
+  macOS**, down to the 60 s / 15 min ceilings and the 300 s `CONFIRMATION_COOLDOWN`: the freeipapi
+  quota counts per exit address and is shared with everyone else on that node, so its 429 must
+  neither kill targets nor be spent again right away. The two confirmers are substitutes here too,
+  and `GeoServiceTrace::COOLING_DOWN` is the same text as on macOS.
 - **Both geo lists share one builder and one storage path.** `geo_list_card(state, kind, title)` is
   called twice, and `Settings::entries/add_entry/remove_entry` take a `GeoListKind`; the
   `…_blocked_entry` / `…_allowed_entry` functions only delegate. Same shape as macOS, and for the

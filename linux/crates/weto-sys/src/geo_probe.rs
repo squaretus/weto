@@ -8,6 +8,7 @@
 //! страны, и спрашивается он каждый круг. Кэшируется только подтверждение,
 //! и только про тот же самый адрес — то же правило, что на macOS.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -23,6 +24,15 @@ pub const CONFIRMATION_SOFT_TTL: Duration = Duration::from_secs(60);
 /// Жёсткий потолок: дольше этого доверять одному ответу нельзя. У переприсвоенных
 /// диапазонов страна регистрации меняется.
 pub const CONFIRMATION_HARD_TTL: Duration = Duration::from_secs(900);
+
+/// Сколько подтверждающий сервис не спрашивается после отказа. Сервисы
+/// взаимозаменяемы: отказавший уступает место другому, а переспрашивать только что
+/// отказавший — тратить квоту, общую с соседями по выходу VPN, на заведомое «нет».
+/// Число выбрано между потолками кэша: короче мягкого (60 с) не пропустило бы
+/// ни одной попытки обновиться, дольше жёсткого (15 мин) не дало бы сервису вернуться
+/// раньше, чем годный ответ про этот адрес истечёт. Зеркало macOS
+/// `Constants.confirmationCooldownSeconds`.
+pub const CONFIRMATION_COOLDOWN: Duration = Duration::from_secs(300);
 
 pub trait GeoProbing: Send + Sync {
     fn probe(&self, token: Option<&str>) -> GeoProbeReport;
@@ -68,6 +78,14 @@ pub struct HttpGeoProbe {
     /// Последний годный ответ подтверждающего сервиса. Ключ — адрес: подтверждение
     /// отвечает «в какой стране вот этот адрес», и к другому адресу не относится.
     confirmation: Mutex<Option<CachedConfirmation>>,
+    /// До какого времени сервис не спрашивается. Отказ и исчерпанный лимит здесь равны:
+    /// подтверждение и так спрашивается примерно раз в минуту, и переспрашивать только
+    /// что отказавший сервис — тратить общую с соседями по выходу квоту
+    /// на заведомое «нет».
+    cooldowns: Mutex<HashMap<ConfirmSource, Instant>>,
+    /// Кто ответил в прошлый раз. Спрашивается первым: пока сервис отвечает, трогать
+    /// второй незачем, а у freeipapi лимит теснее, чем у geojs.
+    preferred: Mutex<Option<ConfirmSource>>,
     /// Трассы текущей пробы. Собираются по ходу и уезжают в отчёт: журналу нужен
     /// не вывод, а то, из чего он сделан.
     traces: Mutex<Vec<GeoServiceTrace>>,
@@ -89,6 +107,8 @@ impl HttpGeoProbe {
             network_path,
             clock: Box::new(Instant::now),
             confirmation: Mutex::new(None),
+            cooldowns: Mutex::new(HashMap::new()),
+            preferred: Mutex::new(None),
             traces: Mutex::new(Vec::new()),
         }
     }
@@ -121,6 +141,13 @@ impl HttpGeoProbe {
     /// и остаётся `Unavailable`, то есть fail-closed. Ценность в адресе. Совпал он
     /// с адресом прошлого вердикта — перепроверять страну не нужно, тот же адрес
     /// означает ту же страну; решает это охрана, у которой прошлое чтение и есть.
+    ///
+    /// Третьего источника собственного адреса здесь нет намеренно: годится только
+    /// хост, который провайдер на этой машине выпускает через выбранный профиль.
+    /// Мимо туннеля не идёт ничего, но выход провайдер выбирает у себя на сервере
+    /// для каждого адресата свой, и почти все ip-чекеры выпускает как RU. Такой хост
+    /// назвал бы чужой адрес при полностью исправном профиле, и это читалось бы
+    /// как смена выхода.
     ///
     /// Этим же путём идёт проба без токена: на свежей установке пользователь должен
     /// узнать, где он, ещё до настройки ipinfo.
@@ -223,31 +250,114 @@ impl HttpGeoProbe {
         });
     }
 
-    /// Отказ первичного подтверждающего сервиса запоминается: когда молчат оба,
-    /// в отчёт идёт его причина, а не общая «недоступность».
+    /// Выбор подтверждающего сервиса адаптивный: отказавший уходит остывать,
+    /// и спрашивается взаимозаменяемый сосед. Отказ спрошенного запоминается —
+    /// когда молчат все, в отчёт идёт причина того, кого спросили первым,
+    /// а не общая «недоступность».
+    ///
+    /// Остывание — предпочтение, а не запрет: когда остывают все, спрашиваются все.
+    /// Иначе один круг, в котором отказали оба, оставлял бы охрану без подтверждения
+    /// на все пять минут, и вернуть его было бы нечем.
     fn confirm(&self, ip: &str) -> (SourceOutcome, Option<ConfirmSource>) {
-        let primary = self.fetch_country(
-            "freeipapi",
-            &self.endpoints.freeipapi.replace("{ip}", ip),
-            |body| responses::decode_freeipapi(body).ok().flatten(),
-        );
-        if let Ok(country) = primary {
-            return (
-                SourceOutcome::Answered(country),
-                Some(ConfirmSource::Freeipapi),
-            );
+        let ordered = self.ordered_services();
+        let ready: Vec<ConfirmSource> = ordered
+            .iter()
+            .copied()
+            .filter(|source| !self.is_cooling(*source))
+            .collect();
+        let queue = if ready.is_empty() {
+            ordered.clone()
+        } else {
+            ready
+        };
+        for skipped in ordered.iter().filter(|source| !queue.contains(source)) {
+            self.note_cooling(*skipped);
         }
 
-        let fallback =
-            self.fetch_country("geojs", &self.endpoints.geojs.replace("{ip}", ip), |body| {
-                responses::decode_geojs(body).ok()
-            });
-        if let Ok(country) = fallback {
-            return (SourceOutcome::Answered(country), Some(ConfirmSource::Geojs));
+        let mut first_failure: Option<GeoFailure> = None;
+        for source in queue {
+            let answer = match source {
+                ConfirmSource::Freeipapi => self.fetch_country(
+                    source.name(),
+                    &self.endpoints.freeipapi.replace("{ip}", ip),
+                    |body| responses::decode_freeipapi(body).ok().flatten(),
+                ),
+                ConfirmSource::Geojs => self.fetch_country(
+                    source.name(),
+                    &self.endpoints.geojs.replace("{ip}", ip),
+                    |body| responses::decode_geojs(body).ok(),
+                ),
+            };
+            match answer {
+                Ok(country) => {
+                    self.cooldowns
+                        .lock()
+                        .expect("остывание подтверждения")
+                        .remove(&source);
+                    *self.preferred.lock().expect("предпочтение подтверждения") = Some(source);
+                    return (SourceOutcome::Answered(country), Some(source));
+                }
+                Err(failure) => {
+                    self.cooldowns
+                        .lock()
+                        .expect("остывание подтверждения")
+                        .insert(source, (self.clock)() + CONFIRMATION_COOLDOWN);
+                    let mut preferred = self.preferred.lock().expect("предпочтение подтверждения");
+                    if *preferred == Some(source) {
+                        *preferred = None;
+                    }
+                    if first_failure.is_none() {
+                        first_failure = Some(failure);
+                    }
+                }
+            }
         }
+        (
+            SourceOutcome::Failed(first_failure.unwrap_or(GeoFailure::Unreachable)),
+            None,
+        )
+    }
 
-        let failure = primary.err().unwrap_or(GeoFailure::Unreachable);
-        (SourceOutcome::Failed(failure), None)
+    /// Порядок — начальное предпочтение, а не иерархия «основной и запасной»:
+    /// первым спрашивается тот, кто ответил в прошлый раз.
+    fn ordered_services(&self) -> Vec<ConfirmSource> {
+        let all = [ConfirmSource::Freeipapi, ConfirmSource::Geojs];
+        match *self.preferred.lock().expect("предпочтение подтверждения") {
+            Some(preferred) => {
+                let mut ordered = vec![preferred];
+                ordered.extend(all.iter().copied().filter(|source| *source != preferred));
+                ordered
+            }
+            None => all.to_vec(),
+        }
+    }
+
+    fn is_cooling(&self, source: ConfirmSource) -> bool {
+        let mut cooldowns = self.cooldowns.lock().expect("остывание подтверждения");
+        match cooldowns.get(&source) {
+            Some(until) if (self.clock)() < *until => true,
+            Some(_) => {
+                cooldowns.remove(&source);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Пропуск остывающего сервиса — тоже событие пробы. Без отметки выходило бы,
+    /// что сервис промолчал, тогда как его не спрашивали вовсе.
+    fn note_cooling(&self, source: ConfirmSource) {
+        self.trace(GeoServiceTrace {
+            service: source.name().to_string(),
+            url: String::new(),
+            http_status: None,
+            duration_milliseconds: None,
+            body: None,
+            failure: Some(GeoServiceTrace::COOLING_DOWN.to_string()),
+            phases: None,
+            from_cache: false,
+            cache_age_seconds: None,
+        });
     }
 
     fn fetch_country(

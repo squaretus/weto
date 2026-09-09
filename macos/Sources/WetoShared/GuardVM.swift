@@ -218,7 +218,9 @@ public final class GuardVM {
         // такт охраны через `settleResume()`, — и обязана быть видимой: эпизода паузы
         // в этом запуске нет, и без этого пользователь не узнал бы о стоящей цели ничего.
         let recovered = enforcer.resumeOrphans()
-        if !recovered.unresolved.isEmpty { surfaceRecovered(recovered.unresolved) }
+        if !recovered.outcome.unresolved.isEmpty {
+            surfaceRecovered(recovered.outcome.unresolved, in: recovered.observed)
+        }
         refreshRunningTargets()
         events.start { [weak self] trigger in
             Task { @MainActor [weak self] in self?.handle(trigger) }
@@ -603,10 +605,20 @@ public final class GuardVM {
         pausedEpisodePIDs.formUnion(newcomers.map(\.pid))
 
         for root in newcomers where root.matchedBy == .rule {
-            // Пилюля у цели, стоявшей до нового эпизода, уже есть — и она вернее нашей:
-            // «вернулось в фон» ей дописало наблюдение, а не догадка плана.
-            guard !pausedProcesses.contains(where: { $0.pid == root.pid }) else { continue }
             let backgrounded = outcome.plan.backgrounded.contains(root.pid)
+            // Пилюля у цели, стоявшей до нового эпизода, уже есть, и признак «вернулось
+            // в фон» у неё вернее нашего: его дописало наблюдение, а не догадка плана.
+            // А вот момент — наш: отсчёт до потолка идёт от начала ЭТОЙ паузы, и пилюля,
+            // дожившая с прошлого эпизода, показывала бы отсчёт от чужого начала —
+            // тем более старый, чем дольше цель стояла до него.
+            if let index = pausedProcesses.firstIndex(where: { $0.pid == root.pid }) {
+                let survivor = pausedProcesses[index]
+                pausedProcesses[index] = PausedProcess(
+                    pid: survivor.pid, targetName: survivor.targetName,
+                    since: moment, isBackgrounded: survivor.isBackgrounded
+                )
+                continue
+            }
             pausedProcesses.append(PausedProcess(pid: root.pid, targetName: root.targetName,
                                                  since: moment, isBackgrounded: backgrounded))
             if backgrounded { notifier.notifyBackgrounded(targetName: root.targetName) }
@@ -678,8 +690,11 @@ public final class GuardVM {
     /// ни пилюли, ни подсказки про `fg`, ни следа в журналах. След остаётся там, где
     /// ему место, — в журнале проверок с поводом «восстановление после падения»,
     /// одной записью на восстановление, а не на такт.
-    private func surfaceRecovered(_ standing: [StoppedProcess]) {
-        let scan = enforcer.scan()
+    ///
+    /// Обход приходит параметром: `resumeOrphans` только что прошёл по всем процессам,
+    /// чтобы отличить стоящих от исчезнувших, и второй такой же проход дал бы то же самое
+    /// вдвое дороже — а на старте это ещё и другой момент времени.
+    private func surfaceRecovered(_ standing: [StoppedProcess], in scan: ProcessEnforcer.Scan) {
         var nameByPID: [Int32: String] = [:]
         for process in ProcessMatcher.matches(in: scan.processes, rules: scan.rules)
         where process.matchedBy == .rule {
