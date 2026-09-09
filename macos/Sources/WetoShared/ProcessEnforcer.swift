@@ -25,10 +25,22 @@ final class ProcessEnforcer {
         static let none = EnforcementResult(matched: [], results: [])
     }
 
+    struct PauseOutcome {
+        let plan: PausePlan
+        /// Цели, остановленные этим проходом: без шеллов и без уже стоявших.
+        let fresh: [MatchedProcess]
+        let results: [SignalResult]
+
+        static let none = PauseOutcome(
+            plan: PausePlan(stopOrder: [], shells: [], backgrounded: [], skipped: []), fresh: [], results: []
+        )
+    }
+
     private let settings: SettingsStore
     private let resolver: TargetResolving
     private let locator: ProcessLocating
     private let signaler: ProcessSignaling
+    private let ledger: StoppedLedger
 
     private var cachedEntries: [String]?
     private var cachedRules: [TargetRule] = []
@@ -46,12 +58,14 @@ final class ProcessEnforcer {
         resolver: TargetResolving,
         locator: ProcessLocating,
         signaler: ProcessSignaling,
+        ledger: StoppedLedger,
         now: @escaping () -> Date = Date.init
     ) {
         self.settings = settings
         self.resolver = resolver
         self.locator = locator
         self.signaler = signaler
+        self.ledger = ledger
         self.now = now
     }
 
@@ -144,13 +158,75 @@ final class ProcessEnforcer {
         )
     }
 
-    func enforce(_ scan: Scan) -> EnforcementResult {
+    /// Пауза: только тем, кого в учёте ещё нет. Под паузой обход идёт каждые 250 мс,
+    /// и ребёнок, родившийся между снимком и сигналом, доловится следующим проходом.
+    func pause(_ scan: Scan) -> PauseOutcome {
         guard !scan.isEmpty else { return .none }
-
         let matched = ProcessMatcher.matches(in: scan.processes, rules: scan.rules)
-        guard !matched.isEmpty else { return .none }
+        let known = Set(ledger.pids)
+        let pending = matched.filter { !known.contains($0.pid) }
+        guard !pending.isEmpty else { return .none }
 
-        return EnforcementResult(matched: matched, results: signaler.send(.kill, to: matched.map(\.pid)))
+        let plan = PausePlanner.plan(matched: pending, processes: scan.processes)
+        let order = plan.stopOrder.filter { !known.contains($0) }
+        let results = signaler.send(.stop, to: order)
+        let delivered = Set(results.filter(\.isDelivered).map(\.pid))
+
+        var pathByPID: [Int32: String] = [:]
+        for process in scan.processes { pathByPID[process.pid] = process.executablePath }
+        let moment = now()
+        ledger.add(order.filter(delivered.contains).map { pid in
+            StoppedProcess(pid: pid, executablePath: pathByPID[pid] ?? "", stoppedAt: moment,
+                           isShell: plan.shells.contains(pid))
+        })
+
+        return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) }, results: results)
+    }
+
+    /// Продолжение всем из учёта — в обратном порядке: потомки, цели, шеллы.
+    @discardableResult
+    func resume() -> [SignalResult] {
+        let order = Array(ledger.pids.reversed())
+        guard !order.isEmpty else { return [] }
+        let results = signaler.send(.resume, to: order)
+        ledger.clear()
+        return results
+    }
+
+    /// После падения weto: продолжить только тех, кто всё ещё стоит и остался тем же процессом.
+    /// pid переиспользуются, и SIGCONT чужому процессу недопустим.
+    ///
+    /// Учёт на диске не несёт глубины дерева — только `isShell`, поэтому точный
+    /// «потомки, затем цель, затем шелл» здесь недостижим; ближайшее приближение —
+    /// все цели раньше своих шеллов, порядок внутри каждой группы как в файле.
+    func resumeOrphans() {
+        let entries = ledger.entries
+        guard !entries.isEmpty else { return }
+        var alive: [Int32: ProcessSnapshot] = [:]
+        for process in locator.allProcesses() { alive[process.pid] = process }
+        let ours = entries.filter { entry in
+            guard let process = alive[entry.pid] else { return false }
+            return process.isStopped && process.executablePath == entry.executablePath
+        }
+        if !ours.isEmpty {
+            let order = ours.filter { !$0.isShell }.map(\.pid) + ours.filter(\.isShell).map(\.pid)
+            _ = signaler.send(.resume, to: order)
+        }
+        ledger.clear()
+    }
+
+    /// Завершение. Шелл, стоявший ради терминала цели, обязан ожить: цели больше нет.
+    /// Недоставленный SIGKILL оставляет процесс в учёте — штатный выход его продолжит.
+    func terminate(_ scan: Scan) -> EnforcementResult {
+        let matched = scan.isEmpty ? [] : ProcessMatcher.matches(in: scan.processes, rules: scan.rules)
+        let results = matched.isEmpty ? [] : signaler.send(.kill, to: matched.map(\.pid))
+        let killed = Set(results.filter(\.isDelivered).map(\.pid))
+
+        let shells = ledger.entries.filter(\.isShell).map(\.pid)
+        if !shells.isEmpty { _ = signaler.send(.resume, to: shells.reversed()) }
+        ledger.remove(shells + ledger.pids.filter(killed.contains))
+
+        return EnforcementResult(matched: matched, results: results)
     }
 
     func runningTargets(in scan: Scan) -> [RunningTarget] {
