@@ -28,7 +28,7 @@ final class StatusPresentationTests: XCTestCase {
     func test_phase_titles_are_the_six_canonical_words() {
         XCTAssertEqual(GuardPhase.disabled.title, "Выключено")
         XCTAssertEqual(GuardPhase.verifying(since: t0, cause: .coldStart).title, "Проверка")
-        XCTAssertEqual(GuardPhase.protected(reading).title, "Защищено")
+        XCTAssertEqual(GuardPhase.protected(reading).title, "На страже")
         XCTAssertEqual(
             GuardPhase.interference(reading, reason: .confirmationUnavailable, failures: 1).title,
             "Помехи"
@@ -71,9 +71,9 @@ final class StatusPresentationTests: XCTestCase {
 
     func test_protected_names_the_exit() {
         let e = StatusPresentation.explanation(for: .protected(reading), remainingPause: nil)
-        XCTAssertEqual(e.action, "Ничего не сделано")
+        XCTAssertEqual(e.action, "Цели работают")
         XCTAssertEqual(e.evidence, "Выход 203.0.113.28, страна KZ подтверждена freeipapi")
-        XCTAssertEqual(e.next, "Проверка повторяется каждые 5 с")
+        XCTAssertEqual(e.next, "Дальше ничего делать не нужно")
     }
 
     /// Счёт «ещё N проб — и пауза» обязан совпадать с тем, что реально сделает
@@ -86,13 +86,13 @@ final class StatusPresentationTests: XCTestCase {
         let reason = UnprovenReason.geoUnavailable("таймаут запроса")
         let input = GuardInput.verdict(.unproven(reason), geo: .unavailable("таймаут запроса"))
 
-        // Первая непроверенность из «Защищено»: тормозит на failures == 1, терпимость 2 —
+        // Первая непроверенность из «На страже»: тормозит на failures == 1, терпимость 2 —
         // впереди ещё две неудачи, прежде чем реальный `apply` уйдёт в паузу.
         _ = machine.apply(input, at: t0)
         XCTAssertEqual(machine.phase, .interference(reading, reason: reason, failures: 1))
         let e1 = StatusPresentation.explanation(for: machine.phase, remainingPause: nil, tolerance: machine.tolerance)
         XCTAssertEqual(e1.title, "Помехи")
-        XCTAssertEqual(e1.action, "Ничего не сделано")
+        XCTAssertEqual(e1.action, "Цели работают")
         XCTAssertEqual(e1.evidence, "Не удалось определить внешний адрес: таймаут запроса")
         XCTAssertEqual(e1.next, "Цели работают по вердикту KZ; ещё 2 неудачные пробы — и пауза")
 
@@ -134,7 +134,7 @@ final class StatusPresentationTests: XCTestCase {
 
     func test_disabled_tells_what_to_do() {
         let e = StatusPresentation.explanation(for: .disabled, remainingPause: nil)
-        XCTAssertEqual(e.action, "Ничего не сделано")
+        XCTAssertEqual(e.action, "Цели работают")
         XCTAssertEqual(e.evidence, "Цели не выбраны — охрана ничего не завершает")
         XCTAssertEqual(e.next, "Добавьте приложение или команду в настройках")
     }
@@ -156,6 +156,21 @@ final class StatusPresentationTests: XCTestCase {
     func test_countdown_survives_a_missing_deadline() {
         let e = StatusPresentation.explanation(for: .verifying(since: t0, cause: .coldStart), remainingPause: nil)
         XCTAssertEqual(e.next, "Ждём подтверждения безопасного выхода, 0 с до завершения")
+    }
+
+    // MARK: - Видимость блока объяснения в попапе
+
+    /// Там, где охрана ничего не сделала с целями — целей нет (`.disabled`) или они
+    /// работают штатно (`.protected`) — попап не объясняет ничего: заголовок, гео-показания,
+    /// футер, как до появления паузы. Остальные четыре фазы объясняют себя всегда.
+    func test_explanation_is_shown_only_where_something_happened_to_targets() {
+        XCTAssertFalse(StatusPresentation.shouldExplain(.disabled))
+        XCTAssertFalse(StatusPresentation.shouldExplain(.protected(reading)))
+
+        XCTAssertTrue(StatusPresentation.shouldExplain(.verifying(since: t0, cause: .coldStart)))
+        XCTAssertTrue(StatusPresentation.shouldExplain(.interference(reading, reason: .confirmationUnavailable, failures: 0)))
+        XCTAssertTrue(StatusPresentation.shouldExplain(.paused(since: t0, reason: .confirmationUnavailable)))
+        XCTAssertTrue(StatusPresentation.shouldExplain(.danger(.pauseExpired)))
     }
 
     // MARK: - Подсказка про незапущенные цели

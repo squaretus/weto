@@ -199,7 +199,7 @@ final class GuardMachineTests: XCTestCase {
         )
     }
 
-    // Опасно → safe по пробе: Защищено, возобновлять нечего.
+    // Опасно → safe по пробе: На страже, возобновлять нечего.
     func test_safe_after_danger_returns_to_protected_without_resume() {
         var machine = protectedMachine()
         _ = machine.apply(.evidence(.vpnAppNotRunning), at: at(1))
@@ -246,7 +246,7 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertEqual(machine.phase.action, .pause)
     }
 
-    // Цель добавлена при выключенной охране и действующем чтении: сразу Защищено.
+    // Цель добавлена при выключенной охране и действующем чтении: сразу На страже.
     func test_reassessment_from_disabled_behaves_like_a_verdict() {
         var machine = GuardMachine(tolerance: 2, pauseCeiling: 60)
         XCTAssertEqual(machine.apply(.reassessment(.safe, reading: kz), at: t0), .none)
@@ -393,7 +393,7 @@ final class GuardMachineTests: XCTestCase {
     func test_titles_are_the_six_states() {
         XCTAssertEqual(GuardPhase.disabled.title, "Выключено")
         XCTAssertEqual(GuardPhase.verifying(since: t0, cause: .coldStart).title, "Проверка")
-        XCTAssertEqual(GuardPhase.protected(kz).title, "Защищено")
+        XCTAssertEqual(GuardPhase.protected(kz).title, "На страже")
         XCTAssertEqual(GuardPhase.interference(kz, reason: .confirmationUnavailable, failures: 1).title, "Помехи")
         XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Пауза")
         XCTAssertEqual(GuardPhase.danger(.pauseExpired).title, "Опасно")

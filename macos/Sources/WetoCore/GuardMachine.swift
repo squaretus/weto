@@ -36,7 +36,7 @@ public enum GuardPhase: Equatable, Sendable {
         switch self {
         case .disabled: return "Выключено"
         case .verifying: return "Проверка"
-        case .protected: return "Защищено"
+        case .protected: return "На страже"
         case .interference: return "Помехи"
         case .paused: return "Пауза"
         case .danger: return "Опасно"

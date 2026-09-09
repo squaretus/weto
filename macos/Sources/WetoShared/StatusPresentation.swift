@@ -58,7 +58,7 @@ public enum StatusPresentation {
         switch phase {
         case .disabled:
             return StatusExplanation(
-                title: phase.title, action: "Ничего не сделано",
+                title: phase.title, action: "Цели работают",
                 evidence: "Цели не выбраны — охрана ничего не завершает",
                 next: "Добавьте приложение или команду в настройках"
             )
@@ -70,9 +70,9 @@ public enum StatusPresentation {
             )
         case .protected(let reading):
             return StatusExplanation(
-                title: phase.title, action: "Ничего не сделано",
+                title: phase.title, action: "Цели работают",
                 evidence: exitDescription(reading),
-                next: "Проверка повторяется каждые \(Int(Constants.geoProbeIntervalSeconds)) с"
+                next: "Дальше ничего делать не нужно"
             )
         case .interference(let reading, let reason, let failures):
             let next: String
@@ -87,7 +87,7 @@ public enum StatusPresentation {
                 let left = max(1, tolerance - failures + 1)
                 next = "Цели работают по вердикту \(reading.primaryCountry); ещё \(left) \(pluralProbes(left)) — и пауза"
             }
-            return StatusExplanation(title: phase.title, action: "Ничего не сделано", evidence: reason.displayText, next: next)
+            return StatusExplanation(title: phase.title, action: "Цели работают", evidence: reason.displayText, next: next)
         case .paused(_, let reason):
             return StatusExplanation(
                 title: phase.title, action: "Цели на паузе", evidence: reason.displayText,
@@ -98,6 +98,18 @@ public enum StatusPresentation {
                 title: phase.title, action: "Цели завершены", evidence: evidence.displayText,
                 next: "Запуск запрещён до подтверждения безопасного выхода"
             )
+        }
+    }
+
+    /// Стоит ли показывать объяснение в попапе. `explanation` остаётся тотальной — отвечает
+    /// на каждую фазу три непустые строки, — а это отдельное решение о том, что видит
+    /// пользователь: там, где охрана ничего не сделала с целями (`.disabled` — целей нет,
+    /// `.protected` — работают штатно, объяснять нечего), попап выглядит так же, как до
+    /// появления паузы — заголовок, гео-показания, футер целей, без строк объяснения.
+    public static func shouldExplain(_ phase: GuardPhase) -> Bool {
+        switch phase {
+        case .disabled, .protected: return false
+        case .verifying, .interference, .paused, .danger: return true
         }
     }
 
