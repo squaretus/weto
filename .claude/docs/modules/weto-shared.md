@@ -20,11 +20,14 @@ this layer decides *when* to ask and *what to do* with the answer.
   print `suspended (tty input)` to the user once a second) — it stays on the books, and
   `terminate`/`stop` still signal it. `stop()` cannot observe anything after its own SIGCONT,
   so its outcome is «не подтверждено: … weto проверит их при следующем запуске» — neither the
-  optimistic nor the pessimistic lie. A pill that survives into a *new* episode (the target never
-  came back up, and the verdict went bad again) adopts the new episode's moment: the countdown on
-  it runs to `pauseCeilingSeconds`, which is measured from the start of *this* pause, so keeping
-  the old `since` showed a start nobody counts from. Only `isBackgrounded` is inherited — that one
-  was written by observation, not by the plan's guess.
+  optimistic nor the pessimistic lie. A pill whose target worked between episodes and was stopped
+  again adopts the new moment — that standing did start now, and `pause` only reports as `fresh`
+  what it actually signalled, so a target that never came back up keeps its original `since`,
+  which is the truth about it. `PausedProcess.since` records when weto stopped that pid; the
+  countdown the badge shows is not read from it but from the reducer's phase
+  (`pauseDeadline` → `phase.pausedSince`), because the 60 s ceiling belongs to the episode, not to
+  one target. Only `isBackgrounded` is inherited across episodes — that one was written by
+  observation, not by the plan's guess.
 - `macos/Sources/WetoShared/GuardController.swift` — owns the one live `GuardMachine` (the reducer
   lives in `WetoCore`, see `weto-core.md`) plus the network probe: turns triggers into
   `GuardInput`, applies it, and asks `GuardVM` to enact whatever `GuardEffect` came back

@@ -456,6 +456,45 @@ final class GeoProbeTests: XCTestCase {
         XCTAssertNil(skipped?.httpStatus, "запроса не было — статуса быть не может")
     }
 
+    /// Остывание кончается само: пять минут прошло — сервис снова полноправный.
+    /// Без этого один отказ уводил бы сервис из ротации навсегда, и пара
+    /// взаимозаменяемых подтверждений тихо превращалась бы в одиночку.
+    func test_a_cooled_confirmation_returns_when_its_cooldown_expires() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .failure(FetchFailure()),
+            "ip/country/": .success(geojsKZ),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" }, now: { clock.now })
+        _ = await probe.probe()
+        let afterFailure = await fetcher.count("freeipapi")
+        XCTAssertEqual(afterFailure, 1, "отказал и ушёл остывать")
+
+        await fetcher.setResponse("freeipapi", .success(freeipapiKZ))
+
+        // Ещё остывает: адрес тот же, мягкий потолок прошёл — спрашивают соседа.
+        clock.advance(by: Constants.confirmationSoftTTLSeconds + 1)
+        _ = await probe.probe()
+        let whileCooling = await fetcher.count("freeipapi")
+        XCTAssertEqual(whileCooling, 1, "внутри остывания не спрашивают")
+
+        // Остывание истекло — сервис снова полноправный кандидат. Видно это там, где
+        // сосед отказал: пока сосед отвечает, второго и не спрашивают, а вот отказ соседа
+        // при остывающем freeipapi оставил бы охрану без подтверждения вовсе.
+        clock.advance(by: Constants.confirmationCooldownSeconds + 1)
+        await fetcher.setResponse("ip/country/", .failure(FetchFailure()))
+        let report = await probe.probe()
+
+        let afterCooldown = await fetcher.count("freeipapi")
+        XCTAssertEqual(afterCooldown, 2, "остывание кончилось — сервис снова в круге")
+        XCTAssertEqual(report.confirmation, .answered("KZ"))
+        XCTAssertNil(
+            report.traces.first { $0.service == "freeipapi" }?.failure,
+            "остывшему сервису пометка «остывает» больше не положена"
+        )
+    }
+
     /// Остывание — предпочтение между равными, а не запрет. Круг, в котором отказали все,
     /// иначе оставлял бы охрану без подтверждения на все пять минут, и вернуть его
     /// было бы нечем.

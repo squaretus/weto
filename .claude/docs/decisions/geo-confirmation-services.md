@@ -55,14 +55,14 @@ KZ-released ones are candidates; the RU-released ones describe the provider's ot
 | `free.freeipapi.com` | KZ profile | 60 requests/minute, no key | confirmation, interchangeable with geojs |
 | `get.geojs.io` | KZ profile | no published cap | confirmation, interchangeable with freeipapi |
 | `api.country.is` | KZ profile | 10 requests/second, no quota, free for commercial use | documented spare — swap in by changing one URL constant |
-| `ipwho.is` | KZ profile | 1000/day, no key | documented spare; the daily cap is per client IP, i.e. per VPN exit — usable as a stand-in, not as a per-tick source |
+| `ipwho.is` | KZ profile | 1000/day, no key | documented spare; the daily cap is per client IP, i.e. per VPN exit, and it was measured burning out in ~1.4 h behind one exit — usable as a stand-in, not as a per-tick source |
 | `ip-api.com` | KZ profile | 45/minute | **rejected twice over:** HTTP only on the free tier, and its ToS forbids commercial use. A kill switch must not trust a plaintext geo answer |
 | `checkip.amazonaws.com`, `api.ipify.org`, `icanhazip.com`, `ifconfig.me`, `ident.me`, `api.seeip.org`, `1.1.1.1/cdn-cgi/trace`, `api.ipapi.is`, `ifconfig.co` | **RU** | — | rejected: they report the RU exit while the KZ profile is perfectly healthy. `checkip.amazonaws.com` had been the third self-IP source and was removed for exactly this — a healthy profile read as a changed exit, and the targets paused on a lie |
 | `ipapi.co`, `api.myip.com`, `api.ip.sb` | — | — | rejected: no answer at all |
 | `check-host.net/ip-info` | — | — | rejected: HTML only, no machine-readable answer |
 | `ipcheck.ing` | — | — | rejected: 403 to anything that is not a browser |
 | `ipquery.io` | — | — | rejected: stale registration data on reassigned ranges |
-| `ifconfig.co` | RU | — | rejected on both counts: released as RU *and* stale registration data |
+| `ifconfig.co` | RU | — | rejected twice over: listed above among the RU-released hosts, and its registration data is stale on reassigned ranges |
 
 The stale-data ones are the subtle rejections: on reassigned address ranges they report the
 country from outdated registration records. Against a correct answer from the other service that
