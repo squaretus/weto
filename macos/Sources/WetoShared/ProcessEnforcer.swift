@@ -158,22 +158,39 @@ final class ProcessEnforcer {
         )
     }
 
+    /// Ключ «уже стоит по нашей вине»: pid один переиспользуется ядром, и учёт хранит
+    /// путь бинарника именно ради этого — сравнение обязано идти по паре, не по pid одному.
+    private struct StoppedIdentity: Hashable {
+        let pid: Int32
+        let executablePath: String
+    }
+
     /// Пауза: только тем, кого в учёте ещё нет. Под паузой обход идёт каждые 250 мс,
     /// и ребёнок, родившийся между снимком и сигналом, доловится следующим проходом.
     func pause(_ scan: Scan) -> PauseOutcome {
         guard !scan.isEmpty else { return .none }
         let matched = ProcessMatcher.matches(in: scan.processes, rules: scan.rules)
-        let known = Set(ledger.pids)
-        let pending = matched.filter { !known.contains($0.pid) }
-        guard !pending.isEmpty else { return .none }
-
-        let plan = PausePlanner.plan(matched: pending, processes: scan.processes)
-        let order = plan.stopOrder.filter { !known.contains($0) }
-        let results = signaler.send(.stop, to: order)
-        let delivered = Set(results.filter(\.isDelivered).map(\.pid))
 
         var pathByPID: [Int32: String] = [:]
         for process in scan.processes { pathByPID[process.pid] = process.executablePath }
+
+        // pid, доставшийся от переиспользования, не значит «тот же процесс, что мы
+        // остановили»: запись в учёте про мёртвого владельца этого pid не должна
+        // маскировать свежую цель, которой ядро выдало то же число.
+        let known = Set(ledger.entries.map { StoppedIdentity(pid: $0.pid, executablePath: $0.executablePath) })
+        func isAlreadyStopped(_ pid: Int32) -> Bool {
+            guard let path = pathByPID[pid] else { return false }
+            return known.contains(StoppedIdentity(pid: pid, executablePath: path))
+        }
+
+        let pending = matched.filter { !isAlreadyStopped($0.pid) }
+        guard !pending.isEmpty else { return .none }
+
+        let plan = PausePlanner.plan(matched: pending, processes: scan.processes)
+        let order = plan.stopOrder.filter { !isAlreadyStopped($0) }
+        let results = signaler.send(.stop, to: order)
+        let delivered = Set(results.filter(\.isDelivered).map(\.pid))
+
         let moment = now()
         ledger.add(order.filter(delivered.contains).map { pid in
             StoppedProcess(pid: pid, executablePath: pathByPID[pid] ?? "", stoppedAt: moment,

@@ -270,6 +270,29 @@ final class ProcessEnforcerTests: XCTestCase {
         XCTAssertEqual(ledger.entries.first?.isShell, true)
     }
 
+    /// Учёт хранит путь бинарника ровно затем, что pid ядро переиспользует: запись
+    /// об уже мёртвом владельце этого числа не имеет права сойти за «мы её уже остановили»
+    /// и молча выпустить свежую цель, которой достался тот же pid, из-под паузы.
+    func test_pause_stops_a_target_whose_pid_was_recycled_from_a_stale_ledger_entry() {
+        let signaler = RecordingSignaler()
+        let ledgerStorage = InMemoryStoppedLedger()
+        ledgerStorage.save([
+            StoppedProcess(pid: target.pid, executablePath: "/usr/bin/some-other-dead-process",
+                           stoppedAt: Date(), isShell: false),
+        ])
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: MutableProcessLocator([shell, target, child]), clock: TestClock(),
+                                    signaler: signaler, ledger: StoppedLedger(storage: ledgerStorage))
+
+        let outcome = enforcer.pause(enforcer.scan())
+
+        XCTAssertEqual(signaler.batches.map(\.signal), [.stop])
+        XCTAssertEqual(signaler.batches.first?.pids, [100, 200, 201],
+                       "pid цели переиспользован не нашим процессом — цель обязана быть остановлена")
+        XCTAssertEqual(outcome.fresh.map(\.pid), [200, 201])
+        XCTAssertEqual(Set(ledgerStorage.load().entries.map(\.pid)), [100, 200, 201])
+    }
+
     /// Второй обход под паузой не шлёт SIGSTOP уже стоящим — только новорождённым.
     func test_a_second_sweep_stops_only_newcomers() {
         let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
@@ -353,6 +376,51 @@ final class ProcessEnforcerTests: XCTestCase {
 
         XCTAssertEqual(signaler.batches.first?.signal, .resume)
         XCTAssertEqual(signaler.batches.first?.pids, [200, 100], "цель раньше шелла, чужой pid пропущен")
+        XCTAssertEqual(ledgerStorage.load(), .entries([]))
+    }
+
+    /// Тест выше сеет учёт вручную в порядке «цель, потомок, шелл» — так `pause()` его
+    /// никогда не напишет (шелл там всегда идёт первым). Этот тест строит учёт настоящим
+    /// `pause()`, затем поднимает НАД ТЕМ ЖЕ ФАЙЛОМ свежий `ProcessEnforcer` — ровно так,
+    /// как выглядел бы перезапуск после падения, — и проверяет порядок, который
+    /// `resumeOrphans` даёт из подлинной записи, а не из порядка, придуманного тестом.
+    func test_resumeOrphans_round_trips_through_a_ledger_written_by_a_real_pause() {
+        let ledgerStorage = InMemoryStoppedLedger()
+        let firstEnforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                         locator: MutableProcessLocator([shell, target, child]), clock: TestClock(),
+                                         signaler: RecordingSignaler(), ledger: StoppedLedger(storage: ledgerStorage))
+        _ = firstEnforcer.pause(firstEnforcer.scan())
+        // Настоящий pause() пишет в файл [шелл, цель, потомок] — PausePlanner ставит
+        // шеллы первыми (см. PausePlan.swift): stopOrder = shells + ordered.
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200, 201])
+
+        // «Падение и перезапуск weto»: те же три процесса всё ещё стоят (SSTOP),
+        // но обслуживает их уже другой ProcessEnforcer над тем же файлом на диске.
+        let stoppedShell = ProcessSnapshot(pid: shell.pid, parentPID: shell.parentPID,
+                                           executablePath: shell.executablePath, processGroup: shell.processGroup,
+                                           terminalForegroundGroup: shell.terminalForegroundGroup, isStopped: true)
+        let stoppedTarget = ProcessSnapshot(pid: target.pid, parentPID: target.parentPID,
+                                            executablePath: target.executablePath, processGroup: target.processGroup,
+                                            terminalForegroundGroup: target.terminalForegroundGroup, isStopped: true)
+        let stoppedChild = ProcessSnapshot(pid: child.pid, parentPID: child.parentPID,
+                                           executablePath: child.executablePath, processGroup: child.processGroup,
+                                           terminalForegroundGroup: child.terminalForegroundGroup, isStopped: true)
+        let secondSignaler = RecordingSignaler()
+        let secondEnforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                          locator: MutableProcessLocator([stoppedShell, stoppedTarget, stoppedChild]),
+                                          clock: TestClock(), signaler: secondSignaler,
+                                          ledger: StoppedLedger(storage: ledgerStorage))
+
+        secondEnforcer.resumeOrphans()
+
+        // Учёт на диске несёт только `isShell`, не глубину дерева: «потомок раньше цели»
+        // из настоящего стоп-порядка восстановить нечем. Ближайшее и уже принятое на
+        // ревью приближение — все не-шеллы раньше шеллов, порядок внутри группы как
+        // в файле, а файл писала pause() в порядке [шелл, цель, потомок]. После вычитания
+        // шелла из не-шелльной группы остаётся [цель, потомок], затем шелл.
+        XCTAssertEqual(secondSignaler.batches.first?.signal, .resume)
+        XCTAssertEqual(secondSignaler.batches.first?.pids, [200, 201, 100],
+                       "обе цели продолжены раньше шелла; порядок внутри группы — как записал pause()")
         XCTAssertEqual(ledgerStorage.load(), .entries([]))
     }
 }
