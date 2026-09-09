@@ -192,9 +192,12 @@ final class GuardController {
 
         emit(machine.apply(.tick, at: moment), origin: .established)
 
-        // Мигающая сеть вернулась на путь, про который вердикт есть, а цели всё ещё
-        // не работают: `.tick` выше пробы не просит, и без явного запроса здесь
-        // охрана дождалась бы только расписания (5 с) — на каждый флап заново.
+        // Мигающая сеть вернулась на путь, про который вердикт есть: `.tick` выше
+        // пробы не просит, и без явного запроса здесь охрана дождалась бы только
+        // расписания (5 с) — на каждый флап заново. Ускорение имеет смысл, только
+        // пока цели стоят или уже завершены — `probeIfStanding` ничего не делает,
+        // если такт оставил фазу «Проверка» (цели работают, проба уже запрошена
+        // при объявлении потери).
         // Только на самом возврате, не на каждом такте: частота пробы иначе слилась бы
         // с частотой опроса системы (раз в секунду).
         if returnedFromAnnouncedLoss {
@@ -202,8 +205,10 @@ final class GuardController {
         }
     }
 
-    /// Цели ещё не работают (пауза не снята или доказательство не местное) — без
-    /// явного запроса охрана дождалась бы только расписания (5 с).
+    /// Просит внеплановую пробу только пока цели стоят или уже завершены
+    /// (`phase.action != .run`) — без неё расписание (5 с) добралось бы само.
+    /// Для «Проверка» (цели работают) не срабатывает: эта фаза не стоящая,
+    /// и проба для неё уже запрошена там, где потеря вердикта объявлялась.
     private func probeIfStanding(trigger: CheckEvent.Trigger) {
         guard machine.phase.action != .run else { return }
         startProbe(after: 0, trigger: trigger)
@@ -222,9 +227,10 @@ final class GuardController {
         if announcedLoss != loss, established != nil { onReport(nil) }
         announcedLoss = loss
 
-        let lost = machine.apply(.verdictLost(staleness.cause), at: moment)
-        let ceiling = machine.apply(.tick, at: moment)
-        emit(ceiling == .none ? lost : ceiling, origin: nil)
+        // `.verdictLost` возвращает `.none` во всех ветках (см. `GuardMachine.apply`) —
+        // вызов здесь ради мутации фазы, а не ради эффекта; наружу уходит только `.tick`.
+        _ = machine.apply(.verdictLost(staleness.cause), at: moment)
+        emit(machine.apply(.tick, at: moment), origin: nil)
     }
 
     /// Чем прежний вердикт перестал описывать наш выход — на этот самый момент.

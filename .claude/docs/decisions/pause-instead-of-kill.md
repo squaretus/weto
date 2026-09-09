@@ -22,12 +22,17 @@ a timeout means a black hole, not a leak.
    blacklisted, a blocked country, a country conflict, a whitelist miss, or the pause ceiling
    expired. Everything else — no verdict yet, ipinfo silent, confirmation silent, a different
    address named by the fallback — is *unproven* and pauses the targets (SIGSTOP) instead.
-2. **Two axes, six states.** Knowledge about the exit (none / safe / safe-but-silent /
+2. **Two axes, six phases, five titles.** Knowledge about the exit (none / safe / safe-but-silent /
    unreachable / unsafe) × action on targets (running / paused with a countdown / terminated
-   with launch blocked). User-visible states: **Выключено**, **Проверка**, **На страже**,
-   **Помехи**, **Пауза**, **Опасно**. The reason is attached as evidence; it does not define
-   the state. The policy stays a pure function (`GuardPolicy.decide` → safe / unproven / kill);
-   the transitions live in a pure reducer (`GuardMachine`) owned by `GuardController`.
+   with launch blocked) gives six `GuardPhase` cases: `disabled`, `verifying`, `protected`,
+   `interference`, `paused`, `danger`. The title answers "am I protected?", not "why" — so
+   `protected` and `interference` share one title. Five titles reach the user: **Охрана
+   выключена**, **Проверяю выход**, **На страже** (both `protected` and `interference`),
+   **Выход не подтверждён**, **Небезопасно**. «Помехи» names the `interference` phase
+   internally (evidence and shield colour differ from `protected`) but is not a title the
+   user ever sees. The reason is attached as evidence; it does not define the state. The
+   policy stays a pure function (`GuardPolicy.decide` → safe / unproven / kill); the
+   transitions live in a pure reducer (`GuardMachine`) owned by `GuardController`.
 3. **The pause starts from a bad result, never from waiting for one.** «Проверка» is a *running*
    phase: a cold start and a path change invalidate the verdict and ask for a probe, and the
    answer decides. The first result that says «not proven» pauses the targets — there is no count
@@ -111,5 +116,6 @@ Consequences of the amendment:
   is computed where it is applied — at the bad result that opens the episode — and describes
   the exit at that moment. It is absent when there was nothing to lose (the exit did not move
   and the services simply went quiet); the exit itself is still in the record as its own
-  fields. The popup wording for «Проверка» («Цели на паузе» plus a countdown) remains stale
-  and is fixed by the wording follow-up.
+  fields. The popup wording for «Проверка» was fixed by the wording follow-up (`80be667`):
+  it now reads «Проверяю выход», «Цели работают», with no countdown — a running phase reads
+  as one.

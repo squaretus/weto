@@ -2516,6 +2516,11 @@ final class GuardVMTests: XCTestCase {
             harness.log.events.first?.resolutionText,
             "возобновлено: проверка подтвердила безопасный выход: 91.224.74.177, KZ"
         )
+        XCTAssertEqual(
+            harness.log.events.first?.diagnostics?.staleness?.cause, .coldStart,
+            "разбор свежести переживает разрешение эпизода: холодный старт открыл паузу, "
+                + "и safe-резолюция не вправе стереть его из уже написанной записи"
+        )
         XCTAssertTrue(harness.vm.pausedProcesses.isEmpty)
         harness.vm.stop()
     }

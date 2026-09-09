@@ -76,7 +76,61 @@ Files: `macos/Sources/WetoSystem/NetworkEventSource.swift`, `macos/Sources/WetoS
 `macos/Sources/WetoShared/GuardController.swift`, `macos/Sources/WetoCore/GuardPolicy.swift`,
 `macos/Sources/WetoCore/Model/NetworkSnapshot.swift`, `macos/Sources/WetoSystem/GeoProbe.swift`,
 `macos/Sources/WetoShared/ProcessEnforcer.swift`, `macos/Sources/WetoCore/ProcessMatcher.swift`,
-`macos/Sources/WetoSystem/ProcessKiller.swift`, `macos/Sources/WetoShared/EventLogStore.swift`.
+`macos/Sources/WetoSystem/ProcessSignaler.swift`, `macos/Sources/WetoShared/EventLogStore.swift`.
+
+> **Note on the steps above:** this description predates the pause model
+> (`decisions/pause-instead-of-kill.md`) and still says "kill" and `verificationPending` where the
+> code now pauses. The reducer and the SIGSTOP/SIGCONT path it describes are correct;
+> steps 4–8 need a fuller pass to read `GuardMachine`/`GuardPhase` rather than the old tri-state
+> `pendingVerification`/immediate-`SIGKILL` shape. See the subsection immediately below for what
+> actually happens once a decision needs to pause rather than kill.
+
+### Guard cycle: pause and resume
+
+Where the cycle above ends in "kill", it more often ends in "pause" now: `GuardPolicy.decide`
+still answers `safe` / `unproven(reason)` / `kill(evidence)`, but only `kill` terminates anything.
+Everything else goes through the reducer.
+
+1. **Reduce.** `GuardController` owns the one live `GuardMachine`. It turns each situation into a
+   `GuardInput` (`.verdict`, `.reassessment`, `.evidence`, `.verdictLost`, `.tick`, `.disarmed`) and
+   calls `GuardMachine.apply(_:at:)` — a pure function, pinned by the shared golden fixture
+   `shared/fixtures/guard-transitions.json` and run by both `GuardMachineTests` (Swift) and the
+   Rust port (`linux-guard`). It returns one `GuardEffect`: `.none`/`.pause`/`.resume`/`.terminate`.
+2. **Plan.** On `.pause`, `GuardVM.pauseTargets()` asks `ProcessEnforcer.pause(_:)`, which calls
+   `PausePlanner.plan(matched:processes:)` (pure, in `WetoCore`) for a `PausePlan`: who to stop and
+   in what order (a foreground job's shell before its target, parent before descendants), who is
+   already stopped (skip), and whose target lost its terminal in the process (`backgrounded`).
+3. **Signal.** `ProcessSignaling.send(.stop, to: plan.stopOrder)` — the boundary in `WetoSystem`
+   that delivers signals strictly in list order; `.resume` walks the same list reversed. This is
+   the only place SIGSTOP/SIGCONT/SIGKILL are actually sent.
+4. **Record.** Every pid actually stopped is added to the `StoppedLedger` (`stopped.json`, next to
+   the journals) *before* anything else, and the pause opens a `kind: .paused` journal episode
+   (reason = the phase's `UnprovenReason`). A backgrounded terminal target also gets a
+   `notifyBackgrounded` system notification, since it otherwise just "disappears" from its
+   terminal with no explanation.
+5. **Wait.** While paused, the 250 ms watchdog keeps sweeping for newborn descendants
+   (`applyCurrentAction` → `pauseTargets` again) and the probe keeps its normal rhythm; the
+   countdown is `GuardVM.pauseDeadline` (`pausedSince + pauseCeilingSeconds`, 60 s), read by the
+   popup's `WetoPauseBadge` and by `StatusPresentation.explanation`'s third line off the same
+   `TimelineView` clock.
+6. **Resolve.** A `.resume` effect (safe verdict) calls `ProcessEnforcer.resume()` —
+   `ProcessSignaling.send(.resume, …)` over the whole ledger, reversed, then the ledger is cleared
+   — and `resolvePauseEpisode` refines the open episode with how it ended. A `.terminate` effect
+   instead kills whatever still matches the rules and resumes (never leaves stopped) anyone in the
+   ledger that no longer does, so nothing is left frozen past the point where it stops being
+   watched.
+7. **Recover from a crash.** `GuardVM.start()` calls `ProcessEnforcer.resumeOrphans()` once, before
+   anything else starts: it `SIGCONT`s only pids that are still stopped *and* still the same
+   executable (pid reuse must not resume a stranger), then clears the ledger regardless. A
+   corrupted `stopped.json` is read as empty (never blocks startup) but writes one
+   `CheckEvent(trigger: .startupRecovery, outcome: .ledgerUnreadable)` to the check-journal, since
+   the kill-journal has no way to record an unmet obligation that killed nothing.
+
+Files: `macos/Sources/WetoCore/GuardMachine.swift`, `macos/Sources/WetoCore/PausePlan.swift`,
+`macos/Sources/WetoShared/GuardController.swift`, `macos/Sources/WetoShared/GuardVM.swift`,
+`macos/Sources/WetoShared/ProcessEnforcer.swift`, `macos/Sources/WetoShared/StoppedLedger.swift`,
+`macos/Sources/WetoShared/GuardNotifying.swift`, `macos/Sources/WetoSystem/ProcessSignaler.swift`,
+`macos/Sources/WetoSystem/TerminalLocator.swift`, `macos/Sources/WetoMenuBar/StatusPopupView.swift`.
 
 ### Update: HTTP check in the app, root install in the daemon
 

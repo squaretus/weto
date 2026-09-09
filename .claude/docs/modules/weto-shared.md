@@ -9,11 +9,35 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Key files
 - `macos/Sources/WetoShared/AppCoordinator.swift` — composition root, wired once in `WetoMenuBarApp`
-- `macos/Sources/WetoShared/GuardVM.swift` — observable facade for the UI, journal dedup, watchdog, tick loop
-- `macos/Sources/WetoShared/GuardController.swift` — decision state machine, owns the network probe
-- `macos/Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event
+- `macos/Sources/WetoShared/GuardVM.swift` — observable facade for the UI, journal dedup, watchdog, tick loop.
+  Owns the pause side: `pausedProcesses` (popup badges), `pauseDeadline`, `pauseTargets()`/`resumeTargets()`,
+  which call `ProcessEnforcer.pause`/`.resume` and record/refine the `kind: .paused` episode.
+- `macos/Sources/WetoShared/GuardController.swift` — owns the one live `GuardMachine` (the reducer
+  lives in `WetoCore`, see `weto-core.md`) plus the network probe: turns triggers into
+  `GuardInput`, applies it, and asks `GuardVM` to enact whatever `GuardEffect` came back
+- `macos/Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event;
+  `pause(_:)` builds a `PausePlan` (skips pids already in the ledger) and sends `.stop` in
+  `stopOrder`, `resume()` sends `.resume` in the reverse of what the ledger holds, `resumeOrphans()`
+  is the crash-recovery path (only pids that are still stopped *and* still the same executable get
+  `SIGCONT` — pid reuse must not resume a stranger)
+- `macos/Sources/WetoShared/StoppedLedger.swift` — `StoppedProcess` (pid + path + `isShell`),
+  `StoppedLedgerPersisting` (`StoppedFile` at `stopped.json`, atomic temp+rename, next to the
+  journals; `InMemoryStoppedLedger` for tests), `StoppedLedgerReadout` (`.entries`/`.corrupted` —
+  a corrupted file reads as empty but is distinguishable at the boundary, so a broken ledger and
+  an empty one don't silently mean the same thing to `startupRecovery`)
+- `macos/Sources/WetoShared/GuardNotifying.swift` — `UserNotificationGuardNotifier`: two distinct
+  notifications, `notifyTerminated` (existing) and `notifyBackgrounded` (a paused terminal target
+  lost its foreground job — the process just "disappears" from its terminal without one).
+  `onOpen` is the tap handler that opens the popup; `presentationWhileActive` makes notifications
+  show even while weto's own window has focus, which is exactly when the user is watching status
+  and needs the explanation
+- `macos/Sources/WetoShared/PopupPresenting.swift` — the one-method boundary `MenuBarPopupPresenter`
+  needs to open the popup from a notification tap, without pulling `WetoMenuBar` into this module
 - `macos/Sources/WetoShared/SettingsStore.swift` — `UserDefaults` + Keychain, guard-config change bus
 - `macos/Sources/WetoShared/EventLogStore.swift` — 100-entry ring buffer of `KillEvent`, one per killed process
+- `macos/Sources/WetoShared/CheckLogStore.swift` — 50-entry ring buffer of `CheckEvent` (the second
+  journal: every connectivity-check attempt, not just the ones that killed something).
+  `CheckEvent.isWorthRecording` is the filter — see invariants
 - `macos/Sources/WetoShared/JournalFile.swift` — `~/Library/Application Support/weto/journal.json`, temp + rename
 - `macos/Sources/WetoShared/JournalExporter.swift` — the export envelope handed to a human or an agent
 - `macos/Sources/WetoShared/LaunchAgentController.swift` — `~/Library/LaunchAgents/com.weto.app.plist`
@@ -25,8 +49,9 @@ this layer decides *when* to ask and *what to do* with the answer.
   `Resources/uninstall-weto.sh` is machine-checked — `scripts/tests/uninstall-parity-contract.sh`
 - `macos/Sources/WetoShared/WetoUpdateTheme.swift` — weto skin for the `UpdateKit` dialog
 - `macos/Sources/WetoCore/WetoUpdate.swift` — the update configuration this module wires up
-- `macos/Sources/WetoShared/StatusPresentation.swift`, `KillNotifying.swift`, `URLOpening.swift`
-- Tests: `macos/Tests/WetoSharedTests/` (`GuardVMTests` is the behavioural bulk, 31 KB)
+- `macos/Sources/WetoShared/StatusPresentation.swift`, `URLOpening.swift`
+- Tests: `macos/Tests/WetoSharedTests/` (`GuardVMTests` is the behavioural bulk); `StoppedLedgerTests`,
+  `GuardNotifyingTests`, `CheckLogStoreTests` cover the additions above
 
 ## Entry points
 - `AppCoordinator.init()` → wires real system adapters; `start()`, `stopForTermination()`
@@ -52,13 +77,23 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `WetoUpdateTheme.make(for:) → UpdateTheme` — the only weto-specific part of the dialog
 - `UpdateInstalling.requestInstall(completion:)`, `requestLastFailure(completion:)`;
   `HelperUninstalling.uninstallHelper(completion:)`
-- `StatusPresentation.title(for:)`, `lines(for:reading:)`, `lines(for:report:timeZone:)`,
-  `detail(for:reading:)`
+- `StatusPresentation.explanation(for:remainingPause:) → StatusExplanation` — the three popup
+  lines (what weto did / why / what's next); `shouldExplain(_:)` gates them off for `.disabled`
+  and `.protected`, where there is nothing to explain
+- `StatusPresentation.lines(for:reading:)`, `lines(for:report:timeZone:)`, `detail(for:reading:)`
+- `GuardVM.showTerminal(for pid:) → Bool` — the popup's "Показать терминал" button, delegates to
+  `TerminalLocating`
+- `StoppedLedger.add(_:)`/`.remove(_:)`/`.clear()`, `.pids`, `.startedFromCorruptedFile`
+- `CheckLogStore.record(_:)` (drops anything `!isWorthRecording`), `.all`, `.clear()`
+- `GuardNotifying.notifyTerminated(reasonText:killedCount:)`, `.notifyBackgrounded(targetName:)`;
+  `UserNotificationGuardNotifier.activate()`, `.onOpen` (tap → open popup)
 
 ## Dependencies
 - `WetoCore`: `GuardPolicy`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`
 - `WetoSystem` protocols (injected, mocked in tests): `NetworkSnapshotReading`, `NetworkEventSourcing`,
-  `GeoProbing`, `ProcessLocating`, `ProcessKilling`, `TargetResolving`, `SecretStoring`, `HTTPFetching`
+  `GeoProbing`, `ProcessLocating`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`,
+  `TargetResolving`, `SecretStoring`, `HTTPFetching`
+- `StoppedLedgerPersisting` (injected, mocked in tests as `InMemoryStoppedLedger`)
 - `UpdateKit` / `UpdateKitUI`: `UpdateController`, `HelperUpdateInstaller`, `UserDefaultsUpdateStore`,
   `UpdateWindowPresenter` (see `modules/update-kit.md`)
 - Frameworks: `AppKit` (`NSWorkspace.open`, bundle paths), `UserNotifications`, `Observation`
@@ -68,8 +103,14 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Side effects
 <!-- generated, verify -->
-- Kills processes: `ProcessEnforcer.enforce` → `ProcessKilling.kill(pids:)`, driven from
-  `GuardVM.apply(.kill)` and from the 250 ms watchdog while state is `.unsafe`.
+- Signals processes: `ProcessEnforcer.pause(_:)` → `ProcessSignaling.send(.stop, …)` in
+  `PausePlan.stopOrder`; `.terminate(_:)` → `.send(.kill, …)` for matched pids and `.send(.resume, …)`
+  for anyone in the stopped ledger that no longer matches (a rule change or the shell of a target
+  under `.danger` — leaving it stopped would freeze it until the next weto launch); `.resume()` →
+  `.send(.resume, …)` over the whole ledger, reversed. Driven from `GuardVM.applyCurrentAction`
+  (`phase.action`: `.pause`/`.terminate`) and from the 250 ms watchdog while paused or unsafe.
+- Writes `stopped.json` on every ledger `add`/`remove`/`clear` — atomic temp+rename, same pattern
+  as the journals.
 - `UserDefaults` writes on every settings setter (write-through, no batching) and on every
   journal `record`/`clear`.
 - Keychain write on `setIPInfoToken`; `Maintenance.uninstall` writes `nil` to the same account.
@@ -209,14 +250,47 @@ this layer decides *when* to ask and *what to do* with the answer.
   which also clears `lastReading`, since the popup falls back to it): a dash is more honest
   than someone else's country. Such a probe never softens the verdict.
 
+- **A pause episode's staleness is captured once, at open, and survives resolution.**
+  `pauseTargets()` reads `controller.lastStaleness` into `pauseStaleness` only when
+  `pauseEpisodeID` is still `nil` (the episode is new); `resolvePauseEpisode` reuses that same
+  stored value for the `.refine` call, never re-asking the controller — outside `.paused` the
+  controller answers `nil`, and a safe resume would otherwise silently erase the freshness
+  diagnosis from an already-written record (`GuardVMTests.test_a_bad_result_on_a_cold_start_pauses…`
+  asserts it survives).
+- **The stopped ledger is the only thing standing between a weto crash and a target frozen
+  forever.** `GuardVM.start()` calls `enforcer.resumeOrphans()` once, before the event source and
+  the tick loop start. A clean or absent `stopped.json` needs no journal entry — an empty read is a
+  legitimate "nothing to resume" — but a *corrupted* file writes `CheckEvent(trigger:
+  .startupRecovery, outcome: .ledgerUnreadable)`: the obligation ("SIGCONT whoever we stopped last
+  time") went unfulfilled, and the check-journal is the only record of it, since the kill-journal
+  only ever hears about processes actually terminated. `resumeOrphans` never trusts a bare pid: an
+  entry only resumes if the live process at that pid is still stopped *and* still the same
+  `executablePath` — pid reuse must not `SIGCONT` a stranger.
+- **Two notifications, two purposes, one delegate.** `notifyTerminated` is the pre-existing "your
+  targets died" banner; `notifyBackgrounded` exists because a paused terminal target that loses its
+  foreground job otherwise just vanishes from its terminal with no explanation — the notification
+  is the only place the user learns `fg` will bring it back. Both must show even while weto's own
+  window has focus (`presentationWhileActive`), because "the popup is open" is exactly when the
+  user is looking for the explanation, not when they've stopped caring.
+- **Not every check is worth a journal entry.** `CheckEvent.isWorthRecording`: a button press, a
+  path change, a settings edit or the crash-recovery check always write; the 5 s geo schedule
+  writes only a *failed* request — a successful routine tick says nothing new, and recording every
+  scheduled attempt would evict the one entry the check-journal exists for (the real failure) from
+  its 50-slot ring within about four minutes.
+
 ## Failure hotspots
 <!-- generated, verify -->
 - `LaunchAgentController.enable/disable` — the self-bootout trap above; cost the project two
   releases. Any change here needs `LaunchAgentControllerTests` (`…does_not_boot_out_the_job_the_app_itself_is`).
-- `GuardController.beginNetworkVerification` / `applyLatestNetworkOutcome` — revision bookkeeping;
-  errors here show up as either kills on a healthy VPN or a stale `safe` after the VPN dropped.
-- `GuardVM.enforce` journal dedup — the classic regression is `verificationPending` swallowing the
-  real reason, or a relaunch an hour later leaving no trace.
+- `GuardController.evaluate` / `applyLatestNetworkOutcome` — revision bookkeeping; errors here show
+  up as either kills on a healthy VPN or a stale `safe` after the VPN dropped. Since the pause
+  model landed, a lost verdict routes through `GuardMachine.apply(.verdictLost)` — a wrong branch
+  there shows up as targets pausing when they should keep running, or the reverse.
+- `GuardVM.applyCurrentAction` journal dedup (`pauseTargets`/`terminateTargets`) — the classic
+  regression is a stale reason swallowing the real one, a relaunch leaving no trace, or a pause
+  episode's `diagnostics.staleness` getting recomputed at resolution instead of reused from the
+  moment the episode opened (`resolvePauseEpisode` must reuse `pauseStaleness`, not call
+  `controller.lastStaleness` again — the latter is `nil` outside `.paused`).
 - Task lifecycles (`tickTask`, `watchdogTask`, `probeTask`, `periodicTask`):
   leaked loops keep killing after `stop()`; over-eager cancellation silently disables the
   watchdog or the install-outcome poll (the latter's symptom is an eternal install spinner).
@@ -232,6 +306,9 @@ this layer decides *when* to ask and *what to do* with the answer.
   mutates settings again would recurse.
 
 ## Related docs
-- `.claude/rules/ARCHITECTURE.md` — key contracts (policy order, fail-closed, autostart)
+- `.claude/rules/ARCHITECTURE.md` — key contracts (policy order, fail-closed, autostart, pause)
 - `features/geo-whitelist.md` — the allowed-exits list this store persists
-- `docs/design-system.md` — for the UI that consumes `StatusPresentation`
+- `features/pause-instead-of-kill.md` — pause/resume path end to end
+- `decisions/pause-instead-of-kill.md` — why unproven pauses instead of killing
+- `docs/design-system.md` — for the UI that consumes `StatusPresentation`, the pause badge and
+  the "Показать терминал" affordance

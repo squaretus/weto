@@ -18,11 +18,17 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `macos/Sources/WetoSystem/NetworkPathReporter.swift` (also `NetworkPathReporting`)
 - `macos/Sources/WetoSystem/HTTPFetching.swift`
 - `macos/Sources/WetoSystem/ProcessRegistry.swift`
-- `macos/Sources/WetoSystem/ProcessKiller.swift`
+- `macos/Sources/WetoSystem/ProcessSignaler.swift` — `ProcessSignaling` (was `ProcessKilling`):
+  `send(_:to:)` delivers `.kill`/`.stop`/`.resume` strictly in list order — pause's
+  shell-then-target-then-descendants contract lives on this boundary, not in the caller
+- `macos/Sources/WetoSystem/TerminalLocator.swift` — `TerminalLocating`: finds the `.app` that
+  hosts a backgrounded terminal target's pid, to bring it back to the user's attention. Never
+  types `fg` for them — only Terminal.app/iTerm2 support that via AppleScript, and not every
+  emulator does
 - `macos/Sources/WetoSystem/TargetResolver.swift`
 - `macos/Sources/WetoSystem/KeychainStore.swift` (also `SecretStoring`, `SecretStoreError`, `TokenBox`)
 - `macos/Sources/WetoSystem/FlagImageStore.swift`
-- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests}.swift`
+- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests,ProcessSignalerTests,TerminalLocatorTests,HTTPFetcherPhasesTests}.swift`
 
 ## Entry points
 - `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; kernel route probe.
@@ -38,7 +44,10 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `HTTPFetchError` carries the response for the same reason: the body of a 429 is what explains it.
 - `ProcessLocating.allProcesses(includeArguments:) → [ProcessSnapshot]`,
   `.allProcesses()` (convenience, argv off), `.bundlePath(forBundleID:) → String?`
-- `ProcessKilling.kill(pids: [Int32]) → [KillResult]` (`KillResult.isTerminated`)
+- `ProcessSignaling.send(_ signal: ProcessSignal, to: [Int32]) → [SignalResult]` —
+  `.kill`/`.stop`/`.resume` (`SignalResult.isDelivered`, true for `nil` and `ESRCH` alike)
+- `TerminalLocating.activateTerminal(owning pid:in processes:) → Bool` — brings the hosting
+  `.app` to the front; `TerminalLocator.hostApplicationPID(of:in:)` is the pure lookup half
 - `TargetResolving.resolve(_ entry: String) → TargetRule?`
 - `SecretStoring.read(account:) → String?`,
   `.write(_:account:) → Result<Void, SecretStoreError>`
@@ -62,7 +71,10 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 
 ## Side effects
 <!-- generated, verify -->
-- Sends SIGKILL (no SIGTERM stage) to arbitrary pids via `ProcessKiller`.
+- Sends `SIGKILL`, `SIGSTOP` or `SIGCONT` (no `SIGTERM` stage) to arbitrary pids via
+  `ProcessSignaler`, strictly in the order the caller lists them.
+- `TerminalLocator.activateTerminal` calls `NSRunningApplication.activate()` — brings a window
+  to the front, the only UI-adjacent side effect below `WetoShared`.
 - Network calls per `GeoProbe.probe()`: one ipinfo request, plus a confirmation request only when
   the address is new or the soft ceiling (60 s) has passed. When ipinfo refuses, one request to the
   geojs "who am I" endpoint instead — the address is what proves the verdict may be reused.
@@ -118,8 +130,12 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   substring matching killed look-alike wrappers and processes that merely mentioned the path.
 - **argv buffer size is asked from the kernel** (`sysctl` with `nil` buffer) and capped at
   `ARG_MAX`, not preallocated — a fixed 256 KiB per process cost tens of MB on the hot path.
-- **`ESRCH` counts as terminated.** `KillResult.isTerminated` is true for `nil` and `ESRCH`:
-  a process that vanished between enumeration and kill is a success, not a failure.
+- **`ESRCH` counts as delivered.** `SignalResult.isDelivered` is true for `nil` and `ESRCH` alike,
+  for every signal (`kill`, `stop`, `resume`): a process that vanished between enumeration and
+  the signal is a success, not a failure.
+- **A pid is not an identity across a pause.** The stopped-process ledger (`weto-shared.md`)
+  pairs pid with `executablePath` before trusting "already stopped" or resuming on a crash
+  restart — pid reuse would otherwise SIGCONT a stranger.
 - **`TargetResolver` resolves symlinks into `path` and keeps the original candidate in
   `launchPaths`.** `TargetRule.init` merges `path` into `launchPaths`, so both spellings match.
   This is what makes `/usr/bin/nano` work when `proc_pidpath` reports `pico`.
@@ -204,3 +220,4 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `bugs/tunnel-without-network-service.md` — why the route owner is asked of the kernel
 - `decisions/vpn-app-instead-of-tunnel.md` — why there is no tunnel picker any more
 - `decisions/geo-confirmation-services.md` — the request budget this module spends
+- `decisions/pause-instead-of-kill.md` — the signal-order contract `ProcessSignaling` enforces
