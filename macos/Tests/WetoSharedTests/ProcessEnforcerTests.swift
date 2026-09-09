@@ -338,6 +338,43 @@ final class ProcessEnforcerTests: XCTestCase {
         XCTAssertTrue(ledger.pids.isEmpty)
     }
 
+    /// Запись в учёте перестаёт совпадать ни с одним правилом между паузой и завершением —
+    /// вторую цель сняли с охраны (чекбокс в настройках), пока её процесс стоял. Раньше
+    /// `terminate` продолжал только шеллы: такая запись осталась бы замороженной до
+    /// следующего запуска weto. Критерий приёмки — «Пауза» → «Опасно» никого не оставляет
+    /// замороженным: SIGCONT обязан дойти до любой записи, не попавшей под SIGKILL.
+    func test_terminate_resumes_a_ledger_entry_that_stopped_matching_any_rule() {
+        let otherEntry = "/Users/me/.local/bin/other"
+        let otherPath = "/usr/local/bin/other-tool"
+        let other = ProcessSnapshot(pid: 400, parentPID: 1, executablePath: otherPath)
+
+        let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        let clock = TestClock()
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.targets = [entry, otherEntry]
+        let enforcer = ProcessEnforcer(
+            settings: settings,
+            resolver: MutableResolver([entry: oldVersionPath, otherEntry: otherPath]),
+            locator: MutableProcessLocator([shell, target, child, other]),
+            signaler: signaler,
+            ledger: ledger,
+            now: { clock.now }
+        )
+        _ = enforcer.pause(enforcer.scan())
+        XCTAssertEqual(ledger.pids, [100, 400, 200, 201], "вторая цель встала под паузу вместе с первой")
+
+        settings.targets = [entry] // вторую цель сняли с охраны, пока она стояла
+
+        let result = enforcer.terminate(enforcer.scan())
+
+        XCTAssertEqual(result.matched.map(\.pid), [200, 201], "снятая цель под правило уже не попадает")
+        XCTAssertEqual(signaler.batches.map(\.signal), [.stop, .kill, .resume])
+        XCTAssertEqual(signaler.batches[1].pids, [200, 201], "SIGKILL — только тем, кто всё ещё под правилом")
+        XCTAssertEqual(signaler.batches[2].pids, [400, 100],
+                       "SIGCONT — и шеллу, и записи, переставшей совпадать с правилом")
+        XCTAssertTrue(ledger.pids.isEmpty)
+    }
+
     /// Цель, которую не удалось завершить (EPERM), остаётся в учёте: штатный выход её продолжит.
     func test_a_refused_kill_keeps_the_process_in_the_ledger() {
         let signaler = RecordingSignaler(); signaler.refused = [201]

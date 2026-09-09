@@ -1055,8 +1055,8 @@ final class GuardVMTests: XCTestCase {
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
 
-        XCTAssertNotEqual(
-            h.log.events.first?.diagnostics?.verdictOrigin, .current,
+        XCTAssertNil(
+            h.log.events.first?.diagnostics?.verdictOrigin,
             "эпизод вызван сменой пути, а не только что ответившей пробой"
         )
         // Смена пути гасит показания целиком (`onReport(nil)`): экран не имеет права

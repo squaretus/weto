@@ -63,6 +63,11 @@ final class GuardController {
     private struct EstablishedReading {
         let reading: GeoReading
         let fingerprint: String
+        /// Ревизия настроек в момент, когда вердикт установился — единственный способ
+        /// сказать позже, изменились ли настройки со времени этого вердикта. Без неё
+        /// `previousRevision` в объявлении потери пришлось бы подделывать текущей
+        /// ревизией, и причина `configurationAndNetworkChanged` не приходила бы никогда.
+        let revision: Int
     }
 
     private struct AnnouncedLoss: Equatable {
@@ -110,6 +115,10 @@ final class GuardController {
         // Иначе повод снятой пробы остался бы «кнопкой» навсегда и блокировал
         // автоматические пробы после следующего старта.
         pendingTrigger = nil
+        // Иначе первый emit следующей жизни мог бы быть погашен сравнением
+        // с фазой и объявлением потери из прошлой жизни, а не из этой.
+        lastEmittedPhase = nil
+        announcedLoss = nil
     }
 
     func awaitPendingProbe() async {
@@ -163,6 +172,7 @@ final class GuardController {
 
         // Вердикт про этот путь есть — прошлая потеря закрыта. Забыть её обязательно:
         // иначе возврат на тот же чужой путь уже не объявлялся бы вовсе.
+        let returnedFromAnnouncedLoss = announcedLoss != nil
         announcedLoss = nil
 
         // VPN-приложение вернулось при действующем вердикте — переоценка без пробы.
@@ -174,13 +184,29 @@ final class GuardController {
         }
 
         emit(machine.apply(.tick, at: moment), origin: .established)
+
+        // Мигающая сеть вернулась на путь, про который вердикт есть, а цели всё ещё
+        // не работают: `.tick` выше пробы не просит, и без явного запроса здесь
+        // охрана дождалась бы только расписания (5 с) — на каждый флап заново.
+        // Только на самом возврате, не на каждом такте: частота пробы иначе слилась бы
+        // с частотой опроса системы (раз в секунду).
+        if returnedFromAnnouncedLoss {
+            probeIfStanding(trigger: probeTrigger)
+        }
+    }
+
+    /// Цели ещё не работают (пауза не снята или доказательство не местное) — без
+    /// явного запроса охрана дождалась бы только расписания (5 с).
+    private func probeIfStanding(trigger: CheckEvent.Trigger) {
+        guard machine.phase.action != .run else { return }
+        startProbe(after: 0, trigger: trigger)
     }
 
     /// Объявление потери вердикта: разбор свежести живёт ровно на время объявления,
     /// потолок паузы считается тем же тактом, наружу уходит один эффект.
     private func announceLoss(fingerprint: String, at moment: Date) {
         let staleness = VerdictStaleness(
-            previousRevision: established == nil ? nil : revision,
+            previousRevision: established?.revision,
             revision: revision,
             previousFingerprint: established?.fingerprint,
             fingerprint: fingerprint
@@ -245,6 +271,7 @@ final class GuardController {
             isEnabled: settings.isEnabled, vpn: vpnAppStatus(), geo: .resolved(established.reading), config: config
         ))
         emit(machine.apply(.reassessment(decision, reading: established.reading), at: now()), origin: .established)
+        probeIfStanding(trigger: .settingsChange)
     }
 
     /// Запрос уходит один и доводится до конца.
@@ -326,7 +353,7 @@ final class GuardController {
 
         let geo = admissibleOutcome(of: report, fingerprint: fingerprint)
         if case .resolved(let reading) = geo {
-            established = EstablishedReading(reading: reading, fingerprint: fingerprint)
+            established = EstablishedReading(reading: reading, fingerprint: fingerprint, revision: revision)
             announcedLoss = nil
         }
         lastSnapshot = snapshot
