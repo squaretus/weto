@@ -8,9 +8,10 @@ import WetoSystem
 ///
 /// Три инварианта:
 ///
-/// 1. **Без доказательства — пауза, не завершение.** Нет вердикта про текущий путь — цели стоят;
-///    молчание сервисов при установленном вердикте терпится N проб, потом пауза; потолок паузы —
-///    завершение. Переходы считает `GuardMachine`, здесь только входы.
+/// 1. **Пауза начинается с результата, а не с его ожидания.** Нет вердикта про текущий путь —
+///    объявляем потерю и просим пробу, а цели работают: решает ответ. Первый же ответ
+///    «не доказано» ставит на паузу — счёта неудачных проб нет; потолок паузы — завершение.
+///    Переходы считает `GuardMachine`, здесь только входы.
 /// 2. **Устаревший результат не возвращает safe.** У каждой пробы своя ревизия и отпечаток на старте;
 ///    результат применяется, только если оба ещё актуальны.
 /// 3. **Свежесть вердикта — только отпечаток выхода.** Правка настроек вердикт не обесценивает:
@@ -40,9 +41,11 @@ final class GuardController {
     /// вердикта от неё больше не зависит.
     private(set) var revision = 0
 
-    /// Разбор потери свежести — только для той единственной записи журнала, которую эта потеря
-    /// и вызвала. Взводится перед объявлением и гасится сразу после него: не погашенный, он
-    /// приклеивался бы и к эпизоду таймаута через минуты после того, как вердикт устоялся.
+    /// Разбор свежести — только для той единственной записи журнала, которую этот результат
+    /// и завёл: эпизод начинается плохим результатом пробы, и разбор описывает состояние
+    /// выхода ровно на тот момент. Взводится перед применением вердикта и гасится сразу
+    /// после: не погашенный, он приклеивался бы и к эпизоду таймаута через минуты после
+    /// того, как вердикт устоялся.
     private(set) var lastStaleness: VerdictStaleness?
     private(set) var lastSnapshot: NetworkSnapshot?
 
@@ -54,10 +57,13 @@ final class GuardController {
     /// Единственный носитель свежести: совпал отпечаток — вердикт про этот путь есть.
     private var established: EstablishedReading?
 
-    /// Потеря вердикта, уже объявленная редьюсеру. Повтор того же объявления в него не идёт:
-    /// у «Проверки» он был бы пустым (редьюсер отбивает одинаковую причину сам), а «Опасно»
-    /// по истёкшему потолку он снимал бы каждую секунду — отпечаток-то так и остаётся чужим, —
-    /// и обе фазы мигали бы по кругу, начиная отсчёт заново.
+    /// Потеря вердикта, про которую показания на экране уже погашены.
+    ///
+    /// Редьюсеру повтор объявления не мешает — он идемпотентен: одинаковая причина
+    /// не меняет «Проверку», под паузой «вердикта нет» не перезапускает отсчёт,
+    /// а «Опасно» не смягчает. Но гасить показания второй раз нельзя: такт идёт раз
+    /// в секунду и затирал бы свежий отчёт пробы, которая ответила уже про этот путь, —
+    /// а попап обязан показать, кто именно молчал.
     private var announcedLoss: AnnouncedLoss?
 
     private struct EstablishedReading {
@@ -162,9 +168,10 @@ final class GuardController {
         }
 
         guard hasVerdictForPath, let established else {
-            // Вердикта про этот путь нет: пауза немедленно, без терпимости, и проба.
-            // Потолок считает только `.tick`, поэтому он идёт тем же тактом: без него
-            // «Проверка», в которую никто не отвечает, стояла бы вечно.
+            // Вердикта про этот путь нет: объявляем потерю и просим пробу — цели при этом
+            // работают, паузу принесёт только плохой результат. Потолок считает лишь `.tick`,
+            // поэтому он идёт тем же тактом: пауза, начатая до смены пути, иначе не доехала бы
+            // до завершения — «вердикта нет» её не снимает и не продлевает.
             announceLoss(fingerprint: fingerprint, at: moment)
             startProbe(after: debounceInterval, trigger: probeTrigger)
             return
@@ -202,33 +209,34 @@ final class GuardController {
         startProbe(after: 0, trigger: trigger)
     }
 
-    /// Объявление потери вердикта: разбор свежести живёт ровно на время объявления,
-    /// потолок паузы считается тем же тактом, наружу уходит один эффект.
+    /// Объявление потери вердикта: цели не трогаем, потолок паузы считается тем же
+    /// тактом, наружу уходит один эффект.
+    ///
+    /// Разбор свежести здесь не взводится: записи журнала эта потеря не заводит —
+    /// заводит её плохой результат пробы, и разбор считается там, где применяется.
     private func announceLoss(fingerprint: String, at moment: Date) {
-        let staleness = VerdictStaleness(
+        let staleness = stalenessNow(fingerprint: fingerprint)
+        let loss = AnnouncedLoss(cause: staleness.cause, fingerprint: fingerprint)
+
+        // Показания гасим один раз на потерю: они про путь, которого уже нет.
+        if announcedLoss != loss, established != nil { onReport(nil) }
+        announcedLoss = loss
+
+        let lost = machine.apply(.verdictLost(staleness.cause), at: moment)
+        let ceiling = machine.apply(.tick, at: moment)
+        emit(ceiling == .none ? lost : ceiling, origin: nil)
+    }
+
+    /// Чем прежний вердикт перестал описывать наш выход — на этот самый момент.
+    /// Считается из установленного вердикта и текущего отпечатка, а не запоминается:
+    /// разбор обязан описывать момент своего применения, а не прошлое объявление.
+    private func stalenessNow(fingerprint: String) -> VerdictStaleness {
+        VerdictStaleness(
             previousRevision: established?.revision,
             revision: revision,
             previousFingerprint: established?.fingerprint,
             fingerprint: fingerprint
         )
-        let loss = AnnouncedLoss(cause: staleness.cause, fingerprint: fingerprint)
-
-        // Повтор того же объявления редьюсеру не идёт — но только пока цели и так
-        // не работают. Работающие цели при отсутствии вердикта про их путь — это утечка,
-        // и такое совпадение пары объявляется заново, чем бы оно ни было вызвано.
-        if announcedLoss == loss, machine.phase.action != .run {
-            // Редьюсеру нечего сказать, но потолок обязан идти.
-            emit(machine.apply(.tick, at: moment), origin: nil)
-            return
-        }
-        announcedLoss = loss
-
-        lastStaleness = staleness
-        if established != nil { onReport(nil) }
-        let lost = machine.apply(.verdictLost(staleness.cause), at: moment)
-        let ceiling = machine.apply(.tick, at: moment)
-        emit(ceiling == .none ? lost : ceiling, origin: nil)
-        lastStaleness = nil
     }
 
     /// Проверка по кнопке: локальное доказательство применяется сразу, запрос уходит всегда.
@@ -374,7 +382,17 @@ final class GuardController {
 
         let decision = GuardPolicy.decide(GuardSignals(isEnabled: settings.isEnabled, vpn: vpn, geo: geo, config: config))
         let origin: VerdictOrigin? = geo.isResolved ? .current : (established == nil ? nil : .established)
+
+        // Этот ответ откроет эпизод паузы — значит журналу нужен разбор свежести:
+        // что было с выходом в момент, когда цели встали. Разбор есть только тогда,
+        // когда прежний вердикт правда перестал описывать наш выход: молчание сервисов
+        // при неизменном отпечатке свежести не теряет, и `nil` там — ответ, а не пробел
+        // (состояние выхода в этот момент показания несут отдельными полями).
+        if case .unproven = decision, established?.fingerprint != fingerprint {
+            lastStaleness = stalenessNow(fingerprint: fingerprint)
+        }
         emit(machine.apply(.verdict(decision, geo: geo), at: now()), origin: origin)
+        lastStaleness = nil
     }
 
     /// Запись о состоявшейся пробе: показания и трассы сервисов как есть.
