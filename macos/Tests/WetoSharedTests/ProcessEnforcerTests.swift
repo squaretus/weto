@@ -62,6 +62,24 @@ private final class SilentSignaler: ProcessSignaling, @unchecked Sendable {
     }
 }
 
+/// Записывающий двойник: фиксирует порядок и содержимое каждой партии сигналов,
+/// а не только итоговый результат — контракт порядка иначе доказать нельзя.
+private final class RecordingSignaler: ProcessSignaling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [(signal: ProcessSignal, pids: [Int32])] = []
+    var refused: Set<Int32> = []
+
+    var batches: [(signal: ProcessSignal, pids: [Int32])] {
+        lock.lock(); defer { lock.unlock() }
+        return stored
+    }
+
+    func send(_ signal: ProcessSignal, to pids: [Int32]) -> [SignalResult] {
+        lock.lock(); stored.append((signal, pids)); let refused = self.refused; lock.unlock()
+        return pids.map { SignalResult(pid: $0, errorCode: refused.contains($0) ? EPERM : nil) }
+    }
+}
+
 /// Часы под управлением теста: обновление правил привязано ко времени,
 /// а не к числу обходов процессов.
 private final class TestClock: @unchecked Sendable {
@@ -101,18 +119,31 @@ final class ProcessEnforcerTests: XCTestCase {
         targets: [String],
         resolver: TargetResolving,
         locator: ProcessLocating,
-        clock: TestClock
+        clock: TestClock,
+        signaler: ProcessSignaling = SilentSignaler(),
+        ledger: StoppedLedger? = nil
     ) -> ProcessEnforcer {
+        let ledger = ledger ?? StoppedLedger(storage: InMemoryStoppedLedger())
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.targets = targets
         return ProcessEnforcer(
             settings: settings,
             resolver: resolver,
             locator: locator,
-            signaler: SilentSignaler(),
+            signaler: signaler,
+            ledger: ledger,
             now: { clock.now }
         )
     }
+
+    // Дерево переднего задания из PausePlannerTests: интерактивный шелл, его цель
+    // и потомок цели — ровно тот случай, где порядок сигналов доказывает контракт.
+    private let shell = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                        processGroup: 100, terminalForegroundGroup: 200)
+    private let target = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/Users/me/.local/share/claude/versions/2.1.227",
+                                         processGroup: 200, terminalForegroundGroup: 200)
+    private let child = ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                                        processGroup: 200, terminalForegroundGroup: 200)
 
     /// Бинарник обновился, симлинк указывает на новую версию — цель обязана
     /// подтянуться сама, без повторного добавления руками.
@@ -163,7 +194,7 @@ final class ProcessEnforcerTests: XCTestCase {
         clock.advance(by: Constants.targetRuleRefreshSeconds)
 
         XCTAssertEqual(
-            enforcer.enforce(enforcer.scan()).matched.map(\.pid),
+            enforcer.terminate(enforcer.scan()).matched.map(\.pid),
             [501],
             "процесс прежней версии обязан завершаться и после переезда правила"
         )
@@ -191,7 +222,7 @@ final class ProcessEnforcerTests: XCTestCase {
         clock.advance(by: Constants.targetRuleRefreshSeconds)
 
         XCTAssertEqual(
-            enforcer.enforce(enforcer.scan()).matched.map(\.pid),
+            enforcer.terminate(enforcer.scan()).matched.map(\.pid),
             [501],
             "цель, переставшая разрешаться, не имеет права оставить процесс без охраны"
         )
@@ -222,5 +253,106 @@ final class ProcessEnforcerTests: XCTestCase {
         _ = enforcer.scan()
 
         XCTAssertEqual(resolver.resolveCount, afterFirstScan)
+    }
+
+    func test_pause_stops_shell_then_target_then_child_and_records_them() {
+        let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: MutableProcessLocator([shell, target, child]), clock: TestClock(),
+                                    signaler: signaler, ledger: ledger)
+
+        let outcome = enforcer.pause(enforcer.scan())
+
+        XCTAssertEqual(signaler.batches.map(\.signal), [.stop])
+        XCTAssertEqual(signaler.batches.first?.pids, [100, 200, 201])
+        XCTAssertEqual(outcome.fresh.map(\.pid), [200, 201], "шелл — не цель и в журнал не идёт")
+        XCTAssertEqual(ledger.pids, [100, 200, 201])
+        XCTAssertEqual(ledger.entries.first?.isShell, true)
+    }
+
+    /// Второй обход под паузой не шлёт SIGSTOP уже стоящим — только новорождённым.
+    func test_a_second_sweep_stops_only_newcomers() {
+        let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        let locator = MutableProcessLocator([shell, target])
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: locator, clock: TestClock(), signaler: signaler, ledger: ledger)
+        _ = enforcer.pause(enforcer.scan())
+
+        locator.replace(with: [shell, target, child])
+        let second = enforcer.pause(enforcer.scan())
+
+        XCTAssertEqual(signaler.batches.last?.pids, [201])
+        XCTAssertEqual(second.fresh.map(\.pid), [201])
+    }
+
+    func test_resume_walks_the_ledger_backwards_and_clears_it() {
+        let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: MutableProcessLocator([shell, target, child]), clock: TestClock(),
+                                    signaler: signaler, ledger: ledger)
+        _ = enforcer.pause(enforcer.scan())
+
+        _ = enforcer.resume()
+
+        XCTAssertEqual(signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(signaler.batches.last?.pids, [201, 200, 100], "цель раньше шелла")
+        XCTAssertTrue(ledger.pids.isEmpty)
+    }
+
+    /// Завершение стоящих целей: SIGKILL целям, SIGCONT шеллу — иначе терминал остаётся мёртвым.
+    func test_terminate_kills_targets_and_releases_their_shell() {
+        let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: MutableProcessLocator([shell, target, child]), clock: TestClock(),
+                                    signaler: signaler, ledger: ledger)
+        _ = enforcer.pause(enforcer.scan())
+
+        let result = enforcer.terminate(enforcer.scan())
+
+        XCTAssertEqual(Set(result.matched.map(\.pid)), [200, 201])
+        XCTAssertEqual(signaler.batches.map(\.signal), [.stop, .kill, .resume])
+        XCTAssertEqual(signaler.batches.last?.pids, [100])
+        XCTAssertTrue(ledger.pids.isEmpty)
+    }
+
+    /// Цель, которую не удалось завершить (EPERM), остаётся в учёте: штатный выход её продолжит.
+    func test_a_refused_kill_keeps_the_process_in_the_ledger() {
+        let signaler = RecordingSignaler(); signaler.refused = [201]
+        let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: MutableProcessLocator([shell, target, child]), clock: TestClock(),
+                                    signaler: signaler, ledger: ledger)
+        signaler.refused = []
+        _ = enforcer.pause(enforcer.scan())
+        signaler.refused = [201]
+
+        _ = enforcer.terminate(enforcer.scan())
+
+        XCTAssertEqual(ledger.pids, [201])
+    }
+
+    /// После падения: SIGCONT тем, кто стоит и остался тем же процессом; чужой pid не трогаем.
+    func test_orphans_are_resumed_only_when_still_stopped_and_the_same_executable() {
+        let ledgerStorage = InMemoryStoppedLedger()
+        ledgerStorage.save([
+            StoppedProcess(pid: 200, executablePath: target.executablePath, stoppedAt: Date(), isShell: false),
+            StoppedProcess(pid: 201, executablePath: "/usr/bin/node", stoppedAt: Date(), isShell: false),
+            StoppedProcess(pid: 100, executablePath: "/bin/zsh", stoppedAt: Date(), isShell: true),
+        ])
+        let signaler = RecordingSignaler()
+        let alive = [
+            ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh", isStopped: true),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: target.executablePath, isStopped: true),
+            ProcessSnapshot(pid: 201, parentPID: 1, executablePath: "/usr/bin/python3", isStopped: true), // pid переиспользован
+        ]
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: MutableProcessLocator(alive), clock: TestClock(),
+                                    signaler: signaler, ledger: StoppedLedger(storage: ledgerStorage))
+
+        enforcer.resumeOrphans()
+
+        XCTAssertEqual(signaler.batches.first?.signal, .resume)
+        XCTAssertEqual(signaler.batches.first?.pids, [200, 100], "цель раньше шелла, чужой pid пропущен")
+        XCTAssertEqual(ledgerStorage.load(), .entries([]))
     }
 }

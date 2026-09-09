@@ -116,7 +116,11 @@ public final class GuardVM {
             settings: settings,
             resolver: resolver,
             locator: locator,
-            signaler: killer
+            signaler: killer,
+            // Учёт остановленных подключается целиком в задаче 15: до тех пор пауза
+            // в этом сторожевом цикле не вызывается, а `terminate` учётом не пользуется
+            // при пустом состоянии.
+            ledger: StoppedLedger(storage: InMemoryStoppedLedger())
         )
 
         self.controller = GuardController(
@@ -353,7 +357,7 @@ public final class GuardVM {
     }
 
     private func enforce(reasonText: String, staleness: VerdictStaleness? = nil) {
-        let outcome = enforcer.enforce(currentScan ?? enforcer.scan())
+        let outcome = enforcer.terminate(currentScan ?? enforcer.scan())
         let matched = outcome.matched
         guard !matched.isEmpty else { return }
 
