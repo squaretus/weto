@@ -34,14 +34,18 @@ public enum GuardPhase: Equatable, Sendable {
         }
     }
 
+    /// Заголовок отвечает на «я защищён?», а не называет причину: причина — в строке
+    /// объяснения (`StatusPresentation.explanation`), не здесь. Поэтому «На страже»
+    /// и «Помехи» из прежней версии слились в одно слово: степень уверенности у обеих —
+    /// «цели работают», и разница — в улике снизу и в цвете щита, а не в заголовке.
     public var title: String {
         switch self {
-        case .disabled: return "Выключено"
-        case .verifying: return "Проверка"
+        case .disabled: return "Охрана выключена"
+        case .verifying: return "Проверяю выход"
         case .protected: return "На страже"
-        case .interference: return "Помехи"
-        case .paused: return "Пауза"
-        case .danger: return "Опасно"
+        case .interference: return "На страже"
+        case .paused: return "Выход не подтверждён"
+        case .danger: return "Небезопасно"
         }
     }
 

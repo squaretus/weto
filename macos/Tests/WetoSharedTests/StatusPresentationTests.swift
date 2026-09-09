@@ -26,15 +26,16 @@ final class StatusPresentationTests: XCTestCase {
     /// Заголовок статуса — это состояние охраны, а не причина: шесть слов из `GuardPhase`,
     /// одинаковых на обеих платформах. Своего заголовка у представления больше нет.
     func test_phase_titles_are_the_six_canonical_words() {
-        XCTAssertEqual(GuardPhase.disabled.title, "Выключено")
-        XCTAssertEqual(GuardPhase.verifying(cause: .coldStart).title, "Проверка")
+        XCTAssertEqual(GuardPhase.disabled.title, "Охрана выключена")
+        XCTAssertEqual(GuardPhase.verifying(cause: .coldStart).title, "Проверяю выход")
         XCTAssertEqual(GuardPhase.protected(reading).title, "На страже")
         XCTAssertEqual(
             GuardPhase.interference(reading, reason: .confirmationUnavailable).title,
-            "Помехи"
+            "На страже",
+            "тот же заголовок, что у protected — разница в улике строкой ниже и в цвете щита"
         )
-        XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Пауза")
-        XCTAssertEqual(GuardPhase.danger(.pauseExpired).title, "Опасно")
+        XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Выход не подтверждён")
+        XCTAssertEqual(GuardPhase.danger(.pauseExpired).title, "Небезопасно")
     }
 
     // MARK: - Объяснение тремя строками (что сделано, почему, что дальше)
@@ -61,12 +62,22 @@ final class StatusPresentationTests: XCTestCase {
         }
     }
 
-    func test_verifying_explains_pause_reason_and_countdown() {
+    /// Проба в полёте, вердикта про текущий путь ещё нет — но цели работают: пауза
+    /// начинается с плохого результата, а не с его ожидания. Ни «на паузе», ни отсчёта.
+    func test_verifying_explains_the_lost_verdict_while_targets_keep_running() {
         let e = StatusPresentation.explanation(for: .verifying(cause: .coldStart), remainingPause: 43)
-        XCTAssertEqual(e.title, "Проверка")
-        XCTAssertEqual(e.action, "Цели на паузе")
-        XCTAssertEqual(e.evidence, "Подключение ещё не проверено: вердикта ещё не было")
-        XCTAssertEqual(e.next, "Ждём подтверждения безопасного выхода, 43 с до завершения")
+        XCTAssertEqual(e.title, "Проверяю выход")
+        XCTAssertEqual(e.action, "Цели работают")
+        XCTAssertEqual(e.evidence, "Прежний вердикт не годится: вердикта ещё не было")
+        XCTAssertEqual(e.next, "Жду ответа сервисов о безопасности выхода")
+    }
+
+    /// «Проверяю выход» не читает часы вовсе: считать там нечего независимо от того,
+    /// что передали в `remainingPause` — отсчёт принадлежит одной только паузе.
+    func test_verifying_ignores_remaining_pause_entirely() {
+        let withDeadline = StatusPresentation.explanation(for: .verifying(cause: .coldStart), remainingPause: 43)
+        let withoutDeadline = StatusPresentation.explanation(for: .verifying(cause: .coldStart), remainingPause: nil)
+        XCTAssertEqual(withDeadline, withoutDeadline)
     }
 
     func test_protected_names_the_exit() {
@@ -77,22 +88,22 @@ final class StatusPresentationTests: XCTestCase {
     }
 
     /// Обещать «ещё N проб — и пауза» больше нечем: счёта неудачных проб у охраны нет,
-    /// и первый же неответ ставит на паузу. Поэтому строка «что дальше» у Помех говорит
-    /// про улику, а не про отсчёт, — и обещание проверяется прогоном настоящей машины:
-    /// «Помехи» существуют ровно на доказанной неизменности адреса, а неответ из них
-    /// уводит в паузу немедленно.
+    /// и первый же неответ ставит на паузу. Поэтому строка «что дальше» у интерференции
+    /// говорит про улику, а не про отсчёт, — и обещание проверяется прогоном настоящей
+    /// машины: доказанная неизменность адреса существует ровно до первого неответа,
+    /// который уводит в паузу немедленно.
     func test_interference_promises_no_countdown_because_silence_pauses_at_once() {
         var machine = GuardMachine(phase: .protected(reading))
         let detail = "таймаут запроса"
 
-        // Единственный вход в «Помехи»: ipinfo молчит, резерв назвал прежний адрес.
+        // Единственный вход сюда: ipinfo молчит, резерв назвал прежний адрес.
         XCTAssertEqual(machine.apply(.verdict(.safe, geo: .degraded(previous: reading, detail: detail)), at: t0), .none)
         XCTAssertEqual(machine.phase, .interference(reading, reason: .geoUnavailable(detail)))
         let e = StatusPresentation.explanation(for: machine.phase, remainingPause: nil)
-        XCTAssertEqual(e.title, "Помехи")
+        XCTAssertEqual(e.title, "На страже")
         XCTAssertEqual(e.action, "Цели работают")
         XCTAssertEqual(e.evidence, "Не удалось определить внешний адрес: таймаут запроса")
-        XCTAssertEqual(e.next, "Цели работают: адрес 203.0.113.28 доказанно тот же")
+        XCTAssertEqual(e.next, "Адрес 203.0.113.28 доказанно тот же — жду восстановления ipinfo")
 
         // Ответа нет вовсе — цели встают той же пробой, без всякого «ещё N».
         XCTAssertEqual(
@@ -106,7 +117,8 @@ final class StatusPresentationTests: XCTestCase {
 
     func test_paused_explains_the_ceiling() {
         let e = StatusPresentation.explanation(for: .paused(since: t0, reason: .confirmationUnavailable), remainingPause: 12)
-        XCTAssertEqual(e.action, "Цели на паузе")
+        XCTAssertEqual(e.title, "Выход не подтверждён")
+        XCTAssertEqual(e.action, "Цели остановлены")
         XCTAssertEqual(e.evidence, "Подтверждающие сервисы недоступны")
         XCTAssertEqual(e.next, "Ждём ответа сервисов, 12 с до завершения; возобновятся при подтверждении безопасного выхода")
     }
@@ -138,10 +150,10 @@ final class StatusPresentationTests: XCTestCase {
     }
 
     /// `remainingPause` может не подъехать вовремя (например, `pauseDeadline` ещё не выставлен) —
-    /// строка не имеет права падать или показывать отрицательное число.
+    /// строка паузы не имеет права падать или показывать отрицательное число.
     func test_countdown_survives_a_missing_deadline() {
-        let e = StatusPresentation.explanation(for: .verifying(cause: .coldStart), remainingPause: nil)
-        XCTAssertEqual(e.next, "Ждём подтверждения безопасного выхода, 0 с до завершения")
+        let e = StatusPresentation.explanation(for: .paused(since: t0, reason: .confirmationUnavailable), remainingPause: nil)
+        XCTAssertEqual(e.next, "Ждём ответа сервисов, 0 с до завершения; возобновятся при подтверждении безопасного выхода")
     }
 
     // MARK: - Видимость блока объяснения в попапе

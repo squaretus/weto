@@ -96,6 +96,13 @@ impl AppliedDecision {
     ///
     /// «Ipinfo недоступен» говорит пользователю, что чинить; «Сервис недоступен»
     /// не говорит ничего. Разница дешёвая, а польза ежедневная.
+    ///
+    /// `Kill` — единственная ветка, где заголовок дословно совпадает с macOS
+    /// (`GuardPhase.danger.title`): доказательство завершает цели и запрещает
+    /// запуск одинаково на обеих платформах, а `Pending`/`Unproven` здесь всё ещё
+    /// завершают цели вместо паузы (порт паузы на Linux не сделан), так что их
+    /// заголовки словами macOS «Проверяю выход»/«Выход не подтверждён» не называются —
+    /// это было бы неправдой о том, что происходит с целями.
     pub fn status_title(&self) -> &'static str {
         match self {
             AppliedDecision::Safe => "На страже",
@@ -104,7 +111,7 @@ impl AppliedDecision {
                 "Подтверждение недоступно"
             }
             AppliedDecision::Unproven(_) => "Ipinfo недоступен",
-            AppliedDecision::Kill(_) => "Цели завершены",
+            AppliedDecision::Kill(_) => "Небезопасно",
         }
     }
 }
@@ -312,7 +319,7 @@ mod tests {
         )));
 
         assert_eq!(guarded.title, "На страже");
-        assert_eq!(killed.title, "Цели завершены");
+        assert_eq!(killed.title, "Небезопасно");
         assert!(!guarded.subtitle.is_empty() && !killed.subtitle.is_empty());
     }
 
