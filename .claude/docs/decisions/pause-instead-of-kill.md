@@ -108,6 +108,8 @@ Consequences of the amendment:
 - `guard-transitions.json` moves to version 2: `case.tolerance` and `phase.failures` are gone,
   `phase.cause` is checked, and `verifying` may be a starting phase.
 - An episode of the journal cannot begin in «Проверка» any more, so `diagnostics.staleness`
-  does not reach a pause record until `GuardController`/`GuardVM` are adapted. The popup wording
-  for «Проверка» («Цели на паузе» plus a countdown) is likewise stale and is fixed by the
-  wording follow-up.
+  is computed where it is applied — at the bad result that opens the episode — and describes
+  the exit at that moment. It is absent when there was nothing to lose (the exit did not move
+  and the services simply went quiet); the exit itself is still in the record as its own
+  fields. The popup wording for «Проверка» («Цели на паузе» plus a countdown) remains stale
+  and is fixed by the wording follow-up.

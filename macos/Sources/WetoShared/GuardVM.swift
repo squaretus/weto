@@ -70,7 +70,7 @@ public final class GuardVM {
 
     // Пара «причина + pid»: тот же процесс по той же причине второй записи
     // не заводит, а новый — заводит всегда. Дедупликация только по pid съедала бы
-    // настоящую причину, пришедшую на смену «ещё не проверено».
+    // настоящую причину, пришедшую на смену прежней.
     @ObservationIgnored private var recordedKills: Set<RecordedKill> = []
 
     // Причины, уже описанные в журнале в рамках текущего небезопасного эпизода.
@@ -86,10 +86,10 @@ public final class GuardVM {
     // не допускает и при завершении стоявших целей. Поэтому pid из эпизода
     // при завершении новых записей не заводят — им дописывается исход.
     //
-    // Причина у эпизода одна в каждый момент, но не навсегда: пока цели стоят,
-    // редьюсер вправе сменить причину стояния (смена пути под паузой), и тогда
-    // весь эпизод уточняется до той причины, которая его держит, — вместе
-    // с разбором свежести. Уточняется, а не заводится заново: см. `refreshPauseEpisodeCause`.
+    // Причина у эпизода одна на всё стояние: цели ставит плохой результат пробы,
+    // и она же приходит с причиной. Сменить её, пока цели стоят, нечем — «вердикта
+    // нет» под паузой не меняет ни фазы, ни причины, ни отсчёта, — поэтому причина
+    // и разбор свежести снимаются один раз, при открытии эпизода, и живут до исхода.
     @ObservationIgnored private var pauseEpisodeID: UUID?
     @ObservationIgnored private var pausedEpisodePIDs: Set<Int32> = []
     @ObservationIgnored private var pauseStaleness: VerdictStaleness?
@@ -423,7 +423,6 @@ public final class GuardVM {
         case .pause, .terminate:
             startWatchdog()
         }
-        refreshPauseEpisodeCause()
         refreshRunningTargets()
     }
 
@@ -445,47 +444,24 @@ public final class GuardVM {
     }
 
     /// Причина эпизода паузы человеческим текстом: она же уходит в журнал.
-    private var pauseReasonText: String {
-        switch phase {
-        case .verifying(let cause): return "Подключение ещё не проверено: \(cause.displayText)"
-        case .paused(_, let reason): return reason.displayText
-        default: return phase.title
-        }
-    }
-
-    /// Разбор свежести есть только у стоящей фазы «вердикта нет»: у паузы по молчанию
-    /// сервисов вердикт как раз в силе, и терять ему нечего. Живёт он ровно на время
-    /// объявления потери, поэтому спрашивается у контроллера в тот же миг.
-    private var currentPauseStaleness: VerdictStaleness? {
-        if case .verifying = phase { return controller.lastStaleness }
-        return nil
-    }
-
-    /// Причина стояния способна смениться, пока цели стоят: смена пути под паузой
-    /// переводит «Паузу» в «Проверку», заново запускает отсчёт потолка и не даёт
-    /// никакого эффекта — цели и так стоят. Записи эпизода обязаны говорить то,
-    /// что держит их сейчас: иначе завершение по потолку дописывалось бы к записям
-    /// про давно прошедший таймаут, да ещё без разбора свежести, и по выгрузке
-    /// выходило бы, что путь не менялся вовсе.
     ///
-    /// Эпизод при этом один: процесс остановлен один раз, и второй набор записей
-    /// про те же pid был бы ложью. Уточняется весь эпизод разом — ровно затем
-    /// `refine` и заведён.
-    private func refreshPauseEpisodeCause() {
-        guard let episodeID = pauseEpisodeID, phase.action == .pause else { return }
-        let reason = pauseReasonText
-        let staleness = currentPauseStaleness
-        // Такт, подтверждающий прежнюю причину, разбора свежести не несёт —
-        // затирать им уже записанный нельзя.
-        guard reason != pauseEpisodeReason || (staleness != nil && staleness != pauseStaleness) else { return }
+    /// Стоящая фаза ровно одна, и приходит она с готовой причиной: «подключение ещё
+    /// не проверено» больше не бывает причиной стояния — до ответа пробы цели работают.
+    private var pauseReasonText: String {
+        if case .paused(_, let reason) = phase { return reason.displayText }
+        return phase.title
+    }
 
-        pauseEpisodeReason = reason
-        if let staleness { pauseStaleness = staleness }
-        eventLog.refine(
-            episodeID: episodeID,
-            reasonText: reason,
-            diagnostics: currentDiagnostics(staleness: pauseStaleness)
-        )
+    /// Разбор свежести спрашивается у контроллера ровно в тот миг, когда плохой результат
+    /// поставил цели: он взведён на время применения вердикта и сразу гаснет, поэтому
+    /// эпизоду достаётся разбор про его собственный момент, а не про давнюю смену пути.
+    ///
+    /// `nil` тут бывает и по делу: молчание сервисов при неизменном выходе свежести
+    /// не теряет, и вердикту нечего было терять. Состояние выхода в этот момент
+    /// показания несут отдельными полями.
+    private var currentPauseStaleness: VerdictStaleness? {
+        if case .paused = phase { return controller.lastStaleness }
+        return nil
     }
 
     private func pauseTargets() {
@@ -558,7 +534,7 @@ public final class GuardVM {
     }
 
     /// Исход эпизода паузы: записи те же, к ним дописывается, чем стояние кончилось.
-    /// Без исхода запись навсегда остаётся с «подключение ещё не проверено»,
+    /// Без исхода запись навсегда остаётся с отговоркой «сервисы не ответили»,
     /// и пауза выглядит случайной.
     private func resolvePauseEpisode(_ outcome: String) {
         guard let episodeID = pauseEpisodeID else { return }
@@ -643,8 +619,9 @@ public final class GuardVM {
     }
 
     /// Отладочные показания эпизода: они не показываются пользователю и нужны
-    /// только выгрузке. `staleness` называется явно вызывающим: только пауза
-    /// «вердикта нет» знает, что именно устарело.
+    /// только выгрузке. `staleness` называется явно вызывающим: разбор свежести есть
+    /// у эпизода паузы и только у него — у завершения по доказательству терять было
+    /// нечего, вердикт как раз получен.
     private func currentDiagnostics(staleness: VerdictStaleness?) -> KillDiagnostics {
         let snapshot = controller.lastSnapshot
         return KillDiagnostics(

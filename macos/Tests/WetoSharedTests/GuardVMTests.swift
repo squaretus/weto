@@ -1282,6 +1282,43 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
+    /// Такт под паузой на чужом пути повторяет объявление потери вердикта каждую
+    /// секунду. Повтор обязан быть немым: показания гасятся один раз на потерю,
+    /// иначе следующий такт затирал бы свежий отчёт пробы, которая уже ответила
+    /// про этот путь, — и попап переставал бы говорить, кто именно молчал.
+    /// Отсчёт потолка повтор не перезапускает по той же причине: он считается
+    /// от плохого результата.
+    func test_a_repeated_loss_announcement_keeps_the_report_and_the_countdown() async {
+        let clock = TestClock()
+        let h = makeDelayedHarness(snapshot: healthySnapshot(), now: { clock.now })
+        h.vm.start()
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+
+        // Вердикт остался про прежний выход, а проба по новому не ответила ничем.
+        h.network.snapshotValue = directSnapshot()
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "Пауза")
+        let deadline = h.vm.pauseDeadline
+        XCTAssertEqual(h.vm.lastReport?.ipinfo, .failed(.other("таймаут запроса")))
+
+        clock.advance(by: 1)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(h.vm.phase.title, "Пауза")
+        XCTAssertEqual(
+            h.vm.lastReport?.ipinfo, .failed(.other("таймаут запроса")),
+            "такт погасил отчёт про этот же путь — попапу больше нечего показать"
+        )
+        XCTAssertEqual(h.vm.pauseDeadline, deadline, "и отсчёт не перезапустил")
+        h.vm.stop()
+    }
+
     /// Пауза приходит по неответу, поэтому в журнал первым попадает «не удалось
     /// определить внешний адрес» — ответ «пока не знаю». Через миг вердикт готов
     /// и оказывается доказательством: новой записи о тех же pid не будет, а исход
@@ -1342,9 +1379,9 @@ final class GuardVMTests: XCTestCase {
     /// Смена пути вердикт обесценивает, но целей не трогает: пауза приходит только
     /// с плохим результатом пробы, и до него эпизода нет вовсе.
     ///
-    /// Разбор свежести (`diagnostics.staleness`) при этом остаётся у объявления потери,
-    /// а не у записи: эпизод больше не начинается в «Проверке». Довести разбор
-    /// до записи паузы — задача про адаптацию `GuardController`/`GuardVM`.
+    /// А когда эпизод всё-таки заводится, разбор свежести (`diagnostics.staleness`)
+    /// обязан быть в нём: без него выгрузка не отвечает, что именно случилось с выходом,
+    /// и смена интерфейса неотличима от правки настроек.
     func test_a_path_change_alone_starts_no_episode() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
 
@@ -1371,6 +1408,13 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.phase.title, "Пауза")
         XCTAssertEqual(h.log.events.first?.kind, .paused, "цели стоят, а не завершены")
         XCTAssertEqual(h.signaler.batches.last?.signal, .stop)
+
+        // Разбор свежести доехал до записи и описывает выход на момент постановки:
+        // прежний вердикт был про другой интерфейс, и запись обязана это назвать.
+        let staleness = h.log.events.first?.diagnostics?.staleness
+        XCTAssertEqual(staleness?.cause, .networkChanged)
+        XCTAssertEqual(staleness?.previousFingerprint, healthySnapshot().verdictFingerprint)
+        XCTAssertEqual(staleness?.fingerprint, directSnapshot().verdictFingerprint)
         h.vm.stop()
     }
 
@@ -1403,8 +1447,12 @@ final class GuardVMTests: XCTestCase {
 
     /// Свежесть, потерянная в момент смены пути, установившей новый вердикт, не
     /// имеет права сопровождать эпизод более позднего таймаута: `lastStaleness`
-    /// относится только к тому единственному fail-closed объявлению, ради
-    /// которого посчитан, а не ко всем эпизодам до следующей смены пути.
+    /// относится только к тому результату, ради которого посчитан, а не ко всем
+    /// эпизодам до следующей смены пути.
+    ///
+    /// Разбора в этой записи нет вовсе, и это ответ, а не пробел: выход не менялся,
+    /// вердикту нечего было терять, промолчали сервисы. Что механизм при этом жив,
+    /// пришпилено в `test_a_path_change_alone_starts_no_episode`.
     func test_timeout_after_a_settled_verdict_carries_no_stale_staleness() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
         h.vm.start()
@@ -1432,6 +1480,10 @@ final class GuardVMTests: XCTestCase {
         XCTAssertNil(
             h.log.events.first?.diagnostics?.staleness,
             "таймаут по установленному вердикту не наследует смену пути из прошлого эпизода"
+        )
+        XCTAssertEqual(
+            h.log.events.first?.diagnostics?.outgoingInterface, directSnapshot().outgoing?.interface,
+            "выход в момент постановки записан всё равно — отдельным полем"
         )
     }
 
@@ -2444,6 +2496,10 @@ final class GuardVMTests: XCTestCase {
             harness.log.events.first?.reasonText,
             "Не удалось определить внешний адрес: таймаут запроса"
         )
+        XCTAssertEqual(
+            harness.log.events.first?.diagnostics?.staleness?.cause, .coldStart,
+            "разбор свежести в записи: вердикта про этот выход не было вовсе"
+        )
 
         harness.vm.handle(.geoSchedule)
         await harness.probe.waitUntilStarted(atLeast: 2)
@@ -2497,6 +2553,11 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(harness.log.events.first?.reasonText, "Не удалось определить внешний адрес: таймаут запроса")
         XCTAssertEqual(harness.log.events.first?.ip, "203.0.113.28", "плоские поля — прошлый вердикт")
         XCTAssertEqual(harness.log.events.first?.diagnostics?.verdictOrigin, .established)
+        XCTAssertNil(
+            harness.log.events.first?.diagnostics?.staleness,
+            "выход не менялся — винить сеть журнал не имеет права: промолчали сервисы"
+        )
+        XCTAssertEqual(harness.log.events.first?.diagnostics?.outgoingInterface, "utun5")
         XCTAssertEqual(
             harness.vm.pauseDeadline?.timeIntervalSince(clock.now), Constants.pauseCeilingSeconds,
             "потолок отсчитывается от начала стояния"
