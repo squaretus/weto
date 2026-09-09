@@ -47,7 +47,7 @@ public final class GuardVM {
     @ObservationIgnored private let geoProbe: GeoProbing
     @ObservationIgnored private let locator: ProcessLocating
     @ObservationIgnored private let resolver: TargetResolving
-    @ObservationIgnored private let killer: ProcessSignaling
+    @ObservationIgnored private let signaler: ProcessSignaling
     @ObservationIgnored private let notifier: KillNotifying
     @ObservationIgnored private let events: NetworkEventSourcing
     @ObservationIgnored private let launchAgent: LaunchAgentManaging
@@ -94,7 +94,7 @@ public final class GuardVM {
         geoProbe: GeoProbing,
         locator: ProcessLocating,
         resolver: TargetResolving = TargetResolver(),
-        killer: ProcessSignaling,
+        signaler: ProcessSignaling,
         notifier: KillNotifying,
         events: NetworkEventSourcing,
         launchAgent: LaunchAgentManaging = LaunchAgentController(),
@@ -107,7 +107,7 @@ public final class GuardVM {
         self.geoProbe = geoProbe
         self.locator = locator
         self.resolver = resolver
-        self.killer = killer
+        self.signaler = signaler
         self.notifier = notifier
         self.events = events
         self.launchAgent = launchAgent
@@ -116,10 +116,10 @@ public final class GuardVM {
             settings: settings,
             resolver: resolver,
             locator: locator,
-            signaler: killer,
+            signaler: signaler,
             // Учёт остановленных подключается целиком в задаче 15: до тех пор пауза
-            // в этом сторожевом цикле не вызывается, а `terminate` учётом не пользуется
-            // при пустом состоянии.
+            // в этом сторожевом цикле не вызывается, а `terminate` учётом пользуется
+            // как обычно — он просто пуст, раз `pause` его никогда не пополняет.
             ledger: StoppedLedger(storage: InMemoryStoppedLedger())
         )
 

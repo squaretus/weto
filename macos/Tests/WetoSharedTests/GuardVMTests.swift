@@ -346,7 +346,7 @@ final class GuardVMTests: XCTestCase {
                 processes: processes ?? defaultProcesses
             ),
             resolver: resolver,
-            killer: killer,
+            signaler: killer,
             notifier: notifier,
             events: events,
             debounceInterval: 0.01
@@ -392,7 +392,7 @@ final class GuardVMTests: XCTestCase {
                 processes: defaultProcesses
             ),
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: killer,
+            signaler: killer,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0
@@ -1312,7 +1312,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: resolverMapping),
-            killer: SpySignaler(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0
@@ -1381,7 +1381,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: StubLocator(bundlePaths: [targetBundleID: targetPath], processes: processes),
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpySignaler(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0
@@ -1479,7 +1479,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: killer,
+            signaler: killer,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1519,7 +1519,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpySignaler(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1577,7 +1577,7 @@ final class GuardVMTests: XCTestCase {
                 vpnAppID: vpnAppPath,
                 "nano": "/usr/bin/pico",
             ]),
-            killer: killer,
+            signaler: killer,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1624,7 +1624,7 @@ final class GuardVMTests: XCTestCase {
                 vpnAppID: vpnAppPath,
                 "nano": "/usr/bin/pico",
             ]),
-            killer: killer,
+            signaler: killer,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1663,7 +1663,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: ProcessRegistry(),
             resolver: TargetResolver(),
-            killer: SpySignaler(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1822,7 +1822,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(.unavailable("таймаут запроса")),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpySignaler(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 10
@@ -1873,7 +1873,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: probe,
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpySignaler(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             // Проба не должна успеть уйти за время теста: иначе настоящий ответ
@@ -1921,7 +1921,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: killer,
+            signaler: killer,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -2054,7 +2054,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpySignaler(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
