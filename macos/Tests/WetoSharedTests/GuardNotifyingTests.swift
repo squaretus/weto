@@ -21,5 +21,6 @@ final class GuardNotifyingTests: XCTestCase {
     /// решает, что показать в ответ на нажатие.
     func test_backgrounded_notification_has_its_own_category() {
         XCTAssertEqual(UserNotificationGuardNotifier.backgroundedCategory, "com.weto.paused.backgrounded")
+        XCTAssertEqual(UserNotificationGuardNotifier.presentationWhileActive, [.banner, .sound])
     }
 }
