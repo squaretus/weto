@@ -16,8 +16,8 @@ public enum GuardState: Equatable, Sendable {
         switch self {
         case .disabled: return .grey
         case .safe: return .green
-        // Красный для любой причины: разбор «помехи vs опасно» приходит вместе
-        // с GuardMachine (задача 8).
+        // Красный для любой причины: разбор «помехи vs опасно» — на задаче 15,
+        // где `statusColor` получает все шесть состояний `GuardMachine`.
         case .unsafe: return .red
         }
     }
@@ -63,7 +63,7 @@ public final class GuardVM {
     // Текст причины, которым `apply` применил текущее небезопасное решение. Сторож
     // и повторное включение цели во время того же решения обязаны звучать так же:
     // `state` хранит для `.unproven` фиксированный `.pauseExpired` (временно, до
-    // задачи 14), и его `displayText` — не настоящая причина, а текст потолка паузы.
+    // задачи 15), и его `displayText` — не настоящая причина, а текст потолка паузы.
     @ObservationIgnored private var lastUnsafeReasonText: String?
 
     // Решение только что принято по пробе, которая ответила сейчас, а не по старому
@@ -361,10 +361,12 @@ public final class GuardVM {
                 : .disabled
 
         case .unproven(let reason):
-            // Временно, до задачи 14: непроверенность обрабатывается как прежний kill.
-            // Уточнение эпизода при последующем реальном вердикте (`refineEpisodeReason`
-            // в прежнем коде) сюда пока не переехало — задача 14 строит его заново
-            // на `GuardMachine`, где решение и его повод не разъезжаются.
+            // Временно, до задачи 15: непроверенность обрабатывается как прежний kill.
+            // Инвариант «эпизод, начавшийся до вердикта и закончившийся безопасным
+            // выходом, дописывает исход» (`.claude/rules/ARCHITECTURE.md`) сюда пока
+            // не переехал — прежний `refineEpisodeReason` его нёс, а задача 15 строит
+            // его заново на `resolutionText` / `kind: paused` `GuardMachine`, где решение
+            // и его повод не разъезжаются.
             state = .unsafe(.pauseExpired)
             lastUnsafeReasonText = reason.displayText
             enforce(reasonText: reason.displayText, staleness: controller.lastStaleness)
