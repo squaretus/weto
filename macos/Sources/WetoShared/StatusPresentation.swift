@@ -28,7 +28,88 @@ public struct IdleTargetsNotice: Equatable, Sendable {
     }
 }
 
+/// Три строки объяснения: что сделал weto, почему, что дальше. Заголовок — состояние, не причина.
+public struct StatusExplanation: Equatable, Sendable {
+    public let title: String
+    public let action: String
+    public let evidence: String
+    public let next: String
+
+    public init(title: String, action: String, evidence: String, next: String) {
+        self.title = title
+        self.action = action
+        self.evidence = evidence
+        self.next = next
+    }
+}
+
 public enum StatusPresentation {
+
+    /// Объяснение состояния тремя строками: что сделано с целями, почему —
+    /// улика фазы, и что дальше — счётчик паузы или совет действия. `remainingPause`
+    /// приходит параметром (обычно из `GuardMachine.remainingPause(at:)`): представление
+    /// не читает часы само.
+    public static func explanation(
+        for phase: GuardPhase,
+        remainingPause: TimeInterval?,
+        tolerance: Int = Constants.silenceToleranceProbes
+    ) -> StatusExplanation {
+        let remaining = Int((remainingPause ?? 0).rounded(.up))
+        switch phase {
+        case .disabled:
+            return StatusExplanation(
+                title: phase.title, action: "Ничего не сделано",
+                evidence: "Цели не выбраны — охрана ничего не завершает",
+                next: "Добавьте приложение или команду в настройках"
+            )
+        case .verifying(_, let cause):
+            return StatusExplanation(
+                title: phase.title, action: "Цели на паузе",
+                evidence: "Подключение ещё не проверено: \(cause.displayText)",
+                next: "Ждём подтверждения безопасного выхода, \(remaining) с до завершения"
+            )
+        case .protected(let reading):
+            return StatusExplanation(
+                title: phase.title, action: "Ничего не сделано",
+                evidence: exitDescription(reading),
+                next: "Проверка повторяется каждые \(Int(Constants.geoProbeIntervalSeconds)) с"
+            )
+        case .interference(let reading, let reason, let failures):
+            let next: String
+            if failures == 0 {
+                next = "Цели работают: адрес \(reading.ip) доказанно тот же"
+            } else {
+                let left = max(1, tolerance - failures)
+                next = "Цели работают по вердикту \(reading.primaryCountry); ещё \(left) \(pluralProbes(left)) — и пауза"
+            }
+            return StatusExplanation(title: phase.title, action: "Ничего не сделано", evidence: reason.displayText, next: next)
+        case .paused(_, let reason):
+            return StatusExplanation(
+                title: phase.title, action: "Цели на паузе", evidence: reason.displayText,
+                next: "Ждём ответа сервисов, \(remaining) с до завершения; возобновятся при подтверждении безопасного выхода"
+            )
+        case .danger(let evidence):
+            return StatusExplanation(
+                title: phase.title, action: "Цели завершены", evidence: evidence.displayText,
+                next: "Запуск запрещён до подтверждения безопасного выхода"
+            )
+        }
+    }
+
+    private static func exitDescription(_ reading: GeoReading) -> String {
+        guard let confirmed = reading.confirmedCountry, let source = reading.confirmSource else {
+            return "Выход \(reading.ip), страна \(reading.primaryCountry) по данным ipinfo"
+        }
+        return "Выход \(reading.ip), страна \(confirmed) подтверждена \(source.rawValue)"
+    }
+
+    /// «1 неудачная проба», «2 неудачные пробы», «5 неудачных проб».
+    private static func pluralProbes(_ count: Int) -> String {
+        let last = count % 10, lastTwo = count % 100
+        if last == 1 && lastTwo != 11 { return "неудачная проба" }
+        if (2...4).contains(last) && !(12...14).contains(lastTwo) { return "неудачные пробы" }
+        return "неудачных проб"
+    }
 
     /// Совет «VPN можно выключать» правдив ровно в одном состоянии: свежий safe.
     /// Под паузой и после доказательства цели молчат не потому, что всё хорошо.
