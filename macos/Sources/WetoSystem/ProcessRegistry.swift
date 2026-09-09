@@ -53,11 +53,18 @@ public struct ProcessRegistry: ProcessLocating {
 
         for pid in pids.prefix(count) where pid > 0 {
             guard let path = executablePath(pid: pid) else { continue }
+            let info = bsdInfo(pid: pid)
             result.append(ProcessSnapshot(
                 pid: pid,
-                parentPID: parentPID(pid: pid),
+                parentPID: info.map { pid_t($0.pbi_ppid) } ?? 0,
                 executablePath: path,
-                arguments: includeArguments ? arguments(pid: pid) : nil
+                arguments: includeArguments ? arguments(pid: pid) : nil,
+                processGroup: info.map { Int32($0.pbi_pgid) } ?? 0,
+                // Без управляющего терминала e_tpgid — мусор: обнуляем по флагу.
+                terminalForegroundGroup: info.flatMap {
+                    ($0.pbi_flags & UInt32(PROC_FLAG_CONTROLT)) != 0 ? Int32($0.e_tpgid) : nil
+                } ?? 0,
+                isStopped: info.map { $0.pbi_status == UInt32(SSTOP) } ?? false
             ))
         }
         return result
@@ -70,12 +77,12 @@ public struct ProcessRegistry: ProcessLocating {
         return String(cString: buffer)
     }
 
-    private func parentPID(pid: pid_t) -> pid_t {
+    private func bsdInfo(pid: pid_t) -> proc_bsdinfo? {
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         let written = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
-        guard written == size else { return 0 }
-        return pid_t(info.pbi_ppid)
+        guard written == size else { return nil }
+        return info
     }
 
     /// argv процесса отдельными элементами.

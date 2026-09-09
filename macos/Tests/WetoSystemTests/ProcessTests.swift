@@ -95,7 +95,7 @@ final class ProcessRegistryTests: XCTestCase {
     }
 }
 
-final class ProcessKillerTests: XCTestCase {
+final class ProcessSignalerKillTests: XCTestCase {
 
     func test_kill_terminates_a_real_process() throws {
         let task = Process()
@@ -104,7 +104,7 @@ final class ProcessKillerTests: XCTestCase {
         try task.run()
         XCTAssertTrue(task.isRunning)
 
-        let results = ProcessKiller().kill(pids: [task.processIdentifier])
+        let results = ProcessSignaler().send(.kill, to: [task.processIdentifier])
 
         XCTAssertEqual(results.count, 1)
         XCTAssertNil(results[0].errorCode, "kill вернул errno \(results[0].errorCode ?? -1)")
@@ -115,21 +115,21 @@ final class ProcessKillerTests: XCTestCase {
 
     func test_kill_of_nonexistent_pid_reports_esrch() {
 
-        let results = ProcessKiller().kill(pids: [Int32.max - 1])
+        let results = ProcessSignaler().send(.kill, to: [Int32.max - 1])
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results[0].errorCode, ESRCH)
-        XCTAssertTrue(results[0].isTerminated, "несуществующий процесс считается завершённым")
+        XCTAssertTrue(results[0].isDelivered, "несуществующий процесс считается завершённым")
     }
 
     func test_kill_of_launchd_reports_eperm() {
 
-        let results = ProcessKiller().kill(pids: [1])
+        let results = ProcessSignaler().send(.kill, to: [1])
         XCTAssertEqual(results[0].errorCode, EPERM)
-        XCTAssertFalse(results[0].isTerminated)
+        XCTAssertFalse(results[0].isDelivered)
     }
 
     func test_empty_pid_list_yields_empty_result() {
-        XCTAssertTrue(ProcessKiller().kill(pids: []).isEmpty)
+        XCTAssertTrue(ProcessSignaler().send(.kill, to: []).isEmpty)
     }
 
     func test_results_preserve_input_order() throws {
@@ -138,7 +138,7 @@ final class ProcessKillerTests: XCTestCase {
         task.arguments = ["30"]
         try task.run()
 
-        let results = ProcessKiller().kill(pids: [Int32.max - 1, task.processIdentifier])
+        let results = ProcessSignaler().send(.kill, to: [Int32.max - 1, task.processIdentifier])
 
         XCTAssertEqual(results.map(\.pid), [Int32.max - 1, task.processIdentifier])
         task.waitUntilExit()
