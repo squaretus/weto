@@ -122,4 +122,78 @@ final class PausePlannerTests: XCTestCase {
         XCTAssertEqual(plan.stopOrder, [100, 210])
         XCTAssertEqual(plan.shells, [100])
     }
+
+    // MARK: - Передний план принадлежит поддереву цели, а не только её группе
+
+    /// Цель отдала терминал своему ребёнку, поставившему себя в отдельную группу
+    /// (`setpgid` + `tcsetpgrp`): группа цели передней не является, но цель по-прежнему
+    /// переднее задание шелла. Шелл обязан войти в план первым — иначе zsh узнаёт о SIGSTOP
+    /// цели, забирает терминал и цель становится фоновым заданием насовсем.
+    func test_foreground_group_owned_by_a_child_still_takes_the_shell_along() {
+        let shellWaiting = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                           processGroup: 100, terminalForegroundGroup: 300)
+        let target = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/bin/sh",
+                                     processGroup: 200, terminalForegroundGroup: 300)
+        let grabber = ProcessSnapshot(pid: 300, parentPID: 200, executablePath: "/usr/bin/perl",
+                                      processGroup: 300, terminalForegroundGroup: 300)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule), (300, .descendant)]),
+                                     processes: [shellWaiting, target, grabber])
+        XCTAssertEqual(plan.stopOrder, [100, 200, 300],
+                       "Порядок — часть контракта: шелл раньше своей цели, цель раньше потомков.")
+        XCTAssertEqual(plan.resumeOrder, [300, 200, 100])
+        XCTAssertEqual(plan.shells, [100])
+        XCTAssertTrue(plan.backgrounded.isEmpty,
+                      "Терминал держит потомок цели — цель в переднем плане, а не в фоне.")
+    }
+
+    /// То же, но группу держит внук: членство в поддереве, а не глубина ровно один.
+    func test_foreground_group_owned_by_a_grandchild_still_takes_the_shell_along() {
+        let shellWaiting = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                           processGroup: 100, terminalForegroundGroup: 400)
+        let target = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/bin/sh",
+                                     processGroup: 200, terminalForegroundGroup: 400)
+        let middle = ProcessSnapshot(pid: 300, parentPID: 200, executablePath: "/usr/bin/node",
+                                     processGroup: 200, terminalForegroundGroup: 400)
+        let grabber = ProcessSnapshot(pid: 400, parentPID: 300, executablePath: "/usr/bin/perl",
+                                      processGroup: 400, terminalForegroundGroup: 400)
+        let plan = PausePlanner.plan(
+            matched: matched([(200, .rule), (300, .descendant), (400, .descendant)]),
+            processes: [shellWaiting, target, middle, grabber]
+        )
+        XCTAssertEqual(plan.stopOrder, [100, 200, 300, 400])
+        XCTAssertEqual(plan.resumeOrder, [400, 300, 200, 100])
+        XCTAssertEqual(plan.shells, [100])
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+    }
+
+    /// Передняя группа принадлежит чужому заданию того же шелла: терминал у соседа,
+    /// цель действительно в фоне. Шелл не трогаем, подсказку про `fg` цель получает.
+    func test_foreground_group_owned_by_an_unrelated_process_is_genuinely_backgrounded() {
+        let shellWaiting = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                           processGroup: 100, terminalForegroundGroup: 500)
+        let target = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/c",
+                                     processGroup: 200, terminalForegroundGroup: 500)
+        let sibling = ProcessSnapshot(pid: 500, parentPID: 100, executablePath: "/usr/bin/vim",
+                                      processGroup: 500, terminalForegroundGroup: 500)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule)]),
+                                     processes: [shellWaiting, target, sibling])
+        XCTAssertEqual(plan.stopOrder, [200])
+        XCTAssertTrue(plan.shells.isEmpty)
+        XCTAssertEqual(plan.backgrounded, [200])
+    }
+
+    /// Цель — сам интерактивный шелл, ждущий своего переднего задания. Он в переднем плане
+    /// (терминал у его потомка) и в план входит сам, а его родитель — `script`, tmux, Terminal —
+    /// живёт на другом терминале и шеллом этого сеанса не является: брать его нельзя,
+    /// иначе SIGSTOP уходит процессу, терминала цели не касающемуся.
+    func test_interactive_shell_target_does_not_drag_in_its_own_parent() {
+        let launcher = ProcessSnapshot(pid: 50, parentPID: 1, executablePath: "/usr/bin/script",
+                                       processGroup: 50, terminalForegroundGroup: 0)
+        let plan = PausePlanner.plan(matched: matched([(100, .rule), (200, .descendant), (201, .descendant)]),
+                                     processes: [launcher, shell, claude, child])
+        XCTAssertEqual(plan.stopOrder, [100, 200, 201])
+        XCTAssertEqual(plan.resumeOrder, [201, 200, 100])
+        XCTAssertTrue(plan.shells.isEmpty)
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+    }
 }

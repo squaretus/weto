@@ -24,7 +24,12 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `macos/Sources/WetoCore/PausePlan.swift` — `PausePlanner.plan(matched:processes:)`: who gets
   SIGSTOP and in what order (shell before its target, parent before descendants; `resumeOrder`
   is the reverse), which roots are already stopped (`skipped`) and which lost their foreground
-  job (`backgrounded`)
+  job (`backgrounded`). A target is in the foreground when the leader of the tty's foreground
+  group is the target itself or a descendant of it — subtree membership, not group equality:
+  a tool the target started with its own job control (`setpgid` + `tcsetpgrp`) holds the group,
+  and equality called such a target backgrounded and left its shell out of the plan. The shell
+  candidate must therefore also share the target's terminal, otherwise the shell's own parent
+  (`script`, tmux, Terminal) would be signalled
 - `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`,
   `TargetRule`, `KillEvent`, `KillDiagnostics`, `JournalExport`, `NetworkPhases` (per-request DNS /
   connect / TLS / first-byte timings, `stalledPhase` tells a dead tunnel from a slow service),

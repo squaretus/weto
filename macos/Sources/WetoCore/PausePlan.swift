@@ -40,21 +40,14 @@ public enum PausePlanner {
             if byPID[process.pid]?.isStopped == true { skipped.append(process.pid) } else { active.append(process) }
         }
 
-        // Шелл переднего задания: у корня цели есть tty и его группа — передняя группа tty.
-        // Шелл — родитель лидера этой группы, и он в другой группе (иначе это обёртка, а не шелл).
+        // Шелл переднего задания: у корня цели есть tty и передний план терминала принадлежит
+        // поддереву цели. Шелл — родитель лидера группы цели, он в другой группе (иначе это
+        // обёртка, а не шелл) и на том же терминале (иначе он терминал и не отберёт).
         var shells: [Int32] = []
         var backgrounded: [Int32] = []
         for root in active where root.matchedBy == .rule {
             guard let snapshot = byPID[root.pid], snapshot.terminalForegroundGroup != 0 else { continue }
-            guard snapshot.processGroup == snapshot.terminalForegroundGroup else {
-                // Группа root'а не передняя группа терминала — обычно фоновое задание.
-                // Но root может сам быть интерактивным шеллом, ждущим СВОЙ передний план:
-                // тогда терминал занят его ребёнком (лидером terminalForegroundGroup),
-                // а не root'ом, и это нормальное состояние шелла, а не «фон».
-                if let foregroundLeader = byPID[snapshot.terminalForegroundGroup],
-                   foregroundLeader.parentPID == root.pid {
-                    continue
-                }
+            guard holdsForeground(snapshot, tree: tree) else {
                 backgrounded.append(root.pid)
                 continue
             }
@@ -65,6 +58,7 @@ public enum PausePlanner {
             let leader = byPID[snapshot.processGroup] ?? snapshot
             guard let shell = byPID[leader.parentPID],
                   shell.processGroup != snapshot.processGroup,
+                  shell.terminalForegroundGroup == snapshot.terminalForegroundGroup,
                   !shell.isStopped,
                   !matchedPIDs.contains(shell.pid),
                   !shells.contains(shell.pid)
@@ -83,5 +77,23 @@ public enum PausePlanner {
         let ordered: [Int32] = sortedDepths.map { $0.pid }
 
         return PausePlan(stopOrder: shells + ordered, shells: shells, backgrounded: backgrounded, skipped: skipped)
+    }
+
+    /// Цель в переднем плане своего терминала, если лидер передней группы tty — сама цель
+    /// или её потомок. Сравнивать группы на равенство нельзя: группу, держащую терминал,
+    /// цель могла отдать инструменту, запущенному в собственной группе (`sh -c` → потомок
+    /// с `setpgid` + `tcsetpgrp`), и цель при этом остаётся передним заданием шелла. Прежнее
+    /// равенство групп объявляло такую цель фоновой, шелл в план не попадал, zsh узнавал
+    /// о SIGSTOP цели, печатал `suspended (signal)` и забирал терминал себе — после чего
+    /// цель уже действительно становилась фоновым заданием и вставала по `SIGTTIN`.
+    ///
+    /// Идентификатор группы равен pid её лидера, поэтому лидера ищем по номеру группы.
+    /// Лидера может не быть в снимке (успел выйти) — тогда предков у него нет и передний
+    /// план поддереву цели не принадлежит.
+    private static func holdsForeground(_ target: ProcessSnapshot, tree: ProcessTree) -> Bool {
+        if target.processGroup == target.terminalForegroundGroup { return true }
+        let foregroundLeader = target.terminalForegroundGroup
+        if foregroundLeader == target.pid { return true }
+        return tree.ancestors(of: foregroundLeader).contains(target.pid)
     }
 }
