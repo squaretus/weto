@@ -408,6 +408,30 @@ final class GuardVMTests: XCTestCase {
         for _ in 0..<20 { await Task.yield() }
     }
 
+    /// Доводит молчание сервисов до исчерпания терпимости.
+    ///
+    /// `Constants.silenceToleranceProbes` неудачных проб при установленном вердикте
+    /// и неизменном отпечатке ничего не меняют — это «Помехи», цели работают. Пауза
+    /// приходит со следующей. Расписанием, а не кнопкой: кнопка занята индикатором
+    /// `isProbing`, который гаснет своей задачей, и второе нажатие подряд может не уйти.
+    ///
+    /// `startedProbes` — сколько проб уже стартовало до вызова: `DelayedGeoProbe`
+    /// считает старты с начала теста.
+    @discardableResult
+    private func spendSilenceTolerance(
+        _ h: DelayedHarness,
+        after startedProbes: Int,
+        answering outcome: GeoOutcome = .unavailable("таймаут запроса")
+    ) async -> Int {
+        for attempt in 1...(Constants.silenceToleranceProbes + 1) {
+            h.vm.handle(.geoSchedule)
+            await h.probe.waitUntilStarted(atLeast: startedProbes + attempt)
+            await h.probe.resumeFirst(with: outcome)
+            await h.vm.awaitPendingProbe()
+        }
+        return startedProbes + Constants.silenceToleranceProbes + 1
+    }
+
     /// Такт охраны не имеет права отменять пробу, которая ещё в полёте.
     ///
     /// Пока вердикт несвеж, каждый такт заново объявляет fail-closed и запускает
@@ -955,6 +979,10 @@ final class GuardVMTests: XCTestCase {
     }
 
     /// Молчат оба сервиса — адреса нет вовсе, доказывать нечем.
+    ///
+    /// Терпимость к молчанию (задача 8) стоит между первой неудачной пробой и паузой:
+    /// пока вердикт установлен и отпечаток не менялся, `Constants.silenceToleranceProbes`
+    /// проб подряд ничего не меняют. Цели встают со следующей.
     func test_silence_from_both_services_kills() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
         h.vm.handle(.networkPath)
@@ -962,10 +990,16 @@ final class GuardVMTests: XCTestCase {
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
 
-        h.vm.recheckNow()
+        h.vm.handle(.geoSchedule)
         await h.probe.waitUntilStarted(atLeast: 2)
         await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
         await h.vm.awaitPendingProbe()
+        XCTAssertEqual(
+            h.vm.state, .safe(h.vm.lastReading),
+            "первое молчание в пределах терпимости целей не трогает"
+        )
+
+        await spendSilenceTolerance(h, after: 2)
 
         XCTAssertEqual(h.vm.state, .unsafe(.pauseExpired))
         h.vm.stop()
@@ -980,10 +1014,7 @@ final class GuardVMTests: XCTestCase {
         await harness.probe.resumeFirst(with: geoOutcome())
         await harness.vm.awaitPendingProbe()
 
-        harness.vm.handle(.geoSchedule)
-        await harness.probe.waitUntilStarted(atLeast: 2)
-        await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))
-        await harness.vm.awaitPendingProbe()
+        await spendSilenceTolerance(harness, after: 1)
 
         let event = harness.log.events.first
         XCTAssertEqual(event?.ip, "203.0.113.28", "плоские поля остаются прошлым чтением")
@@ -1011,10 +1042,9 @@ final class GuardVMTests: XCTestCase {
         await h.vm.awaitPendingProbe()
         XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
 
-        h.vm.recheckNow()
-        await h.probe.waitUntilStarted(atLeast: 2)
-        await h.probe.resumeFirst(with: geoOutcome(confirmed: nil))
-        await h.vm.awaitPendingProbe()
+        // Подтверждения нет — непроверенность, но терпимость держит первые пробы:
+        // цели встают, только когда она исчерпана.
+        await spendSilenceTolerance(h, after: 1, answering: geoOutcome(confirmed: nil))
 
         XCTAssertEqual(h.vm.state, .unsafe(.pauseExpired))
         XCTAssertEqual(
@@ -1025,10 +1055,15 @@ final class GuardVMTests: XCTestCase {
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(
-            h.log.events.first?.diagnostics?.verdictOrigin, .established,
+        XCTAssertNotEqual(
+            h.log.events.first?.diagnostics?.verdictOrigin, .current,
             "эпизод вызван сменой пути, а не только что ответившей пробой"
         )
+        // Смена пути гасит показания целиком (`onReport(nil)`): экран не имеет права
+        // показывать страну туннеля, которого уже нет, — а вместе с ней подписывать
+        // в записи нечего. Разбор свежести остаётся в `diagnostics.staleness`.
+        XCTAssertNil(h.log.events.first?.ip)
+        XCTAssertEqual(h.log.events.first?.diagnostics?.staleness?.cause, .networkChanged)
     }
 
     /// Цели живут, но защита держится на том, что адрес не менялся, а не на свежем
@@ -1171,20 +1206,31 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(staleness?.fingerprint, directSnapshot().verdictFingerprint)
     }
 
-    /// Правка настроек тоже обнуляет свежесть — и это обязано отличаться в журнале
-    /// от смены сети, иначе искать причину пользователю негде.
-    func test_settings_change_is_recorded_as_its_own_cause() async {
+    /// Правка настроек свежесть вердикта больше не обнуляет (п. 11): вердикт — знание
+    /// о сети, и от состава списков он не зависит. Решение пересчитывается по
+    /// установленному чтению синхронно — без пробы, без паузы и без записи в журнале.
+    ///
+    /// До задачи 14 такая правка объявляла fail-closed и заводила эпизод с причиной
+    /// `configurationChanged`; из-за этого пользователь терял цели, поправив список.
+    func test_settings_change_keeps_the_verdict_and_writes_no_episode() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ", confirmed: "KZ"))
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        let eventsAfterVerdict = h.log.events.count
+        let killsAfterVerdict = h.killer.killedBatches.count
+        let callsAfterVerdict = await h.probe.calls()
 
         h.settings.blockedCountryCodes = ["DE"]
         h.vm.handle(.tick)
+        await h.vm.awaitPendingProbe()
 
-        let staleness = h.log.events.first?.diagnostics?.staleness
-        XCTAssertEqual(staleness?.cause, .configurationChanged)
-        XCTAssertEqual(staleness?.previousFingerprint, staleness?.fingerprint, "сеть та же")
+        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "правка списков вердикт не обесценивает")
+        XCTAssertEqual(h.log.events.count, eventsAfterVerdict, "эпизода нет: цели не трогали")
+        XCTAssertEqual(h.killer.killedBatches.count, killsAfterVerdict)
+        let calls = await h.probe.calls()
+        XCTAssertEqual(calls, callsAfterVerdict, "правка настроек пробы не просит: путь тот же")
     }
 
     /// Свежесть, потерянная в момент смены пути, установившей новый вердикт, не
@@ -1211,10 +1257,7 @@ final class GuardVMTests: XCTestCase {
         await h.vm.awaitPendingProbe()
         XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "вердикт на новом пути состоялся")
 
-        h.vm.handle(.geoSchedule)
-        await h.probe.waitUntilStarted(atLeast: 3)
-        await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
-        await h.vm.awaitPendingProbe()
+        await spendSilenceTolerance(h, after: 2)
 
         XCTAssertEqual(h.vm.state, .unsafe(.pauseExpired))
         XCTAssertNil(

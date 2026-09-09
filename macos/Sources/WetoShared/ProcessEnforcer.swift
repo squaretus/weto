@@ -232,16 +232,21 @@ final class ProcessEnforcer {
         ledger.clear()
     }
 
-    /// Завершение. Шелл, стоявший ради терминала цели, обязан ожить: цели больше нет.
-    /// Недоставленный SIGKILL оставляет процесс в учёте — штатный выход его продолжит.
+    /// Завершение стоящих целей: SIGKILL тем, кто под правилом, SIGCONT всем остальным
+    /// из учёта — шеллу, стоявшему ради терминала цели, и любому, кто перестал совпадать
+    /// с правилом между паузой и завершением. Оставить его стоять значило бы заморозить
+    /// процесс до следующего запуска weto: под доказательством SIGCONT не пошлёт уже никто.
+    ///
+    /// Недоставленный SIGKILL оставляет цель в учёте — штатный выход её продолжит.
     func terminate(_ scan: Scan) -> EnforcementResult {
         let matched = scan.isEmpty ? [] : ProcessMatcher.matches(in: scan.processes, rules: scan.rules)
         let results = matched.isEmpty ? [] : signaler.send(.kill, to: matched.map(\.pid))
         let killed = Set(results.filter(\.isDelivered).map(\.pid))
 
-        let shells = ledger.entries.filter(\.isShell).map(\.pid)
-        if !shells.isEmpty { _ = signaler.send(.resume, to: shells.reversed()) }
-        ledger.remove(shells + ledger.pids.filter(killed.contains))
+        let doomed = Set(matched.map(\.pid))
+        let released = ledger.pids.filter { !doomed.contains($0) }
+        if !released.isEmpty { _ = signaler.send(.resume, to: released.reversed()) }
+        ledger.remove(released + ledger.pids.filter(killed.contains))
 
         return EnforcementResult(matched: matched, results: results)
     }
