@@ -1,6 +1,4 @@
 import Foundation
-import Observation
-import WetoCore
 
 /// Процесс, которому weto послал SIGSTOP. Путь хранится ради защиты от переиспользования pid:
 /// после падения weto по этому же pid может жить уже другой процесс.
@@ -19,8 +17,30 @@ public struct StoppedProcess: Codable, Equatable, Sendable {
     }
 }
 
+/// Итог чтения учёта с диска. Различает «файла нет или он пуст» от «файл был,
+/// но не прочитался» — без этого испорченный `stopped.json` неотличим от пустого,
+/// и процессы, которых он должен был вернуть из паузы, остаются замороженными молча.
+public enum StoppedLedgerReadout: Equatable, Sendable {
+    case entries([StoppedProcess])
+    case corrupted
+
+    /// Записи независимо от исхода: старт приложения не блокируется ни разу,
+    /// испорченный файл читается как пустой ровно как и отсутствующий.
+    public var entries: [StoppedProcess] {
+        switch self {
+        case .entries(let entries): return entries
+        case .corrupted: return []
+        }
+    }
+
+    public var isCorrupted: Bool {
+        if case .corrupted = self { return true }
+        return false
+    }
+}
+
 public protocol StoppedLedgerPersisting: Sendable {
-    func load() -> [StoppedProcess]
+    func load() -> StoppedLedgerReadout
     func save(_ entries: [StoppedProcess])
 }
 
@@ -43,9 +63,12 @@ public struct StoppedFile: StoppedLedgerPersisting {
 
     public var path: String { url.path }
 
-    public func load() -> [StoppedProcess] {
-        guard let data = FileManager.default.contents(atPath: url.path) else { return [] }
-        return (try? JSONDecoder().decode([StoppedProcess].self, from: data)) ?? []
+    /// Файла нет — легитимно пусто, `.entries([])`. Файл есть, но не декодировался —
+    /// `.corrupted`: тоже читается как пустой список, но с видимым отличием на границе.
+    public func load() -> StoppedLedgerReadout {
+        guard let data = FileManager.default.contents(atPath: url.path) else { return .entries([]) }
+        guard let decoded = try? JSONDecoder().decode([StoppedProcess].self, from: data) else { return .corrupted }
+        return .entries(decoded)
     }
 
     public func save(_ entries: [StoppedProcess]) {
@@ -64,9 +87,9 @@ public final class InMemoryStoppedLedger: StoppedLedgerPersisting, @unchecked Se
 
     public init() {}
 
-    public func load() -> [StoppedProcess] {
+    public func load() -> StoppedLedgerReadout {
         lock.lock(); defer { lock.unlock() }
-        return entries
+        return .entries(entries)
     }
 
     public func save(_ entries: [StoppedProcess]) {
@@ -78,11 +101,17 @@ public final class InMemoryStoppedLedger: StoppedLedgerPersisting, @unchecked Se
 public final class StoppedLedger {
 
     public private(set) var entries: [StoppedProcess]
+    /// Истинно, если на старте файл учёта был испорчен: `entries` при этом всё равно
+    /// пуст и запуск не заблокирован, но обязательство «вернуть остановленным SIGCONT»
+    /// выполнено не было — сигнал виден вызывающему `init(storage:)`, а не тонет в `[]`.
+    public let startedFromCorruptedFile: Bool
     private let storage: StoppedLedgerPersisting
 
     public init(storage: StoppedLedgerPersisting) {
         self.storage = storage
-        self.entries = storage.load()
+        let readout = storage.load()
+        self.entries = readout.entries
+        self.startedFromCorruptedFile = readout.isCorrupted
     }
 
     public convenience init() {
