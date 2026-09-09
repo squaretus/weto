@@ -53,8 +53,10 @@ the whole of what the Linux side is allowed to differ in:
 | — | tray context menu (check / settings / quit) | SNI needs one; the popup carries the same actions |
 | country flag in the menu bar | country name as text | no flag rendering here yet; the set ships with macOS only |
 | app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
+| `Pending`/`Unproven` show «Проверяю выход»/«Выход не подтверждён» (targets keep running / are paused) | same phases show «Проверка подключения»/«Ipinfo недоступен» (`ConfirmationUnavailable`: «Подтверждение недоступно») — targets are killed | the pause port (SIGSTOP/SIGCONT) has not landed on Linux; those two phases still kill here, so borrowing the macOS words would tell the user their targets are running or paused when they are dead — see `AppliedDecision.status_title` in `weto-core/src/presentation.rs` |
 
-Everything else matches: the settings window is the same six cards in the same order
+Everything else matches, including every wording that does not depend on this pause gap: the
+settings window is the same six cards in the same order
 (`Цели`, `Сеть и гео`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
 footer (github link, version, update tile), and the status popup is shield + title +
 two icon buttons, then the geo readout, the update banner, and live targets.

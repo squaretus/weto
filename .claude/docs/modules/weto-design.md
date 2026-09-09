@@ -13,12 +13,19 @@ application state — they take values and closures, never view models.
 - `macos/Sources/WetoDesign/Components/WetoControls.swift` — segmented control, button/field styles, `WetoMenuButton`, `StatusShield`
 - `macos/Sources/WetoDesign/Components/WetoBanner.swift`
 - `macos/Sources/WetoDesign/Components/WetoProcessPill.swift`
+- `macos/Sources/WetoDesign/Components/WetoPauseBadge.swift` — the amber countdown capsule for a
+  paused target, plus the (i) hint and "Показать терминал" button for one that lost its
+  foreground job. Takes `now` as a parameter rather than running its own timer, so every badge in
+  the popup and the explanation's third line tick from the exact same clock
+  (`StatusPopupView`'s single `TimelineView`)
 - `macos/Sources/WetoDesign/Components/WetoDeleteRowAction.swift`
 - `macos/Sources/WetoDesign/Components/MenuBarImageRenderer.swift`
 - `macos/Sources/WetoDesign/TargetIconStore.swift`
 - `macos/Sources/WetoDesign/DesignResources.swift`
 - `macos/Sources/WetoDesign/Resources/cli-claude.svg`, `macos/Sources/WetoDesign/Resources/cli-codex.png`
-- Tests: `macos/Tests/WetoDesignTests/DesignResourcesTests.swift`, `MenuBarImageRendererTests.swift`
+- Tests: `macos/Tests/WetoDesignTests/DesignResourcesTests.swift`, `MenuBarImageRendererTests.swift`,
+  `WetoPauseBadgeTests.swift` (countdown rounding), `WetoPillButtonStyleTests.swift`
+  (`.controlSize(.small)` metrics)
 
 ## Entry points
 - `WetoTokens.<token>` — palette (`shell`/`card`/`sunk`/`line`/`sunkLine`/`ink`/`dim`/`faint`/
@@ -27,10 +34,14 @@ application state — they take values and closures, never view models.
 - `StatusTone.color → WetoColor` (`.ok`/`.degraded`/`.blocked`/`.off`)
 - `WetoPanel(width:content:)`, `WetoCard(_ caption:content:)`, `WetoRow(content:)`, `WetoDivider()`
 - `WetoSegmentedControl(selection:options:)` — generic over `Value: Hashable`
-- `WetoPillButtonStyle(_ kind: .primary/.ghost/.danger, expands:)`, `WetoTileButtonStyle()`,
+- `WetoPillButtonStyle(_ kind: .primary/.ghost/.danger, expands:)` — reads `\.controlSize` and
+  switches between `WetoTokens.controlHeight` (32, default) and `.controlHeightCompact` (24,
+  `.small`); the compact size is a dedicated token, not a scaled-down default, and its first (and
+  so far only) user is the pause badge's "Показать терминал" button, `WetoTileButtonStyle()`,
   `WetoIconButtonStyle()`, `WetoFieldStyle()`, `WetoMenuButton(_ title:items:)`
 - `StatusShield(tone:)`, `WetoBanner(tone:systemImage:text:trailing:)`,
   `WetoProcessPill(icon:title:isCommandLine:childCount:)`,
+  `WetoPauseBadge(deadline:now:hint:onShowTerminal:)`,
   `WetoDeleteRowAction(label:hint:action:)`
 - `MenuBarImageRenderer.image(flagImage:color:) → NSImage` — no country code: nothing draws it
 - `TargetIconStore.shared.icon(for: TargetIconKind, size:) → NSImage?`
@@ -91,6 +102,9 @@ application state — they take values and closures, never view models.
   different heights, and `Menu` styled `.borderlessButton` had no pill at all — AppKit drew
   bare text with its own indicator, half a line off the buttons beside it. A row that mixes
   pills with `WetoMenuButton` also states `HStack(alignment: .center)` explicitly.
+  `.controlSize(.small)` is the one sanctioned exception, and it is still a fixed token
+  (`controlHeightCompact`), not a derived shrink — the pause badge's row is already carrying an
+  icon and a countdown, and a full 32 pt pill next to them loses to a long target name.
 - **`MenuBarImageRenderer`'s cache key is the drawn input itself, never a stand-in for it.**
   The flag is keyed by its `NSImage` (default `NSObject` identity, and the key holds a strong
   reference so a freed image's address cannot be reused), and the colour by rounded sRGB

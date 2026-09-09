@@ -461,9 +461,17 @@ public final class GuardVM {
     ///
     /// Стоящая фаза ровно одна, и приходит она с готовой причиной: «подключение ещё
     /// не проверено» больше не бывает причиной стояния — до ответа пробы цели работают.
+    /// Вызывается только из `pauseTargets()`, а её вызывает только `applyCurrentAction()`
+    /// на `phase.action == .pause` — единственная фаза с этим действием и есть `.paused`,
+    /// так что вторая ветка недостижима. Она остаётся страховкой, а не источником текста:
+    /// заголовок статуса — не причина завершения, и молча вернуть его в журнал вместо
+    /// причины паузы было бы неправдой.
     private var pauseReasonText: String {
-        if case .paused(_, let reason) = phase { return reason.displayText }
-        return phase.title
+        guard case .paused(_, let reason) = phase else {
+            assertionFailure("pauseReasonText спрошен вне паузы: \(phase)")
+            return phase.title
+        }
+        return reason.displayText
     }
 
     /// Разбор свежести спрашивается у контроллера ровно в тот миг, когда плохой результат
