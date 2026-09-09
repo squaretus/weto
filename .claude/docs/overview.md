@@ -99,9 +99,15 @@ turns a decision into one of six phases and either keeps targets running, pauses
    `ProcessSignaling.send(.kill, …)`; `ESRCH` counts as terminated, other errno values surface as
    `permissionFailure` in the UI. This is the only way to catch terminal targets born after the
    phase changed: `NSWorkspace` reports GUI apps only.
-9. **Resolve.** A `.resume` effect (safe verdict) calls `ProcessEnforcer.resume()` —
-   `ProcessSignaling.send(.resume, …)` over the whole ledger, reversed, then the ledger is cleared
-   — and `resolvePauseEpisode` refines the open episode with how it ended. A `.terminate` effect
+9. **Resolve.** `GuardVM.settleResume()` — on every pass with running targets while the ledger is
+   non-empty, not just the one carrying the `.resume` effect — calls
+   `ProcessEnforcer.resume(observing:)`: `ProcessSignaling.send(.resume, …)` over every live entry,
+   reversed. An entry is struck off only once the process is gone or the kernel showed it running:
+   `kill(SIGCONT)` returns 0 for a background job that immediately takes `SIGTTIN` and stops again,
+   so a target still in state `T` keeps its entry and is signalled again next tick.
+   `resolvePauseEpisode` refines the open episode with how it ended — «возобновлено» only for an
+   observed resume, «не возобновлено: …» otherwise, and the popup keeps its badge with the `fg`
+   hint instead of pretending the target came back. A `.terminate` effect
    instead kills whatever still matches the rules and resumes (never leaves stopped) anyone in the
    ledger that no longer does, so nothing is left frozen past the point where it stops being
    watched; reaching the pause ceiling with no answer resolves the same way, with
@@ -115,7 +121,8 @@ turns a decision into one of six phases and either keeps targets running, pauses
     tests).
 11. **Recover from a crash.** `GuardVM.start()` calls `ProcessEnforcer.resumeOrphans()` once,
     before anything else starts: it `SIGCONT`s only pids that are still stopped *and* still the
-    same executable (pid reuse must not resume a stranger), then clears the ledger regardless. A
+    same executable (pid reuse must not resume a stranger) and keeps every entry it did not
+    resolve, leaving it to the tick loop above to observe and re-signal. A
     corrupted `stopped.json` is read as empty (never blocks startup) but writes one
     `CheckEvent(trigger: .startupRecovery, outcome: .ledgerUnreadable)` to the check-journal,
     since the kill-journal has no way to record an unmet obligation that killed nothing.

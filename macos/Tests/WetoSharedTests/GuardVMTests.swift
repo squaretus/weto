@@ -434,7 +434,8 @@ final class GuardVMTests: XCTestCase {
         now: @escaping () -> Date = Date.init,
         processes: [ProcessSnapshot]? = nil,
         executables: [String] = [],
-        ledger: StoppedLedger? = nil
+        ledger: StoppedLedger? = nil,
+        locator: ProcessLocating? = nil
     ) -> DelayedHarness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
@@ -455,7 +456,7 @@ final class GuardVMTests: XCTestCase {
             checkLog: checkLog,
             snapshotReader: network,
             geoProbe: probe,
-            locator: StubLocator(
+            locator: locator ?? StubLocator(
                 bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
                 processes: processes ?? defaultProcesses
             ),
@@ -2665,6 +2666,87 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(harness.notifier.backgrounded, ["nano"])
         XCTAssertFalse(harness.signaler.batches.first?.pids.contains(100) ?? true, "шелл фонового задания не трогаем")
         harness.vm.stop()
+    }
+
+    /// Дерево фонового задания: шелл держит терминал сам, цель и её потомок — в своей
+    /// группе. Ровно та форма, в которой стояли процессы на машине владельца.
+    private func backgroundJobTree(stopped: Bool) -> [ProcessSnapshot] {
+        [
+            ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                            processGroup: 100, terminalForegroundGroup: 100),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                            processGroup: 200, terminalForegroundGroup: 100, isStopped: stopped),
+            ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                            processGroup: 200, terminalForegroundGroup: 100, isStopped: stopped),
+            ProcessSnapshot(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+    }
+
+    /// Тот самый случай с машины владельца: `claude` стоял фоновым заданием, проверка
+    /// сказала «безопасно», weto послал SIGCONT — и вычеркнул запись из учёта, потому
+    /// что `kill` вернул 0. Процесс проснулся, тронул tty, получил SIGTTIN и встал
+    /// обратно; досылать ему сигнал стало некому, и он остался стоять на часы, а журнал
+    /// написал «возобновлено». Обязательство держится до наблюдения, и следующий проход
+    /// обязан послать SIGCONT снова.
+    func test_a_background_target_that_falls_back_to_stopped_keeps_its_obligation() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: backgroundJobTree(stopped: false)
+        )
+        let ledgerStorage = InMemoryStoppedLedger()
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+
+        await pauseWithABadResult(h, after: 0)
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop])
+        XCTAssertEqual(h.signaler.batches.first?.pids, [200, 201], "шелла в плане нет: задание уже в фоне")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200])
+        XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true)
+        XCTAssertNil(h.log.events.first?.resolutionText, "стояние ещё не кончилось")
+
+        // Теперь ядро показывает их стоящими — как и было у владельца часами.
+        locator.processes = backgroundJobTree(stopped: true)
+
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume])
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200], "продолжение — в обратном порядке")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "отправка сигнала обязательства не снимает")
+        XCTAssertNil(h.log.events.first?.resolutionText,
+                     "возобновления ещё не наблюдали — заявлять его журнал не имеет права")
+
+        // Следующий проход: процессы всё ещё стоят. Это ответ, а не ожидание.
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume, .resume])
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200], "следующий проход шлёт SIGCONT снова")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "пока цель стоит, учёт её держит — иначе SIGCONT не пошлёт уже никто")
+        XCTAssertEqual(
+            h.log.events.first?.resolutionText,
+            "не возобновлено: процессы [200, 201] остались остановленными — "
+                + "задание ушло в фон, продолжите его в терминале командой fg",
+            "журнал говорит, что случилось на самом деле"
+        )
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200],
+                       "цель не имеет права выглядеть возобновлённой: подсказка про fg остаётся")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true)
+        XCTAssertEqual(h.notifier.backgrounded, ["nano"], "уведомление про fg — одно на стояние")
+
+        // Пользователь ввёл `fg`: цель пошла, и вот теперь обязательство снято.
+        locator.processes = backgroundJobTree(stopped: false)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(ledgerStorage.load(), .entries([]), "обязательство снимает наблюдение")
+        XCTAssertTrue(h.vm.pausedProcesses.isEmpty)
+        h.vm.stop()
     }
 
     /// Потолок паузы виден интерфейсу только пока цели стоят — то есть с плохого

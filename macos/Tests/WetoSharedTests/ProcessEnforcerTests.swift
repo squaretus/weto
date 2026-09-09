@@ -145,6 +145,14 @@ final class ProcessEnforcerTests: XCTestCase {
     private let child = ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
                                         processGroup: 200, terminalForegroundGroup: 200)
 
+    /// Тот же процесс, каким его показывает ядро после SIGSTOP: `SSTOP`.
+    private static func stopped(_ process: ProcessSnapshot) -> ProcessSnapshot {
+        ProcessSnapshot(pid: process.pid, parentPID: process.parentPID,
+                        executablePath: process.executablePath, arguments: process.arguments,
+                        processGroup: process.processGroup,
+                        terminalForegroundGroup: process.terminalForegroundGroup, isStopped: true)
+    }
+
     /// Бинарник обновился, симлинк указывает на новую версию — цель обязана
     /// подтянуться сама, без повторного добавления руками.
     func test_updated_binary_is_matched_without_re_adding_the_target() {
@@ -294,6 +302,11 @@ final class ProcessEnforcerTests: XCTestCase {
     }
 
     /// Второй обход под паузой не шлёт SIGSTOP уже стоящим — только новорождённым.
+    ///
+    /// «Уже стоит по нашей вине» спрашивается у ядра, а не у одного учёта: с тех пор
+    /// как учёт держит обязательство до наблюдения, в нём остаётся и запись, до которой
+    /// SIGCONT уже дошёл. Поэтому снимок между проходами обязан быть настоящим —
+    /// остановленные показаны остановленными.
     func test_a_second_sweep_stops_only_newcomers() {
         let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
         let locator = MutableProcessLocator([shell, target])
@@ -301,11 +314,32 @@ final class ProcessEnforcerTests: XCTestCase {
                                     locator: locator, clock: TestClock(), signaler: signaler, ledger: ledger)
         _ = enforcer.pause(enforcer.scan())
 
-        locator.replace(with: [shell, target, child])
+        locator.replace(with: [Self.stopped(shell), Self.stopped(target), child])
         let second = enforcer.pause(enforcer.scan())
 
         XCTAssertEqual(signaler.batches.last?.pids, [201])
         XCTAssertEqual(second.fresh.map(\.pid), [201])
+    }
+
+    /// Запись, которую SIGCONT уже разбудил, а наблюдения ещё не было, остаётся в учёте.
+    /// Ожившая цель обязана снова получить SIGSTOP — иначе «мы её уже остановили»
+    /// молча выпускало бы работающий процесс из-под паузы, — но второй записи в журнал
+    /// она не заводит: про этот pid эпизод уже рассказал.
+    func test_pause_stops_a_ledger_entry_that_is_running_again_without_recording_it_twice() {
+        let signaler = RecordingSignaler(); let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        let locator = MutableProcessLocator([shell, target, child])
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: locator, clock: TestClock(), signaler: signaler, ledger: ledger)
+        let first = enforcer.pause(enforcer.scan())
+        XCTAssertEqual(first.fresh.map(\.pid), [200, 201])
+
+        // Учёт держит их до наблюдения, а ядро показывает идущими: SIGCONT дошёл.
+        let second = enforcer.pause(enforcer.scan())
+
+        XCTAssertEqual(signaler.batches.map(\.signal), [.stop, .stop])
+        XCTAssertEqual(signaler.batches.last?.pids, [100, 200, 201], "идущая цель встаёт заново")
+        XCTAssertTrue(second.fresh.isEmpty, "повторной записи о том же pid журнал не допускает")
+        XCTAssertEqual(ledger.pids, [100, 200, 201])
     }
 
     func test_resume_walks_the_ledger_backwards_and_clears_it() {
@@ -413,7 +447,9 @@ final class ProcessEnforcerTests: XCTestCase {
 
         XCTAssertEqual(signaler.batches.first?.signal, .resume)
         XCTAssertEqual(signaler.batches.first?.pids, [200, 100], "цель раньше шелла, чужой pid пропущен")
-        XCTAssertEqual(ledgerStorage.load(), .entries([]))
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 100],
+                       "обязательство снимает наблюдение: запись, которую этот проход "
+                        + "не увидел идущей, из учёта не уходит")
     }
 
     /// Тест выше сеет учёт вручную в порядке «цель, потомок, шелл» — так `pause()` его
@@ -458,6 +494,40 @@ final class ProcessEnforcerTests: XCTestCase {
         XCTAssertEqual(secondSignaler.batches.first?.signal, .resume)
         XCTAssertEqual(secondSignaler.batches.first?.pids, [200, 201, 100],
                        "обе цели продолжены раньше шелла; порядок внутри группы — как записал pause()")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200, 201],
+                       "все трое всё ещё стоят: до наблюдения обязательство держится")
+    }
+
+    /// Учёт после падения не вычёркивается отправкой сигнала: пока ядро показывает
+    /// процесс стоящим, запись живёт и получает SIGCONT снова. Иначе цель, вернувшаяся
+    /// в стоп по SIGTTIN, оставалась бы замороженной навсегда — досылать ей сигнал
+    /// было бы уже некому.
+    func test_orphan_that_stays_stopped_keeps_its_entry_and_is_signalled_again() {
+        let ledgerStorage = InMemoryStoppedLedger()
+        ledgerStorage.save([
+            StoppedProcess(pid: 200, executablePath: target.executablePath, stoppedAt: Date(), isShell: false),
+        ])
+        let signaler = RecordingSignaler()
+        let locator = MutableProcessLocator([Self.stopped(target)])
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: locator, clock: TestClock(),
+                                    signaler: signaler, ledger: StoppedLedger(storage: ledgerStorage))
+
+        enforcer.resumeOrphans()
+        let second = enforcer.resume(observing: nil)
+
+        XCTAssertEqual(signaler.batches.map(\.signal), [.resume, .resume])
+        XCTAssertEqual(signaler.batches.last?.pids, [200], "следующий проход шлёт SIGCONT снова")
+        XCTAssertEqual(second.unresolved.map(\.pid), [200])
+        XCTAssertTrue(second.released.isEmpty)
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200])
+
+        // Пользователь ввёл `fg` — процесс пошёл, и вот теперь обязательство снято.
+        locator.replace(with: [target])
+        let third = enforcer.resume(observing: nil)
+
+        XCTAssertEqual(third.released, [200])
+        XCTAssertTrue(third.unresolved.isEmpty)
         XCTAssertEqual(ledgerStorage.load(), .entries([]))
     }
 }
