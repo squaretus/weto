@@ -110,6 +110,15 @@ final class KillEventTests: XCTestCase {
         XCTAssertEqual(try? KillEvent.decodeLog(Data("не json".utf8)), nil)
     }
 
+    /// Тексты видов записи общие с Linux дословно: файл выгрузки читают на обеих
+    /// платформах, и «на паузе» обязано звучать одинаково.
+    func test_kind_texts_are_the_shared_wording() {
+        XCTAssertEqual(KillEventKind.terminated.displayText, "завершено")
+        XCTAssertEqual(KillEventKind.launchBlocked.displayText, "запуск запрещён")
+        XCTAssertEqual(KillEventKind.paused.displayText, "на паузе")
+        XCTAssertEqual(KillEventKind.paused.rawValue, "paused", "имя в файле — часть формата")
+    }
+
     // MARK: - matchedBy
 
     /// Поле означало «совпал только как потомок», а читалось как «имеет родителя».

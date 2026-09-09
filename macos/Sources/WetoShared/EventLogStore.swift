@@ -57,16 +57,20 @@ public final class EventLogStore {
         persist()
     }
 
-    /// Уточнение причины у всех записей эпизода.
+    /// Уточнение причины и исхода у всех записей эпизода.
     ///
-    /// Fail-closed завершает цели раньше, чем причина известна, и в журнал попадает
+    /// Пауза приходит раньше, чем причина известна, и в журнал попадает
     /// «подключение ещё не проверено» — ответ «пока не знаю». Секундой позже вердикт
-    /// готов, но завершать уже нечего, и новой записи не будет: журнал навсегда
-    /// сохранял отговорку вместо того, из-за чего цели и умерли. Уточняется весь
+    /// готов, но новой записи не будет: те же процессы либо возобновлены, либо
+    /// завершены, и второй набор записей о них был бы ложью. Журнал навсегда
+    /// сохранял отговорку вместо того, чем всё кончилось. Уточняется весь
     /// эпизод, а не одна запись: процессов в нём десятки, и причина у них общая.
+    ///
+    /// `reasonText` необязателен: у эпизода паузы причина названа верно с самого
+    /// начала — меняется только исход.
     public func refine(
         episodeID: UUID,
-        reasonText: String,
+        reasonText: String? = nil,
         resolutionText: String? = nil,
         ip: String? = nil,
         country: String? = nil,
@@ -87,7 +91,7 @@ public final class EventLogStore {
                 executablePath: event.executablePath,
                 matchedBy: event.matchedBy,
                 kind: event.kind,
-                reasonText: reasonText,
+                reasonText: reasonText ?? event.reasonText,
                 resolutionText: resolutionText ?? event.resolutionText,
                 ip: ip ?? event.ip,
                 country: country ?? event.country,

@@ -11,34 +11,26 @@ final class StatusPresentationTests: XCTestCase {
         confirmSource: .freeipapi
     )
 
-    func test_disabled_state_says_guard_is_off() {
-        XCTAssertEqual(StatusPresentation.title(for: .disabled), "Охрана выключена")
-    }
+    private let t0 = Date(timeIntervalSince1970: 1_000_000)
 
-    func test_safe_state_says_on_watch() {
-        XCTAssertEqual(StatusPresentation.title(for: .safe(reading)), "На страже")
-    }
-
-    // Разбор заголовков по причине («Ipinfo недоступен», «Проверка подключения»)
-    // удалён вместе со `statusTitle`: заголовки состояний приходят с фазами
-    // `GuardMachine` в задаче 8. До тех пор любая небезопасная причина — «Цели
-    // завершены».
-    func test_every_blocking_reason_reports_targets_terminated() {
-        XCTAssertEqual(StatusPresentation.title(for: .unsafe(.vpnAppNotRunning)), "Цели завершены")
+    /// Заголовок статуса — это состояние охраны, а не причина: шесть слов из `GuardPhase`,
+    /// одинаковых на обеих платформах. Своего заголовка у представления больше нет.
+    /// Объяснение тремя строками — задача 16.
+    func test_phase_titles_are_the_six_canonical_words() {
+        XCTAssertEqual(GuardPhase.disabled.title, "Выключено")
+        XCTAssertEqual(GuardPhase.verifying(since: t0, cause: .coldStart).title, "Проверка")
+        XCTAssertEqual(GuardPhase.protected(reading).title, "Защищено")
         XCTAssertEqual(
-            StatusPresentation.title(for: .unsafe(.blockedCountry(code: "RU", source: "ipinfo"))),
-            "Цели завершены"
+            GuardPhase.interference(reading, reason: .confirmationUnavailable, failures: 1).title,
+            "Помехи"
         )
-        XCTAssertEqual(StatusPresentation.title(for: .unsafe(.pauseExpired)), "Цели завершены")
-    }
-
-    func test_pause_expired_is_blocking_rather_than_degraded() {
-        XCTAssertEqual(GuardState.unsafe(.pauseExpired).statusColor, .red)
+        XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Пауза")
+        XCTAssertEqual(GuardPhase.danger(.pauseExpired).title, "Опасно")
     }
 
     func test_lines_are_ip_and_both_sources() {
         XCTAssertEqual(
-            StatusPresentation.lines(for: .safe(reading), reading: reading),
+            StatusPresentation.lines(for: .protected(reading), reading: reading),
             [
                 StatusLine(key: "IP", value: "203.0.113.28"),
                 StatusLine(key: "ipinfo", value: "KZ"),
@@ -47,15 +39,22 @@ final class StatusPresentationTests: XCTestCase {
         )
     }
 
-    /// Временно, до задачи 14/15: `.confirmationUnavailable` (ipinfo ответил,
-    /// подтверждение — нет) и `.geoUnavailable` (ipinfo молчит) — обе стороны
-    /// непроверенности — схлопнуты в один `.pauseExpired`, и `knownReading`
-    /// больше не различает их: обе прячут прошлое чтение целиком.
-    func test_unreachable_ipinfo_hides_stale_reading() {
+    /// «Проверка» не знает про выход ничего: вердикта про текущий путь нет,
+    /// и прошлые адрес со страной читались бы как «я всё ещё под VPN».
+    func test_verifying_hides_stale_reading() {
         let lines = StatusPresentation.lines(
-            for: .unsafe(.pauseExpired), reading: reading
+            for: .verifying(since: t0, cause: .networkChanged), reading: reading
         )
         XCTAssertEqual(lines.map(\.value), ["неизвестен", "—", "—"])
+    }
+
+    /// Под паузой вердикт по-прежнему про этот путь — прошлое чтение показывать честно:
+    /// именно оно объясняет, почему цели стоят, а не завершены.
+    func test_paused_still_shows_the_last_known_reading() {
+        let lines = StatusPresentation.lines(
+            for: .paused(since: t0, reason: .geoUnavailable("таймаут запроса")), reading: reading
+        )
+        XCTAssertEqual(lines.map(\.value), ["203.0.113.28", "KZ", "KZ"])
     }
 
     // 1770000000 = 2026-02-02 02:40:00 UTC
@@ -73,7 +72,7 @@ final class StatusPresentationTests: XCTestCase {
 
         XCTAssertEqual(
             StatusPresentation.lines(
-                for: .unsafe(.pauseExpired),
+                for: .paused(since: t0, reason: .geoUnavailable("таймаут запроса")),
                 report: report,
                 timeZone: TimeZone(identifier: "UTC")!
             ),
@@ -98,7 +97,7 @@ final class StatusPresentationTests: XCTestCase {
 
         XCTAssertEqual(
             StatusPresentation.lines(
-                for: .safe(reading),
+                for: .protected(reading),
                 report: report,
                 timeZone: TimeZone(identifier: "UTC")!
             ),
@@ -113,30 +112,21 @@ final class StatusPresentationTests: XCTestCase {
 
     func test_detail_joins_lines_for_notifications() {
         XCTAssertEqual(
-            StatusPresentation.detail(for: .safe(reading), reading: reading),
+            StatusPresentation.detail(for: .protected(reading), reading: reading),
             "IP: 203.0.113.28 · ipinfo: KZ · freeipapi: KZ"
         )
     }
 
     func test_detail_is_nil_when_nothing_is_known() {
-        XCTAssertNil(StatusPresentation.detail(for: .unsafe(.vpnAppNotRunning), reading: nil))
-    }
-
-    /// Временно, до задачи 8: жёлтая деградация уходит вместе с `isDegradedRatherThanBlocked` —
-    /// любая небезопасная причина сейчас красная, а «помехи vs опасно» вернётся с фазами
-    /// `GuardMachine`.
-    func test_status_color_is_red_for_any_unsafe_reason() {
-        XCTAssertEqual(GuardState.safe(reading).statusColor, .green)
-        XCTAssertEqual(GuardState.unsafe(.pauseExpired).statusColor, .red)
-        XCTAssertEqual(GuardState.unsafe(.vpnAppNotRunning).statusColor, .red)
+        XCTAssertNil(StatusPresentation.detail(for: .danger(.vpnAppNotRunning), reading: nil))
     }
 
     // MARK: - Подсказка про незапущенные цели
 
     /// Совет «VPN можно выключать» имеет смысл ровно в одном состоянии — когда
     /// охрана на страже и подтвердила безопасность.
-    func test_idle_targets_hint_offers_to_disconnect_only_when_safe() {
-        let notice = StatusPresentation.idleTargets(for: .safe(nil))
+    func test_idle_targets_hint_offers_to_disconnect_only_when_protected() {
+        let notice = StatusPresentation.idleTargets(for: .protected(reading))
 
         XCTAssertEqual(notice.text, "Цели не запущены")
         XCTAssertEqual(notice.hint, "— VPN можно выключать")
@@ -145,14 +135,17 @@ final class StatusPresentationTests: XCTestCase {
     /// После срабатывания охраны цели молчат не потому, что всё хорошо:
     /// VPN уже выключен, и советовать выключить его — ложь.
     func test_idle_targets_hint_is_silent_after_the_kill_switch() {
-        let notice = StatusPresentation.idleTargets(for: .unsafe(.vpnAppNotRunning))
+        let notice = StatusPresentation.idleTargets(for: .danger(.vpnAppNotRunning))
 
         XCTAssertEqual(notice.text, "Цели не запущены")
         XCTAssertNil(notice.hint, "выключенный VPN не повод советовать его выключить")
     }
 
     func test_idle_targets_hint_is_silent_while_paused() {
-        XCTAssertNil(StatusPresentation.idleTargets(for: .unsafe(.pauseExpired)).hint)
+        XCTAssertNil(
+            StatusPresentation.idleTargets(for: .paused(since: t0, reason: .confirmationUnavailable)).hint
+        )
+        XCTAssertNil(StatusPresentation.idleTargets(for: .verifying(since: t0, cause: .coldStart)).hint)
     }
 
     func test_idle_targets_hint_is_silent_when_guard_is_off() {

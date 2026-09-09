@@ -32,6 +32,10 @@ pub const CAPACITY: usize = 100;
 pub enum KillEventKind {
     Terminated,
     LaunchBlocked,
+    /// Процесс остановлен (SIGSTOP), а не завершён. Чем кончилось стояние —
+    /// в `resolution_text`: возобновлено, завершено по доказательству или по потолку.
+    /// Формат общий с macOS; сама пауза на Linux — следующий план.
+    Paused,
 }
 
 impl KillEventKind {
@@ -39,6 +43,7 @@ impl KillEventKind {
         match self {
             KillEventKind::Terminated => "завершено",
             KillEventKind::LaunchBlocked => "запуск запрещён",
+            KillEventKind::Paused => "на паузе",
         }
     }
 }

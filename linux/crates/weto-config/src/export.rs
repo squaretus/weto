@@ -18,7 +18,8 @@ use crate::settings::Settings;
 
 /// Версия формата. Меняется, когда старый разбор перестаёт понимать новый файл.
 /// Версия 2: рядом с завершениями появились проверки.
-pub const SCHEMA_VERSION: u32 = 2;
+/// Версия 3: записи паузы, происхождение показаний, фазы запроса, matchedBy.
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

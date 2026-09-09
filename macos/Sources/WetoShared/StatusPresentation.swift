@@ -30,31 +30,21 @@ public struct IdleTargetsNotice: Equatable, Sendable {
 
 public enum StatusPresentation {
 
-    public static func idleTargets(for state: GuardState) -> IdleTargetsNotice {
-        switch state {
-        case .safe:
+    /// Совет «VPN можно выключать» правдив ровно в одном состоянии: свежий safe.
+    /// Под паузой и после доказательства цели молчат не потому, что всё хорошо.
+    public static func idleTargets(for phase: GuardPhase) -> IdleTargetsNotice {
+        if case .protected = phase {
             return IdleTargetsNotice(text: "Цели не запущены", hint: "— VPN можно выключать")
-        case .unsafe, .disabled:
-            return IdleTargetsNotice(text: "Цели не запущены", hint: nil)
         }
+        return IdleTargetsNotice(text: "Цели не запущены", hint: nil)
     }
 
     public static let unknownIP = "неизвестен"
     public static let missingValue = "—"
     public static let confirmationLabel = "подтверждение"
 
-    public static func title(for state: GuardState) -> String {
-        switch state {
-        case .disabled: return "Охрана выключена"
-        case .safe: return "На страже"
-        // Разбор по причине (иное для «ipinfo недоступен», иное для «подтверждение
-        // недоступно») придёт вместе с заголовками фаз GuardMachine (задача 8).
-        case .unsafe: return "Цели завершены"
-        }
-    }
-
-    public static func lines(for state: GuardState, reading: GeoReading?) -> [StatusLine] {
-        let known = knownReading(for: state, reading: reading)
+    public static func lines(for phase: GuardPhase, reading: GeoReading?) -> [StatusLine] {
+        let known = knownReading(for: phase, reading: reading)
 
         // Подпись строки — имя сервиса, который реально ответил: подтверждающих
         // два, и показывать чужое имя было бы ложью.
@@ -71,7 +61,7 @@ public enum StatusPresentation {
     /// Строки по отчёту последней пробы: показываем, кто именно ответил, кто молчит
     /// и была ли вообще сеть. Без этого отказ ipinfo выглядел на экране как пустые прочерки.
     public static func lines(
-        for state: GuardState,
+        for phase: GuardPhase,
         report: GeoProbeReport,
         timeZone: TimeZone = .current
     ) -> [StatusLine] {
@@ -115,17 +105,22 @@ public enum StatusPresentation {
         return formatter.string(from: date)
     }
 
-    private static func knownReading(for state: GuardState, reading: GeoReading?) -> GeoReading? {
-        // Временно, до задачи 14/15: `.pauseExpired` — единственный заместитель
-        // непроверенности, и раньше эту роль играл `.geoUnavailable`.
-        if case .unsafe(.pauseExpired) = state { return nil }
-        if case .safe(let current) = state { return current ?? reading }
-        return reading
+    /// Что мы имеем право показывать как известное про выход.
+    ///
+    /// «Проверка» не знает ничего: вердикта про текущий путь нет, и прошлые адрес
+    /// со страной читались бы как «я всё ещё под VPN». Закрытый клиент — то же самое.
+    private static func knownReading(for phase: GuardPhase, reading: GeoReading?) -> GeoReading? {
+        switch phase {
+        case .verifying: return nil
+        case .protected(let current), .interference(let current, _, _): return current
+        case .danger(.vpnAppNotRunning): return nil
+        default: return reading
+        }
     }
 
-    public static func detail(for state: GuardState, reading: GeoReading?) -> String? {
-        guard knownReading(for: state, reading: reading) != nil else { return nil }
-        return lines(for: state, reading: reading)
+    public static func detail(for phase: GuardPhase, reading: GeoReading?) -> String? {
+        guard knownReading(for: phase, reading: reading) != nil else { return nil }
+        return lines(for: phase, reading: reading)
             .map { "\($0.key): \($0.value)" }
             .joined(separator: " · ")
     }

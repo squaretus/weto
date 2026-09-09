@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "about": [
     "Контракт формата выгрузки журнала. Одну и ту же форму обязаны давать обе",
     "реализации: macOS/Tests/WetoSharedTests/JournalExportFixtureTests.swift и",
@@ -29,9 +29,17 @@
     "уходит заголовком, а заголовки в журнал не записываются вовсе.",
     "",
     "phases — длительности фаз запроса (DNS, соединение, TLS, первый байт), nil у фазы,",
-    "которая не завершилась, 0 — у фазы, которой не было. Linux пока пишет null: ureq фаз не отдаёт."
+    "которая не завершилась, 0 — у фазы, которой не было. Linux пока пишет null: ureq фаз не отдаёт.",
+    "",
+    "kind paused — эпизод паузы; исход в resolutionText: возобновлено / завершено",
+    "по доказательству / завершено по потолку. Записей о тех же pid при завершении",
+    "не добавляется — им дописывается исход.",
+    "",
+    "checkTriggers.startupRecovery — не проверка подключения, а единственный след",
+    "невыполненного обязательства: учёт остановленных процессов не прочитался",
+    "(outcome ledgerUnreadable), и SIGCONT в этот запуск никто не получил."
   ],
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "envelopeKeys": [
     "app",
     "checks",
@@ -127,14 +135,16 @@
     "manual",
     "networkChange",
     "schedule",
-    "settingsChange"
+    "settingsChange",
+    "startupRecovery"
   ],
   "checkOutcomes": [
     "answered",
     "failed",
     "skippedProbeInFlight",
     "discardedPathChanged",
-    "discardedSettingsChanged"
+    "discardedSettingsChanged",
+    "ledgerUnreadable"
   ],
   "stalenessCauses": [
     "coldStart",
@@ -144,7 +154,8 @@
   ],
   "eventKinds": [
     "terminated",
-    "launchBlocked"
+    "launchBlocked",
+    "paused"
   ],
   "verdictOrigins": [
     "established",
