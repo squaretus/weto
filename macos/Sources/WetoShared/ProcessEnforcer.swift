@@ -25,6 +25,27 @@ final class ProcessEnforcer {
         static let none = EnforcementResult(matched: [], results: [])
     }
 
+    /// Итог продолжения. Обязательство «вернуть из паузы» снимает не отправка сигнала,
+    /// а наблюдение: `kill(SIGCONT)` возвращает 0 и для цели, у которой шелл уже забрал
+    /// терминал, — она просыпается, тут же читает tty, получает SIGTTIN и встаёт обратно.
+    /// Учёт, вычеркнутый по факту отправки, оставлял такую цель замороженной навсегда:
+    /// держать обязательство было больше некому, а журнал писал «возобновлено».
+    struct ResumeOutcome {
+        /// Что сказало ядро на каждый посланный SIGCONT.
+        let results: [SignalResult]
+        /// Обязательство снято наблюдением: процесса больше нет (или его pid достался
+        /// другому) либо ядро показало его идущим.
+        let released: [Int32]
+        /// Остались в учёте: ядро всё ещё показывает их стоящими. Фоновое задание
+        /// попадает сюда снова и снова — оно просыпается на SIGCONT, читает tty,
+        /// получает SIGTTIN и встаёт обратно, пока пользователь не введёт `fg`.
+        let unresolved: [StoppedProcess]
+
+        var isComplete: Bool { unresolved.isEmpty }
+
+        static let none = ResumeOutcome(results: [], released: [], unresolved: [])
+    }
+
     struct PauseOutcome {
         let plan: PausePlan
         /// Цели, остановленные этим проходом: без шеллов и без уже стоявших.
@@ -176,16 +197,24 @@ final class ProcessEnforcer {
         guard !scan.isEmpty else { return .none }
         let matched = ProcessMatcher.matches(in: scan.processes, rules: scan.rules)
 
-        var pathByPID: [Int32: String] = [:]
-        for process in scan.processes { pathByPID[process.pid] = process.executablePath }
+        var snapshotByPID: [Int32: ProcessSnapshot] = [:]
+        for process in scan.processes { snapshotByPID[process.pid] = process }
 
         // pid, доставшийся от переиспользования, не значит «тот же процесс, что мы
         // остановили»: запись в учёте про мёртвого владельца этого pid не должна
         // маскировать свежую цель, которой ядро выдало то же число.
+        //
+        // Записи мало и по второй причине: с тех пор как учёт держит обязательство до
+        // наблюдения, в нём остаётся и цель, которой SIGCONT уже дошёл. Она снова идёт,
+        // и «мы её уже остановили» по одной записи выпустило бы работающую цель
+        // из-под паузы. Решает снимок: стоит она или нет — видно у ядра.
         let known = Set(ledger.entries.map { StoppedIdentity(pid: $0.pid, executablePath: $0.executablePath) })
+        func isKnown(_ pid: Int32) -> Bool {
+            guard let process = snapshotByPID[pid] else { return false }
+            return known.contains(StoppedIdentity(pid: pid, executablePath: process.executablePath))
+        }
         func isAlreadyStopped(_ pid: Int32) -> Bool {
-            guard let path = pathByPID[pid] else { return false }
-            return known.contains(StoppedIdentity(pid: pid, executablePath: path))
+            snapshotByPID[pid]?.isStopped == true && isKnown(pid)
         }
 
         let pending = matched.filter { !isAlreadyStopped($0.pid) }
@@ -203,22 +232,73 @@ final class ProcessEnforcer {
 
         let moment = now()
         ledger.add(order.filter(delivered.contains).map { pid in
-            StoppedProcess(pid: pid, executablePath: pathByPID[pid] ?? "", stoppedAt: moment,
-                           isShell: plan.shells.contains(pid))
+            StoppedProcess(pid: pid, executablePath: snapshotByPID[pid]?.executablePath ?? "",
+                           stoppedAt: moment, isShell: plan.shells.contains(pid))
         })
 
-        return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) },
+        // Остановлены этим проходом — доставленный SIGSTOP тому, кого в учёте ещё не было.
+        // Запись, ожившая между проходами (SIGCONT дошёл, наблюдения ещё не было), снова
+        // получает SIGSTOP, но второй записи в журнал не заводит: про этот pid эпизод
+        // уже рассказал, а повторов журнал не допускает.
+        return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) && !isKnown($0.pid) },
                             results: results, matched: matched)
     }
 
+    /// Кого учёт всё ещё держит, а кого отпускает: `nil` в снимке — процесса нет,
+    /// чужой путь по тому же pid — тоже нет (число переиспользовано ядром).
+    private func settle(
+        _ entries: [StoppedProcess],
+        against alive: [Int32: ProcessSnapshot]
+    ) -> (living: [StoppedProcess], standing: [StoppedProcess], released: [Int32]) {
+        var living: [StoppedProcess] = []
+        var standing: [StoppedProcess] = []
+        var released: [Int32] = []
+        for entry in entries {
+            guard let process = alive[entry.pid], process.executablePath == entry.executablePath else {
+                released.append(entry.pid)
+                continue
+            }
+            living.append(entry)
+            if process.isStopped { standing.append(entry) } else { released.append(entry.pid) }
+        }
+        return (living, standing, released)
+    }
+
+    /// Наблюдать обязательство можно только по настоящему обходу. `scan()` при пустом
+    /// списке правил возвращает пустой снимок — обходить незачем, — и по нему все записи
+    /// учёта выглядели бы исчезнувшими, а это ровно те, которых забывать нельзя.
+    /// Настоящий обход пустым не бывает: в нём есть как минимум launchd.
+    private func observedProcesses(_ scan: Scan?) -> [ProcessSnapshot] {
+        guard let processes = scan?.processes, !processes.isEmpty else { return locator.allProcesses() }
+        return processes
+    }
+
     /// Продолжение всем из учёта — в обратном порядке: потомки, цели, шеллы.
+    ///
+    /// Обязательство снимает наблюдение, а не отправка сигнала. `kill(SIGCONT)` возвращает
+    /// 0 и для фонового задания: цель просыпается, тут же читает tty, получает SIGTTIN
+    /// и встаёт обратно. Учёт, вычеркнутый по факту отправки, оставлял её замороженной
+    /// навсегда — слать ей SIGCONT было больше некому, — а журнал писал «возобновлено».
+    ///
+    /// Наблюдение идёт по обходу, снятому до сигналов: увидеть последствия SIGCONT в тот
+    /// же миг нельзя — процесс успеет проснуться и встать уже после нашего чтения.
+    /// Поэтому проход, отправивший сигнал, обязательства не снимает; разбирает его
+    /// следующий, и всё ещё стоящая цель получает SIGCONT снова.
     @discardableResult
-    func resume() -> [SignalResult] {
-        let order = Array(ledger.pids.reversed())
-        guard !order.isEmpty else { return [] }
-        let results = signaler.send(.resume, to: order)
-        ledger.clear()
-        return results
+    func resume(observing scan: Scan? = nil) -> ResumeOutcome {
+        let entries = ledger.entries
+        guard !entries.isEmpty else { return .none }
+
+        var alive: [Int32: ProcessSnapshot] = [:]
+        for process in observedProcesses(scan) { alive[process.pid] = process }
+        let (living, standing, released) = settle(entries, against: alive)
+
+        // Сигнал уходит всем живым записям, а не только стоящим: наблюдение снимает
+        // обязательство, но порядок «потомки, цели, шеллы» — часть контракта, и рвать
+        // его из-за одной записи, успевшей проснуться, нельзя.
+        let results = living.isEmpty ? [] : signaler.send(.resume, to: Array(living.map(\.pid).reversed()))
+        if !released.isEmpty { ledger.remove(released) }
+        return ResumeOutcome(results: results, released: released, unresolved: standing)
     }
 
     /// После падения weto: продолжить только тех, кто всё ещё стоит и остался тем же процессом.
@@ -227,20 +307,25 @@ final class ProcessEnforcer {
     /// Учёт на диске не несёт глубины дерева — только `isShell`, поэтому точный
     /// «потомки, затем цель, затем шелл» здесь недостижим; ближайшее приближение —
     /// все цели раньше своих шеллов, порядок внутри каждой группы как в файле.
-    func resumeOrphans() {
+    ///
+    /// Запись, которую этот проход не разрешил, из учёта не уходит: обязательство и здесь
+    /// снимает наблюдение. Дальше её ведёт обычный такт охраны — он и досылает SIGCONT
+    /// цели, вернувшейся в стоп по SIGTTIN.
+    @discardableResult
+    func resumeOrphans() -> ResumeOutcome {
         let entries = ledger.entries
-        guard !entries.isEmpty else { return }
+        guard !entries.isEmpty else { return .none }
         var alive: [Int32: ProcessSnapshot] = [:]
         for process in locator.allProcesses() { alive[process.pid] = process }
-        let ours = entries.filter { entry in
-            guard let process = alive[entry.pid] else { return false }
-            return process.isStopped && process.executablePath == entry.executablePath
+        let (_, standing, released) = settle(entries, against: alive)
+
+        var results: [SignalResult] = []
+        if !standing.isEmpty {
+            let order = standing.filter { !$0.isShell }.map(\.pid) + standing.filter(\.isShell).map(\.pid)
+            results = signaler.send(.resume, to: order)
         }
-        if !ours.isEmpty {
-            let order = ours.filter { !$0.isShell }.map(\.pid) + ours.filter(\.isShell).map(\.pid)
-            _ = signaler.send(.resume, to: order)
-        }
-        ledger.clear()
+        if !released.isEmpty { ledger.remove(released) }
+        return ResumeOutcome(results: results, released: released, unresolved: standing)
     }
 
     /// Завершение стоящих целей: SIGKILL тем, кто под правилом, SIGCONT всем остальным
@@ -249,14 +334,19 @@ final class ProcessEnforcer {
     /// процесс до следующего запуска weto: под доказательством SIGCONT не пошлёт уже никто.
     ///
     /// Недоставленный SIGKILL оставляет цель в учёте — штатный выход её продолжит.
+    /// Продолженная запись уходит из учёта по тому же правилу, что и в `resume`:
+    /// по наблюдению, а не по отправке сигнала. Стоящей она остаётся до тех пор,
+    /// пока ядро не покажет её идущей, и сторож досылает SIGCONT каждым проходом.
     func terminate(_ scan: Scan) -> EnforcementResult {
         let matched = scan.isEmpty ? [] : ProcessMatcher.matches(in: scan.processes, rules: scan.rules)
         let results = matched.isEmpty ? [] : signaler.send(.kill, to: matched.map(\.pid))
         let killed = Set(results.filter(\.isDelivered).map(\.pid))
 
         let doomed = Set(matched.map(\.pid))
-        let released = ledger.pids.filter { !doomed.contains($0) }
-        if !released.isEmpty { _ = signaler.send(.resume, to: released.reversed()) }
+        var alive: [Int32: ProcessSnapshot] = [:]
+        for process in observedProcesses(scan) { alive[process.pid] = process }
+        let (living, _, released) = settle(ledger.entries.filter { !doomed.contains($0.pid) }, against: alive)
+        if !living.isEmpty { _ = signaler.send(.resume, to: Array(living.map(\.pid).reversed())) }
         ledger.remove(released + ledger.pids.filter(killed.contains))
 
         return EnforcementResult(matched: matched, results: results)

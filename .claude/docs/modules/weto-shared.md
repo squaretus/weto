@@ -10,16 +10,23 @@ this layer decides *when* to ask and *what to do* with the answer.
 ## Key files
 - `macos/Sources/WetoShared/AppCoordinator.swift` — composition root, wired once in `WetoMenuBarApp`
 - `macos/Sources/WetoShared/GuardVM.swift` — observable facade for the UI, journal dedup, watchdog, tick loop.
-  Owns the pause side: `pausedProcesses` (popup badges), `pauseDeadline`, `pauseTargets()`/`resumeTargets()`,
+  Owns the pause side: `pausedProcesses` (popup badges), `pauseDeadline`, `pauseTargets()`/`settleResume()`,
   which call `ProcessEnforcer.pause`/`.resume` and record/refine the `kind: .paused` episode.
+  `settleResume()` runs on every pass with running targets while the ledger is non-empty
+  (the `.resume` effect is not a one-shot): the obligation is discharged by observation, so
+  the episode is refined «возобновлено» only once the process was seen running again, and
+  «не возобновлено: …» when SIGCONT did not stick (background job) or was refused.
 - `macos/Sources/WetoShared/GuardController.swift` — owns the one live `GuardMachine` (the reducer
   lives in `WetoCore`, see `weto-core.md`) plus the network probe: turns triggers into
   `GuardInput`, applies it, and asks `GuardVM` to enact whatever `GuardEffect` came back
 - `macos/Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event;
   `pause(_:)` builds a `PausePlan` (skips pids already in the ledger) and sends `.stop` in
-  `stopOrder`, `resume()` sends `.resume` in the reverse of what the ledger holds, `resumeOrphans()`
+  `stopOrder`, `resume(observing:)` sends `.resume` in the reverse of what the ledger holds and
+  returns a `ResumeOutcome` (`released` / `unresolved`), `resumeOrphans()`
   is the crash-recovery path (only pids that are still stopped *and* still the same executable get
-  `SIGCONT` — pid reuse must not resume a stranger)
+  `SIGCONT` — pid reuse must not resume a stranger). Neither one clears the ledger: an entry is
+  struck off only when the process is gone or the kernel showed it running, so a target that
+  falls back to `T` via `SIGTTIN` keeps its entry and gets SIGCONT again next pass
 - `macos/Sources/WetoShared/StoppedLedger.swift` — `StoppedProcess` (pid + path + `isShell`),
   `StoppedLedgerPersisting` (`StoppedFile` at `stopped.json`, atomic temp+rename, next to the
   journals; `InMemoryStoppedLedger` for tests), `StoppedLedgerReadout` (`.entries`/`.corrupted` —
@@ -106,9 +113,11 @@ this layer decides *when* to ask and *what to do* with the answer.
 - Signals processes: `ProcessEnforcer.pause(_:)` → `ProcessSignaling.send(.stop, …)` in
   `PausePlan.stopOrder`; `.terminate(_:)` → `.send(.kill, …)` for matched pids and `.send(.resume, …)`
   for anyone in the stopped ledger that no longer matches (a rule change or the shell of a target
-  under `.danger` — leaving it stopped would freeze it until the next weto launch); `.resume()` →
-  `.send(.resume, …)` over the whole ledger, reversed. Driven from `GuardVM.applyCurrentAction`
-  (`phase.action`: `.pause`/`.terminate`) and from the 250 ms watchdog while paused or unsafe.
+  under `.danger` — leaving it stopped would freeze it until the next weto launch); `.resume(observing:)` →
+  `.send(.resume, …)` over every live ledger entry, reversed. Driven from `GuardVM.applyCurrentAction`
+  (`phase.action`: `.pause`/`.terminate`) and from the 250 ms watchdog while paused or unsafe;
+  the resume side is driven by `GuardVM.settleResume()` from `apply`'s `.run` branch and from
+  every `handle(_:)` (a newsless tick never reaches `apply` — `GuardController.emit` swallows it).
 - Writes `stopped.json` on every ledger `add`/`remove`/`clear` — atomic temp+rename, same pattern
   as the journals.
 - `UserDefaults` writes on every settings setter (write-through, no batching) and on every
@@ -265,7 +274,11 @@ this layer decides *when* to ask and *what to do* with the answer.
   time") went unfulfilled, and the check-journal is the only record of it, since the kill-journal
   only ever hears about processes actually terminated. `resumeOrphans` never trusts a bare pid: an
   entry only resumes if the live process at that pid is still stopped *and* still the same
-  `executablePath` — pid reuse must not `SIGCONT` a stranger.
+  `executablePath` — pid reuse must not `SIGCONT` a stranger. And it never forgets an entry it did
+  not resolve: sending SIGCONT is not resuming (`kill` returns 0 for a background job that
+  immediately takes `SIGTTIN` and stops again), so a still-stopped entry stays on the books and
+  the tick loop keeps signalling it — that is the bug that left three of the owner's processes
+  in state `T` for hours with an empty `stopped.json`.
 - **Two notifications, two purposes, one delegate.** `notifyTerminated` is the pre-existing "your
   targets died" banner; `notifyBackgrounded` exists because a paused terminal target that loses its
   foreground job otherwise just vanishes from its terminal with no explanation — the notification

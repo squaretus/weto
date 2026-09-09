@@ -95,6 +95,16 @@ public final class GuardVM {
     @ObservationIgnored private var pauseStaleness: VerdictStaleness?
     @ObservationIgnored private var pauseEpisodeReason: String?
 
+    // pid, которым SIGCONT в текущем снятии паузы уже уходил. Цель, стоящая после
+    // своего же сигнала, — это ответ, а не ожидание: обязательство держится дальше,
+    // но журналу пора сказать, что возобновления не было.
+    @ObservationIgnored private var signalledForResume: Set<Int32> = []
+
+    // Проход охраны: свой у такта и свой у пришедшего ответа пробы. Разбор снятия
+    // паузы зовут оба, и второй SIGCONT в тот же проход был бы лишним шумом.
+    @ObservationIgnored private var passID = 0
+    @ObservationIgnored private var settledResumePass = -1
+
     private struct RecordedKill: Hashable {
         let pid: Int32
         let reason: String
@@ -197,6 +207,8 @@ public final class GuardVM {
         }
 
         // После падения: SIGCONT всем из учёта, кто ещё стоит и остался тем же процессом.
+        // Запись, которую этот проход не разрешил, остаётся в учёте — дальше её ведёт
+        // такт охраны через `settleResume()`.
         enforcer.resumeOrphans()
         refreshRunningTargets()
         events.start { [weak self] trigger in
@@ -213,10 +225,20 @@ public final class GuardVM {
         tickTask?.cancel(); tickTask = nil
         geoTickTask?.cancel(); geoTickTask = nil
         watchdogTask?.cancel(); watchdogTask = nil
-        // Штатный выход: замороженных целей не оставляем.
-        enforcer.resume()
-        resolvePauseEpisode("возобновлено: охрана остановлена")
-        pausedProcesses.removeAll()
+        // Штатный выход: замороженных целей не оставляем. Наблюдать последствия
+        // сигнала здесь уже нечем — такта больше не будет, — поэтому запись, которую
+        // SIGCONT не разрешил, остаётся в учёте и достаётся `resumeOrphans` при
+        // следующем запуске. Журнал говорит ровно это, а не «возобновлено».
+        let outcome = enforcer.resume()
+        if outcome.isComplete {
+            resolvePauseEpisode("возобновлено: охрана остановлена")
+        } else {
+            resolvePauseEpisode("не возобновлено: охрана остановлена, а процессы "
+                                + "\(outcome.unresolved.map(\.pid)) остались остановленными — "
+                                + "weto продолжит их при следующем запуске")
+        }
+        let stillStanding = Set(outcome.unresolved.map(\.pid))
+        pausedProcesses.removeAll { !stillStanding.contains($0.pid) }
         // Фаза обязана уйти вместе с целями: «Пауза», оставленная после остановки,
         // тикала бы отсчётом до потолка, которого никто больше не считает,
         // и `pauseDeadline` показывал бы интерфейсу стояние без стоящих.
@@ -329,6 +351,7 @@ public final class GuardVM {
     public func handle(_ trigger: GuardTrigger) {
         let scan = enforcer.scan(includingVPNApp: true)
         currentScan = scan
+        passID += 1
         defer { currentScan = nil }
 
         runningTargets = enforcer.runningTargets(in: scan)
@@ -358,6 +381,12 @@ public final class GuardVM {
         }
 
         controller.evaluate()
+
+        // Такт без новостей до `apply` не доходит вовсе: `GuardController.emit` глушит
+        // его, пока цели работают и фаза не менялась. А обязательство «вернуть из паузы»
+        // держится до наблюдения, и цель, вернувшуюся в стоп по SIGTTIN, догоняет
+        // именно этот вызов — раз в секунду, пока учёт не опустеет.
+        settleResume()
     }
 
     /// Проверка по кнопке из попапа. Повторное нажатие, пока ответ не пришёл,
@@ -408,7 +437,10 @@ public final class GuardVM {
     /// и сигналам, и списку живых целей, и статусу VPN-приложения.
     private func apply(_ phase: GuardPhase, effect: GuardEffect, origin: VerdictOrigin?) {
         let ownsScan = currentScan == nil
-        if ownsScan { currentScan = enforcer.scan(includingVPNApp: true) }
+        if ownsScan {
+            currentScan = enforcer.scan(includingVPNApp: true)
+            passID += 1
+        }
         defer { if ownsScan { currentScan = nil } }
 
         self.phase = phase
@@ -416,7 +448,11 @@ public final class GuardVM {
 
         switch effect {
         case .pause: pauseTargets()
-        case .resume: resumeTargets()
+        case .resume:
+            // Снятие паузы разбирается ниже, в ветке работающих целей: обязательство
+            // держится до наблюдения, и разбирает его каждый проход с работающими
+            // целями, а не только тот, что принёс эффект.
+            break
         case .terminate:
             if case .danger(let evidence) = phase { terminateTargets(evidence) }
         case .none: break
@@ -434,6 +470,9 @@ public final class GuardVM {
             permissionFailure = nil
             recordedKills.removeAll()
             recordedReasons.removeAll()
+            // После сброса, а не до: отказ в правах на SIGCONT — сообщение про сигнал,
+            // который только что не дошёл, и гасить его тем же проходом нельзя.
+            settleResume()
         case .pause, .terminate:
             startWatchdog()
         }
@@ -506,6 +545,9 @@ public final class GuardVM {
             pauseEpisodeID = episodeID
             pauseEpisodeReason = pauseReasonText
             pauseStaleness = currentPauseStaleness
+            // Новое стояние — новое снятие паузы: pid, которым SIGCONT уходил в прошлый
+            // раз, не имеют права сойти за «сигнал не прижился» у этого эпизода.
+            signalledForResume.removeAll()
         }
         let moment = now()
         let diagnostics = currentDiagnostics(staleness: pauseStaleness)
@@ -540,19 +582,85 @@ public final class GuardVM {
         }
     }
 
-    private func resumeTargets() {
-        enforcer.resume()
-        if case .disabled = phase {
-            resolvePauseEpisode("возобновлено: охрана выключена или целей нет")
-            // Чтение самой фазы, а не последнее известное: паузу снимает конкретный
-            // вердикт, и в исходе обязан стоять его адрес.
-        } else if let reading = phase.reading ?? lastReading {
-            resolvePauseEpisode("возобновлено: проверка подтвердила безопасный выход: "
-                                + "\(reading.ip), \(reading.primaryCountry)")
-        } else {
-            resolvePauseEpisode("возобновлено: проверка подтвердила безопасный выход")
+    /// Снятие паузы: SIGCONT всем, кто ещё в учёте, и правда о том, что из этого вышло.
+    ///
+    /// Зовётся не эффектом `.resume`, а каждым проходом с работающими целями, пока учёт
+    /// не пуст: обязательство «вернуть из паузы» снимает наблюдение, а не отправка
+    /// сигнала. Цель, которую SIGCONT разбудил, а SIGTTIN тут же вернул в стоп, остаётся
+    /// в учёте и получает сигнал снова — такт идёт раз в секунду, так что восстановление
+    /// автоматическое и перезапуска приложения не требует.
+    private func settleResume() {
+        guard phase.action == .run, !ledger.entries.isEmpty, settledResumePass != passID else { return }
+        settledResumePass = passID
+
+        // Кому SIGCONT уже уходил до этого прохода: только про них можно сказать,
+        // что сигнал не прижился. Стоящая цель, сигнал которой ушёл прямо сейчас,
+        // ещё не ответила — наблюдение шло по обходу, снятому до отправки.
+        let awaited = signalledForResume
+        let outcome = enforcer.resume(observing: currentScan)
+        signalledForResume.formUnion(outcome.results.map(\.pid))
+
+        let refused = outcome.results.filter { !$0.isDelivered }.map(\.pid)
+        if !refused.isEmpty {
+            permissionFailure = "Не удалось возобновить процессы \(refused) — недостаточно прав"
         }
-        pausedProcesses.removeAll()
+
+        guard !outcome.isComplete else {
+            resolvePauseEpisode(resumedEpisodeText)
+            signalledForResume.removeAll()
+            pausedProcesses.removeAll()
+            return
+        }
+
+        // Цель, которая всё ещё стоит, возобновлённой выглядеть не имеет права: пилюля
+        // остаётся, а признак «вернулась в фон» у неё теперь верен по факту — терминал
+        // у шелла, иначе SIGCONT прижился бы.
+        let answered = outcome.unresolved.filter { awaited.contains($0.pid) }
+        surfaceStanding(outcome.unresolved, answered: Set(answered.map(\.pid)))
+
+        guard !answered.isEmpty || !refused.isEmpty else { return }
+        resolvePauseEpisode(unresolvedEpisodeText(standing: outcome.unresolved.map(\.pid), refused: refused))
+    }
+
+    /// Исход эпизода, у которого возобновление наблюдалось.
+    private var resumedEpisodeText: String {
+        if case .disabled = phase {
+            return "возобновлено: охрана выключена или целей нет"
+        }
+        // Чтение самой фазы, а не последнее известное: паузу снимает конкретный
+        // вердикт, и в исходе обязан стоять его адрес.
+        if let reading = phase.reading ?? lastReading {
+            return "возобновлено: проверка подтвердила безопасный выход: "
+                + "\(reading.ip), \(reading.primaryCountry)"
+        }
+        return "возобновлено: проверка подтвердила безопасный выход"
+    }
+
+    /// Исход эпизода, у которого возобновления не случилось. Журнал обязан говорить
+    /// правду: «возобновлено» пишется только про наблюдённое возобновление, иначе
+    /// запись выдавала бы замороженную цель за живую.
+    private func unresolvedEpisodeText(standing: [Int32], refused: [Int32]) -> String {
+        if !refused.isEmpty {
+            return "не возобновлено: сигнал продолжения не дошёл до процессов \(refused) — "
+                + "недостаточно прав"
+        }
+        return "не возобновлено: процессы \(standing) остались остановленными — "
+            + "задание ушло в фон, продолжите его в терминале командой fg"
+    }
+
+    /// Пилюли с подсказкой про `fg` остаются ровно у того, кто действительно стоит.
+    /// Цель, ответившая стопом на свой же SIGCONT, помечается фоновой независимо от того,
+    /// что про неё думал план паузы: терминал у шелла — это уже наблюдённый факт.
+    private func surfaceStanding(_ standing: [StoppedProcess], answered: Set<Int32>) {
+        let pids = Set(standing.map(\.pid))
+        pausedProcesses.removeAll { !pids.contains($0.pid) }
+        for index in pausedProcesses.indices {
+            let paused = pausedProcesses[index]
+            guard answered.contains(paused.pid), !paused.isBackgrounded else { continue }
+            pausedProcesses[index] = PausedProcess(pid: paused.pid, targetName: paused.targetName,
+                                                   since: paused.since, isBackgrounded: true)
+            notifier.notifyBackgrounded(targetName: paused.targetName)
+        }
     }
 
     /// Исход эпизода паузы: записи те же, к ним дописывается, чем стояние кончилось.
