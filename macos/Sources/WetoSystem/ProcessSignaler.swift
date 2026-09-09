@@ -38,11 +38,23 @@ public protocol ProcessSignaling: Sendable {
 
 public struct ProcessSignaler: ProcessSignaling {
 
-    public init() {}
+    private let sendToKernel: @Sendable (Int32, Int32) -> Int32
+
+    public init() {
+        self.init(sendToKernel: { pid, signal in Darwin.kill(pid, signal) })
+    }
+
+    /// Сейм для собственных тестов границы: позволяет зафиксировать порядок и содержимое
+    /// вызовов `kill(2)`, а не только порядок результатов. Не публичный — вызывающие выше
+    /// этой границы (`ProcessEnforcer` и всё, что над ним) обязаны собирать `ProcessSignaler()`
+    /// без параметров; подмена самого ядра для них недоступна и не должна становиться доступной.
+    init(sendToKernel: @escaping @Sendable (Int32, Int32) -> Int32) {
+        self.sendToKernel = sendToKernel
+    }
 
     public func send(_ signal: ProcessSignal, to pids: [Int32]) -> [SignalResult] {
         pids.map { pid in
-            let status = Darwin.kill(pid, signal.number)
+            let status = sendToKernel(pid, signal.number)
             return SignalResult(pid: pid, errorCode: status == 0 ? nil : errno)
         }
     }
