@@ -328,6 +328,14 @@ final class GuardController {
         trigger: CheckEvent.Trigger,
         durationMilliseconds: Int
     ) {
+        // Барьер ревизии: ответ пробы, начатой при прежних настройках, не применяется.
+        //
+        // Технически его можно сузить — настройки и снимок читаются непосредственно
+        // перед применением, а от чужого пути защищает отпечаток, — но он держит
+        // инвариант «устаревший результат не возвращает safe» структурно, а не
+        // рассуждением, и он же единственный источник `discardedSettingsChanged`
+        // в общей схеме выгрузки. Цена — один запрос на правку настроек, событие
+        // редкое и пользовательское.
         guard revision == expected else {
             note(report, trigger: trigger, outcome: .discardedSettingsChanged,
                  fingerprint: expectedFingerprint, milliseconds: durationMilliseconds)

@@ -30,9 +30,14 @@ final class ProcessEnforcer {
         /// Цели, остановленные этим проходом: без шеллов и без уже стоявших.
         let fresh: [MatchedProcess]
         let results: [SignalResult]
+        /// Всё, что под правилами прямо сейчас, — включая стоящих с прошлых проходов.
+        /// По нему видно, кто из стоящих больше не существует или перестал быть целью:
+        /// список пилюль с отсчётом обязан описывать настоящее, а не историю.
+        let matched: [MatchedProcess]
 
         static let none = PauseOutcome(
-            plan: PausePlan(stopOrder: [], shells: [], backgrounded: [], skipped: []), fresh: [], results: []
+            plan: PausePlan(stopOrder: [], shells: [], backgrounded: [], skipped: []),
+            fresh: [], results: [], matched: []
         )
     }
 
@@ -184,7 +189,12 @@ final class ProcessEnforcer {
         }
 
         let pending = matched.filter { !isAlreadyStopped($0.pid) }
-        guard !pending.isEmpty else { return .none }
+        // Останавливать некого — но кто под правилами, знать всё равно нужно:
+        // ровно этот проход и обнаруживает, что стоящая цель умерла сама.
+        guard !pending.isEmpty else {
+            return PauseOutcome(plan: PausePlan(stopOrder: [], shells: [], backgrounded: [], skipped: []),
+                                fresh: [], results: [], matched: matched)
+        }
 
         let plan = PausePlanner.plan(matched: pending, processes: scan.processes)
         let order = plan.stopOrder.filter { !isAlreadyStopped($0) }
@@ -197,7 +207,8 @@ final class ProcessEnforcer {
                            isShell: plan.shells.contains(pid))
         })
 
-        return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) }, results: results)
+        return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) },
+                            results: results, matched: matched)
     }
 
     /// Продолжение всем из учёта — в обратном порядке: потомки, цели, шеллы.

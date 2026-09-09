@@ -81,11 +81,19 @@ public final class GuardVM {
     // контроллер — он единственный знает, чем принято решение.
     @ObservationIgnored private var lastOrigin: VerdictOrigin?
 
-    // Эпизод паузы: одна причина, один id на всё время стояния; pid из него при завершении
-    // новых записей не заводят — им дописывается исход.
+    // Эпизод паузы: один id на всё время стояния — процесс остановлен один раз,
+    // и вторая запись про тот же pid была бы тем же повтором, которого журнал
+    // не допускает и при завершении стоявших целей. Поэтому pid из эпизода
+    // при завершении новых записей не заводят — им дописывается исход.
+    //
+    // Причина у эпизода одна в каждый момент, но не навсегда: пока цели стоят,
+    // редьюсер вправе сменить причину стояния (смена пути под паузой), и тогда
+    // весь эпизод уточняется до той причины, которая его держит, — вместе
+    // с разбором свежести. Уточняется, а не заводится заново: см. `refreshPauseEpisodeCause`.
     @ObservationIgnored private var pauseEpisodeID: UUID?
     @ObservationIgnored private var pausedEpisodePIDs: Set<Int32> = []
     @ObservationIgnored private var pauseStaleness: VerdictStaleness?
+    @ObservationIgnored private var pauseEpisodeReason: String?
 
     private struct RecordedKill: Hashable {
         let pid: Int32
@@ -209,6 +217,10 @@ public final class GuardVM {
         enforcer.resume()
         resolvePauseEpisode("возобновлено: охрана остановлена")
         pausedProcesses.removeAll()
+        // Фаза обязана уйти вместе с целями: «Пауза», оставленная после остановки,
+        // тикала бы отсчётом до потолка, которого никто больше не считает,
+        // и `pauseDeadline` показывал бы интерфейсу стояние без стоящих.
+        phase = .disabled
     }
 
     /// Цвет статуса для глаза. Стоящие цели — не полноценная зелёная защита,
@@ -399,19 +411,32 @@ public final class GuardVM {
         switch phase.action {
         case .run:
             watchdogTask?.cancel(); watchdogTask = nil
-            if case .protected = phase {
-                permissionFailure = nil
-                recordedKills.removeAll()
-                recordedReasons.removeAll()
-            }
+            // Цели снова работают — эпизод закрыт, и следующее завершение будет первым,
+            // а не «запуском запрещён». Сброс на всех работающих фазах, а не на одной
+            // «Защищено»: «Помехи» — рабочий путь (429 от ipinfo приходит регулярно),
+            // и завершение после них получало чужой `kind`, а при совпавшем pid
+            // не получало ни записи, ни баннера. По той же причине здесь гаснет
+            // и сообщение о нехватке прав: оно про сигналы, которых больше нет.
+            permissionFailure = nil
+            recordedKills.removeAll()
+            recordedReasons.removeAll()
         case .pause, .terminate:
             startWatchdog()
         }
+        refreshPauseEpisodeCause()
         refreshRunningTargets()
     }
 
     /// Сторож под паузой доводит новорождённых потомков, под запретом — новые запуски.
+    ///
+    /// Обход процессов свой, как и у `apply`: сигналы и отладочные показания записи
+    /// обязаны описывать один момент. Сторож срабатывает как раз тогда, когда запись
+    /// и создаётся, — на новорождённой цели.
     private func applyCurrentAction() {
+        let ownsScan = currentScan == nil
+        if ownsScan { currentScan = enforcer.scan(includingVPNApp: true) }
+        defer { if ownsScan { currentScan = nil } }
+
         switch phase.action {
         case .pause: pauseTargets()
         case .terminate: if case .danger(let evidence) = phase { terminateTargets(evidence) }
@@ -428,23 +453,67 @@ public final class GuardVM {
         }
     }
 
+    /// Разбор свежести есть только у стоящей фазы «вердикта нет»: у паузы по молчанию
+    /// сервисов вердикт как раз в силе, и терять ему нечего. Живёт он ровно на время
+    /// объявления потери, поэтому спрашивается у контроллера в тот же миг.
+    private var currentPauseStaleness: VerdictStaleness? {
+        if case .verifying = phase { return controller.lastStaleness }
+        return nil
+    }
+
+    /// Причина стояния способна смениться, пока цели стоят: смена пути под паузой
+    /// переводит «Паузу» в «Проверку», заново запускает отсчёт потолка и не даёт
+    /// никакого эффекта — цели и так стоят. Записи эпизода обязаны говорить то,
+    /// что держит их сейчас: иначе завершение по потолку дописывалось бы к записям
+    /// про давно прошедший таймаут, да ещё без разбора свежести, и по выгрузке
+    /// выходило бы, что путь не менялся вовсе.
+    ///
+    /// Эпизод при этом один: процесс остановлен один раз, и второй набор записей
+    /// про те же pid был бы ложью. Уточняется весь эпизод разом — ровно затем
+    /// `refine` и заведён.
+    private func refreshPauseEpisodeCause() {
+        guard let episodeID = pauseEpisodeID, phase.action == .pause else { return }
+        let reason = pauseReasonText
+        let staleness = currentPauseStaleness
+        // Такт, подтверждающий прежнюю причину, разбора свежести не несёт —
+        // затирать им уже записанный нельзя.
+        guard reason != pauseEpisodeReason || (staleness != nil && staleness != pauseStaleness) else { return }
+
+        pauseEpisodeReason = reason
+        if let staleness { pauseStaleness = staleness }
+        eventLog.refine(
+            episodeID: episodeID,
+            reasonText: reason,
+            diagnostics: currentDiagnostics(staleness: pauseStaleness)
+        )
+    }
+
     private func pauseTargets() {
         let outcome = enforcer.pause(currentScan ?? enforcer.scan())
         let refused = outcome.results.filter { !$0.isDelivered }
         permissionFailure = refused.isEmpty
             ? nil
             : "Не удалось приостановить процессы \(refused.map(\.pid)) — недостаточно прав"
+
+        // Пилюля с отсчётом описывает то, что стоит сейчас: цель, умершая под паузой
+        // сама или снятая с охраны, оставалась в списке с живым отсчётом и кнопкой
+        // «Показать терминал», которой нечего показывать.
+        let standing = Set(outcome.matched.map(\.pid))
+        pausedProcesses.removeAll { !standing.contains($0.pid) }
+
         guard !outcome.fresh.isEmpty else { return }
 
         let episodeID = pauseEpisodeID ?? UUID()
         if pauseEpisodeID == nil {
             pauseEpisodeID = episodeID
-            // Разбор свежести есть только у паузы «вердикта нет»; у паузы по молчанию
-            // сервисов вердикт как раз в силе, и терять ему нечего.
-            if case .verifying = phase { pauseStaleness = controller.lastStaleness } else { pauseStaleness = nil }
+            pauseEpisodeReason = pauseReasonText
+            pauseStaleness = currentPauseStaleness
         }
         let moment = now()
         let diagnostics = currentDiagnostics(staleness: pauseStaleness)
+        // Причина берётся у эпизода, а не у фазы: новорождённый под паузой обязан
+        // встать в один ряд с остальными, а не принести свой текст.
+        let reasonText = pauseEpisodeReason ?? pauseReasonText
         eventLog.record(outcome.fresh.map { process in
             KillEvent(
                 episodeID: episodeID,
@@ -455,7 +524,7 @@ public final class GuardVM {
                 executablePath: process.executablePath,
                 matchedBy: process.matchedBy,
                 kind: .paused,
-                reasonText: pauseReasonText,
+                reasonText: reasonText,
                 ip: lastReading?.ip,
                 country: lastReading?.primaryCountry,
                 confirmedCountry: lastReading?.confirmedCountry,
@@ -505,6 +574,7 @@ public final class GuardVM {
         pauseEpisodeID = nil
         pausedEpisodePIDs.removeAll()
         pauseStaleness = nil
+        pauseEpisodeReason = nil
     }
 
     private func terminateTargets(_ evidence: UnsafeEvidence) {
