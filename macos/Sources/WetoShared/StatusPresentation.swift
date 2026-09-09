@@ -51,8 +51,7 @@ public enum StatusPresentation {
     /// не читает часы само.
     public static func explanation(
         for phase: GuardPhase,
-        remainingPause: TimeInterval?,
-        tolerance: Int = Constants.silenceToleranceProbes
+        remainingPause: TimeInterval?
     ) -> StatusExplanation {
         let remaining = Int((remainingPause ?? 0).rounded(.up))
         switch phase {
@@ -62,7 +61,10 @@ public enum StatusPresentation {
                 evidence: "Цели не выбраны — охрана ничего не завершает",
                 next: "Добавьте приложение или команду в настройках"
             )
-        case .verifying(_, let cause):
+        // ВРЕМЕННО: строки «Цели на паузе» и отсчёт у «Проверки» остались от стоящей
+        // фазы и теперь неверны — цели в проверке работают. Их правит отдельная задача
+        // про формулировки (respec-wording), она же уносит `remainingPause` из этой ветки.
+        case .verifying(let cause):
             return StatusExplanation(
                 title: phase.title, action: "Цели на паузе",
                 evidence: "Подключение ещё не проверено: \(cause.displayText)",
@@ -74,20 +76,13 @@ public enum StatusPresentation {
                 evidence: exitDescription(reading),
                 next: "Дальше ничего делать не нужно"
             )
-        case .interference(let reading, let reason, let failures):
-            let next: String
-            if failures == 0 {
-                next = "Цели работают: адрес \(reading.ip) доказанно тот же"
-            } else {
-                // `GuardMachine.tolerate` остаётся в `.interference(failures: f)`, пока
-                // `f <= tolerance`, и переходит в `.paused` только когда `f + 1 > tolerance`.
-                // Значит дальше терпится ровно `tolerance - failures + 1` неудач, а не
-                // `tolerance - failures`: при failures == tolerance следующий провал —
-                // уже потолок, и это одна проба, а не ноль.
-                let left = max(1, tolerance - failures + 1)
-                next = "Цели работают по вердикту \(reading.primaryCountry); ещё \(left) \(pluralProbes(left)) — и пауза"
-            }
-            return StatusExplanation(title: phase.title, action: "Цели работают", evidence: reason.displayText, next: next)
+        case .interference(let reading, let reason):
+            // «Помехи» — это ответ, а не тишина: резервный сервис назвал прежний адрес.
+            // Считать тут нечего — отсчёта неудачных проб у охраны больше нет.
+            return StatusExplanation(
+                title: phase.title, action: "Цели работают", evidence: reason.displayText,
+                next: "Цели работают: адрес \(reading.ip) доказанно тот же"
+            )
         case .paused(_, let reason):
             return StatusExplanation(
                 title: phase.title, action: "Цели на паузе", evidence: reason.displayText,
@@ -118,14 +113,6 @@ public enum StatusPresentation {
             return "Выход \(reading.ip), страна \(reading.primaryCountry) по данным ipinfo"
         }
         return "Выход \(reading.ip), страна \(confirmed) подтверждена \(source.rawValue)"
-    }
-
-    /// «1 неудачная проба», «2 неудачные пробы», «5 неудачных проб».
-    private static func pluralProbes(_ count: Int) -> String {
-        let last = count % 10, lastTwo = count % 100
-        if last == 1 && lastTwo != 11 { return "неудачная проба" }
-        if (2...4).contains(last) && !(12...14).contains(lastTwo) { return "неудачные пробы" }
-        return "неудачных проб"
     }
 
     /// Совет «VPN можно выключать» правдив ровно в одном состоянии: свежий safe.
@@ -210,7 +197,7 @@ public enum StatusPresentation {
     private static func knownReading(for phase: GuardPhase, reading: GeoReading?) -> GeoReading? {
         switch phase {
         case .verifying: return nil
-        case .protected(let current), .interference(let current, _, _): return current
+        case .protected(let current), .interference(let current, _): return current
         case .danger(.vpnAppNotRunning): return nil
         default: return reading
         }

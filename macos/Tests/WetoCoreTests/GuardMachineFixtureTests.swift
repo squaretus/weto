@@ -5,20 +5,19 @@ import XCTest
 ///
 /// Тот же файл прочтёт Rust-реализация в плане порта паузы. Политика уже пришпилена
 /// фикстурой, но политика отвечает про один момент; расхождение двух реализаций живёт
-/// в переходах — в терпимости к молчанию, в момент постановки на паузу и в потолке.
+/// в переходах — в том, какая фаза стоит, когда начинается пауза и как считается потолок.
 /// Без общего файла это разъехалось бы тихо: обе стороны остались бы «зелёными».
 final class GuardMachineFixtureTests: XCTestCase {
 
     func test_every_fixture_case_matches_the_machine() throws {
         let suite = try loadSuite()
-        XCTAssertEqual(suite.version, 1, "версия фикстур разъехалась с раннером")
+        XCTAssertEqual(suite.version, 2, "версия фикстур разъехалась с раннером")
         XCTAssertFalse(suite.cases.isEmpty, "фикстуры пусты — файл не найден или испорчен")
 
         let reading = suite.reading.asReading
         for fixture in suite.cases {
             var machine = GuardMachine(
                 phase: try fixture.start.phase(reading: reading),
-                tolerance: fixture.tolerance,
                 pauseCeiling: fixture.ceilingSeconds
             )
             for step in fixture.steps {
@@ -59,7 +58,6 @@ final class GuardMachineFixtureTests: XCTestCase {
 
     private struct Case: Decodable {
         let name: String
-        let tolerance: Int
         let ceilingSeconds: TimeInterval
         let start: Phase
         let steps: [Step]
@@ -88,29 +86,31 @@ final class GuardMachineFixtureTests: XCTestCase {
         }
     }
 
-    /// Ожидаемая фаза: сверяются `kind`, а также `failures` и `evidence.kind`, если заданы.
-    /// Полезная нагрузка узлов (`detail`, `observed`, `ip`, `code`, `source`, `primary`,
-    /// `confirmed`) обязательна: молчаливое умолчание в пустую строку означало бы,
-    /// что Rust-раннер разойдётся с этим на первом же случае с нагрузкой, и оба
-    /// останутся зелёными.
+    /// Ожидаемая фаза: сверяются `kind`, а также `cause`, `reason` и `evidence.kind`,
+    /// если заданы. Полезная нагрузка узлов (`detail`, `observed`, `ip`, `code`, `source`,
+    /// `primary`, `confirmed`, `cause`) обязательна: молчаливое умолчание в пустую строку
+    /// означало бы, что Rust-раннер разойдётся с этим на первом же случае с нагрузкой,
+    /// и оба останутся зелёными.
     /// Момент постановки на паузу не сверяется — он вычисляется из `at` шага, и сверять
     /// его значило бы сверять раннер с самим собой.
     private struct Phase: Decodable {
         let kind: String
-        let failures: Int?
+        let cause: String?
         let evidence: Evidence?
         let reason: Reason?
 
-        /// Стартовая фаза случая. `verifying` и `paused` в фикстурах стартовыми не бывают:
-        /// у них есть момент постановки, а он в файле не задаётся — такие случаи
-        /// начинаются с шага, который на паузу и ставит.
+        /// Стартовая фаза случая. `paused` стартовой не бывает: у неё есть момент
+        /// постановки, а он в файле не задаётся — такие случаи начинаются с шага,
+        /// который на паузу и ставит. У `verifying` момента нет вовсе (цели в ней
+        /// работают, и считать от неё нечего), поэтому стартовой она быть может.
         func phase(reading: GeoReading) throws -> GuardPhase {
             switch kind {
             case "disabled": return .disabled
+            case "verifying": return .verifying(cause: try parsedCause)
             case "protected": return .protected(reading)
             case "interference":
                 guard let reason else { throw Failure("стартовая фаза interference без причины") }
-                return .interference(reading, reason: try reason.asUnproven, failures: failures ?? 0)
+                return .interference(reading, reason: try reason.asUnproven)
             case "danger":
                 guard let evidence else { throw Failure("стартовая фаза danger без улики") }
                 return .danger(try evidence.asEvidence)
@@ -119,14 +119,28 @@ final class GuardMachineFixtureTests: XCTestCase {
             }
         }
 
+        private var parsedCause: VerdictStaleness.Cause {
+            get throws {
+                guard let cause, let parsed = VerdictStaleness.Cause(rawValue: cause) else {
+                    throw Failure("фаза verifying с неизвестной причиной «\(cause ?? "—")»")
+                }
+                return parsed
+            }
+        }
+
         func matches(_ actual: GuardPhase) -> Bool {
             switch (kind, actual) {
             case ("disabled", .disabled): return true
-            case ("verifying", .verifying): return true
+            case ("verifying", .verifying(let actualCause)):
+                guard cause != nil else { return true }
+                return (try? parsedCause) == actualCause
             case ("protected", .protected): return true
-            case ("interference", .interference(_, _, let actualFailures)):
-                return failures.map { $0 == actualFailures } ?? true
-            case ("paused", .paused): return true
+            case ("interference", .interference(_, let actualReason)):
+                guard let reason else { return true }
+                return (try? reason.asUnproven) == actualReason
+            case ("paused", .paused(_, let actualReason)):
+                guard let reason else { return true }
+                return (try? reason.asUnproven) == actualReason
             case ("danger", .danger(let actualEvidence)):
                 guard let evidence else { return true }
                 return (try? evidence.asEvidence) == actualEvidence

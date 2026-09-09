@@ -13,21 +13,23 @@ public enum GuardAction: Equatable, Sendable {
 public enum GuardPhase: Equatable, Sendable {
     /// Охрана выключена или целей нет.
     case disabled
-    /// Вердикта нет: холодный старт или сменился путь. Цели стоят.
-    case verifying(since: Date, cause: VerdictStaleness.Cause)
+    /// Проба в полёте, вердикта про текущий путь ещё нет. Цели работают:
+    /// пауза начинается с плохого результата, а не с его ожидания.
+    case verifying(cause: VerdictStaleness.Cause)
     /// Свежий safe. Цели работают.
     case protected(GeoReading)
-    /// Вердикт есть, сервисы молчат в пределах терпимости. Цели работают, предупреждение.
-    case interference(GeoReading, reason: UnprovenReason, failures: Int)
-    /// Терпимость исчерпана. Цели стоят, идёт отсчёт до потолка.
+    /// Ipinfo молчит, но резервный сервис назвал прежний адрес: это ответ, а не тишина,
+    /// и он доказывает неизменность выхода. Цели работают, предупреждение.
+    case interference(GeoReading, reason: UnprovenReason)
+    /// Проба вернула «не доказано». Цели стоят, идёт отсчёт до потолка.
     case paused(since: Date, reason: UnprovenReason)
     /// Доказательство. Цели завершены, запуск запрещён.
     case danger(UnsafeEvidence)
 
     public var action: GuardAction {
         switch self {
-        case .disabled, .protected, .interference: return .run
-        case .verifying, .paused: return .pause
+        case .disabled, .verifying, .protected, .interference: return .run
+        case .paused: return .pause
         case .danger: return .terminate
         }
     }
@@ -43,10 +45,10 @@ public enum GuardPhase: Equatable, Sendable {
         }
     }
 
-    /// Когда цели встали. `nil` — не стоят.
+    /// Когда цели встали. `nil` — не стоят. Стоящая фаза ровно одна: «Пауза».
     public var pausedSince: Date? {
         switch self {
-        case .verifying(let since, _), .paused(let since, _): return since
+        case .paused(let since, _): return since
         default: return nil
         }
     }
@@ -54,7 +56,7 @@ public enum GuardPhase: Equatable, Sendable {
     /// Чтение, на котором стоит фаза. У стоящих и опасных фаз его нет.
     public var reading: GeoReading? {
         switch self {
-        case .protected(let reading), .interference(let reading, _, _): return reading
+        case .protected(let reading), .interference(let reading, _): return reading
         default: return nil
         }
     }
@@ -65,7 +67,7 @@ public enum GuardInput: Equatable, Sendable {
     /// от safe по доказанной неизменности адреса (`.degraded`).
     case verdict(GuardDecision, geo: GeoOutcome)
     /// Переоценка по установленному чтению без пробы: правка настроек
-    /// или возвращение VPN-приложения. Паузу не снимает, счёт терпимости не ведёт.
+    /// или возвращение VPN-приложения. Паузу не снимает — её снимает только проба.
     case reassessment(GuardDecision, reading: GeoReading)
     /// Локальное доказательство между пробами: VPN-приложение закрылось.
     case evidence(UnsafeEvidence)
@@ -87,23 +89,25 @@ public enum GuardEffect: Equatable, Sendable {
 /// Переходы между шестью состояниями. Чистая функция состояния и входа:
 /// контроллер — единственный владелец экземпляра, но правила живут здесь и проверяются
 /// синхронно, без единой границы. Голден-фикстура — `shared/fixtures/guard-transitions.json`.
+///
+/// Пауза начинается с плохого результата пробы и ничем другим. Ни холодный старт,
+/// ни смена пути целей не трогают: они лишь обесценивают вердикт и просят пробу,
+/// а решает ответ. Цена известна и принята владельцем: между сменой пути (или
+/// холодным стартом) и ответом пробы есть до ~5 с, когда цели работают без вердикта.
+/// Счёта неудачных проб нет вовсе — первый же ответ «сервисы не ответили» ставит
+/// на паузу, потолок считается только от её начала.
 public struct GuardMachine: Equatable, Sendable {
 
     public private(set) var phase: GuardPhase
-
-    /// Сколько подряд неудачных проб при установленном вердикте ничего не меняют.
-    public let tolerance: Int
 
     /// Сколько цели могут стоять до завершения.
     public let pauseCeiling: TimeInterval
 
     public init(
         phase: GuardPhase = .disabled,
-        tolerance: Int = Constants.silenceToleranceProbes,
         pauseCeiling: TimeInterval = Constants.pauseCeilingSeconds
     ) {
         self.phase = phase
-        self.tolerance = tolerance
         self.pauseCeiling = pauseCeiling
     }
 
@@ -121,32 +125,21 @@ public struct GuardMachine: Equatable, Sendable {
 
         case .verdictLost(let cause):
             switch phase {
-            case .verifying(_, let current) where cause == current:
-                // Пока вердикт несвеж, такт заново объявляет fail-closed каждую секунду:
-                // перезапуск отсчёта на каждом объявлении значил бы, что потолок
-                // не срабатывает никогда.
-                return .none
-            case .verifying:
-                // Причина другая — путь сменился уже в проверке, и у нового пути свой
-                // отсчёт. Эффекта нет: цели и так стоят.
-                phase = .verifying(since: now, cause: cause)
+            case .paused:
+                // Стоим по плохому результату, и потолок считается от него.
+                // «Вердикта нет» — не результат: ни возобновить, ни перезапустить
+                // отсчёт оно не вправе, иначе минуту можно было бы продлевать вечно
+                // сменами пути.
                 return .none
             case .danger:
-                // Завершение снимает только смена пути: у нового пути свой шанс.
-                // Ни холодный старт (констатация, что вердикта по-прежнему нет),
-                // ни правка настроек (п. 11: вердикт она не обесценивает) путь не меняют,
-                // и доказательство остаётся в силе, пока проба не скажет иного.
-                guard cause.includesNetworkChange else { return .none }
-                phase = .verifying(since: now, cause: cause)
-                return .pause
-            case .paused:
-                // Путь сменился, пока стояли: отсчёт идёт по новому пути, цели уже стоят.
-                phase = .verifying(since: now, cause: cause)
+                // Из «Опасно» выпускает только настоящий ответ пробы. Прежде
+                // «Проверка» была стоящей фазой и переход туда был послаблением,
+                // теперь он разрешал бы запуск целей без единой улики в пользу этого.
                 return .none
-            case .disabled, .protected, .interference:
-                // Момент смены пути и есть возможная утечка: пауза сразу, без терпимости.
-                phase = .verifying(since: now, cause: cause)
-                return .pause
+            case .disabled, .protected, .interference, .verifying:
+                // Цели работают и продолжают: проба спрашивается первой, отвечает она.
+                phase = .verifying(cause: cause)
+                return .none
             }
 
         case .evidence(let evidence):
@@ -197,7 +190,7 @@ public struct GuardMachine: Equatable, Sendable {
             switch geo {
             case .degraded(let previous, let detail):
                 // Адрес доказанно тот же — цели работают, но зелёный тут врал бы.
-                phase = .interference(previous, reason: .geoUnavailable(detail), failures: 0)
+                phase = .interference(previous, reason: .geoUnavailable(detail))
             default:
                 guard let reading = geo.reading else { return .none }
                 phase = .protected(reading)
@@ -206,36 +199,17 @@ public struct GuardMachine: Equatable, Sendable {
 
         case .unproven(let reason):
             switch phase {
-            case .protected(let reading):
-                return tolerate(reading: reading, reason: reason, failures: 1, at: now)
-            case .interference(let reading, _, let failures):
-                return tolerate(reading: reading, reason: reason, failures: failures + 1, at: now)
-            case .disabled:
-                phase = .verifying(since: now, cause: .coldStart)
+            case .disabled, .verifying, .protected, .interference:
+                // Первый же ответ «не доказано» ставит на паузу: терпимости к молчанию
+                // сервисов больше нет — она обменивала минуты работы целей на догадку,
+                // что молчание временное.
+                phase = .paused(since: now, reason: reason)
                 return .pause
-            case .verifying, .paused, .danger:
+            case .paused, .danger:
                 // Стоим или уже завершили: непроверенность ничего не добавляет,
-                // потолок считает `tick`.
+                // потолок считает `tick` от начала паузы.
                 return .none
             }
         }
-    }
-
-    /// Терпимость к молчанию: первые `tolerance` неудачных проб ничего не меняют,
-    /// пауза приходит с `tolerance + 1`-й — при N = 2 это ~10 с пятисекундного расписания.
-    /// Смена адреса терпимости не получает — прошлое чтение про новый адрес ничего не говорит.
-    private mutating func tolerate(
-        reading: GeoReading, reason: UnprovenReason, failures: Int, at now: Date
-    ) -> GuardEffect {
-        if case .addressChanged = reason {
-            phase = .paused(since: now, reason: reason)
-            return .pause
-        }
-        if failures <= tolerance {
-            phase = .interference(reading, reason: reason, failures: failures)
-            return .none
-        }
-        phase = .paused(since: now, reason: reason)
-        return .pause
     }
 }

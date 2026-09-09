@@ -238,7 +238,7 @@ public final class GuardVM {
         switch phase {
         case .disabled, .verifying:
             return nil
-        case .protected(let reading), .interference(let reading, _, _):
+        case .protected(let reading), .interference(let reading, _):
             return reading.primaryCountry
         case .paused:
             return lastReading?.primaryCountry
@@ -447,7 +447,7 @@ public final class GuardVM {
     /// Причина эпизода паузы человеческим текстом: она же уходит в журнал.
     private var pauseReasonText: String {
         switch phase {
-        case .verifying(_, let cause): return "Подключение ещё не проверено: \(cause.displayText)"
+        case .verifying(let cause): return "Подключение ещё не проверено: \(cause.displayText)"
         case .paused(_, let reason): return reason.displayText
         default: return phase.title
         }
