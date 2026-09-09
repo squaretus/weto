@@ -55,8 +55,9 @@ linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабо�
   Появилось желание написать «weto» внутри пакета —
   значение просится в конфигурацию. `UpdateKitCore` держит тот же инвариант, что `WetoCore`,
   а у `UpdateKitXPC` нет зависимостей вообще.
-- Мокаются только границы системы (`GeoProbing`, `ProcessKilling`, `NetworkSnapshotReading`,
-  `RouteProbing`, `TargetResolving`, `NetworkEventSourcing`; в пакете — `ReleaseFetching`, `UpdateInstalling`,
+- Мокаются только границы системы (`GeoProbing`, `ProcessSignaling`, `NetworkSnapshotReading`,
+  `RouteProbing`, `TargetResolving`, `NetworkEventSourcing`, `TerminalLocating`,
+  `StoppedLedgerPersisting`, `PopupPresenting`; в пакете — `ReleaseFetching`, `UpdateInstalling`,
   `UpdateStateStoring`, `UpdateClock`, `URLOpening`). Внутренние типы не подменяются.
 - Флаги стран лежат в бандле, а не тянутся из сети: канон — `shared/flags`,
   раскладка по платформам — `shared/tools/sync-flags.sh`, править копию нельзя.
@@ -162,3 +163,8 @@ linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабо�
   завершения (`NSSupportsAutomaticTermination`, `NSSupportsSuddenTermination`
   в `Info.plist` плюс `ProcessInfo.disableAutomaticTermination`
   и `disableSuddenTermination` на старте).
+- Остановка переднего задания интерактивного шелла требует сигнала шеллу раньше цели,
+  возобновление — в обратном порядке (сперва цель, потом шелл): иначе шелл забирает
+  терминал себе обратно, и цель встаёт по `SIGTTIN`. Проверено на zsh и bash 3.2. Процесс,
+  уже остановленный пользователем (`Ctrl-Z`) до паузы, план не трогает ни при остановке,
+  ни при возобновлении.
