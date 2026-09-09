@@ -44,12 +44,29 @@ final class ForegroundJobPlanTests: XCTestCase {
                 kill(task.processIdentifier, SIGCONT)
                 task.terminate()
             }
-            task.waitUntilExit()
+            // Не `waitUntilExit()`: `script`, застрявший на своём pty, подвесил бы
+            // прогон целиком — а уборка обязана кончаться всегда. Ждём ограниченно,
+            // упрямому досылаем SIGKILL и уходим.
+            waitForExit(within: 5)
+        }
+
+        private func waitForExit(within seconds: TimeInterval) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while task.isRunning && Date() < deadline { usleep(50_000) }
+            guard task.isRunning else { return }
+            kill(task.processIdentifier, SIGKILL)
+            let hardDeadline = Date().addingTimeInterval(1)
+            while task.isRunning && Date() < hardDeadline { usleep(50_000) }
         }
     }
 
-    /// Ждать появления процесса нельзя вечно: сорванный `script` или zsh без job control
-    /// обязаны провалить тест, а не подвесить прогон.
+    /// Сорванный `script`, zsh без job control или потомок, не забравший терминал,
+    /// обязаны провалить тест, а не подвесить прогон и не пропустить проверку:
+    /// пропуск здесь означал бы зелёный прогон там, где план паузы никто не проверил.
+    private struct TerminalSetupFailure: Error, CustomStringConvertible {
+        let description: String
+    }
+
     private static let spawnTimeout: TimeInterval = 15
 
     private func waitForChild(
@@ -110,7 +127,10 @@ final class ForegroundJobPlanTests: XCTestCase {
         let shell = waitForChild(of: session.task.processIdentifier, executablePath: "/bin/zsh")
         guard let shell else {
             session.tearDown()
-            throw XCTSkip("zsh в pty не поднялся за \(Int(Self.spawnTimeout)) с — проверять нечего.")
+            throw TerminalSetupFailure(
+                description: "zsh в pty не поднялся за \(Int(Self.spawnTimeout)) с: "
+                    + "план паузы остался непроверенным."
+            )
         }
         session.shellPID = shell.pid
         return (session, sandbox)
@@ -127,7 +147,10 @@ final class ForegroundJobPlanTests: XCTestCase {
         let job = waitForChild(of: session.shellPID, executablePath: executablePath)
         guard let job else {
             session.tearDown()
-            throw XCTSkip("Переднее задание в pty не появилось — проверять нечего.")
+            throw TerminalSetupFailure(
+                description: "Переднее задание \(executablePath) в pty не появилось "
+                    + "за \(Int(Self.spawnTimeout)) с: план паузы остался непроверенным."
+            )
         }
         session.jobPID = job.pid
         session.jobPath = job.snapshot.executablePath
@@ -177,7 +200,10 @@ final class ForegroundJobPlanTests: XCTestCase {
         }
         guard let grabber else {
             session.tearDown()
-            throw XCTSkip("Потомок не забрал терминал себе за \(Int(Self.spawnTimeout)) с — проверять нечего.")
+            throw TerminalSetupFailure(
+                description: "Потомок не забрал терминал себе за \(Int(Self.spawnTimeout)) с: "
+                    + "именно эта форма и проверяется, пропускать её нельзя."
+            )
         }
         session.grabberPID = grabber.pid
         return session

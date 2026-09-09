@@ -42,7 +42,8 @@ public enum PausePlanner {
 
         // Шелл переднего задания: у корня цели есть tty и передний план терминала принадлежит
         // поддереву цели. Шелл — родитель лидера группы цели, он в другой группе (иначе это
-        // обёртка, а не шелл) и на том же терминале (иначе он терминал и не отберёт).
+        // обёртка, а не шелл), на том же терминале (иначе он терминал и не отберёт)
+        // и действительно шелл (иначе это `login`, терминал у цели не отбирающий).
         var shells: [Int32] = []
         var backgrounded: [Int32] = []
         for root in active where root.matchedBy == .rule {
@@ -59,6 +60,7 @@ public enum PausePlanner {
             guard let shell = byPID[leader.parentPID],
                   shell.processGroup != snapshot.processGroup,
                   shell.terminalForegroundGroup == snapshot.terminalForegroundGroup,
+                  isShell(shell),
                   !shell.isStopped,
                   !matchedPIDs.contains(shell.pid),
                   !shells.contains(shell.pid)
@@ -88,12 +90,35 @@ public enum PausePlanner {
     /// цель уже действительно становилась фоновым заданием и вставала по `SIGTTIN`.
     ///
     /// Идентификатор группы равен pid её лидера, поэтому лидера ищем по номеру группы.
+    /// Отдельной ветки «лидер передней группы — сама цель» нет: группа зовётся по pid
+    /// своего лидера, так что этот случай — то же равенство групп сверху.
     /// Лидера может не быть в снимке (успел выйти) — тогда предков у него нет и передний
     /// план поддереву цели не принадлежит.
     private static func holdsForeground(_ target: ProcessSnapshot, tree: ProcessTree) -> Bool {
         if target.processGroup == target.terminalForegroundGroup { return true }
-        let foregroundLeader = target.terminalForegroundGroup
-        if foregroundLeader == target.pid { return true }
-        return tree.ancestors(of: foregroundLeader).contains(target.pid)
+        return tree.ancestors(of: target.terminalForegroundGroup).contains(target.pid)
+    }
+
+    /// Шеллы, которые ведут job control. Список имён — неприятная, но единственная
+    /// работающая проверка: структурно `login -fp user` под Terminal.app и интерактивный
+    /// zsh под `script`/tmux стоят на одном и том же месте дерева. `Terminal → login → -zsh`
+    /// против `script → zsh → цель`: у обоих родитель сидит на том же tty, в своей группе
+    /// процессов, и оба — лидеры своей сессии (под Terminal.app лидер — `login`,
+    /// под `script` и tmux — сам zsh). Поэтому «не лидер сессии» выкинуло бы из плана
+    /// как раз нужный шелл, а группы и tty не разводят эти формы вовсе.
+    ///
+    /// Разводит их работа: терминал у остановленной цели отбирает тот, кто ведёт её
+    /// задание, а `login` лишь ждёт выхода шелла — ему SIGSTOP не по делу.
+    /// Незнакомый шелл кандидатом не станет, и цель под ним уйдёт в фон на первой
+    /// же паузе; расплата видна — учёт держит обязательство до наблюдения,
+    /// и пользователь получает подсказку про `fg`.
+    private static let shellNames: Set<String> = [
+        "sh", "bash", "dash", "zsh", "ksh", "ksh93", "mksh", "csh", "tcsh",
+        "fish", "nu", "nushell", "xonsh", "elvish", "pwsh"
+    ]
+
+    private static func isShell(_ process: ProcessSnapshot) -> Bool {
+        guard let name = process.executablePath.split(separator: "/").last else { return false }
+        return shellNames.contains(String(name))
     }
 }

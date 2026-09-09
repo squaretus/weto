@@ -59,6 +59,11 @@ public struct CheckEvent: Codable, Equatable, Identifiable, Sendable {
         /// Учёт остановленных процессов не прочитался: обязательство «вернуть
         /// остановленным SIGCONT» в этот запуск выполнено не было.
         case ledgerUnreadable
+        /// Учёт прочитан, и процессы из него на старте всё ещё стояли: SIGCONT им ушёл,
+        /// но эпизода паузы в этом запуске нет, и журнал завершений про них молчит
+        /// по построению. Без этой записи стоящая цель после падения weto не оставляла
+        /// следа нигде.
+        case standingProcessesRemain
 
         public var displayText: String {
             switch self {
@@ -68,6 +73,7 @@ public struct CheckEvent: Codable, Equatable, Identifiable, Sendable {
             case .discardedPathChanged: return "ответ отброшен: путь сменился"
             case .discardedSettingsChanged: return "ответ отброшен: настройки изменились"
             case .ledgerUnreadable: return "учёт остановленных не прочитан"
+            case .standingProcessesRemain: return "остановленные процессы остались стоять"
             }
         }
 

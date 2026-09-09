@@ -29,7 +29,13 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   a tool the target started with its own job control (`setpgid` + `tcsetpgrp`) holds the group,
   and equality called such a target backgrounded and left its shell out of the plan. The shell
   candidate must therefore also share the target's terminal, otherwise the shell's own parent
-  (`script`, tmux, Terminal) would be signalled
+  (`script`, tmux, Terminal) would be signalled — and it must actually be a shell
+  (`PausePlanner.shellNames`): `login -fp user` from a real Terminal.app tree
+  (`Terminal → login → -zsh`) holds the *same* controlling tty in its own process group, so
+  when the matched root is itself the interactive shell nothing structural tells `login` from
+  the zsh of a `script`/tmux session (both are session leaders — session leadership excludes
+  exactly the shell we need). Only the job control does: `login` never takes the terminal back
+  from a stopped target, so SIGSTOP to it is a signal off the point
 - `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`,
   `TargetRule`, `KillEvent`, `KillDiagnostics`, `JournalExport`, `NetworkPhases` (per-request DNS /
   connect / TLS / first-byte timings, `stalledPhase` tells a dead tunnel from a slow service),

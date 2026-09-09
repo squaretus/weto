@@ -47,8 +47,9 @@ SIGSTOP/SIGCONT behaviour yet (`unproven` still kills there — see `modules/lin
   vanishes from its terminal with zero explanation.
 - Added: `CheckEvent`/`CheckLogStore` — a second, 50-entry journal for connectivity-check
   *attempts* (trigger + outcome), independent of the kill journal, which only ever hears about
-  processes actually terminated. `startupRecovery`/`ledgerUnreadable` is the one trigger/outcome
-  pair whose only witness is this journal.
+  processes actually terminated. `startupRecovery` is the one trigger whose only witness is this
+  journal — `ledgerUnreadable` (the ledger did not decode) and `standingProcessesRemain` (entries
+  survived the recovery, so the obligation is still open).
 - Renamed: `ProcessKilling` → `ProcessSignaling` (`.kill`/`.stop`/`.resume`, delivered strictly in
   list order); `ProcessKiller.swift` → `ProcessSignaler.swift`.
 - Renamed: `UnsafeReason` → `UnprovenReason` (pauses) + `UnsafeEvidence` (kills).
@@ -101,6 +102,10 @@ only a cause, no moment — nothing is timed from it. Wording landed in commit `
 - [ ] Kill `weto` while a target is paused, relaunch → target gets `SIGCONT` on startup
       (`resumeOrphans`), or, if `stopped.json` is corrupted, a `startupRecovery`/`ledgerUnreadable`
       entry appears in the check-journal.
+- [ ] Same, but with the target *backgrounded* (it answers the startup `SIGCONT` with a stop) →
+      the popup shows its badge with the `fg` hint and one
+      `startupRecovery`/`standingProcessesRemain` entry appears in the check-journal;
+      the terminal does not keep printing `suspended (tty input)` forever.
 - [ ] A paused terminal target loses its foreground job (backgrounded) → notification with
       "Показать терминал" fires; the button activates the hosting terminal app.
 - [ ] Linux: `unproven` still kills (no regression toward accidentally pausing there before the

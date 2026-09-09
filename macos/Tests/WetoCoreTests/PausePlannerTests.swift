@@ -183,17 +183,41 @@ final class PausePlannerTests: XCTestCase {
     }
 
     /// Цель — сам интерактивный шелл, ждущий своего переднего задания. Он в переднем плане
-    /// (терминал у его потомка) и в план входит сам, а его родитель — `script`, tmux, Terminal —
-    /// живёт на другом терминале и шеллом этого сеанса не является: брать его нельзя,
-    /// иначе SIGSTOP уходит процессу, терминала цели не касающемуся.
+    /// (терминал у его потомка) и в план входит сам, а его родитель — `login -fp user`
+    /// из настоящего дерева Terminal.app (`Terminal → login → -zsh`) — job control не ведёт
+    /// и терминал у остановленной цели не отбирает: SIGSTOP ему — сигнал не по делу.
+    ///
+    /// Форма родителя здесь честная и самая неудобная: тот же управляющий терминал, что
+    /// у шелла (`terminalForegroundGroup` совпадает), своя группа процессов. Ни условие
+    /// «на том же терминале», ни лидерство сессии его не отсекают — отсекает только то,
+    /// что `login` шеллом не является.
     func test_interactive_shell_target_does_not_drag_in_its_own_parent() {
-        let launcher = ProcessSnapshot(pid: 50, parentPID: 1, executablePath: "/usr/bin/script",
-                                       processGroup: 50, terminalForegroundGroup: 0)
+        let login = ProcessSnapshot(pid: 50, parentPID: 1, executablePath: "/usr/bin/login",
+                                    processGroup: 50, terminalForegroundGroup: 200)
         let plan = PausePlanner.plan(matched: matched([(100, .rule), (200, .descendant), (201, .descendant)]),
-                                     processes: [launcher, shell, claude, child])
+                                     processes: [login, shell, claude, child])
         XCTAssertEqual(plan.stopOrder, [100, 200, 201])
         XCTAssertEqual(plan.resumeOrder, [201, 200, 100])
-        XCTAssertTrue(plan.shells.isEmpty)
+        XCTAssertTrue(plan.shells.isEmpty, "`login` шеллом цели не является: терминал он не отберёт")
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+    }
+
+    /// Обратная сторона того же условия: вложенный шелл на том же терминале — настоящий
+    /// шелл цели, и он обязан войти в план первым. Форма та же, что у `login`
+    /// (родитель в своей группе на том же tty), и разводит их только то, что здесь
+    /// родитель ведёт job control: узнав о SIGSTOP, он и заберёт терминал себе.
+    func test_nested_shell_on_the_same_terminal_is_taken_along() {
+        let outer = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                    processGroup: 100, terminalForegroundGroup: 300)
+        let inner = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/bin/bash",
+                                    processGroup: 200, terminalForegroundGroup: 300)
+        let job = ProcessSnapshot(pid: 300, parentPID: 200, executablePath: "/usr/bin/vim",
+                                  processGroup: 300, terminalForegroundGroup: 300)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule), (300, .descendant)]),
+                                     processes: [outer, inner, job])
+        XCTAssertEqual(plan.stopOrder, [100, 200, 300])
+        XCTAssertEqual(plan.resumeOrder, [300, 200, 100])
+        XCTAssertEqual(plan.shells, [100])
         XCTAssertTrue(plan.backgrounded.isEmpty)
     }
 }
