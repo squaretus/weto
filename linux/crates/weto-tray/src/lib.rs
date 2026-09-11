@@ -15,7 +15,7 @@ pub mod service;
 
 use std::sync::mpsc::Sender;
 
-use weto_core::presentation::ShieldState;
+use weto_core::presentation::GuardStatusColor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayEvent {
@@ -27,7 +27,7 @@ pub enum TrayEvent {
 }
 
 pub struct WetoTray {
-    state: ShieldState,
+    state: GuardStatusColor,
     title: String,
     events: Sender<TrayEvent>,
 }
@@ -35,13 +35,15 @@ pub struct WetoTray {
 impl WetoTray {
     pub fn new(events: Sender<TrayEvent>) -> WetoTray {
         WetoTray {
-            state: ShieldState::Pending,
+            // Ни вердикта, ни целей ещё нет — тот же серый, что у выключенной
+            // охраны и у «Проверяю выход» (`GuardStatusColor::Grey`).
+            state: GuardStatusColor::Grey,
             title: "Проверка подключения".to_string(),
             events,
         }
     }
 
-    pub fn set_status(&mut self, state: ShieldState, title: &str) {
+    pub fn set_status(&mut self, state: GuardStatusColor, title: &str) {
         self.state = state;
         self.title = title.to_string();
     }

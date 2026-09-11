@@ -308,6 +308,57 @@ fn the_obligation_is_held_until_the_kernel_shows_the_process_running() {
     assert!(ledger_pids(&s).is_empty());
 }
 
+/// Терминальная цель, стоявшая на переднем плане, а после несостоявшегося
+/// возобновления потерявшая терминал, уведомляет об этом ровно один раз —
+/// не на каждый такт, пока обязательство держится. Порт macOS
+/// `GuardVM.surfaceStanding` → `notifyBackgrounded`.
+#[test]
+fn a_target_that_loses_its_terminal_is_announced_once() {
+    let s = stand();
+    guarded(&s);
+
+    services_go_silent(&s);
+    assert!(
+        s.reporter.recorded().backgrounded.is_empty(),
+        "стоит на переднем плане, фон ещё не наблюдён"
+    );
+
+    // Задание фоновое: SIGCONT его будит, а tty тут же возвращает в стоп.
+    s.world.is_background_job(200);
+    s.geo.everything_answers_again();
+    s.controller.probe_now();
+    for _ in 0..5 {
+        s.controller.tick();
+    }
+
+    assert_eq!(
+        s.reporter.recorded().backgrounded,
+        vec!["claude".to_string()]
+    );
+}
+
+/// Цель, чью переднюю группу держит чужое задание, уходит в фон уже в момент
+/// паузы, а не только после несостоявшегося возобновления — план это знает
+/// сразу (`pause_plan::plan`), и уведомление обязано прийти тем же проходом.
+#[test]
+fn a_target_paused_while_already_backgrounded_is_announced_immediately() {
+    let world = World::of(vec![
+        process(100, 1, "/usr/bin/zsh", 100, 500),
+        process(200, 100, CLAUDE, 200, 500),
+        process(500, 100, "/usr/bin/vim", 500, 500),
+        detached(77, 1, "/usr/bin/happ"),
+    ]);
+    let s = stand_with(world, &[]);
+    guarded(&s);
+
+    services_go_silent(&s);
+
+    assert_eq!(
+        s.reporter.recorded().backgrounded,
+        vec!["claude".to_string()]
+    );
+}
+
 /// Отказ ядра — не наблюдение: журнал называет отказ, а запись остаётся в учёте.
 #[test]
 fn a_refused_resume_is_named_as_a_refusal() {

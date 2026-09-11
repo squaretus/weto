@@ -7,7 +7,7 @@
 use gtk4::prelude::*;
 use gtk4::{gdk, CssProvider};
 
-pub use weto_core::presentation::ShieldState;
+pub use weto_core::presentation::GuardStatusColor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
@@ -76,13 +76,14 @@ pub fn mark_root(root: &impl IsA<gtk4::Widget>) {
     root.as_ref().add_css_class("weto-root");
 }
 
-/// Класс состояния для щита и заголовка статуса.
-pub fn shield_class(state: ShieldState) -> &'static str {
+/// Класс состояния для щита и заголовка статуса. Имена классов остались
+/// прежними в CSS (`guarded`/`pending`/`killed`/`disabled`) — меняется лишь
+/// то, из чего выводится цвет: фаза охраны, а не устаревшая проекция.
+pub fn shield_class(state: GuardStatusColor) -> &'static str {
     match state {
-        ShieldState::Guarded => "guarded",
-        ShieldState::Degraded => "pending",
-        ShieldState::Pending => "pending",
-        ShieldState::Killed => "killed",
-        ShieldState::Disabled => "disabled",
+        GuardStatusColor::Green => "guarded",
+        GuardStatusColor::Yellow => "pending",
+        GuardStatusColor::Red => "killed",
+        GuardStatusColor::Grey => "disabled",
     }
 }

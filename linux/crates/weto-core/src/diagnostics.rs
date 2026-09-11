@@ -174,9 +174,6 @@ pub struct GeoReadingPatch {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KillContext {
     pub reason: String,
-    /// Эпизод начался до вердикта: причина ещё «подключение не проверено»,
-    /// и её предстоит уточнить.
-    pub is_pending: bool,
     pub reading: GeoReadingPatch,
     pub diagnostics: KillDiagnostics,
 }

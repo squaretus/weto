@@ -14,7 +14,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `ip.rs` | address validation and CIDR |
 | `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the 60 s ceiling |
 | `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `PausedProcess`, `RecoveredProcess` |
-| `weto-core` | `presentation.rs` | status wording, `ShieldState`, `AppliedDecision::from_phase` |
+| `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation`/`should_explain`, `status_lines`, `idle_targets` |
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic |
 | `weto-sys` | `network_events.rs` | netlink subscription |
 | `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, `T` state |
@@ -57,8 +57,8 @@ the whole of what the Linux side is allowed to differ in:
 | — | tray context menu (check / settings / quit) | SNI needs one; the popup carries the same actions |
 | country flag in the menu bar | country name as text | no flag rendering here yet; the set ships with macOS only |
 | app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
-| a pill per standing target, a countdown to the ceiling and the `fg` hint | nothing yet | the screen still reads `AppliedDecision`, not `GuardPhase`; `GuardSnapshot` already carries `phase`, `paused` and `pause_deadline` |
-| `Verifying`/`Paused` show «Проверяю выход»/«Выход не подтверждён» | same phases show «Проверка подключения»/«Ipinfo недоступен» (`ConfirmationUnavailable`: «Подтверждение недоступно») | wording follows the screen, and the screen has not been ported yet; the canonical titles already live in `GuardPhase::title` — see `AppliedDecision::status_title` in `weto-core/src/presentation.rs` |
+| pill countdown badge has a "Показать терминал" button next to the `fg` hint | `(i)` hint only, no button | `TerminalLocating` (`NSRunningApplication` activation, walking up from the shell to the process owning a bundle) has no Linux equivalent; the only way to raise an arbitrary terminal emulator's window is an external tool (`wmctrl`, `xdotool`), and the project does not silently add that dependency |
+| a target going to the background fires a system notification (`notifyBackgrounded`) | same notification, sent through `notify-send` (`KillNotifying::notify_backgrounded`) | same mechanism the kill notification already uses, just a second message |
 
 Everything else matches, including every wording that does not depend on the unported screen: the
 settings window is the same six cards in the same order
@@ -195,7 +195,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-326 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+338 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. Everything that cannot be
 faked — a real WireGuard tunnel, the look of the tray icon — is covered by the
@@ -241,9 +241,11 @@ them, so the rules stay under test.
 Secret Service over D-Bus — the token lives in a `0600` file. Country flags and
 per-target icons are not fetched, so the status window shows generic glyphs.
 
-**The pause has no face yet.** The behaviour is complete and the transitions fixture
-`shared/fixtures/guard-transitions.json` is read by both runners, but GTK still renders
-`AppliedDecision`: no pill per standing target, no countdown, no `fg` hint, and the status
-titles are the interim ones. Everything the screen needs is already in `GuardSnapshot`
-(`phase`, `paused`, `pause_deadline`). Notifications about a target going to the background
-(macOS `notifyBackgrounded`) are not sent either.
+**The pause has a face now.** The status window builds its title, shield colour and the
+three explanation lines straight from `GuardPhase` (`weto_core::presentation::shield_color`,
+`explanation`, `should_explain` — the same texts as macOS `GuardVM.statusColor` and
+`StatusPresentation.explanation`, word for word), and every standing target gets a pause
+badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`).
+The one thing genuinely missing is the "Показать терминал" button — see the deviation table
+above — and it is a deliberate absence, not an oversight: nothing in the codebase can raise
+an arbitrary terminal emulator's window without a new dependency.
