@@ -41,16 +41,16 @@ impl ProcRegistry {
             .ok()?
             .to_string_lossy()
             .into_owned();
-        let parent_pid = read_ppid(&dir.join("stat"))?;
+        let stat = read_stat(&dir.join("stat"))?;
 
         Some(ProcessSnapshot {
             pid,
-            parent_pid,
+            parent_pid: stat.parent_pid,
             executable_path,
             arguments,
-            // Группа, передняя группа терминала и признак остановки приедут
-            // из `/proc/<pid>/stat` вместе с планом паузы.
-            ..ProcessSnapshot::default()
+            process_group: stat.process_group,
+            terminal_foreground_group: stat.terminal_foreground_group,
+            is_stopped: stat.is_stopped,
         })
     }
 }
@@ -97,11 +97,51 @@ fn read_cmdline(path: &Path) -> Option<Option<Vec<String>>> {
     })
 }
 
-/// Четвёртое поле `stat` — ppid. Второе поле (comm) заключено в скобки и может
-/// содержать что угодно, включая пробелы и сами скобки, поэтому разбор идёт
-/// от последней закрывающей скобки, а не по номеру пробела.
-fn read_ppid(path: &Path) -> Option<i32> {
+/// То из `/proc/<pid>/stat`, что нужно охране: родитель, группа процессов,
+/// передняя группа управляющего терминала и признак остановки.
+struct Stat {
+    parent_pid: i32,
+    process_group: i32,
+    terminal_foreground_group: i32,
+    is_stopped: bool,
+}
+
+/// Второе поле `stat` (comm) заключено в скобки и может содержать что угодно,
+/// включая пробелы и сами скобки, поэтому отсчёт полей идёт от **последней**
+/// закрывающей скобки, а не по номеру пробела: у процесса с именем
+/// `имя (со) скобками` разбор по пробелам уводит ppid в чужое поле.
+///
+/// Нумерация дальше — от `state`: 0 state, 1 ppid, 2 pgrp, 3 session,
+/// 4 tty_nr, 5 tpgid.
+fn read_stat(path: &Path) -> Option<Stat> {
     let text = fs::read_to_string(path).ok()?;
     let after_comm = &text[text.rfind(')')? + 1..];
-    after_comm.split_whitespace().nth(1)?.parse().ok()
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+
+    let terminal = field(&fields, 4);
+    let foreground = field(&fields, 5);
+
+    Some(Stat {
+        parent_pid: fields.get(1)?.parse().ok()?,
+        process_group: field(&fields, 2),
+        // Процессу без управляющего терминала ядро пишет в tpgid -1, а план
+        // паузы ждёт нуля («терминала нет»): приводит граница, а не ядро.
+        terminal_foreground_group: if terminal == 0 || foreground < 0 {
+            0
+        } else {
+            foreground
+        },
+        // `T` — остановлен сигналом: пользовательский Ctrl-Z или наша пауза.
+        // `t` — остановка трассировщиком, это другое состояние и не она.
+        is_stopped: fields.first() == Some(&"T"),
+    })
+}
+
+/// Поля, которых может не оказаться, — не повод потерять процесс целиком:
+/// снимок и без них знает путь, родителя и argv. 0 у группы значит «неизвестно».
+fn field(fields: &[&str], index: usize) -> i32 {
+    fields
+        .get(index)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }

@@ -5,8 +5,8 @@
 //! успели бы разъехаться.
 
 use weto_core::process::{running_targets, MatchedProcess, RunningTarget, TargetRule};
-use weto_sys::process_killer::ProcessKilling;
 use weto_sys::process_registry::ProcessRegistryReading;
+use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling};
 
 pub struct EnforcementResult {
     pub killed: Vec<MatchedProcess>,
@@ -15,15 +15,15 @@ pub struct EnforcementResult {
 
 pub struct ProcessEnforcer {
     registry: Box<dyn ProcessRegistryReading>,
-    killer: Box<dyn ProcessKilling>,
+    signaler: Box<dyn ProcessSignaling>,
 }
 
 impl ProcessEnforcer {
     pub fn new(
         registry: Box<dyn ProcessRegistryReading>,
-        killer: Box<dyn ProcessKilling>,
+        signaler: Box<dyn ProcessSignaling>,
     ) -> ProcessEnforcer {
-        ProcessEnforcer { registry, killer }
+        ProcessEnforcer { registry, signaler }
     }
 
     /// Живые цели без единого сигнала — для экрана.
@@ -55,7 +55,17 @@ impl ProcessEnforcer {
         let processes = self.registry.snapshot();
         let matched = weto_core::process::matches(&processes, rules);
         let pids: Vec<i32> = matched.iter().map(|m| m.pid).collect();
-        let delivered = self.killer.kill(&pids);
+        // Процесс, умерший сам за миг до сигнала, доставкой считается: журнал
+        // объясняет цель, которой больше нет, а не отказ ядра. Отказом остаётся
+        // только настоящий отказ — тот же счёт, что и у `ProcessEnforcer`
+        // на macOS.
+        let delivered: Vec<i32> = self
+            .signaler
+            .send(ProcessSignal::Terminate, &pids)
+            .into_iter()
+            .filter(|result| result.is_delivered())
+            .map(|result| result.pid)
+            .collect();
 
         EnforcementResult {
             killed: matched

@@ -22,8 +22,8 @@ use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
 use weto_sys::network_snapshot::{KernelNetworkReader, NetworkSnapshotReading};
-use weto_sys::process_killer::SigtermKiller;
 use weto_sys::process_registry::ProcRegistry;
+use weto_sys::process_signaler::ProcessSignaler;
 use weto_sys::secret_store::FileSecretStore;
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
@@ -70,7 +70,10 @@ fn build_controller(paths: &Paths) -> GuardController {
         )),
         Box::new(FileSecretStore::new(paths.token_file())),
         Box::new(FileSettings(paths.settings_file())),
-        ProcessEnforcer::new(Box::new(ProcRegistry::new()), Box::new(SigtermKiller)),
+        ProcessEnforcer::new(
+            Box::new(ProcRegistry::new()),
+            Box::new(ProcessSignaler::new()),
+        ),
         Box::new(PrintingReporter),
         Box::new(SilentChecks),
     )

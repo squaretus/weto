@@ -20,8 +20,8 @@ use weto_guard::controller::{GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
-use weto_sys::process_killer::ProcessKilling;
 use weto_sys::process_registry::ProcessRegistryReading;
+use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
 use weto_sys::secret_store::{SecretError, SecretStoring};
 
 // --- границы ---------------------------------------------------------------
@@ -140,18 +140,23 @@ impl ProcessRegistryReading for FakeProcesses {
 }
 
 #[derive(Clone, Default)]
-struct RecordingKiller(Arc<Mutex<Vec<i32>>>);
+struct RecordingSignaler(Arc<Mutex<Vec<i32>>>);
 
-impl RecordingKiller {
+impl RecordingSignaler {
     fn killed(&self) -> Vec<i32> {
         self.0.lock().unwrap().clone()
     }
 }
 
-impl ProcessKilling for RecordingKiller {
-    fn kill(&self, pids: &[i32]) -> Vec<i32> {
+impl ProcessSignaling for RecordingSignaler {
+    fn send(&self, _signal: ProcessSignal, pids: &[i32]) -> Vec<SignalResult> {
         self.0.lock().unwrap().extend_from_slice(pids);
-        pids.to_vec()
+        pids.iter()
+            .map(|pid| SignalResult {
+                pid: *pid,
+                error_code: None,
+            })
+            .collect()
     }
 }
 
@@ -252,7 +257,7 @@ struct Harness {
     geo: FakeGeo,
     settings: FakeSettings,
     processes: FakeProcesses,
-    killer: RecordingKiller,
+    killer: RecordingSignaler,
     reporter: RecordingReporter,
     checks: RecordingChecks,
 }
@@ -267,7 +272,7 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
     let network = FakeNetwork::healthy_tunnel();
     let geo = FakeGeo::safe();
     let settings = FakeSettings::armed();
-    let killer = RecordingKiller::default();
+    let killer = RecordingSignaler::default();
     let reporter = RecordingReporter::default();
     let checks = RecordingChecks::default();
     let processes = FakeProcesses(Arc::new(Mutex::new(vec![
