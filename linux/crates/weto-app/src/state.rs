@@ -19,10 +19,8 @@ use weto_config::journal::{GeoReadingPatch, Journal, KillContext, KillEvent, Kil
 use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
 use weto_core::episode::EpisodeLedger;
-use weto_core::geo::SourceOutcome;
 use weto_core::guard_machine::GuardAction;
 use weto_core::pause_plan::RecoveredProcess;
-use weto_core::presentation::{AppliedDecision, GuardState};
 use weto_core::process::{MatchBasis, MatchedProcess};
 use weto_guard::controller::{
     CheckReporting, GuardController, GuardSnapshot, KillReporting, SettingsProviding,
@@ -195,61 +193,11 @@ impl JournalWriter {
 }
 
 impl KillReporting for JournalWriter {
-    /// Причина эпизода, ставшая известной, дописывается всем его записям.
-    fn refine(&self, context: &KillContext) {
-        if context.is_pending {
-            return;
-        }
-
-        let pending = AppliedDecision::PENDING_TEXT.to_string();
-        let settled: Option<String> = self
-            .episode
-            .lock()
-            .expect("журнал")
-            .settle(&pending, &context.reason);
-        let Some(pending_id) = settled else {
-            return;
-        };
-
-        let mut journal = self.journal.lock().expect("журнал");
-        if !journal.refine_episode(
-            &pending_id,
-            Some(&context.reason),
-            None,
-            Some(&Self::patch(context)),
-            Some(&context.diagnostics),
-        ) {
-            return;
-        }
-        self.save(&journal);
-    }
-
-    /// Эпизод кончился безопасным выходом.
-    fn episode_finished(&self, context: &KillContext) {
-        // Учёт обнуляется всегда: без этого следующее падение по той же причине
-        // писалось бы «запуск запрещён» вместо «завершено».
-        let Some(pending_id) = self.episode.lock().expect("журнал").finish() else {
-            return;
-        };
-
-        let outcome = match (&context.reading.ip, &context.reading.country) {
-            (Some(ip), Some(country)) => {
-                format!("проверка завершилась безопасным выходом: {ip}, {country}")
-            }
-            _ => "проверка завершилась безопасным выходом".to_string(),
-        };
-
-        let mut journal = self.journal.lock().expect("журнал");
-        if !journal.refine_episode(
-            &pending_id,
-            None,
-            Some(&outcome),
-            Some(&Self::patch(context)),
-            Some(&context.diagnostics),
-        ) {
-            return;
-        }
-        self.save(&journal);
+    /// Цели снова работают: учёт «что уже описано» обнуляется — без этого
+    /// следующее падение по той же причине писалось бы «запуск запрещён»
+    /// вместо «завершено».
+    fn episode_finished(&self, _context: &KillContext) {
+        self.episode.lock().expect("журнал").finish();
     }
 
     /// Процессы, которым ушёл SIGSTOP. Эпизод один на всё стояние: цели, их
@@ -365,7 +313,6 @@ impl KillReporting for JournalWriter {
         if fresh.is_empty() {
             return;
         }
-        let mut episode = self.episode.lock().expect("журнал");
 
         let kind = if is_new_reason {
             KillEventKind::Terminated
@@ -400,14 +347,15 @@ impl KillReporting for JournalWriter {
             })
             .collect();
 
-        if context.is_pending {
-            episode.begin_pending(episode_id.clone());
-        }
-        drop(episode);
-
         let mut journal = self.journal.lock().expect("журнал");
         journal.append(events);
         self.save(&journal);
+    }
+
+    /// Терминальная цель под паузой потеряла терминал: сообщаем тем же путём,
+    /// что и о завершении.
+    fn backgrounded(&self, target_name: &str) {
+        self.notifier.notify_backgrounded(target_name);
     }
 }
 
@@ -503,6 +451,12 @@ impl AppState {
         self.controller.snapshot()
     }
 
+    /// Сколько цели ещё могут стоять. `None` — не стоят. Строка «что дальше»
+    /// в объяснении статуса читает часы отсюда, а не сама.
+    pub fn remaining_pause(&self) -> Option<Duration> {
+        self.controller.remaining_pause()
+    }
+
     pub fn journal(&self) -> Journal {
         self.journal.lock().expect("журнал").clone()
     }
@@ -566,36 +520,6 @@ impl AppState {
 
     pub fn is_probing(&self) -> bool {
         self.probing.load(Ordering::Relaxed)
-    }
-
-    /// Состояние охраны в терминах экрана. Собирается из настроек и снимка:
-    /// вердикта может ещё не быть, и до первой пробы это «Проверка» — цели при
-    /// этом работают, решает ответ пробы.
-    ///
-    /// Пилюлю стоящей цели, отсчёт до потолка и подсказку про `fg` экран пока
-    /// не рисует: они лежат готовыми в `GuardSnapshot` (`paused`, `pause_deadline`)
-    /// и ждут порта интерфейса.
-    pub fn guard_state(&self) -> GuardState {
-        let settings = self.settings.current();
-        let snapshot = self.snapshot();
-        let decision = snapshot
-            .decision
-            .clone()
-            .unwrap_or(AppliedDecision::Pending);
-
-        GuardState {
-            is_enabled: settings.is_enabled,
-            has_targets: !settings.targets.is_empty(),
-            // Цели живут, но ipinfo молчит: защита держится на доказанной
-            // неизменности адреса, и щит обязан быть жёлтым, а не зелёным.
-            is_degraded: matches!(decision, AppliedDecision::Safe)
-                && snapshot
-                    .report
-                    .as_ref()
-                    .is_some_and(|r| matches!(r.ipinfo, SourceOutcome::Failed(_))),
-            decision,
-            country: None,
-        }
     }
 
     /// Проверка по кнопке уходит на рабочий поток: HTTP блокирующий,

@@ -6,13 +6,15 @@
 //! Компоненты не знают о состоянии приложения — то же правило, что у `WetoDesign`
 //! на macOS. Им передают данные, они возвращают виджет.
 
+use std::time::{Duration, SystemTime};
+
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box as GtkBox, Button, DropDown, Entry, Label, Orientation, Switch, ToggleButton,
 };
 
 use crate::theme::shield_class;
-use weto_core::presentation::ShieldState;
+use weto_core::presentation::GuardStatusColor;
 
 /// Шаг сетки — 3 pt. Значения совпадают с токенами `space*`; в CSS они тоже
 /// есть, но зазоры между детьми GTK задаёт только кодом.
@@ -207,7 +209,7 @@ pub fn segments(titles: &[&str], selected: usize) -> (GtkBox, Vec<ToggleButton>)
 }
 
 /// Щит статуса: плитка 32×32, цвет по состоянию, внутри белая иконка.
-pub fn shield(state: ShieldState) -> GtkBox {
+pub fn shield(state: GuardStatusColor) -> GtkBox {
     let tile = GtkBox::new(Orientation::Horizontal, 0);
     tile.add_css_class("weto-shield");
     tile.add_css_class(shield_class(state));
@@ -224,7 +226,7 @@ pub fn shield(state: ShieldState) -> GtkBox {
     tile
 }
 
-pub fn status_title(text: &str, state: ShieldState) -> Label {
+pub fn status_title(text: &str, state: GuardStatusColor) -> Label {
     let label = Label::new(Some(text));
     label.add_css_class("weto-status-title");
     label.add_css_class(shield_class(state));
@@ -232,8 +234,15 @@ pub fn status_title(text: &str, state: ShieldState) -> Label {
     label
 }
 
-/// Пилюля живой цели. `extra` — «и ещё N процессов» этого сеанса.
-pub fn process_pill(name: &str, subtitle: Option<&str>, extra: usize) -> GtkBox {
+/// Пилюля живой цели. `extra` — «и ещё N процессов» этого сеанса. `accessory` —
+/// значок паузы (`pause_badge`) у стоящей цели, вставляется перед `+N`;
+/// `None` — цель работает штатно, порт `WetoProcessPill` без аксессуара.
+pub fn process_pill(
+    name: &str,
+    subtitle: Option<&str>,
+    extra: usize,
+    accessory: Option<&GtkBox>,
+) -> GtkBox {
     let pill = GtkBox::new(Orientation::Horizontal, SPACE3);
     pill.add_css_class("weto-pill");
 
@@ -249,6 +258,10 @@ pub fn process_pill(name: &str, subtitle: Option<&str>, extra: usize) -> GtkBox 
     }
     pill.append(&text);
 
+    if let Some(accessory) = accessory {
+        pill.append(accessory);
+    }
+
     if extra > 0 {
         let counter = Label::new(Some(&format!("+{extra}")));
         counter.add_css_class("weto-pill-extra");
@@ -256,6 +269,50 @@ pub fn process_pill(name: &str, subtitle: Option<&str>, extra: usize) -> GtkBox 
     }
 
     pill
+}
+
+/// Отсчёт до потолка паузы: «43 с», округление вверх — «0 с» не появляется,
+/// пока пауза ещё не истекла. Без дедлайна — «пауза». Порт
+/// `WetoPauseBadge.countdown`: секундного таймера внутри нет, `now` приходит
+/// снаружи одним и тем же значением для всех значков разом.
+pub fn pause_countdown_text(deadline: Option<SystemTime>, now: SystemTime) -> String {
+    let Some(deadline) = deadline else {
+        return "пауза".to_string();
+    };
+    let remaining = deadline.duration_since(now).unwrap_or(Duration::ZERO);
+    let mut seconds = remaining.as_secs();
+    if remaining.subsec_nanos() > 0 {
+        seconds += 1;
+    }
+    format!("{seconds} с")
+}
+
+/// Значок «на паузе»: капсула `amber` с отсчётом до потолка. `hint` — цель
+/// потеряла терминал (`fg`-подсказка); появляется как значок `(i)` с текстом
+/// во всплывающей подсказке. Порт `WetoPauseBadge` без кнопки «Показать
+/// терминал»: на Linux нет способа поднять окно чужого терминала без нового
+/// системного API (`wmctrl`/`xdotool`), проект такую зависимость не тянет —
+/// см. deviation в `linux-guard.md`.
+pub fn pause_badge(deadline: Option<SystemTime>, now: SystemTime, hint: Option<&str>) -> GtkBox {
+    let badge = GtkBox::new(Orientation::Horizontal, SPACE2);
+    badge.add_css_class("weto-pause-badge");
+
+    let icon = gtk4::Image::from_icon_name("media-playback-pause-symbolic");
+    icon.set_pixel_size(12);
+    badge.append(&icon);
+
+    let countdown = Label::new(Some(&pause_countdown_text(deadline, now)));
+    countdown.add_css_class("weto-pause-countdown");
+    badge.append(&countdown);
+
+    if let Some(hint) = hint {
+        let info = gtk4::Image::from_icon_name("dialog-information-symbolic");
+        info.set_pixel_size(12);
+        info.set_tooltip_text(Some(hint));
+        badge.append(&info);
+    }
+
+    badge
 }
 
 /// Запись журнала: три строки без плашек, рамок и цвета.
@@ -333,4 +390,49 @@ pub fn panel() -> GtkBox {
     let panel = GtkBox::new(Orientation::Vertical, SPACE3);
     panel.add_css_class("weto-panel");
     panel
+}
+
+#[cfg(test)]
+mod countdown_tests {
+    use super::pause_countdown_text;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    /// Не требует дисплея: чистая функция времени, порт `WetoPauseBadge.countdown`.
+    /// Отсчёт обязан читаться натурально и на границах: 60 с, 43 с, 1 с и — на
+    /// исходе — 0 с.
+    #[test]
+    fn reads_naturally_at_the_edges() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        for seconds in [60, 43, 1, 0] {
+            let deadline = now + Duration::from_secs(seconds);
+            assert_eq!(
+                pause_countdown_text(Some(deadline), now),
+                format!("{seconds} с")
+            );
+        }
+    }
+
+    /// Округление вверх: 42.2 с не имеет права показаться как «42 с» — тогда
+    /// «0 с» появилось бы на секунду раньше, чем пауза действительно истекла.
+    #[test]
+    fn rounds_up() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let deadline = now + Duration::from_millis(42_200);
+        assert_eq!(pause_countdown_text(Some(deadline), now), "43 с");
+    }
+
+    /// Дедлайн в прошлом не уходит в отрицательное число.
+    #[test]
+    fn never_goes_negative() {
+        let deadline = UNIX_EPOCH + Duration::from_secs(1_000);
+        let now = deadline + Duration::from_secs(5);
+        assert_eq!(pause_countdown_text(Some(deadline), now), "0 с");
+    }
+
+    /// Ничего не стоит — считать нечего.
+    #[test]
+    fn without_a_deadline_just_says_paused() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        assert_eq!(pause_countdown_text(None, now), "пауза");
+    }
 }

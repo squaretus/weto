@@ -8,7 +8,7 @@
 //! Для трея берётся один знак без рамки: рамка в исходнике нужна затем, чтобы
 //! квадрат иконки не сливался с подложкой того же цвета, а у трея подложки нет.
 
-use weto_core::presentation::ShieldState;
+use weto_core::presentation::GuardStatusColor;
 
 /// Слой знака — общий с macOS файл.
 const GRID_SVG: &str = include_str!("../../../../shared/icon/dark.icon/Assets/grid.svg");
@@ -33,19 +33,17 @@ pub struct Pixmap {
 /// приложения ей незачем: следовать надо статусу. Это единственное место,
 /// где цвет несёт смысл в одиночку, и потому рядом с иконкой в меню всегда
 /// стоит текст статуса.
-fn tint(state: ShieldState) -> &'static str {
+fn tint(state: GuardStatusColor) -> &'static str {
     match state {
-        ShieldState::Guarded => "#46D09B",
-        // Тот же жёлтый, что у ожидания: другого жёлтого в теме нет.
-        ShieldState::Degraded => "#F2B544",
-        ShieldState::Pending => "#F2B544",
-        ShieldState::Killed => "#FF6B81",
-        ShieldState::Disabled => "#9C9AA6",
+        GuardStatusColor::Green => "#46D09B",
+        GuardStatusColor::Yellow => "#F2B544",
+        GuardStatusColor::Red => "#FF6B81",
+        GuardStatusColor::Grey => "#9C9AA6",
     }
 }
 
 /// Готовит SVG знака: убирает рамку и перекрашивает штрих.
-fn tinted_svg(state: ShieldState) -> String {
+fn tinted_svg(state: GuardStatusColor) -> String {
     let mut svg = String::with_capacity(GRID_SVG.len());
     for line in GRID_SVG.lines() {
         // Рамка занимает две строки и начинается с <rect; у трея её нет.
@@ -58,7 +56,7 @@ fn tinted_svg(state: ShieldState) -> String {
     svg.replace(INK, tint(state))
 }
 
-pub fn render(state: ShieldState, size: u32) -> Pixmap {
+pub fn render(state: GuardStatusColor, size: u32) -> Pixmap {
     let svg = tinted_svg(state);
 
     let options = resvg::usvg::Options::default();
@@ -105,28 +103,28 @@ mod tests {
     fn the_frame_is_dropped_for_the_tray() {
         assert!(GRID_SVG.contains("<rect"), "в исходнике рамка есть");
         assert!(
-            !tinted_svg(ShieldState::Guarded).contains("<rect"),
+            !tinted_svg(GuardStatusColor::Green).contains("<rect"),
             "у трея подложки нет, рамке неоткуда отстраиваться"
         );
     }
 
     #[test]
     fn each_state_paints_the_glyph_differently() {
-        let guarded = render(ShieldState::Guarded, TRAY_SIZE);
-        let killed = render(ShieldState::Killed, TRAY_SIZE);
-        let pending = render(ShieldState::Pending, TRAY_SIZE);
+        let green = render(GuardStatusColor::Green, TRAY_SIZE);
+        let red = render(GuardStatusColor::Red, TRAY_SIZE);
+        let yellow = render(GuardStatusColor::Yellow, TRAY_SIZE);
 
-        assert_eq!(guarded.width, TRAY_SIZE as i32);
-        assert_eq!(guarded.argb.len(), (TRAY_SIZE * TRAY_SIZE * 4) as usize);
-        assert_ne!(guarded.argb, killed.argb);
-        assert_ne!(guarded.argb, pending.argb);
+        assert_eq!(green.width, TRAY_SIZE as i32);
+        assert_eq!(green.argb.len(), (TRAY_SIZE * TRAY_SIZE * 4) as usize);
+        assert_ne!(green.argb, red.argb);
+        assert_ne!(green.argb, yellow.argb);
     }
 
     /// Пустая картинка означала бы, что знак не отрисовался, а иконка
     /// в трее просто исчезла — заметить это без проверки трудно.
     #[test]
     fn the_glyph_is_actually_drawn() {
-        let pixmap = render(ShieldState::Guarded, TRAY_SIZE);
+        let pixmap = render(GuardStatusColor::Green, TRAY_SIZE);
         let opaque = pixmap.argb.chunks_exact(4).filter(|px| px[0] > 0).count();
 
         assert!(

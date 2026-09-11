@@ -79,9 +79,6 @@ public enum WetoTokens {
     public static let windowWidth: CGFloat = 500
     public static let windowHeight: CGFloat = 640
     public static let controlHeight: CGFloat = 32
-    /// Высота пилюли в `.controlSize(.small)`: значок паузы сажает кнопку «Показать
-    /// терминал» рядом с компактным отсчётом, и полноразмерная пилюля (32 pt) там
-    /// расталкивает и без того плотный ряд.
     public static let controlHeightCompact: CGFloat = 24
 
     public static let status: Font = .system(size: 15, weight: .semibold)

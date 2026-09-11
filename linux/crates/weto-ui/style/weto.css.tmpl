@@ -111,6 +111,13 @@
     color: {{faint}};
 }
 
+/* Вторая строка объяснения статуса («почему») — тот же размер, что у капшена,
+   но цветом `dim`: она называет улику, а не второстепенную деталь. */
+.weto-explain-evidence {
+    font-size: {{fontCaptionSize}};
+    color: {{dim}};
+}
+
 /* --- Строка данных ------------------------------------------------------ */
 
 .weto-data-key {
@@ -333,6 +340,20 @@
 .weto-pill-extra {
     font-size: {{fontCaptionSize}};
     color: {{faint}};
+    font-feature-settings: "tnum";
+}
+
+/* Значок «на паузе»: капсула `amber` c прозрачностью 0.16, отсчёт табличными
+   цифрами того же цвета. Icon и label наследуют цвет от контейнера. */
+.weto-pause-badge {
+    background-color: alpha({{amber}}, 0.16);
+    border-radius: 999px;
+    padding: 2px {{space2}};
+    color: {{amber}};
+}
+
+.weto-pause-countdown {
+    font-size: {{fontDataSize}};
     font-feature-settings: "tnum";
 }
 

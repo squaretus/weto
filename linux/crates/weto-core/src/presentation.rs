@@ -1,34 +1,15 @@
-//! Формулировки для человека: причина завершения, заголовок статуса, тексты
-//! журнала.
+//! Формулировки для человека: заголовок статуса, цвет щита, три строки
+//! объяснения, тексты журнала.
 //!
 //! Живёт в ядре, а не в UI: это чистое вычисление из состояния, и тестируется
 //! оно синхронно, без единого виджета. Порт `UnprovenReason.displayText`,
-//! `UnsafeEvidence.displayText` и `StatusPresentation` с macOS — тексты обязаны
-//! совпадать на обеих платформах дословно.
+//! `UnsafeEvidence.displayText`, `GuardVM.statusColor` и `StatusPresentation`
+//! с macOS — тексты и цвета обязаны совпадать на обеих платформах дословно.
 
+use std::time::Duration;
+
+use crate::guard_machine::GuardPhase;
 use crate::policy::{UnprovenReason, UnsafeEvidence};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShieldState {
-    /// Охрана выключена или целей нет.
-    Disabled,
-    /// Всё сошлось, цели живут.
-    Guarded,
-    /// Цели живут, но защита держится на доказанной неизменности адреса, а не на свежем
-    /// ответе ipinfo. Цвет тот же жёлтый, что у ожидания: полноценной зелёной защиты нет.
-    Degraded,
-    /// Вердикта пока нет: цели завершены до выяснения.
-    Pending,
-    /// Цели завершены по установленной причине.
-    Killed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusPresentation {
-    pub title: String,
-    pub subtitle: String,
-    pub shield: ShieldState,
-}
 
 impl UnprovenReason {
     pub fn display_text(&self) -> String {
@@ -68,69 +49,152 @@ impl UnsafeEvidence {
     }
 }
 
-/// Проекция фазы охраны на экран — ровно то, что сегодня умеет рисовать GTK.
+/// Цвет щита статуса — порт `GuardStatusColor`/`GuardVM.statusColor` с macOS.
 ///
-/// Решает теперь редьюсер (`GuardMachine`), и он же владеет действием над целями;
-/// этот тип остался переходником для интерфейса, который пока не знает ни пилюли
-/// стоящей цели, ни отсчёта до потолка, ни подсказки про `fg`. Его убирает
-/// следующий шаг — порт интерфейса; до тех пор `Pending` показывает «Проверку»
-/// (цели при этом **работают**), а `Unproven` — паузу (цели стоят).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppliedDecision {
-    Safe,
-    Pending,
-    Unproven(UnprovenReason),
-    Kill(UnsafeEvidence),
+/// Решается по фазе, а не по факту летящей пробы: «Проверяю выход» — рабочая
+/// фаза, и жёлтый у неё был бы тревогой без единой улики. Тревожный цвет держат
+/// только стоящая и завершённая фазы; между ними стоит «Помехи» — та же
+/// «На страже» в заголовке, но с доказанно не идеальным ответом, и щит обязан
+/// это показать, раз слово больше не показывает.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardStatusColor {
+    Green,
+    Yellow,
+    Red,
+    Grey,
 }
 
-impl AppliedDecision {
-    pub const PENDING_TEXT: &'static str = "Подключение ещё не проверено";
+pub fn shield_color(phase: &GuardPhase) -> GuardStatusColor {
+    match phase {
+        // Работают, но про выход ничего не известно — не тревога, а отсутствие
+        // данных, тот же серый, что у выключенной охраны.
+        GuardPhase::Disabled | GuardPhase::Verifying { .. } => GuardStatusColor::Grey,
+        GuardPhase::Protected(_) => GuardStatusColor::Green,
+        // Работают, но не идеально: адрес доказанно тот же, а не свежий safe.
+        GuardPhase::Interference { .. } => GuardStatusColor::Yellow,
+        // Стоят — тревожный цвет держится за паузой, а не за пробой в полёте.
+        GuardPhase::Paused { .. } => GuardStatusColor::Yellow,
+        GuardPhase::Danger(_) => GuardStatusColor::Red,
+    }
+}
 
-    /// Чем фаза выглядит для сегодняшнего экрана.
-    ///
-    /// «Помехи» — это «На страже»: цели работают, а жёлтый щит приходит отдельным
-    /// признаком `is_degraded`, ровно как на macOS.
-    pub fn from_phase(phase: &crate::guard_machine::GuardPhase) -> AppliedDecision {
-        use crate::guard_machine::GuardPhase;
-        match phase {
-            GuardPhase::Disabled | GuardPhase::Protected(_) | GuardPhase::Interference { .. } => {
-                AppliedDecision::Safe
-            }
-            GuardPhase::Verifying { .. } => AppliedDecision::Pending,
-            GuardPhase::Paused { reason, .. } => AppliedDecision::Unproven(reason.clone()),
-            GuardPhase::Danger(evidence) => AppliedDecision::Kill(evidence.clone()),
-        }
+/// Три строки объяснения: что сделал weto, почему, что дальше. Заголовок —
+/// состояние, не причина.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusExplanation {
+    pub title: String,
+    pub action: String,
+    pub evidence: String,
+    pub next: String,
+}
+
+/// Объяснение состояния тремя строками: что сделано с целями, почему — улика
+/// фазы, и что дальше — счётчик паузы или совет действия. `remaining_pause`
+/// приходит параметром (обычно из `GuardController::remaining_pause`):
+/// представление не читает часы само.
+pub fn explanation(phase: &GuardPhase, remaining_pause: Option<Duration>) -> StatusExplanation {
+    let remaining = remaining_pause.unwrap_or(Duration::ZERO);
+    let mut remaining_seconds = remaining.as_secs();
+    if remaining.subsec_nanos() > 0 {
+        remaining_seconds += 1;
     }
 
-    pub fn display_text(&self) -> String {
-        match self {
-            AppliedDecision::Safe => String::new(),
-            AppliedDecision::Pending => Self::PENDING_TEXT.to_string(),
-            AppliedDecision::Unproven(reason) => reason.display_text(),
-            AppliedDecision::Kill(evidence) => evidence.display_text(),
-        }
+    match phase {
+        GuardPhase::Disabled => StatusExplanation {
+            title: phase.title().to_string(),
+            action: "Цели работают".to_string(),
+            evidence: "Цели не выбраны — охрана ничего не завершает".to_string(),
+            next: "Добавьте приложение или команду в настройках".to_string(),
+        },
+        // Проба в полёте, вердикта про текущий путь ещё нет — и цели работают:
+        // пауза начинается с плохого результата, а не с его ожидания. Ни «на
+        // паузе», ни отсчёта здесь быть не может — считать нечего, пока ответа нет.
+        GuardPhase::Verifying { cause } => StatusExplanation {
+            title: phase.title().to_string(),
+            action: "Цели работают".to_string(),
+            evidence: format!("Прежний вердикт не годится: {}", cause.display_text()),
+            next: "Жду ответа сервисов о безопасности выхода".to_string(),
+        },
+        GuardPhase::Protected(reading) => StatusExplanation {
+            title: phase.title().to_string(),
+            action: "Цели работают".to_string(),
+            evidence: exit_description(reading),
+            next: "Дальше ничего делать не нужно".to_string(),
+        },
+        // Это ответ, а не тишина: резервный сервис назвал прежний адрес.
+        // Считать тут нечего — отсчёта неудачных проб у охраны больше нет.
+        GuardPhase::Interference { reading, reason } => StatusExplanation {
+            title: phase.title().to_string(),
+            action: "Цели работают".to_string(),
+            evidence: reason.display_text(),
+            next: format!(
+                "Адрес {} доказанно тот же — жду восстановления ipinfo",
+                reading.ip
+            ),
+        },
+        GuardPhase::Paused { reason, .. } => StatusExplanation {
+            title: phase.title().to_string(),
+            action: "Цели остановлены".to_string(),
+            evidence: reason.display_text(),
+            next: format!(
+                "Ждём ответа сервисов, {remaining_seconds} с до завершения; возобновятся \
+                 при подтверждении безопасного выхода"
+            ),
+        },
+        GuardPhase::Danger(evidence) => StatusExplanation {
+            title: phase.title().to_string(),
+            action: "Цели завершены".to_string(),
+            evidence: evidence.display_text(),
+            next: "Запуск запрещён до подтверждения безопасного выхода".to_string(),
+        },
     }
+}
 
-    /// Заголовок статуса называет отказавший сервис поимённо.
-    ///
-    /// «Ipinfo недоступен» говорит пользователю, что чинить; «Сервис недоступен»
-    /// не говорит ничего. Разница дешёвая, а польза ежедневная.
-    ///
-    /// Канон заголовков — `GuardPhase::title`, и он уже здесь, в ядре: «Проверяю
-    /// выход», «На страже», «Выход не подтверждён», «Небезопасно». Эти же строки
-    /// остались сегодняшними, потому что экран пока читает проекцию, а не фазу:
-    /// переключение интерфейса на `GuardPhase` — следующий шаг порта, и трогать
-    /// тексты до него значило бы менять GTK-часть двумя руками из разных шагов.
-    pub fn status_title(&self) -> &'static str {
-        match self {
-            AppliedDecision::Safe => "На страже",
-            AppliedDecision::Pending => "Проверка подключения",
-            AppliedDecision::Unproven(UnprovenReason::ConfirmationUnavailable) => {
-                "Подтверждение недоступно"
-            }
-            AppliedDecision::Unproven(_) => "Ipinfo недоступен",
-            AppliedDecision::Kill(_) => "Небезопасно",
+/// Стоит ли показывать объяснение в попапе. `explanation` остаётся тотальной —
+/// отвечает на каждую фазу три непустые строки, — а это отдельное решение
+/// о том, что видит пользователь: там, где охрана ничего не сделала с целями
+/// (`Disabled` — целей нет, `Protected` — работают штатно, объяснять нечего),
+/// попап выглядит так же, как до появления паузы — заголовок, гео-показания,
+/// футер целей, без строк объяснения.
+pub fn should_explain(phase: &GuardPhase) -> bool {
+    !matches!(phase, GuardPhase::Disabled | GuardPhase::Protected(_))
+}
+
+fn exit_description(reading: &crate::geo::GeoReading) -> String {
+    match (&reading.confirmed_country, &reading.confirm_source) {
+        (Some(confirmed), Some(source)) => {
+            format!(
+                "Выход {}, страна {confirmed} подтверждена {}",
+                reading.ip,
+                source.name()
+            )
         }
+        _ => format!(
+            "Выход {}, страна {} по данным ipinfo",
+            reading.ip, reading.primary_country
+        ),
+    }
+}
+
+/// Что написать, когда целей на машине не запущено. Совет про VPN — часть
+/// смысла, а не оформления, поэтому решение живёт здесь и проверяется тестом.
+/// Порт `IdleTargetsNotice` с macOS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleTargetsNotice {
+    pub text: String,
+    /// Появляется только тогда, когда это правда: после срабатывания охраны
+    /// цели молчат не потому, что всё хорошо, а потому что VPN уже упал.
+    pub hint: Option<String>,
+}
+
+/// Совет «VPN можно выключать» правдив ровно в одном состоянии: свежий safe.
+/// Под паузой и после доказательства цели молчат не потому, что всё хорошо.
+pub fn idle_targets(phase: &GuardPhase) -> IdleTargetsNotice {
+    let hint =
+        matches!(phase, GuardPhase::Protected(_)).then(|| "— VPN можно выключать".to_string());
+    IdleTargetsNotice {
+        text: "Цели не запущены".to_string(),
+        hint,
     }
 }
 
@@ -221,88 +285,26 @@ fn outcome_text(outcome: &crate::geo::SourceOutcome) -> String {
     }
 }
 
-/// Что написать, когда целей на машине не запущено. Совет про VPN — часть
-/// смысла, а не оформления, поэтому решение живёт здесь и проверяется тестом.
-/// Порт `IdleTargetsNotice` с macOS.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdleTargetsNotice {
-    pub text: String,
-    /// Появляется только тогда, когда это правда: после срабатывания охраны
-    /// цели молчат не потому, что всё хорошо, а потому что VPN уже упал.
-    pub hint: Option<String>,
-}
-
-pub fn idle_targets(state: &GuardState) -> IdleTargetsNotice {
-    let is_safe = state.is_enabled && state.has_targets && state.decision == AppliedDecision::Safe;
-    IdleTargetsNotice {
-        text: "Цели не запущены".to_string(),
-        hint: is_safe.then(|| "— VPN можно выключать".to_string()),
-    }
-}
-
-/// Состояние охраны в терминах, которые нужны экрану.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GuardState {
-    pub is_enabled: bool,
-    pub has_targets: bool,
-    pub decision: AppliedDecision,
-    /// Страна, которую показываем, даже когда вердикта нет.
-    pub country: Option<String>,
-    /// Вердикт держится на прошлом чтении: ipinfo молчит, адрес доказанно тот же.
-    pub is_degraded: bool,
-}
-
-pub fn status_presentation(state: &GuardState) -> StatusPresentation {
-    if !state.is_enabled {
-        return StatusPresentation {
-            title: "Охрана выключена".to_string(),
-            subtitle: "Цели не отслеживаются".to_string(),
-            shield: ShieldState::Disabled,
-        };
-    }
-
-    if !state.has_targets {
-        return StatusPresentation {
-            title: "Целей нет".to_string(),
-            subtitle: "Добавьте приложение или команду".to_string(),
-            shield: ShieldState::Disabled,
-        };
-    }
-
-    match &state.decision {
-        AppliedDecision::Safe => StatusPresentation {
-            title: "На страже".to_string(),
-            subtitle: match &state.country {
-                Some(country) => format!("Трафик идёт через VPN, страна {country}"),
-                None => "Трафик идёт через VPN".to_string(),
-            },
-            shield: if state.is_degraded {
-                ShieldState::Degraded
-            } else {
-                ShieldState::Guarded
-            },
-        },
-        AppliedDecision::Pending => StatusPresentation {
-            title: state.decision.status_title().to_string(),
-            subtitle: state.decision.display_text(),
-            shield: ShieldState::Pending,
-        },
-        AppliedDecision::Unproven(_) => StatusPresentation {
-            title: state.decision.status_title().to_string(),
-            subtitle: state.decision.display_text(),
-            shield: ShieldState::Degraded,
-        },
-        AppliedDecision::Kill(_) => StatusPresentation {
-            title: state.decision.status_title().to_string(),
-            subtitle: state.decision.display_text(),
-            shield: ShieldState::Killed,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::StalenessCause;
+    use crate::geo::{ConfirmSource, GeoReading};
+    use crate::policy::UnsafeEvidence;
+    use std::time::UNIX_EPOCH;
+
+    fn reading() -> GeoReading {
+        GeoReading {
+            ip: "203.0.113.28".to_string(),
+            primary_country: "KZ".to_string(),
+            confirmed_country: Some("KZ".to_string()),
+            confirm_source: Some(ConfirmSource::Freeipapi),
+        }
+    }
+
+    fn t0() -> std::time::SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_000_000)
+    }
 
     /// Тексты обязаны совпадать с macOS дословно: это один продукт,
     /// а не два похожих.
@@ -318,72 +320,298 @@ mod tests {
         );
     }
 
-    fn state(decision: AppliedDecision) -> GuardState {
-        GuardState {
-            is_enabled: true,
-            has_targets: true,
-            decision,
-            country: Some("NL".to_string()),
-            is_degraded: false,
+    /// Цвет щита — шесть фаз, четыре цвета: `verifying` красит серым, как
+    /// и `disabled` — это не тревога, а отсутствие данных.
+    #[test]
+    fn shield_colour_follows_the_six_phases() {
+        assert_eq!(shield_color(&GuardPhase::Disabled), GuardStatusColor::Grey);
+        assert_eq!(
+            shield_color(&GuardPhase::Verifying {
+                cause: StalenessCause::ColdStart
+            }),
+            GuardStatusColor::Grey,
+            "рабочая фаза, а не тревога"
+        );
+        assert_eq!(
+            shield_color(&GuardPhase::Protected(reading())),
+            GuardStatusColor::Green
+        );
+        assert_eq!(
+            shield_color(&GuardPhase::Interference {
+                reading: reading(),
+                reason: UnprovenReason::ConfirmationUnavailable
+            }),
+            GuardStatusColor::Yellow
+        );
+        assert_eq!(
+            shield_color(&GuardPhase::Paused {
+                since: t0(),
+                reason: UnprovenReason::ConfirmationUnavailable
+            }),
+            GuardStatusColor::Yellow
+        );
+        assert_eq!(
+            shield_color(&GuardPhase::Danger(UnsafeEvidence::PauseExpired)),
+            GuardStatusColor::Red
+        );
+    }
+
+    /// Таблица «состояние × причина» без пустых клеток: каждая фаза с каждой
+    /// уликой даёт три непустые строки, а заголовок — ровно `GuardPhase::title`.
+    #[test]
+    fn every_phase_and_reason_combination_has_three_lines() {
+        let reasons = [
+            UnprovenReason::GeoUnavailable("таймаут запроса".to_string()),
+            UnprovenReason::AddressChanged {
+                observed: "198.51.100.7".to_string(),
+            },
+            UnprovenReason::ConfirmationUnavailable,
+        ];
+        let evidence = [
+            UnsafeEvidence::VpnAppNotRunning,
+            UnsafeEvidence::BlacklistedIp("203.0.113.28".to_string()),
+            UnsafeEvidence::BlockedCountry {
+                code: "RU".to_string(),
+                source: "ipinfo".to_string(),
+            },
+            UnsafeEvidence::CountryConflict {
+                primary: "KZ".to_string(),
+                confirmed: "DE".to_string(),
+            },
+            UnsafeEvidence::NotWhitelistedIp("203.0.113.28".to_string()),
+            UnsafeEvidence::NotWhitelistedCountry("KZ".to_string()),
+            UnsafeEvidence::PauseExpired,
+        ];
+
+        let mut phases = vec![GuardPhase::Disabled, GuardPhase::Protected(reading())];
+        for cause in [StalenessCause::ColdStart, StalenessCause::NetworkChanged] {
+            phases.push(GuardPhase::Verifying { cause });
+        }
+        for reason in &reasons {
+            phases.push(GuardPhase::Paused {
+                since: t0(),
+                reason: reason.clone(),
+            });
+            phases.push(GuardPhase::Interference {
+                reading: reading(),
+                reason: reason.clone(),
+            });
+        }
+        for evidence in &evidence {
+            phases.push(GuardPhase::Danger(evidence.clone()));
+        }
+
+        for phase in phases {
+            let text = explanation(&phase, Some(Duration::from_secs(43)));
+            for value in [&text.title, &text.action, &text.evidence, &text.next] {
+                assert!(!value.is_empty(), "пустая клетка у {phase:?}");
+            }
+            assert_eq!(text.title, phase.title());
         }
     }
 
-    /// Цвет щита никогда не единственный носитель смысла: рядом всегда текст.
     #[test]
-    fn every_state_has_words_not_just_a_colour() {
-        let guarded = status_presentation(&state(AppliedDecision::Safe));
-        let killed = status_presentation(&state(AppliedDecision::Kill(
-            UnsafeEvidence::VpnAppNotRunning,
-        )));
+    fn verifying_explains_the_lost_verdict_while_targets_keep_running() {
+        let phase = GuardPhase::Verifying {
+            cause: StalenessCause::ColdStart,
+        };
+        let text = explanation(&phase, Some(Duration::from_secs(43)));
+        assert_eq!(text.title, "Проверяю выход");
+        assert_eq!(text.action, "Цели работают");
+        assert_eq!(
+            text.evidence,
+            "Прежний вердикт не годится: вердикта ещё не было"
+        );
+        assert_eq!(text.next, "Жду ответа сервисов о безопасности выхода");
+    }
 
-        assert_eq!(guarded.title, "На страже");
-        assert_eq!(killed.title, "Небезопасно");
-        assert!(!guarded.subtitle.is_empty() && !killed.subtitle.is_empty());
+    /// «Проверяю выход» не читает часы вовсе: считать там нечего независимо
+    /// от того, что передали в `remaining_pause`.
+    #[test]
+    fn verifying_ignores_remaining_pause_entirely() {
+        let phase = GuardPhase::Verifying {
+            cause: StalenessCause::ColdStart,
+        };
+        let with_deadline = explanation(&phase, Some(Duration::from_secs(43)));
+        let without_deadline = explanation(&phase, None);
+        assert_eq!(with_deadline, without_deadline);
     }
 
     #[test]
-    fn the_failing_service_is_named_in_the_title() {
-        let presentation = status_presentation(&state(AppliedDecision::Unproven(
-            UnprovenReason::GeoUnavailable("таймаут запроса".into()),
-        )));
-
-        assert_eq!(presentation.title, "Ipinfo недоступен");
-        assert_ne!(presentation.title, "Сервис недоступен");
-        assert!(presentation.subtitle.contains("таймаут запроса"));
-        assert_eq!(presentation.shield, ShieldState::Degraded);
-    }
-
-    /// Ожидание проверки — не то же, что сработавшая защита: цели завершены
-    /// в обоих случаях, но объяснять их надо по-разному.
-    #[test]
-    fn pending_verification_looks_different_from_a_blocked_country() {
-        let pending = status_presentation(&state(AppliedDecision::Pending));
-        let blocked = status_presentation(&state(AppliedDecision::Kill(
-            UnsafeEvidence::BlockedCountry {
-                code: "RU".into(),
-                source: "ipinfo".into(),
-            },
-        )));
-
-        assert_eq!(pending.shield, ShieldState::Pending);
-        assert_eq!(blocked.shield, ShieldState::Killed);
-        assert_eq!(pending.title, "Проверка подключения");
+    fn protected_names_the_exit() {
+        let text = explanation(&GuardPhase::Protected(reading()), None);
+        assert_eq!(text.action, "Цели работают");
+        assert_eq!(
+            text.evidence,
+            "Выход 203.0.113.28, страна KZ подтверждена freeipapi"
+        );
+        assert_eq!(text.next, "Дальше ничего делать не нужно");
     }
 
     #[test]
-    fn disabled_guard_and_empty_targets_are_told_apart() {
-        let disabled = status_presentation(&GuardState {
-            is_enabled: false,
-            ..state(AppliedDecision::Safe)
+    fn interference_names_the_evidence_and_the_proven_address() {
+        let detail = "таймаут запроса".to_string();
+        let phase = GuardPhase::Interference {
+            reading: reading(),
+            reason: UnprovenReason::GeoUnavailable(detail.clone()),
+        };
+        let text = explanation(&phase, None);
+        assert_eq!(text.title, "На страже");
+        assert_eq!(text.action, "Цели работают");
+        assert_eq!(
+            text.evidence,
+            format!("Не удалось определить внешний адрес: {detail}")
+        );
+        assert_eq!(
+            text.next,
+            "Адрес 203.0.113.28 доказанно тот же — жду восстановления ipinfo"
+        );
+    }
+
+    #[test]
+    fn paused_explains_the_ceiling() {
+        let phase = GuardPhase::Paused {
+            since: t0(),
+            reason: UnprovenReason::ConfirmationUnavailable,
+        };
+        let text = explanation(&phase, Some(Duration::from_secs(12)));
+        assert_eq!(text.title, "Выход не подтверждён");
+        assert_eq!(text.action, "Цели остановлены");
+        assert_eq!(text.evidence, "Подтверждающие сервисы недоступны");
+        assert_eq!(
+            text.next,
+            "Ждём ответа сервисов, 12 с до завершения; возобновятся при подтверждении \
+             безопасного выхода"
+        );
+    }
+
+    #[test]
+    fn danger_forbids_launch() {
+        let phase = GuardPhase::Danger(UnsafeEvidence::BlockedCountry {
+            code: "RU".to_string(),
+            source: "ipinfo".to_string(),
         });
-        let targetless = status_presentation(&GuardState {
-            has_targets: false,
-            ..state(AppliedDecision::Safe)
-        });
+        let text = explanation(&phase, None);
+        assert_eq!(text.action, "Цели завершены");
+        assert_eq!(text.evidence, "Обнаружена страна RU по данным ipinfo");
+        assert_eq!(
+            text.next,
+            "Запуск запрещён до подтверждения безопасного выхода"
+        );
+    }
 
-        assert_eq!(disabled.title, "Охрана выключена");
-        assert_eq!(targetless.title, "Целей нет");
-        assert_eq!(disabled.shield, ShieldState::Disabled);
+    #[test]
+    fn disabled_tells_what_to_do() {
+        let text = explanation(&GuardPhase::Disabled, None);
+        assert_eq!(text.action, "Цели работают");
+        assert_eq!(
+            text.evidence,
+            "Цели не выбраны — охрана ничего не завершает"
+        );
+        assert_eq!(text.next, "Добавьте приложение или команду в настройках");
+    }
+
+    /// Отсчёт обязан читаться натурально и на границах: 60 с, 43 с, 1 с и —
+    /// на исходе — 0 с.
+    #[test]
+    fn countdown_reads_naturally_at_the_edges() {
+        let phase = GuardPhase::Paused {
+            since: t0(),
+            reason: UnprovenReason::ConfirmationUnavailable,
+        };
+        for seconds in [60, 43, 1, 0] {
+            let text = explanation(&phase, Some(Duration::from_secs(seconds)));
+            assert_eq!(
+                text.next,
+                format!(
+                    "Ждём ответа сервисов, {seconds} с до завершения; возобновятся \
+                     при подтверждении безопасного выхода"
+                )
+            );
+        }
+    }
+
+    /// `remaining_pause` может не подъехать вовремя (например, дедлайн ещё
+    /// не выставлен) — строка паузы не имеет права падать или показывать
+    /// отрицательное число.
+    #[test]
+    fn countdown_survives_a_missing_deadline() {
+        let phase = GuardPhase::Paused {
+            since: t0(),
+            reason: UnprovenReason::ConfirmationUnavailable,
+        };
+        let text = explanation(&phase, None);
+        assert_eq!(
+            text.next,
+            "Ждём ответа сервисов, 0 с до завершения; возобновятся при подтверждении \
+             безопасного выхода"
+        );
+    }
+
+    /// Там, где охрана ничего не сделала с целями — целей нет (`Disabled`) или
+    /// они работают штатно (`Protected`) — попап не объясняет ничего. Остальные
+    /// четыре фазы объясняют себя всегда.
+    #[test]
+    fn explanation_is_shown_only_where_something_happened_to_targets() {
+        assert!(!should_explain(&GuardPhase::Disabled));
+        assert!(!should_explain(&GuardPhase::Protected(reading())));
+
+        assert!(should_explain(&GuardPhase::Verifying {
+            cause: StalenessCause::ColdStart
+        }));
+        assert!(should_explain(&GuardPhase::Interference {
+            reading: reading(),
+            reason: UnprovenReason::ConfirmationUnavailable
+        }));
+        assert!(should_explain(&GuardPhase::Paused {
+            since: t0(),
+            reason: UnprovenReason::ConfirmationUnavailable
+        }));
+        assert!(should_explain(&GuardPhase::Danger(
+            UnsafeEvidence::PauseExpired
+        )));
+    }
+
+    /// Совет «VPN можно выключать» имеет смысл ровно в одном состоянии — когда
+    /// охрана на страже и подтвердила безопасность.
+    #[test]
+    fn idle_targets_hint_offers_to_disconnect_only_when_protected() {
+        let notice = idle_targets(&GuardPhase::Protected(reading()));
+        assert_eq!(notice.text, "Цели не запущены");
+        assert_eq!(notice.hint.as_deref(), Some("— VPN можно выключать"));
+    }
+
+    /// После срабатывания охраны цели молчат не потому, что всё хорошо:
+    /// VPN уже выключен, и советовать выключить его — ложь.
+    #[test]
+    fn idle_targets_hint_is_silent_after_the_kill_switch() {
+        let notice = idle_targets(&GuardPhase::Danger(UnsafeEvidence::VpnAppNotRunning));
+        assert_eq!(notice.text, "Цели не запущены");
+        assert_eq!(notice.hint, None);
+    }
+
+    #[test]
+    fn idle_targets_hint_is_silent_while_paused_or_verifying() {
+        assert_eq!(
+            idle_targets(&GuardPhase::Paused {
+                since: t0(),
+                reason: UnprovenReason::ConfirmationUnavailable
+            })
+            .hint,
+            None
+        );
+        assert_eq!(
+            idle_targets(&GuardPhase::Verifying {
+                cause: StalenessCause::ColdStart
+            })
+            .hint,
+            None
+        );
+    }
+
+    #[test]
+    fn idle_targets_hint_is_silent_when_guard_is_off() {
+        assert_eq!(idle_targets(&GuardPhase::Disabled).hint, None);
     }
 
     /// Подпись строки — имя сервиса, который реально ответил: подтверждающих
@@ -436,56 +664,5 @@ mod tests {
         let lines = status_lines_without_report();
         assert_eq!(lines[0].value, "неизвестен");
         assert_eq!(lines[1].value, "—");
-    }
-
-    /// Совет «VPN можно выключать» — правда только пока охрана на страже.
-    /// После срабатывания цели молчат именно потому, что VPN уже упал,
-    /// и тот же совет там был бы обманом.
-    #[test]
-    fn the_vpn_hint_appears_only_while_on_guard() {
-        let guarded = idle_targets(&state(AppliedDecision::Safe));
-        let killed = idle_targets(&state(AppliedDecision::Kill(
-            UnsafeEvidence::VpnAppNotRunning,
-        )));
-        let off = idle_targets(&GuardState {
-            is_enabled: false,
-            ..state(AppliedDecision::Safe)
-        });
-
-        assert_eq!(guarded.hint.as_deref(), Some("— VPN можно выключать"));
-        assert_eq!(killed.hint, None);
-        assert_eq!(off.hint, None);
-        assert_eq!(guarded.text, "Цели не запущены");
-        assert_eq!(killed.text, guarded.text);
-    }
-
-    /// Непроверенное — деградация сервиса, а не сработавшая защита: цвет щита
-    /// обязан их различать, хотя цели завершаются в обоих случаях.
-    #[test]
-    fn unproven_reasons_show_as_degraded_not_a_working_block() {
-        let unproven = status_presentation(&state(AppliedDecision::Unproven(
-            UnprovenReason::ConfirmationUnavailable,
-        )));
-        let blocked = status_presentation(&state(AppliedDecision::Kill(
-            UnsafeEvidence::BlockedCountry {
-                code: "RU".into(),
-                source: "ipinfo".into(),
-            },
-        )));
-
-        assert_eq!(unproven.shield, ShieldState::Degraded);
-        assert_eq!(blocked.shield, ShieldState::Killed);
-    }
-
-    #[test]
-    fn country_is_shown_when_it_is_known() {
-        let with_country = status_presentation(&state(AppliedDecision::Safe));
-        let without = status_presentation(&GuardState {
-            country: None,
-            ..state(AppliedDecision::Safe)
-        });
-
-        assert!(with_country.subtitle.contains("NL"));
-        assert_eq!(without.subtitle, "Трафик идёт через VPN");
     }
 }

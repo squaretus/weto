@@ -402,8 +402,6 @@ pub struct Recorded {
     /// Те из них, про кого заводится запись журнала: стоявшую цель эпизод паузы
     /// уже описал, и второй записи про тот же pid не бывает.
     pub recordable: Vec<i32>,
-    /// Причины, предложенные к уточнению.
-    pub refinements: Vec<String>,
     /// Контексты завершений: по ним проверяется диагностика, а не только текст.
     pub kill_contexts: Vec<KillContext>,
     /// Сколько раз эпизод объявлен законченным.
@@ -416,6 +414,8 @@ pub struct Recorded {
     pub resolutions: Vec<(String, Option<String>)>,
     /// Контексты записей паузы: разбор свежести живёт здесь.
     pub pause_contexts: Vec<KillContext>,
+    /// Цели, о потере терминала которых уведомили: порт `notifyBackgrounded`.
+    pub backgrounded: Vec<String>,
 }
 
 impl RecordingReporter {
@@ -462,14 +462,6 @@ impl KillReporting for RecordingReporter {
         recorded.recordable.extend(recordable.iter().map(|p| p.pid));
     }
 
-    fn refine(&self, context: &KillContext) {
-        self.0
-            .lock()
-            .unwrap()
-            .refinements
-            .push(context.reason.clone());
-    }
-
     fn episode_finished(&self, _context: &KillContext) {
         self.0.lock().unwrap().finished += 1;
     }
@@ -498,6 +490,14 @@ impl KillReporting for RecordingReporter {
             .unwrap()
             .resolutions
             .push((outcome.to_string(), shell_outcome.map(str::to_string)));
+    }
+
+    fn backgrounded(&self, target_name: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .backgrounded
+            .push(target_name.to_string());
     }
 }
 

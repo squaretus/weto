@@ -16,7 +16,7 @@ use weto_config::settings::Settings;
 use weto_core::check::CheckEvent;
 use weto_core::diagnostics::KillContext;
 use weto_core::guard_machine::{GuardAction, GuardPhase};
-use weto_core::presentation::AppliedDecision;
+use weto_core::presentation;
 use weto_core::process::MatchedProcess;
 use weto_guard::controller::{CheckReporting, GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
@@ -129,10 +129,9 @@ fn check(paths: &Paths) {
     let phase = controller.probe_now();
     let snapshot = controller.snapshot();
 
-    if let Some(presentation) = snapshot.presentation {
-        println!("{}", presentation.title);
-        println!("{}", presentation.subtitle);
-    }
+    let text = presentation::explanation(&phase, controller.remaining_pause());
+    println!("{}", text.title);
+    println!("{}: {}", text.action, text.evidence);
     if let Some(report) = snapshot.report {
         println!();
         println!("ipinfo:        {:?}", report.ipinfo);
@@ -163,12 +162,12 @@ fn watch(paths: &Paths) {
                 GuardAction::Pause => println!(
                     "{}: цели на паузе — {}",
                     phase.title(),
-                    AppliedDecision::from_phase(&phase).display_text()
+                    presentation::explanation(&phase, controller.remaining_pause()).evidence
                 ),
                 GuardAction::Terminate => println!(
                     "{}: цели завершены — {}",
                     phase.title(),
-                    AppliedDecision::from_phase(&phase).display_text()
+                    presentation::explanation(&phase, controller.remaining_pause()).evidence
                 ),
             }
             previous = Some(phase.clone());

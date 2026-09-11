@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gtk4::prelude::*;
 
-use weto_core::presentation::ShieldState;
+use weto_core::presentation::{self, GuardStatusColor};
 use weto_tray::TrayEvent;
 
 use crate::state::AppState;
@@ -28,19 +28,21 @@ pub fn install(app: &gtk4::Application, state: Arc<AppState>) -> bool {
     };
 
     let app = app.clone();
-    let mut last: Option<(ShieldState, String)> = None;
+    let mut last: Option<(GuardStatusColor, String)> = None;
 
     gtk4::glib::timeout_add_local(Duration::from_millis(500), move || {
         pump_events(&receiver, &app, &state);
 
         // Иконка обновляется только на изменение: каждая правка — сообщение
         // по шине, и слать его дважды в секунду впустую незачем.
-        if let Some(presentation) = state.snapshot().presentation {
-            let current = (presentation.shield, presentation.title.clone());
-            if last.as_ref() != Some(&current) {
-                handle.set_status(current.0, &current.1);
-                last = Some(current);
-            }
+        let phase = state.snapshot().phase;
+        let current = (
+            presentation::shield_color(&phase),
+            phase.title().to_string(),
+        );
+        if last.as_ref() != Some(&current) {
+            handle.set_status(current.0, &current.1);
+            last = Some(current);
         }
 
         gtk4::glib::ControlFlow::Continue

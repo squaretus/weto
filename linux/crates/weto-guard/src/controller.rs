@@ -33,7 +33,7 @@ use std::time::{Duration, Instant, SystemTime};
 use weto_config::settings::Settings;
 use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
-use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading, SourceOutcome};
+use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading};
 use weto_core::guard_machine::{
     GuardAction, GuardEffect, GuardInput, GuardMachine, GuardPhase, PAUSE_CEILING,
 };
@@ -42,9 +42,6 @@ use weto_core::network::VpnAppStatus;
 use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
 use weto_core::policy::GuardSignals;
 use weto_core::policy::{decide, decide_local, GuardDecision, UnsafeEvidence};
-use weto_core::presentation::{
-    status_presentation, AppliedDecision, GuardState, StatusPresentation,
-};
 use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget};
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
@@ -116,16 +113,6 @@ pub trait KillReporting: Send + Sync {
         context: &KillContext,
     );
 
-    /// Причина эпизода, ставшая известной. Приёмник, ведущий журнал, дописывает
-    /// её всем записям эпизода.
-    ///
-    /// С переходом на паузу уточнять стало нечего: эпизода до вердикта больше
-    /// не бывает — «Проверка» целей не трогает, и первая же запись называет
-    /// настоящую причину. Вызов остаётся на месте, а `KillContext::is_pending`
-    /// всегда `false`: механизм ведёт к `EpisodeLedger::begin_pending`, и снимать
-    /// его стоит одним движением вместе с ним.
-    fn refine(&self, _context: &KillContext) {}
-
     /// Цели снова работают: приёмник обнуляет здесь учёт «что уже описано».
     fn episode_finished(&self, _context: &KillContext) {}
 
@@ -133,6 +120,11 @@ pub trait KillReporting: Send + Sync {
     /// вошедшие в план ради терминала цели. Один эпизод на всё стояние —
     /// повторных записей про те же pid не бывает.
     fn paused(&self, _stopped: &[MatchedProcess], _context: &KillContext) {}
+
+    /// Терминальная цель под паузой потеряла терминал: её задание перестало
+    /// быть передним, и `fg` в обычном терминале её больше не поднимет.
+    /// Порт macOS `GuardNotifying.notifyBackgrounded`.
+    fn backgrounded(&self, _target_name: &str) {}
 
     /// Процессы, застигнутые стоящими на старте: пробы за их стоянием нет,
     /// поэтому эпизод у них свой. Дата записи — когда процесс встал, а не когда
@@ -159,11 +151,10 @@ type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
 
 #[derive(Debug, Clone, Default)]
 pub struct GuardSnapshot {
-    /// Фаза охраны — то, что редьюсер решил про выход и про цели.
+    /// Фаза охраны — то, что редьюсер решил про выход и про цели. Экран строит
+    /// заголовок, цвет щита и три строки объяснения из неё через
+    /// `weto_core::presentation`.
     pub phase: GuardPhase,
-    /// Проекция фазы на сегодняшний экран. Порт интерфейса её убирает.
-    pub decision: Option<AppliedDecision>,
-    pub presentation: Option<StatusPresentation>,
     pub report: Option<GeoProbeReport>,
     pub running: Vec<RunningTarget>,
     /// Цели, стоящие прямо сейчас: пилюли с отсчётом рисует порт интерфейса.
@@ -535,7 +526,7 @@ impl GuardController {
             self.settle_resume(&scan, settings, &phase);
         }
 
-        self.publish(settings, &phase, &scan);
+        self.publish(&phase, &scan);
         phase
     }
 
@@ -603,30 +594,39 @@ impl GuardController {
         self.reporter.paused(&newcomers, &context);
 
         let moment = (self.now)();
-        let mut inner = self.inner.lock().expect("состояние охраны");
-        for root in newcomers
-            .iter()
-            .filter(|p| p.matched_by == MatchBasis::Rule)
+        let mut newly_backgrounded: Vec<String> = Vec::new();
         {
-            let backgrounded = outcome.plan.backgrounded.contains(&root.pid);
-            // Признак «вернулось в фон» у дожившей пилюли вернее нашего: его
-            // дописало наблюдение, а не догадка плана. А вот момент — наш: эта
-            // цель успела поработать между эпизодами, значит стояние началось сейчас.
-            if let Some(existing) = inner
-                .pause
-                .paused
-                .iter_mut()
-                .find(|paused| paused.pid == root.pid)
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            for root in newcomers
+                .iter()
+                .filter(|p| p.matched_by == MatchBasis::Rule)
             {
-                existing.since = moment;
-                continue;
+                let backgrounded = outcome.plan.backgrounded.contains(&root.pid);
+                // Признак «вернулось в фон» у дожившей пилюли вернее нашего: его
+                // дописало наблюдение, а не догадка плана. А вот момент — наш: эта
+                // цель успела поработать между эпизодами, значит стояние началось сейчас.
+                if let Some(existing) = inner
+                    .pause
+                    .paused
+                    .iter_mut()
+                    .find(|paused| paused.pid == root.pid)
+                {
+                    existing.since = moment;
+                    continue;
+                }
+                inner.pause.paused.push(PausedProcess {
+                    pid: root.pid,
+                    target_name: root.target_name.clone(),
+                    since: moment,
+                    is_backgrounded: backgrounded,
+                });
+                if backgrounded {
+                    newly_backgrounded.push(root.target_name.clone());
+                }
             }
-            inner.pause.paused.push(PausedProcess {
-                pid: root.pid,
-                target_name: root.target_name.clone(),
-                since: moment,
-                is_backgrounded: backgrounded,
-            });
+        }
+        for target_name in &newly_backgrounded {
+            self.reporter.backgrounded(target_name);
         }
     }
 
@@ -696,14 +696,19 @@ impl GuardController {
         // пилюля остаётся, а признак «вернулась в фон» у неё теперь верен по факту —
         // терминал у шелла, иначе SIGCONT прижился бы.
         let standing: HashSet<i32> = outcome.unresolved.iter().map(|e| e.pid).collect();
+        let mut newly_backgrounded: Vec<String> = Vec::new();
         {
             let mut inner = self.inner.lock().expect("состояние охраны");
             inner.pause.paused.retain(|p| standing.contains(&p.pid));
             for paused in inner.pause.paused.iter_mut() {
-                if answered.contains(&paused.pid) {
+                if answered.contains(&paused.pid) && !paused.is_backgrounded {
                     paused.is_backgrounded = true;
+                    newly_backgrounded.push(paused.target_name.clone());
                 }
             }
+        }
+        for target_name in &newly_backgrounded {
+            self.reporter.backgrounded(target_name);
         }
 
         if answered.is_empty() && refused.is_empty() {
@@ -836,9 +841,6 @@ impl GuardController {
             .collect();
 
         let context = self.kill_context(settings, reason, None);
-        // Сначала уточнение, потом завершение: иначе уточнённая причина считалась
-        // бы новой и завела бы второй набор записей про то же самое падение.
-        self.reporter.refine(&context);
         self.reporter.report(&killed, &fresh, &context);
     }
 
@@ -998,46 +1000,20 @@ impl GuardController {
         // тикала бы отсчётом до потолка, которого никто больше не считает.
         inner.machine = GuardMachine::default();
         inner.snapshot.phase = GuardPhase::Disabled;
-        inner.snapshot.decision = Some(AppliedDecision::Safe);
         inner.snapshot.pause_deadline = None;
         inner.snapshot.paused = inner.pause.paused.clone();
     }
 
     // --- показания ----------------------------------------------------------
 
-    /// Снимок для экрана: фаза, её проекция, живые цели и стоящие.
-    fn publish(&self, settings: &Settings, phase: &GuardPhase, scan: &Scan) {
+    /// Снимок для экрана: фаза, живые цели и стоящие. Заголовок, цвет щита
+    /// и три строки объяснения строит сам экран из фазы через
+    /// `weto_core::presentation` — снимок их не кеширует.
+    fn publish(&self, phase: &GuardPhase, scan: &Scan) {
         let running = self.enforcer.running_in(scan);
-        let decision = AppliedDecision::from_phase(phase);
 
         let mut inner = self.inner.lock().expect("состояние охраны");
-        let country = inner.last_report.as_ref().and_then(|r| match r.outcome() {
-            GeoOutcome::Resolved(reading) => Some(reading.primary_country),
-            GeoOutcome::Degraded { previous, .. } => Some(previous.primary_country),
-            GeoOutcome::Unavailable(_) | GeoOutcome::AddressChanged { .. } => {
-                r.reference_country().map(str::to_string)
-            }
-        });
-        // Цели живут, но защита держится на том, что адрес не менялся, а не на
-        // свежем ответе ipinfo. Глаз обязан это видеть: зелёный тут врал бы.
-        let is_degraded = matches!(phase, GuardPhase::Interference { .. })
-            || (decision == AppliedDecision::Safe
-                && inner
-                    .last_report
-                    .as_ref()
-                    .is_some_and(|r| matches!(r.ipinfo, SourceOutcome::Failed(_))));
-
-        let presentation = status_presentation(&GuardState {
-            is_enabled: settings.is_enabled,
-            has_targets: !settings.targets.is_empty(),
-            decision: decision.clone(),
-            country,
-            is_degraded,
-        });
-
         inner.snapshot.phase = phase.clone();
-        inner.snapshot.decision = Some(decision);
-        inner.snapshot.presentation = Some(presentation);
         inner.snapshot.running = running;
         inner.snapshot.paused = inner.pause.paused.clone();
         inner.snapshot.pause_deadline = phase.paused_since().map(|since| since + PAUSE_CEILING);
@@ -1077,9 +1053,6 @@ impl GuardController {
 
         KillContext {
             reason,
-            // Эпизода до вердикта больше не бывает: «Проверка» целей не трогает,
-            // и записи журнала заводит только состоявшийся результат.
-            is_pending: false,
             reading,
             diagnostics: KillDiagnostics {
                 staleness,
