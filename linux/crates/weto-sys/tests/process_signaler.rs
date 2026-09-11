@@ -86,19 +86,6 @@ fn stop_resume_and_kill_are_visible_in_proc() {
     assert!(settles_to(child.pid(), None), "SIGKILL завершает");
 }
 
-/// Тот сигнал, которым Linux-охрана завершает цели сегодня. Мягкий, и потому
-/// проверяется отдельно: обработчик у `sleep` его не перехватывает, но сам
-/// факт доставки — не то же самое, что у SIGKILL.
-#[test]
-fn terminate_ends_the_process_too() {
-    let child = Spawned::sleeping("86411");
-
-    let results = ProcessSignaler::new().send(ProcessSignal::Terminate, &[child.pid()]);
-
-    assert!(results.iter().all(SignalResult::is_delivered));
-    assert!(settles_to(child.pid(), None), "SIGTERM завершает `sleep`");
-}
-
 /// Процесс, умерший до сигнала, — не отказ: цель достигнута, и журнал обязан
 /// объяснить его наравне с остальными.
 #[test]

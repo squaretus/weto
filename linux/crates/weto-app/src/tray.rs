@@ -60,12 +60,10 @@ fn pump_events(receiver: &Receiver<TrayEvent>, app: &gtk4::Application, state: &
             },
             TrayEvent::CheckNow => state.probe_now(),
             TrayEvent::OpenSettings => crate::settings_window::present(app, state.clone()),
-            // Штатный выход замороженных целей не оставляет: SIGCONT уходит
-            // раньше, чем закрывается приложение.
-            TrayEvent::Quit => {
-                state.shutdown();
-                app.quit()
-            }
+            // Замороженных целей выход не оставляет, но занимается этим
+            // не пункт меню: SIGCONT шлёт воронка `connect_shutdown`, через
+            // которую проходит любой выход, включая закрытие последнего окна.
+            TrayEvent::Quit => app.quit(),
         }
     }
 }

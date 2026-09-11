@@ -14,12 +14,11 @@ use rustix::process::{kill_process, Pid, Signal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessSignal {
-    /// Завершение цели. На macOS этому случаю соответствует `SIGKILL`;
-    /// Linux с самого начала посылает `SIGTERM`, и менять это — не дело
-    /// границы: выбор сигнала принадлежит поведению охраны.
-    Terminate,
     /// Завершение без права на обработчик: потолок паузы и доказательство
-    /// утечки завершают именно так — цель не должна успеть ничего.
+    /// утечки завершают именно так — цель не должна успеть ничего. Канон
+    /// называет здесь SIGKILL для обеих платформ, и `SIGTERM` граница
+    /// не предлагает вовсе: стоящий процесс обработчика не исполняет,
+    /// и мягкий сигнал просто встал бы в очередь до продолжения.
     Kill,
     Stop,
     Resume,
@@ -28,7 +27,6 @@ pub enum ProcessSignal {
 impl ProcessSignal {
     fn number(self) -> Signal {
         match self {
-            ProcessSignal::Terminate => Signal::TERM,
             ProcessSignal::Kill => Signal::KILL,
             ProcessSignal::Stop => Signal::STOP,
             ProcessSignal::Resume => Signal::CONT,
@@ -172,7 +170,6 @@ mod tests {
     /// `STOP` и `CONT` тестом с подменённым ядром не ловятся ничем иным.
     #[test]
     fn every_signal_maps_to_its_kernel_number() {
-        assert_eq!(ProcessSignal::Terminate.number().as_raw(), libc::SIGTERM);
         assert_eq!(ProcessSignal::Kill.number().as_raw(), libc::SIGKILL);
         assert_eq!(ProcessSignal::Stop.number().as_raw(), libc::SIGSTOP);
         assert_eq!(ProcessSignal::Resume.number().as_raw(), libc::SIGCONT);

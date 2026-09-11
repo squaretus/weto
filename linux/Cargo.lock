@@ -1946,6 +1946,7 @@ name = "weto-app"
 version = "0.0.0"
 dependencies = [
  "gtk4",
+ "libc",
  "weto-config",
  "weto-core",
  "weto-guard",

@@ -628,3 +628,26 @@ fn shutdown_names_a_refusal_instead_of_silence() {
         s.reporter.resolutions()
     );
 }
+
+/// Выход зовут дважды: сперва руками — удаление обязано продолжить цели раньше,
+/// чем исчезнет учёт, — а потом воронкой, через которую проходит любой выход.
+/// Второй раз обязан не делать ничего. Учёт от первого выхода не пустеет:
+/// наблюдать результат сигнала уже нечем, и записи остаются до следующего
+/// запуска — а без признака «выход уже был» второй вызов слал бы по ним SIGCONT
+/// заново и сохранял бы файл учёта, только что снесённый удалением.
+#[test]
+fn shutdown_twice_changes_nothing_the_second_time() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+
+    s.controller.shutdown();
+    let signals_after_first = s.world.signalled(Resume);
+    let resolutions_after_first = s.reporter.resolutions();
+
+    s.controller.shutdown();
+
+    assert_eq!(s.world.signalled(Resume), signals_after_first);
+    assert_eq!(s.reporter.resolutions(), resolutions_after_first);
+    assert_eq!(s.controller.phase(), GuardPhase::Disabled);
+}

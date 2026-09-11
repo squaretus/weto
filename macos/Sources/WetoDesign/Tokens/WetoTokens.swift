@@ -80,6 +80,7 @@ public enum WetoTokens {
     public static let windowHeight: CGFloat = 640
     public static let controlHeight: CGFloat = 32
     public static let controlHeightCompact: CGFloat = 24
+    public static let badgeInset: CGFloat = 2
 
     public static let status: Font = .system(size: 15, weight: .semibold)
     public static let label: Font = .system(size: 13, weight: .medium)
