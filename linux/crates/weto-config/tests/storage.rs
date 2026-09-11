@@ -294,6 +294,54 @@ fn a_legacy_journal_expands_into_a_record_per_process() {
     );
 }
 
+/// Шелл — третий способ попасть в журнал: под правило он не подходил, а SIGSTOP
+/// получил. Формат общий с macOS, поэтому запись обязана читаться и здесь; старый
+/// булев признак при этом читается по-прежнему.
+#[test]
+fn a_shell_record_round_trips_and_legacy_flag_still_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("state/journal.json");
+
+    let mut shell = event(100, "Подтверждающие сервисы недоступны");
+    shell.matched_by = MatchBasis::Shell;
+    shell.executable_path = "/bin/zsh".to_string();
+    shell.kind = KillEventKind::Paused;
+    let mut journal = Journal::default();
+    journal.append(vec![shell]);
+    journal.save(&path).unwrap();
+
+    let loaded = Journal::load(&path);
+    assert_eq!(loaded.entries()[0].matched_by, MatchBasis::Shell);
+    assert_eq!(
+        serde_json::to_value(MatchBasis::Shell).unwrap(),
+        serde_json::json!("shell"),
+        "имя в файле — часть общего с macOS формата"
+    );
+    assert_eq!(
+        MatchBasis::Shell.detail_text(1).as_deref(),
+        Some("шелл терминала цели")
+    );
+    assert_eq!(
+        MatchBasis::Descendant.detail_text(200).as_deref(),
+        Some("потомок 200")
+    );
+    assert!(MatchBasis::Rule.detail_text(1).is_none());
+
+    let legacy = tmp.path().join("legacy.json");
+    std::fs::write(
+        &legacy,
+        r#"{"entries":[{"id":"a","episodeID":"b","date":"1970-01-01T00:00:01Z",
+           "targetName":"claude","pid":5,"parentPID":1,"executablePath":"/c",
+           "isDescendant":true,"kind":"terminated","reasonText":"r"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        Journal::load(&legacy).entries()[0].matched_by,
+        MatchBasis::Descendant,
+        "журналы прежнего формата читаются по-прежнему"
+    );
+}
+
 #[test]
 fn journal_survives_a_round_trip() {
     let tmp = tempfile::tempdir().unwrap();

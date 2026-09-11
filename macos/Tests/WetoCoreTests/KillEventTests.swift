@@ -133,6 +133,23 @@ final class KillEventTests: XCTestCase {
         XCTAssertNil(object?.first?["isDescendant"])
     }
 
+    /// Шелл — третий способ попасть в журнал: под правило он не подходил, а SIGSTOP
+    /// получил. Имя в файле — часть общего с Linux формата, текст — общий дословно.
+    func test_shell_is_a_match_basis_of_its_own() throws {
+        let event = KillEvent(
+            episodeID: UUID(), date: Date(), targetName: "claude", pid: 100, parentPID: 1,
+            executablePath: "/bin/zsh", matchedBy: .shell, kind: .paused,
+            reasonText: "r", ip: nil, country: nil
+        )
+        let data = try JSONEncoder().encode([event])
+        let object = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        XCTAssertEqual(object?.first?["matchedBy"] as? String, "shell")
+        XCTAssertEqual(try KillEvent.decodeLog(data).first?.matchedBy, .shell)
+        XCTAssertEqual(MatchBasis.shell.detailText(parentPID: 1), "шелл терминала цели")
+        XCTAssertEqual(MatchBasis.descendant.detailText(parentPID: 200), "потомок 200")
+        XCTAssertNil(MatchBasis.rule.detailText(parentPID: 1))
+    }
+
     func test_legacy_is_descendant_is_read_as_matched_by() throws {
         let legacy = """
         [{"id":"5D2C1F1E-0000-4000-8000-000000000001","episodeID":"5D2C1F1E-0000-4000-8000-000000000002",

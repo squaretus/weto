@@ -23,8 +23,9 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   and the Rust counterpart in `linux-guard`.
 - `macos/Sources/WetoCore/PausePlan.swift` — `PausePlanner.plan(matched:processes:)`: who gets
   SIGSTOP and in what order (shell before its target, parent before descendants; `resumeOrder`
-  is the reverse), which roots are already stopped (`skipped`) and which lost their foreground
-  job (`backgrounded`). A target is in the foreground when the leader of the tty's foreground
+  is the reverse), which roots are already stopped (`skipped`), which lost their foreground
+  job (`backgrounded`) and, for every shell in the plan, the target whose terminal it holds
+  (`shellTargets` — the journal record of a stopped shell is named after that target). A target is in the foreground when the leader of the tty's foreground
   group is the target itself or a descendant of it — subtree membership, not group equality:
   a tool the target started with its own job control (`setpgid` + `tcsetpgrp`) holds the group,
   and equality called such a target backgrounded and left its shell out of the plan. The shell

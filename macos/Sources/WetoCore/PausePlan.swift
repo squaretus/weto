@@ -6,8 +6,14 @@ public struct PausePlan: Equatable, Sendable {
 
     public let stopOrder: [Int32]
 
-    /// Шеллы, вошедшие в план ради терминала: они не цели и в журнал не пишутся.
+    /// Шеллы, вошедшие в план ради терминала. Они не цели — но SIGSTOP получают,
+    /// а значит, журнал обязан их объяснить: запись заводится с `matchedBy == .shell`
+    /// в том же эпизоде, что и цели, ради которых шелл остановлен.
     public let shells: [Int32]
+
+    /// Ради чьего терминала шелл вошёл в план: имя цели у записи журнала берётся отсюда,
+    /// иначе шелл остался бы в журнале безымянным процессом без связи с целью.
+    public let shellTargets: [Int32: String]
 
     /// Корни целей, которым терминал после SIGCONT не вернуть: фоновое задание.
     /// Пользователю об этом говорит интерфейс (подсказка про `fg`).
@@ -18,9 +24,16 @@ public struct PausePlan: Equatable, Sendable {
 
     public var resumeOrder: [Int32] { stopOrder.reversed() }
 
-    public init(stopOrder: [Int32], shells: [Int32], backgrounded: [Int32], skipped: [Int32]) {
+    public init(
+        stopOrder: [Int32],
+        shells: [Int32],
+        shellTargets: [Int32: String] = [:],
+        backgrounded: [Int32],
+        skipped: [Int32]
+    ) {
         self.stopOrder = stopOrder
         self.shells = shells
+        self.shellTargets = shellTargets
         self.backgrounded = backgrounded
         self.skipped = skipped
     }
@@ -45,6 +58,7 @@ public enum PausePlanner {
         // обёртка, а не шелл), на том же терминале (иначе он терминал и не отберёт)
         // и действительно шелл (иначе это `login`, терминал у цели не отбирающий).
         var shells: [Int32] = []
+        var shellTargets: [Int32: String] = [:]
         var backgrounded: [Int32] = []
         for root in active where root.matchedBy == .rule {
             guard let snapshot = byPID[root.pid], snapshot.terminalForegroundGroup != 0 else { continue }
@@ -66,6 +80,9 @@ public enum PausePlanner {
                   !shells.contains(shell.pid)
             else { continue }
             shells.append(shell.pid)
+            // Терминал у шелла один, и цель в нём тоже одна: первая же выигрывает имя,
+            // и повтора здесь не бывает — `shells.contains` выше отсекает второй заход.
+            shellTargets[shell.pid] = root.targetName
         }
 
         // Родитель раньше потомков: глубина внутри снимка, а не порядок совпадения.
@@ -78,7 +95,8 @@ public enum PausePlanner {
         }
         let ordered: [Int32] = sortedDepths.map { $0.pid }
 
-        return PausePlan(stopOrder: shells + ordered, shells: shells, backgrounded: backgrounded, skipped: skipped)
+        return PausePlan(stopOrder: shells + ordered, shells: shells, shellTargets: shellTargets,
+                         backgrounded: backgrounded, skipped: skipped)
     }
 
     /// Цель в переднем плане своего терминала, если лидер передней группы tty — сама цель
