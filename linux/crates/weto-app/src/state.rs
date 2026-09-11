@@ -20,8 +20,10 @@ use weto_config::paths::Paths;
 use weto_config::settings::{Settings, Theme};
 use weto_core::episode::EpisodeLedger;
 use weto_core::geo::SourceOutcome;
+use weto_core::guard_machine::GuardAction;
+use weto_core::pause_plan::RecoveredProcess;
 use weto_core::presentation::{AppliedDecision, GuardState};
-use weto_core::process::MatchedProcess;
+use weto_core::process::{MatchBasis, MatchedProcess};
 use weto_guard::controller::{
     CheckReporting, GuardController, GuardSnapshot, KillReporting, SettingsProviding,
 };
@@ -105,7 +107,26 @@ struct JournalWriter {
     /// же запись возвращала на диск всё стёртое.
     journal: Arc<Mutex<Journal>>,
     episode: Mutex<EpisodeLedger>,
+    /// Эпизоды стояния: паузы и восстановления после падения. Исход дописывается
+    /// обоим сразу — стоящее с прошлой жизни и остановленное сейчас кончается
+    /// одним и тем же.
+    pause_episodes: Mutex<PauseEpisodes>,
     notifier: Box<dyn KillNotifying>,
+}
+
+#[derive(Default)]
+struct PauseEpisodes {
+    pause: Option<String>,
+    recovery: Option<String>,
+}
+
+impl PauseEpisodes {
+    fn open(&self) -> Vec<String> {
+        [self.pause.clone(), self.recovery.clone()]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
 }
 
 impl JournalWriter {
@@ -117,6 +138,39 @@ impl JournalWriter {
 
     fn patch(context: &KillContext) -> GeoReadingPatch {
         context.reading.clone()
+    }
+
+    /// Записи стояния: по записи на процесс, `kind: paused`, эпизод один.
+    /// Момент приходит функцией — у паузы это «сейчас», у восстановления
+    /// с прошлого запуска момент из учёта.
+    fn pause_events(
+        episode_id: &str,
+        stopped: &[MatchedProcess],
+        context: &KillContext,
+        at: impl Fn(usize) -> std::time::SystemTime,
+    ) -> Vec<KillEvent> {
+        stopped
+            .iter()
+            .enumerate()
+            .map(|(order, process)| KillEvent {
+                id: format!("{episode_id}-{order}"),
+                episode_id: episode_id.to_string(),
+                at: at(order),
+                target_name: process.target_name.clone(),
+                pid: process.pid,
+                parent_pid: process.parent_pid,
+                executable_path: process.executable_path.clone(),
+                matched_by: process.matched_by,
+                kind: KillEventKind::Paused,
+                reason_text: context.reason.clone(),
+                resolution_text: None,
+                ip: context.reading.ip.clone(),
+                country: context.reading.country.clone(),
+                confirmed_country: context.reading.confirmed_country.clone(),
+                confirm_source: context.reading.confirm_source.clone(),
+                diagnostics: Some(context.diagnostics.clone()),
+            })
+            .collect()
     }
 
     /// «claude ×34, codex» — цели прохода с числом завершённых процессов там,
@@ -198,21 +252,120 @@ impl KillReporting for JournalWriter {
         self.save(&journal);
     }
 
-    fn report(&self, killed: &[MatchedProcess], context: &KillContext) {
+    /// Процессы, которым ушёл SIGSTOP. Эпизод один на всё стояние: цели, их
+    /// потомки и шелл, вошедший в план ради терминала цели, объясняются вместе
+    /// и получают один исход.
+    fn paused(&self, stopped: &[MatchedProcess], context: &KillContext) {
+        if stopped.is_empty() {
+            return;
+        }
+        let episode_id = {
+            let mut episodes = self.pause_episodes.lock().expect("эпизоды стояния");
+            episodes.pause.get_or_insert_with(new_id).clone()
+        };
+        let events = Self::pause_events(&episode_id, stopped, context, |_| {
+            std::time::SystemTime::now()
+        });
+
+        let mut journal = self.journal.lock().expect("журнал");
+        journal.append(events);
+        self.save(&journal);
+    }
+
+    /// Процессы, застигнутые стоящими на старте. Эпизод свой: пробы за этим
+    /// стоянием нет, и причина говорит это прямо.
+    fn recovered(&self, standing: &[RecoveredProcess], context: &KillContext) {
+        if standing.is_empty() {
+            return;
+        }
+        let episode_id = {
+            let mut episodes = self.pause_episodes.lock().expect("эпизоды стояния");
+            episodes.recovery.get_or_insert_with(new_id).clone()
+        };
+        let processes: Vec<MatchedProcess> = standing
+            .iter()
+            .map(|recovered| recovered.process.clone())
+            .collect();
+        // Дата записи — когда процесс встал, а не когда weto это заметил.
+        let events = Self::pause_events(&episode_id, &processes, context, |order| {
+            standing[order].stopped_at
+        });
+
+        let mut journal = self.journal.lock().expect("журнал");
+        journal.append(events);
+        self.save(&journal);
+    }
+
+    /// Чем стояние кончилось. Дописывается обоим эпизодам сразу, а запись шелла
+    /// получает свой исход, если он расходится с исходом цели.
+    fn pause_resolved(&self, outcome: &str, shell_outcome: Option<&str>, context: &KillContext) {
+        let episodes = {
+            let mut episodes = self.pause_episodes.lock().expect("эпизоды стояния");
+            let open = episodes.open();
+            episodes.pause = None;
+            episodes.recovery = None;
+            open
+        };
+        if episodes.is_empty() {
+            return;
+        }
+
+        let mut journal = self.journal.lock().expect("журнал");
+        let mut touched = false;
+        for episode_id in episodes {
+            touched |= journal.refine_episode(
+                &episode_id,
+                None,
+                Some(outcome),
+                Some(&Self::patch(context)),
+                Some(&context.diagnostics),
+            );
+            if let Some(shell_outcome) = shell_outcome {
+                journal.refine_basis(&episode_id, MatchBasis::Shell, shell_outcome);
+            }
+        }
+        if touched {
+            self.save(&journal);
+        }
+    }
+
+    fn report(
+        &self,
+        killed: &[MatchedProcess],
+        recordable: &[MatchedProcess],
+        context: &KillContext,
+    ) {
         let mut episode = self.episode.lock().expect("журнал");
 
         let is_new_reason = episode.is_new_reason(&context.reason);
         let fresh: Vec<MatchedProcess> = episode
-            .fresh(killed, &context.reason, |process| process.pid)
+            .fresh(recordable, &context.reason, |process| process.pid)
             .into_iter()
             .cloned()
             .collect();
 
+        // Причина и завершённые pid запоминаются независимо от записи: иначе
+        // такт раз в 250 мс повторял бы и уведомление, и записи про уже мёртвые
+        // процессы.
+        let announce = !killed.is_empty() && (is_new_reason || !fresh.is_empty());
+        episode.remember(&context.reason, killed.iter().map(|process| process.pid));
+        drop(episode);
+
+        // Уведомление — на проход, а не на процесс: тридцать четыре баннера
+        // подряд не сообщение, а помеха. Настройки «уведомлять или нет»
+        // нет и на macOS. Считаются завершённые сейчас, а не все совпавшие:
+        // иначе один добитый процесс давал бы баннер «claude ×34». Цель, стоявшая
+        // до завершения, входит сюда наравне: запись о ней уже есть, но новость
+        // «цели завершены» от этого не исчезает.
+        if announce {
+            self.notifier
+                .notify(&Self::targets_summary(killed), &context.reason);
+        }
+
         if fresh.is_empty() {
             return;
         }
-
-        episode.remember(&context.reason, fresh.iter().map(|process| process.pid));
+        let mut episode = self.episode.lock().expect("журнал");
 
         let kind = if is_new_reason {
             KillEventKind::Terminated
@@ -251,14 +404,6 @@ impl KillReporting for JournalWriter {
             episode.begin_pending(episode_id.clone());
         }
         drop(episode);
-
-        // Уведомление — на проход, а не на процесс: тридцать четыре баннера
-        // подряд не сообщение, а помеха. Настройки «уведомлять или нет»
-        // нет и на macOS.
-        // Считаются завершённые сейчас, а не все совпавшие: иначе один
-        // добитый процесс давал бы баннер «claude ×34».
-        self.notifier
-            .notify(&Self::targets_summary(&fresh), &context.reason);
 
         let mut journal = self.journal.lock().expect("журнал");
         journal.append(events);
@@ -320,6 +465,7 @@ impl AppState {
             paths: paths.clone(),
             journal: journal.clone(),
             episode: Mutex::new(EpisodeLedger::new()),
+            pause_episodes: Mutex::new(PauseEpisodes::default()),
             notifier: Box::new(PortalNotifier::new()),
         };
 
@@ -334,6 +480,7 @@ impl AppState {
             ProcessEnforcer::new(
                 Box::new(ProcRegistry::new()),
                 Box::new(ProcessSignaler::new()),
+                paths.stopped_file(),
             ),
             Box::new(writer),
             Box::new(CheckWriter {
@@ -422,8 +569,12 @@ impl AppState {
     }
 
     /// Состояние охраны в терминах экрана. Собирается из настроек и снимка:
-    /// вердикта может ещё не быть, и до первой пробы это `verificationPending` —
-    /// то же fail-closed, что применяется к целям.
+    /// вердикта может ещё не быть, и до первой пробы это «Проверка» — цели при
+    /// этом работают, решает ответ пробы.
+    ///
+    /// Пилюлю стоящей цели, отсчёт до потолка и подсказку про `fg` экран пока
+    /// не рисует: они лежат готовыми в `GuardSnapshot` (`paused`, `pause_deadline`)
+    /// и ждут порта интерфейса.
     pub fn guard_state(&self) -> GuardState {
         let settings = self.settings.current();
         let snapshot = self.snapshot();
@@ -462,6 +613,16 @@ impl AppState {
         });
     }
 
+    /// Штатный выход: замороженных целей не оставляем.
+    ///
+    /// Наблюдать последствия SIGCONT уже нечем — такта больше не будет, — поэтому
+    /// запись, которую сигнал не разрешил, остаётся в учёте и достаётся
+    /// восстановлению при следующем запуске, а журнал пишет «не подтверждено»,
+    /// а не «возобновлено».
+    pub fn shutdown(&self) {
+        self.controller.shutdown();
+    }
+
     /// Охрана стартует при запуске процесса, а не при первом открытии окна.
     ///
     /// На macOS это правило появилось потому, что `MenuBarExtra` создаёт
@@ -472,16 +633,20 @@ impl AppState {
         std::thread::Builder::new()
             .name("weto-guard".to_string())
             .spawn(move || {
+                // После падения: SIGCONT всем из учёта, кто ещё стоит и остался
+                // тем же процессом. Раньше первого такта — обязательство «вернуть
+                // из паузы» не зависит ни от вердикта, ни от наличия целей.
+                controller.recover_stopped();
                 let events = NetlinkEventSource.subscribe();
                 loop {
-                    let decision = controller.tick();
+                    let phase = controller.tick();
                     // Шаг штатного тика перечитывается каждый раз: правка
-                    // в настройках применяется со следующего же круга.
-                    let interval = match decision {
-                        AppliedDecision::Safe => TICK_SAFE,
-                        AppliedDecision::Pending
-                        | AppliedDecision::Unproven(_)
-                        | AppliedDecision::Kill(_) => TICK_UNSAFE,
+                    // в настройках применяется со следующего же круга. Чаще —
+                    // пока цели не работают: терминальную цель, родившуюся под
+                    // паузой или запретом, больше ничем не поймать.
+                    let interval = match phase.action() {
+                        GuardAction::Run => TICK_SAFE,
+                        GuardAction::Pause | GuardAction::Terminate => TICK_UNSAFE,
                     };
                     // Событие сети прерывает ожидание: реакция на падение
                     // туннеля не должна ждать конца интервала.

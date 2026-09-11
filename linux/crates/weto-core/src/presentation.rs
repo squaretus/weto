@@ -68,10 +68,13 @@ impl UnsafeEvidence {
     }
 }
 
-/// Что охрана применила к целям — на время, пока Linux не портировал паузу.
+/// Проекция фазы охраны на экран — ровно то, что сегодня умеет рисовать GTK.
 ///
-/// `Pending` — прежний «подключение ещё не проверено»; `Unproven` применяется
-/// как kill. План порта поведения паузы (SIGSTOP/SIGCONT) этот тип убирает.
+/// Решает теперь редьюсер (`GuardMachine`), и он же владеет действием над целями;
+/// этот тип остался переходником для интерфейса, который пока не знает ни пилюли
+/// стоящей цели, ни отсчёта до потолка, ни подсказки про `fg`. Его убирает
+/// следующий шаг — порт интерфейса; до тех пор `Pending` показывает «Проверку»
+/// (цели при этом **работают**), а `Unproven` — паузу (цели стоят).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppliedDecision {
     Safe,
@@ -82,6 +85,22 @@ pub enum AppliedDecision {
 
 impl AppliedDecision {
     pub const PENDING_TEXT: &'static str = "Подключение ещё не проверено";
+
+    /// Чем фаза выглядит для сегодняшнего экрана.
+    ///
+    /// «Помехи» — это «На страже»: цели работают, а жёлтый щит приходит отдельным
+    /// признаком `is_degraded`, ровно как на macOS.
+    pub fn from_phase(phase: &crate::guard_machine::GuardPhase) -> AppliedDecision {
+        use crate::guard_machine::GuardPhase;
+        match phase {
+            GuardPhase::Disabled | GuardPhase::Protected(_) | GuardPhase::Interference { .. } => {
+                AppliedDecision::Safe
+            }
+            GuardPhase::Verifying { .. } => AppliedDecision::Pending,
+            GuardPhase::Paused { reason, .. } => AppliedDecision::Unproven(reason.clone()),
+            GuardPhase::Danger(evidence) => AppliedDecision::Kill(evidence.clone()),
+        }
+    }
 
     pub fn display_text(&self) -> String {
         match self {
@@ -97,12 +116,11 @@ impl AppliedDecision {
     /// «Ipinfo недоступен» говорит пользователю, что чинить; «Сервис недоступен»
     /// не говорит ничего. Разница дешёвая, а польза ежедневная.
     ///
-    /// `Kill` — единственная ветка, где заголовок дословно совпадает с macOS
-    /// (`GuardPhase.danger.title`): доказательство завершает цели и запрещает
-    /// запуск одинаково на обеих платформах, а `Pending`/`Unproven` здесь всё ещё
-    /// завершают цели вместо паузы (порт паузы на Linux не сделан), так что их
-    /// заголовки словами macOS «Проверяю выход»/«Выход не подтверждён» не называются —
-    /// это было бы неправдой о том, что происходит с целями.
+    /// Канон заголовков — `GuardPhase::title`, и он уже здесь, в ядре: «Проверяю
+    /// выход», «На страже», «Выход не подтверждён», «Небезопасно». Эти же строки
+    /// остались сегодняшними, потому что экран пока читает проекцию, а не фазу:
+    /// переключение интерфейса на `GuardPhase` — следующий шаг порта, и трогать
+    /// тексты до него значило бы менять GTK-часть двумя руками из разных шагов.
     pub fn status_title(&self) -> &'static str {
         match self {
             AppliedDecision::Safe => "На страже",

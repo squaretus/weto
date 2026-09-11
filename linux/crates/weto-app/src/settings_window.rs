@@ -676,8 +676,10 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
                  в систему. Настройки, журнал и автозапуск сохранятся.",
                 "Закрыть",
                 {
-                    let _state = state.clone();
+                    let state = state.clone();
                     move || {
+                        // Штатный выход замороженных целей не оставляет.
+                        state.shutdown();
                         if let Some(app) = gtk4::gio::Application::default() {
                             app.quit();
                         }
@@ -689,8 +691,10 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
 
     {
         let error = error.clone();
+        let state = state.clone();
         uninstall.connect_clicked(move |button| {
             let error = error.clone();
+            let state = state.clone();
             confirm(
                 button,
                 "Удалить weto?",
@@ -698,6 +702,9 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
                  Действие необратимо.",
                 "Удалить",
                 move || {
+                    // Стоящие цели продолжаются раньше удаления: вместе с учётом
+                    // исчезает и последний, кто помнит, кому должен SIGCONT.
+                    state.shutdown();
                     // Приложение не закрывается молча, если что-то не удалилось:
                     // иначе пользователь считал бы систему чистой.
                     match crate::uninstall::run() {

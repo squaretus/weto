@@ -58,6 +58,13 @@ pub enum GuardPhase {
     Danger(UnsafeEvidence),
 }
 
+impl Default for GuardPhase {
+    /// До первого входа охрана ничего про выход не знает и целей не трогает.
+    fn default() -> GuardPhase {
+        GuardPhase::Disabled
+    }
+}
+
 impl GuardPhase {
     pub fn action(&self) -> GuardAction {
         match self {

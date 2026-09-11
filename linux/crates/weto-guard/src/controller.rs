@@ -1,21 +1,31 @@
-//! Машина состояний охраны.
+//! Машина состояний охраны: владелец редьюсера, сетевой пробы и свежести вердикта.
+//!
+//! Сам он не решает ничего — только готовит входы `GuardMachine` и выполняет
+//! то, что редьюсер решил: пауза, продолжение, завершение. Порт
+//! `macos/Sources/WetoShared/GuardController.swift` вместе с той частью
+//! `GuardVM`, что применяет фазу к процессам и объясняет её журналом:
+//! отдельного VM-слоя на Linux нет, а правила обязаны быть под тестами.
+//!
+//! # Три инварианта
+//!
+//! 1. **Пауза начинается с результата, а не с его ожидания.** Нет вердикта про
+//!    текущий путь — объявляем потерю и просим пробу, а цели работают: решает
+//!    ответ. Первый же ответ «не доказано» ставит на паузу; счёта неудачных проб
+//!    нет, потолок паузы — завершение.
+//! 2. **Устаревший результат не возвращает safe.** У каждой пробы своя ревизия
+//!    и свой отпечаток: результат применяется, только пока оба актуальны.
+//! 3. **Обязательство «вернуть из паузы» снимает наблюдение, а не отправка
+//!    сигнала.** `kill(SIGCONT)` возвращает 0 и фоновому заданию, которое тут же
+//!    получит SIGTTIN и встанет обратно.
 //!
 //! # Свежесть вердикта
 //!
 //! Сетевой вердикт годен, пока не изменились две вещи: ревизия настроек
-//! и отпечаток снимка сети. Без этого признака охрана обязана считать вердикт
-//! отсутствующим — а отсутствие вердикта означает `VerificationPending`,
-//! то есть завершение целей.
-//!
-//! Соблазн выбросить признак свежести и просто спрашивать сеть на каждом тике
-//! разбивается о цифры: тик идёт раз в пять секунд, и при исправном VPN цели
-//! умирали бы каждые пять секунд, пока идёт запрос.
-//!
-//! # Порядок
-//!
-//! Сначала локальное основание — падение туннеля видно из ядра мгновенно.
-//! В сеть идём только тогда, когда локально придраться не к чему.
+//! и отпечаток снимка сети. Отпечаток берётся по выбранному интерфейсу, а не по
+//! всей сети: иначе чужой VPN, переподключившийся сам по себе, стоил бы
+//! пользователю целей. Потеря свежести целей больше не трогает — она просит пробу.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -24,18 +34,23 @@ use weto_config::settings::Settings;
 use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading, SourceOutcome};
+use weto_core::guard_machine::{
+    GuardAction, GuardEffect, GuardInput, GuardMachine, GuardPhase, PAUSE_CEILING,
+};
 use weto_core::network::NetworkSnapshot;
 use weto_core::network::VpnAppStatus;
-use weto_core::policy::{decide, decide_local, GuardDecision, GuardSignals};
+use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
+use weto_core::policy::GuardSignals;
+use weto_core::policy::{decide, decide_local, GuardDecision, UnsafeEvidence};
 use weto_core::presentation::{
     status_presentation, AppliedDecision, GuardState, StatusPresentation,
 };
-use weto_core::process::RunningTarget;
+use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget};
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::secret_store::SecretStoring;
 
-use crate::enforcer::ProcessEnforcer;
+use crate::enforcer::{ProcessEnforcer, Scan};
 
 /// Окно коалесценции: несколько событий сети подряд не должны порождать
 /// несколько запросов. У подтверждающего сервиса лимит 60 запросов в минуту.
@@ -46,6 +61,18 @@ const COALESCE_WINDOW: Duration = Duration::from_millis(300);
 /// страна выхода меняется и на неизменном пути — например, когда пользователь
 /// переключает сервер внутри своего клиента, — и отпечаток об этом не скажет.
 const GEO_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Сколько раз цели, ответившей стопом на собственный SIGCONT, досылается сигнал.
+/// Дальше это не попытка возобновления, а `suspended (tty input)` в терминале
+/// пользователя раз в секунду. Обязательство при этом остаётся: запись не уходит
+/// из учёта, её исполнят завершение и штатный выход. Число то же, что у macOS
+/// (`Constants.resumeRetryLimit`).
+const RESUME_RETRY_LIMIT: u32 = 3;
+
+/// Причина эпизода восстановления. Пробы за этим стоянием нет — и текст обязан
+/// говорить это прямо, а не притворяться вердиктом. Дословно как на macOS.
+pub const RECOVERY_REASON_TEXT: &str =
+    "Найдены остановленными от прошлого запуска weto: пробы за этим стоянием нет";
 
 /// Откуда пришёл запрос пробы. Кнопка ведёт себя иначе, чем таймер, и это
 /// не оптимизация, а поведение продукта.
@@ -69,61 +96,141 @@ pub trait CheckReporting: Send + Sync {
     fn record(&self, event: CheckEvent);
 }
 
+/// Куда уходит всё, что охрана сделала с процессами.
+///
+/// Объяснён обязан быть каждый посланный сигнал, а не только SIGKILL: цель,
+/// шелл её терминала и процесс, найденный стоящим на старте, получают записи
+/// одного вида (`kind: paused`) и один исход на эпизод.
 pub trait KillReporting: Send + Sync {
-    fn report(&self, killed: &[weto_core::process::MatchedProcess], context: &KillContext);
+    /// Завершённые процессы этого прохода.
+    ///
+    /// Списка два, потому что вопроса два. `killed` — все, кого проход
+    /// действительно завершил: про них уведомление, и новость «цели завершены»
+    /// не исчезает оттого, что цель перед смертью стояла. `recordable` — те,
+    /// про кого записи ещё нет: pid, уже описанный эпизодом паузы, второй записи
+    /// не заводит.
+    fn report(
+        &self,
+        killed: &[MatchedProcess],
+        recordable: &[MatchedProcess],
+        context: &KillContext,
+    );
 
     /// Причина эпизода, ставшая известной. Приёмник, ведущий журнал, дописывает
-    /// её всем записям эпизода: вызов приходит и тогда, когда завершать больше
-    /// нечего, то есть ровно в том случае, где записи иначе не появится вовсе.
+    /// её всем записям эпизода.
+    ///
+    /// С переходом на паузу уточнять стало нечего: эпизода до вердикта больше
+    /// не бывает — «Проверка» целей не трогает, и первая же запись называет
+    /// настоящую причину. Вызов остаётся на месте, а `KillContext::is_pending`
+    /// всегда `false`: механизм ведёт к `EpisodeLedger::begin_pending`, и снимать
+    /// его стоит одним движением вместе с ним.
     fn refine(&self, _context: &KillContext) {}
 
-    /// Эпизод кончился безопасным выходом.
-    ///
-    /// Приходит на каждый переход в safe, а не только у эпизода, начавшегося
-    /// до вердикта: приёмник обнуляет здесь учёт «что уже описано». Эпизоду,
-    /// который начинался до вердикта (`context.is_pending`), дописывается ещё
-    /// и исход — цели умерли, а проверка следом сказала «всё в порядке».
-    /// Именно этот случай и выглядит как «weto завершает процессы случайно».
+    /// Цели снова работают: приёмник обнуляет здесь учёт «что уже описано».
     fn episode_finished(&self, _context: &KillContext) {}
+
+    /// Процессы, которым этот проход послал SIGSTOP: цели, потомки и шеллы,
+    /// вошедшие в план ради терминала цели. Один эпизод на всё стояние —
+    /// повторных записей про те же pid не бывает.
+    fn paused(&self, _stopped: &[MatchedProcess], _context: &KillContext) {}
+
+    /// Процессы, застигнутые стоящими на старте: пробы за их стоянием нет,
+    /// поэтому эпизод у них свой. Дата записи — когда процесс встал, а не когда
+    /// weto это заметил.
+    fn recovered(&self, _standing: &[RecoveredProcess], _context: &KillContext) {}
+
+    /// Чем стояние кончилось: возобновлено, завершено по доказательству,
+    /// завершено по потолку, остановлена охрана.
+    ///
+    /// `shell_outcome` — исход для записей с основанием `shell`, когда он
+    /// расходится с исходом цели: шелла завершение возвращает SIGCONT, а не
+    /// убивает, и под общим «завершено» его запись лгала бы.
+    fn pause_resolved(&self, _outcome: &str, _shell_outcome: Option<&str>, _context: &KillContext) {
+    }
 }
 
-/// Вердикт вместе с признаком, при каких условиях он был получен.
-#[derive(Debug, Clone)]
-struct CachedVerdict {
-    revision: u64,
-    fingerprint: String,
-    outcome: GeoOutcome,
-    report: GeoProbeReport,
-}
+/// Ревизия настроек и отпечаток выхода, при которых ответ уже получен.
+type ProbedConditions = (u64, String);
+
+/// Часы охраны. Подменяются только тестами — потолок паузы иначе проверялся бы
+/// минутой ожидания на случай. Ход времени между пробами при этом меряет
+/// `Instant`: расписание и окно коалесценции про стенные часы не спрашивают.
+type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
 
 #[derive(Debug, Clone, Default)]
 pub struct GuardSnapshot {
+    /// Фаза охраны — то, что редьюсер решил про выход и про цели.
+    pub phase: GuardPhase,
+    /// Проекция фазы на сегодняшний экран. Порт интерфейса её убирает.
     pub decision: Option<AppliedDecision>,
     pub presentation: Option<StatusPresentation>,
     pub report: Option<GeoProbeReport>,
     pub running: Vec<RunningTarget>,
+    /// Цели, стоящие прямо сейчас: пилюли с отсчётом рисует порт интерфейса.
+    pub paused: Vec<PausedProcess>,
+    /// Когда истекает потолок паузы. `None` — цели не стоят.
+    pub pause_deadline: Option<SystemTime>,
+}
+
+/// Учёт стояния: что уже описано журналом и кому сколько раз досылали SIGCONT.
+#[derive(Default)]
+struct PauseBook {
+    /// Эпизод паузы открыт: его записи ждут исхода.
+    episode_open: bool,
+    /// Эпизод восстановления открыт: то же самое для стоящих с прошлого запуска.
+    recovery_open: bool,
+    /// pid, про которые эпизод уже рассказал.
+    episode_pids: HashSet<i32>,
+    /// Причина берётся у эпизода, а не у фазы: новорождённый под паузой обязан
+    /// встать в один ряд с остальными, а не принести свой текст.
+    episode_reason: Option<String>,
+    /// Разбор свежести эпизода: чем прежний вердикт перестал описывать наш выход
+    /// в тот момент, когда цели встали.
+    staleness: Option<VerdictStaleness>,
+    /// Кому SIGCONT уже уходил: только про них можно сказать, что сигнал
+    /// не прижился.
+    signalled_for_resume: HashSet<i32>,
+    /// Сколько раз запись ответила стопом на собственный SIGCONT.
+    stop_answers: HashMap<i32, u32>,
+    /// Стоящие цели для экрана.
+    paused: Vec<PausedProcess>,
 }
 
 struct Inner {
-    verdict: Option<CachedVerdict>,
-    /// Последний состоявшийся вердикт. В отличие от `verdict` не обнуляется
-    /// правкой настроек: обнулённый, он делал изменение настроек неотличимым
-    /// от холодного старта, а в журнале это два разных ответа на вопрос
-    /// «почему цели завершились».
-    previous_verdict: Option<(u64, String)>,
-    /// Эпизод, начавшийся до вердикта, и разбор свежести, с которым он начался.
-    pending_episode: Option<VerdictStaleness>,
-    /// Чтение, на котором стоит последний состоявшийся вердикт, и отпечаток сети,
-    /// при котором он получен. Нужно, чтобы молчание ipinfo не завершало цели,
-    /// когда адрес доказанно тот же: тот же адрес — та же страна.
+    machine: GuardMachine,
+    /// Про какой путь и при каких настройках ответ уже получен — любой, включая
+    /// отказ сервисов. Отказ тоже вердикт про этот путь: без него такт просил бы
+    /// пробу заново каждые 300 мс, а решать всё равно нечем.
+    verdict: Option<ProbedConditions>,
+    /// Чтение, на котором стоит последний **состоявшийся** вердикт, вместе
+    /// с отпечатком и ревизией того момента. Нужно трижды: чтобы молчание ipinfo
+    /// не ставило цели на паузу при доказанно том же адресе; чтобы вернувшееся
+    /// VPN-приложение переоценивалось без пробы; и чтобы разбор свежести знал,
+    /// чем прежний вердикт перестал описывать наш выход. Отказ сервисов его
+    /// не трогает — иначе изменение настроек стало бы неотличимо от холодного
+    /// старта, а в журнале это два разных ответа на «почему цели встали».
     established: Option<Established>,
+    /// Потеря вердикта, про которую показания на экране уже погашены. Гасить
+    /// второй раз нельзя: такт идёт раз в секунду и затирал бы свежий отчёт.
+    announced_loss: Option<(String, String)>,
+    /// Разбор свежести на время применения плохого результата: он взводится
+    /// перед вердиктом и гаснет сразу после, чтобы достаться ровно тому эпизоду,
+    /// который этот результат и завёл.
+    pending_staleness: Option<VerdictStaleness>,
     last_probe_finished: Option<Instant>,
+    last_report: Option<GeoProbeReport>,
+    last_reading: Option<GeoReading>,
+    last_network: NetworkSnapshot,
+    pause: PauseBook,
     snapshot: GuardSnapshot,
 }
 
 struct Established {
     reading: GeoReading,
     fingerprint: String,
+    /// Ревизия настроек в момент, когда вердикт установился, — единственный способ
+    /// сказать позже, изменились ли настройки со времени этого вердикта.
+    revision: u64,
 }
 
 pub struct GuardController {
@@ -137,6 +244,7 @@ pub struct GuardController {
     inner: Mutex<Inner>,
     probe_in_flight: Arc<AtomicBool>,
     coalesce_window: Duration,
+    now: Clock,
 }
 
 impl GuardController {
@@ -159,15 +267,21 @@ impl GuardController {
             reporter,
             checks,
             inner: Mutex::new(Inner {
+                machine: GuardMachine::default(),
                 verdict: None,
-                previous_verdict: None,
-                pending_episode: None,
                 established: None,
+                announced_loss: None,
+                pending_staleness: None,
                 last_probe_finished: None,
+                last_report: None,
+                last_reading: None,
+                last_network: NetworkSnapshot::default(),
+                pause: PauseBook::default(),
                 snapshot: GuardSnapshot::default(),
             }),
             probe_in_flight: Arc::new(AtomicBool::new(false)),
             coalesce_window: COALESCE_WINDOW,
+            now: Box::new(SystemTime::now),
         }
     }
 
@@ -179,6 +293,13 @@ impl GuardController {
         self
     }
 
+    /// Часы задаются снаружи только ради тестов: минута до потолка паузы
+    /// проверяется переводом стрелок, а не минутой ожидания.
+    pub fn with_clock(mut self, now: Clock) -> GuardController {
+        self.now = now;
+        self
+    }
+
     pub fn snapshot(&self) -> GuardSnapshot {
         self.inner
             .lock()
@@ -187,8 +308,26 @@ impl GuardController {
             .clone()
     }
 
+    pub fn phase(&self) -> GuardPhase {
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .machine
+            .phase()
+            .clone()
+    }
+
+    /// Сколько цели ещё могут стоять. `None` — не стоят.
+    pub fn remaining_pause(&self) -> Option<Duration> {
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .machine
+            .remaining_pause((self.now)())
+    }
+
     /// Штатный такт охраны.
-    pub fn tick(&self) -> AppliedDecision {
+    pub fn tick(&self) -> GuardPhase {
         self.run(ProbeTrigger::Scheduled)
     }
 
@@ -198,133 +337,721 @@ impl GuardController {
     /// уходит и тогда, когда судьба целей решена локально. Экономия запросов —
     /// свойство штатного тика; на кнопке она означала бы молчание экрана ровно
     /// в тот момент, когда пользователь хочет увидеть свою страну.
-    ///
-    /// Свежесть прежнего вердикта при этом не сбрасывается: иначе нажатие
-    /// при исправном VPN роняло бы состояние в ожидание проверки,
-    /// то есть стоило бы пользователю целей.
-    pub fn probe_now(&self) -> AppliedDecision {
+    pub fn probe_now(&self) -> GuardPhase {
         self.run(ProbeTrigger::Manual)
     }
 
-    fn run(&self, trigger: ProbeTrigger) -> AppliedDecision {
+    // --- такт ---------------------------------------------------------------
+
+    fn run(&self, trigger: ProbeTrigger) -> GuardPhase {
         let settings = self.settings.settings();
         let network = self.network.snapshot();
         let config = settings.guard_config();
-        // Отпечаток берётся по выбранному интерфейсу, а не по всей сети: иначе
-        // чужой VPN, переподключившийся сам по себе, стоил бы пользователю целей.
         let fingerprint = network.verdict_fingerprint();
+        self.inner.lock().expect("состояние охраны").last_network = network.clone();
+
+        if !settings.is_enabled || !config.has_targets() {
+            self.inner.lock().expect("состояние охраны").announced_loss = None;
+            return self.dispatch(GuardInput::Disarmed, &settings);
+        }
+
         let vpn = self.vpn_app_status(&settings);
-        let local = decide_local(settings.is_enabled, vpn, &config);
+        let has_verdict = self.has_verdict(settings.revision, &fingerprint);
 
-        // Локальное основание применяется сразу, до ответа сети: жизни целям
-        // сетевой запрос не продлевает ни на такте, ни по кнопке.
-        if let Some(decision) = local.clone() {
-            let decision = applied(decision);
-            self.apply(&settings, decision.clone(), None, &network);
-
-            // Показания обновляются и здесь. Экономия запросов относится
-            // к вердикту, а не к экрану: пока её распространяли и на показания,
-            // после падения VPN там навсегда оставались адрес и страна туннеля —
-            // то есть экран показывал защиту, которой уже нет.
-            //
-            // Один запрос на смену состояния сети, не чаще: отпечаток меняется
-            // редко, и лимит подтверждающего сервиса от этого не страдает.
-            //
-            // И только пока охрана на посту: выключенной охране и охране без
-            // целей сеть не нужна вовсе, а ходить к чужим сервисам без причины
-            // приложение не должно. Показания там просто гасятся.
-            let armed = settings.is_enabled && !config.targets.is_empty();
-            let stale = self
-                .fresh_verdict(settings.revision, &fingerprint)
-                .is_none();
-            if stale {
+        // Локальное доказательство применяется сразу, до сети: закрытый клиент —
+        // завершение. Жизни целям сетевой запрос не продлевает.
+        if let Some(GuardDecision::Kill(evidence)) = decide_local(settings.is_enabled, vpn, &config)
+        {
+            let phase = self.dispatch(GuardInput::Evidence(evidence), &settings);
+            if !has_verdict {
+                // Экран не должен показывать защиту, которой нет; проба нужна
+                // ради показаний.
                 self.forget_report();
             }
-            if trigger == ProbeTrigger::Manual
-                || (armed && stale && self.coalescing_window_passed())
+            if trigger == ProbeTrigger::Manual || (!has_verdict && self.coalescing_window_passed())
             {
-                let trigger = if trigger == ProbeTrigger::Manual {
-                    CheckTrigger::Manual
-                } else {
-                    self.staleness_trigger(settings.revision)
-                };
-                self.probe_and_store(&settings, &fingerprint, trigger);
+                let reason = self.probe_trigger(trigger, settings.revision);
+                self.probe_and_store(&settings, &fingerprint, reason);
             }
-            return decision;
+            return phase;
         }
 
-        if let Some(cached) = self.fresh_verdict(settings.revision, &fingerprint) {
-            // Подошло расписание — идём в сеть, но fail-closed не объявляем:
-            // прошлый вердикт в силе, пока не пришёл новый ответ.
-            let armed = settings.is_enabled && !config.targets.is_empty();
-            let refreshed = if armed && (trigger == ProbeTrigger::Manual || self.geo_schedule_due())
-            {
-                let reason = if trigger == ProbeTrigger::Manual {
-                    CheckTrigger::Manual
-                } else {
-                    CheckTrigger::Schedule
-                };
-                self.probe_and_store(&settings, &fingerprint, reason)
-            } else {
-                None
-            };
+        if !has_verdict {
+            // Вердикта про этот путь нет: объявляем потерю и просим пробу — цели
+            // при этом работают, паузу принесёт только плохой результат. Потолок
+            // считает лишь `Tick`, поэтому он идёт тем же тактом: пауза, начатая
+            // до смены пути, иначе не доехала бы до завершения.
+            self.announce_loss(&settings, &fingerprint);
+            if trigger == ProbeTrigger::Manual || self.coalescing_window_passed() {
+                let reason = self.probe_trigger(trigger, settings.revision);
+                if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
+                    return self.apply_verdict(&settings, outcome, vpn, &fingerprint);
+                }
+            }
+            return self.phase();
+        }
 
-            let geo = refreshed.unwrap_or_else(|| cached.outcome.clone());
-            let decision = applied(decide(&GuardSignals {
+        // Вердикт про этот путь есть — прошлая потеря закрыта.
+        self.inner.lock().expect("состояние охраны").announced_loss = None;
+
+        // VPN-приложение вернулось при действующем вердикте — переоценка без пробы.
+        if let (GuardPhase::Danger(UnsafeEvidence::VpnAppNotRunning), Some(reading)) =
+            (self.phase(), self.established_reading(&fingerprint))
+        {
+            let decision = decide(&GuardSignals {
                 is_enabled: settings.is_enabled,
                 vpn,
-                geo,
-                config,
-            }));
-            let report = self
-                .inner
-                .lock()
-                .expect("состояние охраны")
-                .verdict
-                .as_ref()
-                .map(|v| v.report.clone())
-                .unwrap_or(cached.report);
-            self.apply(&settings, decision.clone(), Some(report), &network);
-            return decision;
+                geo: GeoOutcome::Resolved(reading.clone()),
+                config: config.clone(),
+            });
+            self.dispatch(GuardInput::Reassessment { decision, reading }, &settings);
         }
 
-        // Вердикта нет или он потерял свежесть: fail-closed до ответа сети.
-        // Не то же, что решение политики: пока обеих сторон вердикта нет вовсе,
-        // а не «политика решила подождать» — потому и не через `decide`/`decide_local`.
-        let armed = settings.is_enabled && config.has_targets();
-        let pending = if armed {
-            AppliedDecision::Pending
-        } else {
-            AppliedDecision::Safe
-        };
-        self.apply(&settings, pending.clone(), None, &network);
+        let phase = self.dispatch(GuardInput::Tick, &settings);
 
-        if trigger == ProbeTrigger::Manual || self.coalescing_window_passed() {
+        // Расписание гео: страна выхода меняется и на неизменном пути. Пока цели
+        // стоят, ритм тот же — проба и есть путь из паузы.
+        if trigger == ProbeTrigger::Manual || self.geo_schedule_due() {
             let reason = if trigger == ProbeTrigger::Manual {
                 CheckTrigger::Manual
             } else {
-                self.staleness_trigger(settings.revision)
+                CheckTrigger::Schedule
             };
             if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
-                let decision = applied(decide(&GuardSignals {
-                    is_enabled: settings.is_enabled,
-                    vpn,
-                    geo: outcome,
-                    config,
-                }));
-                let report = self
-                    .inner
-                    .lock()
-                    .expect("состояние охраны")
-                    .verdict
-                    .as_ref()
-                    .map(|v| v.report.clone());
-                self.apply(&settings, decision.clone(), report, &network);
-                return decision;
+                return self.apply_verdict(&settings, outcome, vpn, &fingerprint);
+            }
+        }
+        phase
+    }
+
+    /// Объявление потери вердикта: цели не трогаем, потолок паузы считается тем же
+    /// тактом, наружу уходит один эффект.
+    ///
+    /// Разбор свежести здесь не взводится: записи журнала эта потеря не заводит —
+    /// заводит её плохой результат пробы, и разбор считается там, где применяется.
+    fn announce_loss(&self, settings: &Settings, fingerprint: &str) {
+        let staleness = self.staleness_now(settings.revision, fingerprint);
+        let loss = (format!("{:?}", staleness.cause), fingerprint.to_string());
+        let (should_forget, cause) = {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            let changed = inner.announced_loss.as_ref() != Some(&loss);
+            let had_verdict = inner.established.is_some();
+            inner.announced_loss = Some(loss);
+            // `VerdictLost` во всех ветках возвращает `None` (см. `GuardMachine`),
+            // поэтому эффект здесь не нужен: наружу уходит только `Tick`.
+            inner
+                .machine
+                .apply(GuardInput::VerdictLost(staleness.cause), (self.now)());
+            (changed && had_verdict, staleness.cause)
+        };
+        // Показания гасим один раз на потерю: они про путь, которого уже нет.
+        if should_forget {
+            self.forget_report();
+        }
+        let _ = cause;
+        self.dispatch(GuardInput::Tick, settings);
+    }
+
+    /// Ответ пробы, пропущенный через политику.
+    fn apply_verdict(
+        &self,
+        settings: &Settings,
+        outcome: GeoOutcome,
+        vpn: VpnAppStatus,
+        fingerprint: &str,
+    ) -> GuardPhase {
+        let config = settings.guard_config();
+        let decision = decide(&GuardSignals {
+            is_enabled: settings.is_enabled,
+            vpn,
+            geo: outcome.clone(),
+            config,
+        });
+
+        // Этот ответ откроет эпизод паузы — значит журналу нужен разбор свежести:
+        // что было с выходом в момент, когда цели встали. Разбор есть только тогда,
+        // когда прежний вердикт правда перестал описывать наш выход: молчание
+        // сервисов при неизменном отпечатке свежести не теряет, и его отсутствие
+        // там — ответ, а не пробел.
+        if matches!(decision, GuardDecision::Unproven(_))
+            && self.established_reading(fingerprint).is_none()
+        {
+            let staleness = self.staleness_now(settings.revision, fingerprint);
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .pending_staleness = Some(staleness);
+        }
+
+        let phase = self.dispatch(
+            GuardInput::Verdict {
+                decision,
+                geo: outcome,
+            },
+            settings,
+        );
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .pending_staleness = None;
+        phase
+    }
+
+    // --- применение фазы ----------------------------------------------------
+
+    /// Вход уезжает редьюсеру, его решение — процессам, а происшедшее — журналу.
+    ///
+    /// Обход процессов на всё применение один: и сигналы, и список живых целей,
+    /// и наблюдение за учётом обязаны описывать один и тот же момент.
+    fn dispatch(&self, input: GuardInput, settings: &Settings) -> GuardPhase {
+        let moment = (self.now)();
+        let (effect, phase) = {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            let effect = inner.machine.apply(input, moment);
+            (effect, inner.machine.phase().clone())
+        };
+
+        let rules = settings.target_rules();
+        let scan = self.enforcer.scan(&rules);
+
+        match effect {
+            // Снятие паузы разбирается ниже, в ветке работающих целей:
+            // обязательство держится до наблюдения, и разбирает его каждый проход
+            // с работающими целями, а не только тот, что принёс эффект.
+            GuardEffect::Pause => self.pause_targets(&scan, settings, &phase),
+            GuardEffect::Terminate => {
+                if let GuardPhase::Danger(evidence) = &phase {
+                    self.terminate_targets(&scan, settings, evidence);
+                }
+            }
+            GuardEffect::None | GuardEffect::Resume => {}
+        }
+
+        if phase.action() == GuardAction::Run {
+            // Цели снова работают — эпизод закрыт, и следующее завершение будет
+            // первым, а не «запуском запрещён».
+            let context = self.kill_context(settings, self.safe_outcome_text(&phase), None);
+            self.reporter.episode_finished(&context);
+            self.settle_resume(&scan, settings, &phase);
+        }
+
+        self.publish(settings, &phase, &scan);
+        phase
+    }
+
+    /// Причина эпизода паузы человеческим текстом: она же уходит в журнал.
+    ///
+    /// Стоящая фаза ровно одна, и приходит она с готовой причиной: «подключение
+    /// ещё не проверено» больше не бывает причиной стояния — до ответа пробы цели
+    /// работают.
+    fn pause_reason_text(phase: &GuardPhase) -> String {
+        match phase {
+            GuardPhase::Paused { reason, .. } => reason.display_text(),
+            other => other.title().to_string(),
+        }
+    }
+
+    fn pause_targets(&self, scan: &Scan, settings: &Settings, phase: &GuardPhase) {
+        let outcome = self.enforcer.pause(scan);
+
+        // Пилюля с отсчётом описывает то, что стоит сейчас: цель, умершая под
+        // паузой сама или снятая с охраны, оставалась бы в списке с живым
+        // отсчётом и кнопкой, которой нечего показывать.
+        let standing: HashSet<i32> = outcome.matched.iter().map(|m| m.pid).collect();
+
+        // Про pid, уже описанный этим эпизодом, второй записи не бывает.
+        // Шеллы идут тем же списком: объяснён обязан быть каждый SIGSTOP,
+        // а не только посланный цели.
+        let mut stopped: Vec<MatchedProcess> = outcome.fresh.clone();
+        stopped.extend(outcome.fresh_shells.iter().cloned());
+
+        let (newcomers, reason, staleness) = {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            inner.pause.paused.retain(|p| standing.contains(&p.pid));
+
+            let newcomers: Vec<MatchedProcess> = stopped
+                .into_iter()
+                .filter(|process| !inner.pause.episode_pids.contains(&process.pid))
+                .collect();
+            if newcomers.is_empty() {
+                return;
+            }
+
+            if !inner.pause.episode_open {
+                inner.pause.episode_open = true;
+                inner.pause.episode_reason = Some(Self::pause_reason_text(phase));
+                inner.pause.staleness = inner.pending_staleness.clone();
+                // Новое стояние — новое снятие паузы: pid, которым SIGCONT уходил
+                // в прошлый раз, не имеют права сойти за «сигнал не прижился»
+                // у этого эпизода, а счёт их ответов начинается заново.
+                inner.pause.signalled_for_resume.clear();
+                inner.pause.stop_answers.clear();
+            }
+            for process in &newcomers {
+                inner.pause.episode_pids.insert(process.pid);
+            }
+            let reason = inner
+                .pause
+                .episode_reason
+                .clone()
+                .unwrap_or_else(|| Self::pause_reason_text(phase));
+            let staleness = inner.pause.staleness.clone();
+            (newcomers, reason, staleness)
+        };
+
+        let context = self.kill_context(settings, reason, staleness);
+        self.reporter.paused(&newcomers, &context);
+
+        let moment = (self.now)();
+        let mut inner = self.inner.lock().expect("состояние охраны");
+        for root in newcomers
+            .iter()
+            .filter(|p| p.matched_by == MatchBasis::Rule)
+        {
+            let backgrounded = outcome.plan.backgrounded.contains(&root.pid);
+            // Признак «вернулось в фон» у дожившей пилюли вернее нашего: его
+            // дописало наблюдение, а не догадка плана. А вот момент — наш: эта
+            // цель успела поработать между эпизодами, значит стояние началось сейчас.
+            if let Some(existing) = inner
+                .pause
+                .paused
+                .iter_mut()
+                .find(|paused| paused.pid == root.pid)
+            {
+                existing.since = moment;
+                continue;
+            }
+            inner.pause.paused.push(PausedProcess {
+                pid: root.pid,
+                target_name: root.target_name.clone(),
+                since: moment,
+                is_backgrounded: backgrounded,
+            });
+        }
+    }
+
+    /// Снятие паузы: SIGCONT всем, кто ещё в учёте, и правда о том, что из этого
+    /// вышло.
+    ///
+    /// Зовётся не эффектом `Resume`, а каждым проходом с работающими целями, пока
+    /// учёт не пуст: обязательство снимает наблюдение, а не отправка сигнала.
+    /// Цель, которую SIGCONT разбудил, а SIGTTIN тут же вернул в стоп, остаётся
+    /// в учёте и получает сигнал снова — такт идёт раз в секунду, так что
+    /// восстановление автоматическое и перезапуска приложения не требует.
+    fn settle_resume(&self, scan: &Scan, settings: &Settings, phase: &GuardPhase) {
+        if self.enforcer.ledger_is_empty() {
+            return;
+        }
+
+        let (awaited, abandoned) = {
+            let inner = self.inner.lock().expect("состояние охраны");
+            let abandoned: HashSet<i32> = inner
+                .pause
+                .stop_answers
+                .iter()
+                .filter(|(_, answers)| **answers >= RESUME_RETRY_LIMIT)
+                .map(|(pid, _)| *pid)
+                .collect();
+            (inner.pause.signalled_for_resume.clone(), abandoned)
+        };
+
+        let outcome = self.enforcer.resume(Some(scan), &abandoned);
+        let refused: Vec<i32> = outcome
+            .results
+            .iter()
+            .filter(|result| !result.is_delivered())
+            .map(|result| result.pid)
+            .collect();
+
+        let answered: Vec<i32> = outcome
+            .unresolved
+            .iter()
+            .map(|entry| entry.pid)
+            .filter(|pid| awaited.contains(pid))
+            .collect();
+
+        {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            for result in &outcome.results {
+                inner.pause.signalled_for_resume.insert(result.pid);
+            }
+            for pid in &outcome.released {
+                inner.pause.stop_answers.remove(pid);
+            }
+            for pid in answered.iter().filter(|pid| !abandoned.contains(pid)) {
+                *inner.pause.stop_answers.entry(*pid).or_insert(0) += 1;
             }
         }
 
-        pending
+        if outcome.is_complete() {
+            self.resolve_pause_episode(settings, &self.resumed_episode_text(phase), None);
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            inner.pause.signalled_for_resume.clear();
+            inner.pause.stop_answers.clear();
+            inner.pause.paused.clear();
+            return;
+        }
+
+        // Цель, которая всё ещё стоит, возобновлённой выглядеть не имеет права:
+        // пилюля остаётся, а признак «вернулась в фон» у неё теперь верен по факту —
+        // терминал у шелла, иначе SIGCONT прижился бы.
+        let standing: HashSet<i32> = outcome.unresolved.iter().map(|e| e.pid).collect();
+        {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            inner.pause.paused.retain(|p| standing.contains(&p.pid));
+            for paused in inner.pause.paused.iter_mut() {
+                if answered.contains(&paused.pid) {
+                    paused.is_backgrounded = true;
+                }
+            }
+        }
+
+        if answered.is_empty() && refused.is_empty() {
+            return;
+        }
+        let text = Self::unresolved_episode_text(&standing_pids(&outcome.unresolved), &refused);
+        self.resolve_pause_episode(settings, &text, None);
+    }
+
+    /// Исход эпизода, у которого возобновление наблюдалось.
+    fn resumed_episode_text(&self, phase: &GuardPhase) -> String {
+        if matches!(phase, GuardPhase::Disabled) {
+            return "возобновлено: охрана выключена или целей нет".to_string();
+        }
+        // Чтение самой фазы, а не последнее известное: паузу снимает конкретный
+        // вердикт, и в исходе обязан стоять его адрес.
+        let reading = phase.reading().cloned().or_else(|| {
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .last_reading
+                .clone()
+        });
+        match reading {
+            Some(reading) => format!(
+                "возобновлено: проверка подтвердила безопасный выход: {}, {}",
+                reading.ip, reading.primary_country
+            ),
+            None => "возобновлено: проверка подтвердила безопасный выход".to_string(),
+        }
+    }
+
+    /// Исход эпизода, у которого возобновления не случилось. Журнал обязан
+    /// говорить правду: «возобновлено» пишется только про наблюдённое
+    /// возобновление, иначе запись выдавала бы замороженную цель за живую.
+    fn unresolved_episode_text(standing: &[i32], refused: &[i32]) -> String {
+        if !refused.is_empty() {
+            return format!(
+                "не возобновлено: сигнал продолжения не дошёл до процессов {refused:?} — \
+                 недостаточно прав"
+            );
+        }
+        format!(
+            "не возобновлено: процессы {standing:?} остались остановленными — \
+             задание ушло в фон, продолжите его в терминале командой fg"
+        )
+    }
+
+    /// Исход эпизода паузы: записи те же, к ним дописывается, чем стояние
+    /// кончилось. Без исхода запись навсегда остаётся с отговоркой «сервисы
+    /// не ответили», и пауза выглядит случайной.
+    ///
+    /// Эпизод восстановления закрывается тем же исходом и здесь же: стоящее
+    /// с прошлой жизни и остановленное сейчас кончается одним и тем же.
+    fn resolve_pause_episode(
+        &self,
+        settings: &Settings,
+        outcome: &str,
+        shell_outcome: Option<&str>,
+    ) {
+        let (open, reason, staleness) = {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            let open = inner.pause.episode_open || inner.pause.recovery_open;
+            let reason = inner
+                .pause
+                .episode_reason
+                .clone()
+                .unwrap_or_else(|| RECOVERY_REASON_TEXT.to_string());
+            let staleness = inner.pause.staleness.clone();
+            if open {
+                inner.pause.episode_open = false;
+                inner.pause.recovery_open = false;
+                inner.pause.episode_pids.clear();
+                inner.pause.episode_reason = None;
+                inner.pause.staleness = None;
+            }
+            (open, reason, staleness)
+        };
+        if !open {
+            return;
+        }
+        let context = self.kill_context(settings, reason, staleness);
+        self.reporter
+            .pause_resolved(outcome, shell_outcome, &context);
+    }
+
+    fn terminate_targets(&self, scan: &Scan, settings: &Settings, evidence: &UnsafeEvidence) {
+        let outcome = self.enforcer.terminate(scan);
+        let reason = evidence.display_text();
+        let cause = if *evidence == UnsafeEvidence::PauseExpired {
+            "по потолку"
+        } else {
+            "по доказательству"
+        };
+
+        // Исход эпизода паузы: те же pid новых записей не заводят, поэтому список
+        // снимается до того, как исход его обнулит.
+        let skip: HashSet<i32> = self
+            .inner
+            .lock()
+            .expect("состояние охраны")
+            .pause
+            .episode_pids
+            .clone();
+        // Шелл под доказательство не попадает: завершение возвращает ему SIGCONT,
+        // а не SIGKILL, — «завершено» в его записи было бы неправдой.
+        self.resolve_pause_episode(
+            settings,
+            &format!("завершено {cause}: {reason}"),
+            Some(&format!("продолжен: цель завершена {cause}: {reason}")),
+        );
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .pause
+            .paused
+            .clear();
+
+        let killed = outcome.killed;
+        if killed.is_empty() {
+            return;
+        }
+        // Запись заводят только те, про кого эпизод паузы ещё не рассказал.
+        // Уведомление — про всех завершённых сейчас: запись у стоявшей цели уже
+        // есть, но новость «цели завершены» от этого не исчезает.
+        let fresh: Vec<MatchedProcess> = killed
+            .iter()
+            .filter(|process| !skip.contains(&process.pid))
+            .cloned()
+            .collect();
+
+        let context = self.kill_context(settings, reason, None);
+        // Сначала уточнение, потом завершение: иначе уточнённая причина считалась
+        // бы новой и завела бы второй набор записей про то же самое падение.
+        self.reporter.refine(&context);
+        self.reporter.report(&killed, &fresh, &context);
+    }
+
+    // --- восстановление после падения ---------------------------------------
+
+    /// Учёт, доживший до нового запуска: SIGCONT всем, кто ещё стоит и остался
+    /// тем же процессом (pid переиспользуются, и SIGCONT чужому недопустим).
+    ///
+    /// Пробы за этим стоянием нет, поэтому эпизод у него свой — но эпизод есть:
+    /// остановил эти процессы weto, а «почему этот процесс стоял» спрашивают
+    /// у журнала завершений, и молчать ему там нельзя. Запись журнала проверок
+    /// отвечает на другой вопрос — что именно weto сделал на старте.
+    pub fn recover_stopped(&self) {
+        let settings = self.settings.settings();
+        let fingerprint = self.network.snapshot().verdict_fingerprint();
+
+        // Учёт не прочитался — обязательство не выполнено. Молча пустое чтение
+        // неотличимо от «возобновлять нечего», поэтому след остаётся в журнале.
+        if self.enforcer.ledger_was_corrupted() {
+            self.record_check(
+                CheckTrigger::StartupRecovery,
+                CheckOutcome::LedgerUnreadable,
+                &fingerprint,
+                Some("учёт остановленных процессов не прочитан: возобновлять нечего".to_string()),
+            );
+        }
+
+        let rules = settings.target_rules();
+        let (outcome, scan) = self.enforcer.resume_orphans(&rules);
+        if outcome.unresolved.is_empty() {
+            return;
+        }
+
+        let mut names: HashMap<i32, String> = HashMap::new();
+        let mut bases: HashMap<i32, MatchBasis> = HashMap::new();
+        if !scan.is_empty() {
+            for process in weto_core::process::matches(&scan.processes, &scan.rules) {
+                names.insert(process.pid, process.target_name.clone());
+                bases.insert(process.pid, process.matched_by);
+            }
+        }
+        let parents: HashMap<i32, i32> = scan
+            .processes
+            .iter()
+            .map(|process| (process.pid, process.parent_pid))
+            .collect();
+
+        let standing: Vec<RecoveredProcess> = outcome
+            .unresolved
+            .iter()
+            .map(|entry| RecoveredProcess {
+                process: MatchedProcess {
+                    pid: entry.pid,
+                    // Цель, снятая пользователем с охраны между запусками, по имени
+                    // не находится — тогда именем служит сам бинарник, и это честнее
+                    // пустой строки.
+                    target_name: names.get(&entry.pid).cloned().unwrap_or_else(|| {
+                        entry
+                            .executable_path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or_default()
+                            .to_string()
+                    }),
+                    parent_pid: parents.get(&entry.pid).copied().unwrap_or_default(),
+                    executable_path: entry.executable_path.clone(),
+                    // Шеллом запись сделал не текущий разбор, а учёт: ради терминала
+                    // цели этот процесс остановили в прошлой жизни weto.
+                    matched_by: if entry.is_shell {
+                        MatchBasis::Shell
+                    } else {
+                        bases.get(&entry.pid).copied().unwrap_or(MatchBasis::Rule)
+                    },
+                },
+                stopped_at: entry.stopped_at,
+            })
+            .collect();
+
+        {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            inner.pause.recovery_open = true;
+            inner.pause.episode_reason = Some(RECOVERY_REASON_TEXT.to_string());
+            for recovered in &standing {
+                inner.pause.episode_pids.insert(recovered.process.pid);
+                // Сигнал этим записям уже ушёл, поэтому следующее наблюдение —
+                // их ответ, а не ожидание: иначе такт молча слал бы SIGCONT
+                // по второму разу.
+                inner
+                    .pause
+                    .signalled_for_resume
+                    .insert(recovered.process.pid);
+                if recovered.process.matched_by == MatchBasis::Shell {
+                    continue;
+                }
+                inner.pause.paused.push(PausedProcess {
+                    pid: recovered.process.pid,
+                    target_name: recovered.process.target_name.clone(),
+                    since: recovered.stopped_at,
+                    // «Вернулось в фон» дописывает первое же наблюдение: сейчас
+                    // известно только то, что процесс стоял.
+                    is_backgrounded: false,
+                });
+            }
+            inner.snapshot.paused = inner.pause.paused.clone();
+        }
+
+        let context = self.kill_context(&settings, RECOVERY_REASON_TEXT.to_string(), None);
+        self.reporter.recovered(&standing, &context);
+
+        let pids: Vec<i32> = standing.iter().map(|r| r.process.pid).collect();
+        self.record_check(
+            CheckTrigger::StartupRecovery,
+            CheckOutcome::StandingProcessesRemain,
+            &fingerprint,
+            Some(format!(
+                "учёт остановленных: процессы {pids:?} стояли на старте — \
+                 продолжение отправлено, дальше их ведёт такт охраны"
+            )),
+        );
+    }
+
+    /// Штатный выход: замороженных целей не оставляем.
+    ///
+    /// Наблюдать последствия сигнала здесь уже нечем — такта больше не будет, —
+    /// поэтому запись, которую SIGCONT не разрешил, остаётся в учёте и достаётся
+    /// восстановлению при следующем запуске. Журнал говорит ровно то, что
+    /// установлено: «не возобновлено» здесь было бы такой же неправдой, как
+    /// «возобновлено», — стоящими записи показал обход, снятый ДО сигнала.
+    pub fn shutdown(&self) {
+        let settings = self.settings.settings();
+        let outcome = self.enforcer.resume(None, &HashSet::new());
+        let refused: Vec<i32> = outcome
+            .results
+            .iter()
+            .filter(|result| !result.is_delivered())
+            .map(|result| result.pid)
+            .collect();
+        let standing = standing_pids(&outcome.unresolved);
+
+        let text = if outcome.is_complete() {
+            "возобновлено: охрана остановлена".to_string()
+        } else if !refused.is_empty() {
+            Self::unresolved_episode_text(&standing, &refused)
+        } else {
+            format!(
+                "не подтверждено: сигнал продолжения отправлен процессам {standing:?}, \
+                 а охрана остановлена — результат наблюдать нечем, weto проверит их \
+                 при следующем запуске"
+            )
+        };
+        self.resolve_pause_episode(&settings, &text, None);
+
+        let mut inner = self.inner.lock().expect("состояние охраны");
+        let alive: HashSet<i32> = standing.iter().copied().collect();
+        inner.pause.paused.retain(|p| alive.contains(&p.pid));
+        // Фаза обязана уйти вместе с целями: «Пауза», оставленная после остановки,
+        // тикала бы отсчётом до потолка, которого никто больше не считает.
+        inner.machine = GuardMachine::default();
+        inner.snapshot.phase = GuardPhase::Disabled;
+        inner.snapshot.decision = Some(AppliedDecision::Safe);
+        inner.snapshot.pause_deadline = None;
+        inner.snapshot.paused = inner.pause.paused.clone();
+    }
+
+    // --- показания ----------------------------------------------------------
+
+    /// Снимок для экрана: фаза, её проекция, живые цели и стоящие.
+    fn publish(&self, settings: &Settings, phase: &GuardPhase, scan: &Scan) {
+        let running = self.enforcer.running_in(scan);
+        let decision = AppliedDecision::from_phase(phase);
+
+        let mut inner = self.inner.lock().expect("состояние охраны");
+        let country = inner.last_report.as_ref().and_then(|r| match r.outcome() {
+            GeoOutcome::Resolved(reading) => Some(reading.primary_country),
+            GeoOutcome::Degraded { previous, .. } => Some(previous.primary_country),
+            GeoOutcome::Unavailable(_) | GeoOutcome::AddressChanged { .. } => {
+                r.reference_country().map(str::to_string)
+            }
+        });
+        // Цели живут, но защита держится на том, что адрес не менялся, а не на
+        // свежем ответе ipinfo. Глаз обязан это видеть: зелёный тут врал бы.
+        let is_degraded = matches!(phase, GuardPhase::Interference { .. })
+            || (decision == AppliedDecision::Safe
+                && inner
+                    .last_report
+                    .as_ref()
+                    .is_some_and(|r| matches!(r.ipinfo, SourceOutcome::Failed(_))));
+
+        let presentation = status_presentation(&GuardState {
+            is_enabled: settings.is_enabled,
+            has_targets: !settings.targets.is_empty(),
+            decision: decision.clone(),
+            country,
+            is_degraded,
+        });
+
+        inner.snapshot.phase = phase.clone();
+        inner.snapshot.decision = Some(decision);
+        inner.snapshot.presentation = Some(presentation);
+        inner.snapshot.running = running;
+        inner.snapshot.paused = inner.pause.paused.clone();
+        inner.snapshot.pause_deadline = phase.paused_since().map(|since| since + PAUSE_CEILING);
+    }
+
+    /// Текст, с которым закрывается эпизод у работающих целей.
+    fn safe_outcome_text(&self, phase: &GuardPhase) -> String {
+        match phase.reading() {
+            Some(reading) => format!(
+                "проверка завершилась безопасным выходом: {}, {}",
+                reading.ip, reading.primary_country
+            ),
+            None => "проверка завершилась безопасным выходом".to_string(),
+        }
     }
 
     /// Показания эпизода: они не показываются пользователю и нужны только выгрузке.
@@ -332,49 +1059,53 @@ impl GuardController {
         &self,
         settings: &Settings,
         reason: String,
-        report: Option<&GeoProbeReport>,
-        network: &NetworkSnapshot,
+        staleness: Option<VerdictStaleness>,
     ) -> KillContext {
-        let reading = match report.map(|r| r.outcome()) {
-            Some(GeoOutcome::Resolved(reading)) => GeoReadingPatch {
-                ip: Some(reading.ip),
-                country: Some(reading.primary_country),
-                confirmed_country: reading.confirmed_country,
+        let inner = self.inner.lock().expect("состояние охраны");
+        let reading = match &inner.last_reading {
+            Some(reading) => GeoReadingPatch {
+                ip: Some(reading.ip.clone()),
+                country: Some(reading.primary_country.clone()),
+                confirmed_country: reading.confirmed_country.clone(),
                 confirm_source: reading.confirm_source.map(|s| s.name().to_string()),
             },
-            Some(GeoOutcome::Degraded { previous, .. }) => GeoReadingPatch {
-                ip: Some(previous.ip),
-                country: Some(previous.primary_country),
-                confirmed_country: previous.confirmed_country,
-                confirm_source: previous.confirm_source.map(|s| s.name().to_string()),
-            },
-            _ => GeoReadingPatch::default(),
+            None => GeoReadingPatch::default(),
         };
+        let report = inner.last_report.clone();
+        let network = inner.last_network.clone();
+        drop(inner);
 
         KillContext {
             reason,
+            // Эпизода до вердикта больше не бывает: «Проверка» целей не трогает,
+            // и записи журнала заводит только состоявшийся результат.
             is_pending: false,
             reading,
             diagnostics: KillDiagnostics {
-                staleness: None,
+                staleness,
                 outgoing_interface: network.outgoing.as_ref().map(|o| o.interface.clone()),
                 outgoing_address: network.outgoing.as_ref().map(|o| o.address.clone()),
-                has_network_path: report.map(|r| r.has_network_path),
+                has_network_path: report.as_ref().map(|r| r.has_network_path),
                 vpn_app_entry: settings.vpn_app.as_ref().map(|app| app.entry.clone()),
                 vpn_app_status: Some(format!("{:?}", self.vpn_app_status(settings))),
-                verdict_origin: report.map(|r| {
+                verdict_origin: report.as_ref().map(|r| {
                     match r.outcome() {
                         GeoOutcome::Resolved(_) => "current",
                         _ => "established",
                     }
                     .to_string()
                 }),
-                services: report.map(|r| r.traces.clone()).unwrap_or_default(),
-                probed_at: report.map(|r| r.checked_at),
+                services: report
+                    .as_ref()
+                    .map(|r| r.traces.clone())
+                    .unwrap_or_default(),
+                probed_at: report.as_ref().map(|r| r.checked_at),
                 app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             },
         }
     }
+
+    // --- проба --------------------------------------------------------------
 
     /// Запись о состоявшейся пробе: показания и трассы сервисов как есть.
     fn note_check(
@@ -421,23 +1152,79 @@ impl GuardController {
         });
     }
 
+    fn record_check(
+        &self,
+        trigger: CheckTrigger,
+        outcome: CheckOutcome,
+        fingerprint: &str,
+        detail: Option<String>,
+    ) {
+        self.checks.record(CheckEvent {
+            id: new_check_id(),
+            at: SystemTime::now(),
+            trigger,
+            outcome,
+            fingerprint: Some(fingerprint.to_string()),
+            duration_milliseconds: None,
+            ip: None,
+            country: None,
+            confirmed_country: None,
+            confirm_source: None,
+            services: Vec::new(),
+            detail,
+        });
+    }
+
+    fn probe_trigger(&self, trigger: ProbeTrigger, revision: u64) -> CheckTrigger {
+        if trigger == ProbeTrigger::Manual {
+            CheckTrigger::Manual
+        } else {
+            self.staleness_trigger(revision)
+        }
+    }
+
     /// Повод пробы выводится из того, что именно перестало быть свежим: ревизия
     /// настроек или отпечаток выхода.
     fn staleness_trigger(&self, revision: u64) -> CheckTrigger {
         let inner = self.inner.lock().expect("состояние охраны");
-        match inner.previous_verdict.as_ref() {
-            Some((previous, _)) if *previous != revision => CheckTrigger::SettingsChange,
+        match inner.established.as_ref() {
+            Some(established) if established.revision != revision => CheckTrigger::SettingsChange,
             _ => CheckTrigger::NetworkChange,
         }
     }
 
-    /// Вердикт годен, только если и настройки, и сеть те же самые.
-    fn fresh_verdict(&self, revision: u64, fingerprint: &str) -> Option<CachedVerdict> {
+    /// Чем прежний вердикт перестал описывать наш выход — на этот самый момент.
+    ///
+    /// Считается из установленного вердикта и текущего отпечатка, а не
+    /// запоминается: разбор обязан описывать момент своего применения, а не
+    /// прошлое объявление. Отказ сервисов установленный вердикт не заменяет,
+    /// поэтому сравнивать всегда есть с чем.
+    fn staleness_now(&self, revision: u64, fingerprint: &str) -> VerdictStaleness {
+        let inner = self.inner.lock().expect("состояние охраны");
+        VerdictStaleness::new(
+            inner.established.as_ref().map(|e| e.revision),
+            revision,
+            inner.established.as_ref().map(|e| e.fingerprint.clone()),
+            fingerprint.to_string(),
+        )
+    }
+
+    /// Есть ли ответ про этот путь при этих настройках.
+    fn has_verdict(&self, revision: u64, fingerprint: &str) -> bool {
         let inner = self.inner.lock().expect("состояние охраны");
         inner
             .verdict
-            .clone()
-            .filter(|v| v.revision == revision && v.fingerprint == fingerprint)
+            .as_ref()
+            .is_some_and(|(known, path)| *known == revision && path == fingerprint)
+    }
+
+    fn established_reading(&self, fingerprint: &str) -> Option<GeoReading> {
+        let inner = self.inner.lock().expect("состояние охраны");
+        inner
+            .established
+            .as_ref()
+            .filter(|e| e.fingerprint == fingerprint)
+            .map(|e| e.reading.clone())
     }
 
     /// Пора ли обновлять гео. Отдельно от окна коалесценции: то гасит всплески
@@ -467,20 +1254,12 @@ impl GuardController {
     ) -> Option<GeoOutcome> {
         if self.probe_in_flight.swap(true, Ordering::SeqCst) {
             // Ровно этот случай и означает «нажал пять раз, а запрос так и не ушёл».
-            self.checks.record(CheckEvent {
-                id: new_check_id(),
-                at: SystemTime::now(),
+            self.record_check(
                 trigger,
-                outcome: CheckOutcome::SkippedProbeInFlight,
-                fingerprint: Some(fingerprint.to_string()),
-                duration_milliseconds: None,
-                ip: None,
-                country: None,
-                confirmed_country: None,
-                confirm_source: None,
-                services: Vec::new(),
-                detail: None,
-            });
+                CheckOutcome::SkippedProbeInFlight,
+                fingerprint,
+                None,
+            );
             return None;
         }
 
@@ -498,16 +1277,18 @@ impl GuardController {
                 inner.established = Some(Established {
                     reading: reading.clone(),
                     fingerprint: fingerprint.to_string(),
+                    revision: settings.revision,
                 });
+                inner.last_reading = Some(reading.clone());
+                inner.announced_loss = None;
             }
-            inner.verdict = Some(CachedVerdict {
-                revision: settings.revision,
-                fingerprint: fingerprint.to_string(),
-                outcome: outcome.clone(),
-                report: report.clone(),
-            });
-            inner.previous_verdict = Some((settings.revision, fingerprint.to_string()));
+            if let GeoOutcome::Degraded { previous, .. } = &outcome {
+                inner.last_reading = Some(previous.clone());
+            }
+            inner.verdict = Some((settings.revision, fingerprint.to_string()));
             inner.last_probe_finished = Some(Instant::now());
+            inner.last_report = Some(report.clone());
+            // Отчёт отдаётся и при отказе: экран обязан показать, кто именно молчал.
             inner.snapshot.report = Some(report);
         }
 
@@ -533,11 +1314,10 @@ impl GuardController {
 
     /// Что из отчёта годится в основание вердикта.
     ///
-    /// ipinfo ответил — берём его ответ. ipinfo молчит — смотрим, назвал ли резервный
-    /// сервис наш адрес: совпал с адресом прошлого вердикта, значит страна та же
-    /// и перепроверять нечего. Снисхождение выдаётся за доказательство, а не за давность,
-    /// и каждый круг доказывается заново: перестанет отвечать и резервный — адреса
-    /// не будет, и цели завершатся.
+    /// ipinfo ответил — берём его ответ. ipinfo молчит — смотрим, назвал ли
+    /// резервный сервис наш адрес: совпал с адресом прошлого вердикта, значит
+    /// страна та же и перепроверять нечего. Это доказательство неизменности,
+    /// а не снисхождение к давности, и каждый круг доказывается заново.
     ///
     /// Сменился отпечаток сети — снисхождения нет ни при каком совпадении адреса:
     /// вердикт при смене пути недействителен по построению.
@@ -577,141 +1357,15 @@ impl GuardController {
     /// оставшиеся на экране, читаются как «я всё ещё там», хотя пользователь
     /// уже вышел в сеть напрямую.
     fn forget_report(&self) {
-        self.inner.lock().expect("состояние охраны").snapshot.report = None;
-    }
-
-    fn apply(
-        &self,
-        settings: &Settings,
-        decision: AppliedDecision,
-        report: Option<GeoProbeReport>,
-        network: &NetworkSnapshot,
-    ) {
-        let rules = settings.target_rules();
-
-        let running = match &decision {
-            AppliedDecision::Safe => {
-                // Эпизод кончился. Сообщать об этом надо всегда, а не только
-                // когда он был неразобранным: учёт «что уже описано» обнуляется
-                // именно здесь, и без вызова следующее падение по той же причине
-                // писалось бы «запуск запрещён» вместо «завершено».
-                //
-                // Если эпизод начинался до вердикта, ему дописывается ещё и исход:
-                // цели умерли, а проверка следом сказала «всё в порядке» — без этого
-                // в журнале навсегда остаётся отговорка без единой цифры.
-                let pending = self
-                    .inner
-                    .lock()
-                    .expect("состояние охраны")
-                    .pending_episode
-                    .take();
-                let mut context = self.kill_context(
-                    settings,
-                    UnsafeReasonText::pending(),
-                    report.as_ref(),
-                    network,
-                );
-                context.is_pending = pending.is_some();
-                context.diagnostics.staleness = pending;
-                self.reporter.episode_finished(&context);
-
-                self.enforcer.running(&rules)
-            }
-            // Пока Linux не портировал паузу, `Pending` и `Unproven` применяются
-            // как прежний kill: fail-closed до ответа сети и непроверенный вердикт
-            // завершают цели, а не приостанавливают их.
-            AppliedDecision::Pending | AppliedDecision::Unproven(_) | AppliedDecision::Kill(_) => {
-                let text = decision.display_text();
-                let is_pending = matches!(decision, AppliedDecision::Pending);
-                let mut context =
-                    self.kill_context(settings, text.clone(), report.as_ref(), network);
-                context.is_pending = is_pending;
-                if is_pending {
-                    let mut inner = self.inner.lock().expect("состояние охраны");
-                    let staleness = VerdictStaleness::new(
-                        inner
-                            .previous_verdict
-                            .as_ref()
-                            .map(|(revision, _)| *revision),
-                        settings.revision,
-                        inner
-                            .previous_verdict
-                            .as_ref()
-                            .map(|(_, fingerprint)| fingerprint.clone()),
-                        network.verdict_fingerprint(),
-                    );
-                    inner.pending_episode = Some(staleness.clone());
-                    drop(inner);
-                    context.diagnostics.staleness = Some(staleness);
-                } else {
-                    // Причина стала известна — эпизод перестал быть неразобранным.
-                    self.inner.lock().expect("состояние охраны").pending_episode = None;
-                }
-
-                // Сначала уточнение, потом завершение: иначе уточнённая причина
-                // считалась бы новой и завела бы второй набор записей про то же
-                // самое падение.
-                self.reporter.refine(&context);
-                let result = self.enforcer.enforce(&rules);
-                if !result.killed.is_empty() {
-                    self.reporter.report(&result.killed, &context);
-                }
-                result.running
-            }
-        };
-
-        let country = report.as_ref().and_then(|r| match r.outcome() {
-            GeoOutcome::Resolved(reading) => Some(reading.primary_country),
-            GeoOutcome::Degraded { previous, .. } => Some(previous.primary_country),
-            GeoOutcome::Unavailable(_) | GeoOutcome::AddressChanged { .. } => {
-                r.reference_country().map(str::to_string)
-            }
-        });
-
-        // Цели живут, но защита держится на том, что адрес не менялся, а не на свежем
-        // ответе ipinfo. Глаз обязан это видеть: зелёный тут врал бы.
-        let is_degraded = matches!(decision, AppliedDecision::Safe)
-            && report
-                .as_ref()
-                .is_some_and(|r| matches!(r.ipinfo, SourceOutcome::Failed(_)));
-
-        let presentation = status_presentation(&GuardState {
-            is_enabled: settings.is_enabled,
-            has_targets: !settings.targets.is_empty(),
-            decision: decision.clone(),
-            country,
-            is_degraded,
-        });
-
         let mut inner = self.inner.lock().expect("состояние охраны");
-        inner.snapshot.decision = Some(decision);
-        inner.snapshot.presentation = Some(presentation);
-        inner.snapshot.running = running;
-        if report.is_some() {
-            inner.snapshot.report = report;
-        }
+        inner.snapshot.report = None;
+        inner.last_report = None;
+        inner.last_reading = None;
     }
 }
 
-/// Что политика решила применить к целям на время, пока Linux не портировал
-/// паузу: `Safe`/`Unproven`/`Kill` переходят в `AppliedDecision` без изменений
-/// по смыслу — только `Unproven` до порта поведения применяется как kill.
-fn applied(decision: GuardDecision) -> AppliedDecision {
-    match decision {
-        GuardDecision::Safe => AppliedDecision::Safe,
-        GuardDecision::Unproven(reason) => AppliedDecision::Unproven(reason),
-        GuardDecision::Kill(evidence) => AppliedDecision::Kill(evidence),
-    }
-}
-
-/// Текст причины «подключение ещё не проверено» одним местом: он и ключ эпизода,
-/// и то, что видит пользователь, — расходиться этим двум нельзя.
-struct UnsafeReasonText;
-
-impl UnsafeReasonText {
-    fn pending() -> String {
-        AppliedDecision::PENDING_TEXT.to_string()
-    }
+fn standing_pids(entries: &[weto_config::stopped::StoppedProcess]) -> Vec<i32> {
+    entries.iter().map(|entry| entry.pid).collect()
 }
 
 /// Идентификатор записи проверки. UUID сюда тянуть незачем: хватает монотонного

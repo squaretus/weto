@@ -1980,6 +1980,7 @@ dependencies = [
 name = "weto-guard"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "tempfile",
  "weto-config",
  "weto-core",

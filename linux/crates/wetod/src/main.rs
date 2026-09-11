@@ -15,6 +15,7 @@ use weto_config::paths::Paths;
 use weto_config::settings::Settings;
 use weto_core::check::CheckEvent;
 use weto_core::diagnostics::KillContext;
+use weto_core::guard_machine::{GuardAction, GuardPhase};
 use weto_core::presentation::AppliedDecision;
 use weto_core::process::MatchedProcess;
 use weto_guard::controller::{CheckReporting, GuardController, KillReporting, SettingsProviding};
@@ -49,7 +50,12 @@ impl CheckReporting for SilentChecks {
 }
 
 impl KillReporting for PrintingReporter {
-    fn report(&self, killed: &[MatchedProcess], context: &KillContext) {
+    fn report(
+        &self,
+        killed: &[MatchedProcess],
+        _recordable: &[MatchedProcess],
+        context: &KillContext,
+    ) {
         let names: Vec<&str> = killed.iter().map(|k| k.target_name.as_str()).collect();
         let pids: Vec<String> = killed.iter().map(|k| k.pid.to_string()).collect();
         println!(
@@ -73,6 +79,7 @@ fn build_controller(paths: &Paths) -> GuardController {
         ProcessEnforcer::new(
             Box::new(ProcRegistry::new()),
             Box::new(ProcessSignaler::new()),
+            paths.stopped_file(),
         ),
         Box::new(PrintingReporter),
         Box::new(SilentChecks),
@@ -119,7 +126,7 @@ fn dump_network(paths: &Paths) {
 
 fn check(paths: &Paths) {
     let controller = build_controller(paths);
-    let decision = controller.probe_now();
+    let phase = controller.probe_now();
     let snapshot = controller.snapshot();
 
     if let Some(presentation) = snapshot.presentation {
@@ -136,37 +143,42 @@ fn check(paths: &Paths) {
         );
     }
     println!();
-    println!("решение: {decision:?}");
+    println!("фаза: {phase:?}");
+    println!("цели: {:?}", phase.action());
 }
 
 fn watch(paths: &Paths) {
     let controller = build_controller(paths);
+    controller.recover_stopped();
     let events = NetlinkEventSource.subscribe();
-    let mut previous: Option<AppliedDecision> = None;
+    let mut previous: Option<GuardPhase> = None;
 
     println!("охрана запущена, Ctrl-C для выхода");
     loop {
-        let decision = controller.tick();
+        let phase = controller.tick();
 
-        if previous.as_ref() != Some(&decision) {
-            match &decision {
-                AppliedDecision::Safe => println!("на страже"),
-                AppliedDecision::Pending
-                | AppliedDecision::Unproven(_)
-                | AppliedDecision::Kill(_) => {
-                    println!("небезопасно: {}", decision.display_text())
-                }
+        if previous.as_ref() != Some(&phase) {
+            match phase.action() {
+                GuardAction::Run => println!("{}", phase.title()),
+                GuardAction::Pause => println!(
+                    "{}: цели на паузе — {}",
+                    phase.title(),
+                    AppliedDecision::from_phase(&phase).display_text()
+                ),
+                GuardAction::Terminate => println!(
+                    "{}: цели завершены — {}",
+                    phase.title(),
+                    AppliedDecision::from_phase(&phase).display_text()
+                ),
             }
-            previous = Some(decision.clone());
+            previous = Some(phase.clone());
         }
 
         // Событие сети прерывает ожидание: реакция на падение туннеля не должна
         // ждать конца интервала.
-        let interval = match decision {
-            AppliedDecision::Safe => TICK_SAFE,
-            AppliedDecision::Pending | AppliedDecision::Unproven(_) | AppliedDecision::Kill(_) => {
-                TICK_UNSAFE
-            }
+        let interval = match phase.action() {
+            GuardAction::Run => TICK_SAFE,
+            GuardAction::Pause | GuardAction::Terminate => TICK_UNSAFE,
         };
         match events.recv_timeout(interval) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}
