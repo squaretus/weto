@@ -276,6 +276,7 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
             parent_pid: 1,
             executable_path: "/usr/bin/nano".to_string(),
             arguments: Some(vec!["nano".to_string()]),
+            ..ProcessSnapshot::default()
         },
         // Живой VPN-клиент: без него локальное основание — «приложение не запущено».
         ProcessSnapshot {
@@ -283,6 +284,7 @@ fn harness_with_window(window: std::time::Duration) -> Harness {
             parent_pid: 1,
             executable_path: "/usr/bin/happ".to_string(),
             arguments: Some(vec!["happ".to_string()]),
+            ..ProcessSnapshot::default()
         },
     ])));
 

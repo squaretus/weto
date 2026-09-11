@@ -48,6 +48,9 @@ impl ProcRegistry {
             parent_pid,
             executable_path,
             arguments,
+            // Группа, передняя группа терминала и признак остановки приедут
+            // из `/proc/<pid>/stat` вместе с планом паузы.
+            ..ProcessSnapshot::default()
         })
     }
 }
