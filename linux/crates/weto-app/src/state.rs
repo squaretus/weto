@@ -22,6 +22,7 @@ use weto_core::episode::EpisodeLedger;
 use weto_core::guard_machine::GuardAction;
 use weto_core::pause_plan::RecoveredProcess;
 use weto_core::process::{MatchBasis, MatchedProcess};
+use weto_core::terminal::TerminalHost;
 use weto_guard::controller::{
     CheckReporting, GuardController, GuardSnapshot, KillReporting, SettingsProviding,
 };
@@ -29,10 +30,11 @@ use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
 use weto_sys::network_snapshot::KernelNetworkReader;
-use weto_sys::notifications::{KillNotifying, PortalNotifier};
-use weto_sys::process_registry::ProcRegistry;
+use weto_sys::notifications::{DesktopNotifier, KillNotifying};
+use weto_sys::process_registry::{ProcRegistry, ProcessRegistryReading};
 use weto_sys::process_signaler::ProcessSignaler;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
+use weto_sys::terminal::{DesktopTerminalActivator, TerminalActivating};
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
 const TICK_UNSAFE: Duration = Duration::from_millis(250);
@@ -401,6 +403,15 @@ pub struct AppState {
     /// Проба в полёте. На месте кнопки проверки крутится индикатор, а повторное
     /// нажатие запроса не порождает: у подтверждающего сервиса лимит.
     probing: Arc<AtomicBool>,
+    /// Кто поднимет терминал цели, ушедшей в фон под паузой, и чем.
+    terminal: Box<dyn TerminalActivating>,
+    /// Свой обход `/proc` для интерфейса: охрана свой снимок наружу не отдаёт,
+    /// а обход стоит пару миллисекунд и случается только у стоящей цели.
+    registry: Box<dyn ProcessRegistryReading>,
+    /// Нажатия на уведомление. Поток уведомлений кладёт сюда просьбу показать
+    /// окно, главный цикл забирает её своим тактом: окна из чужого потока
+    /// не открывают.
+    open_requests: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 impl AppState {
@@ -409,12 +420,23 @@ impl AppState {
         let journal = Arc::new(Mutex::new(Journal::load(&paths.journal_file())));
         let checks = Arc::new(Mutex::new(CheckLog::load(&paths.checks_file())));
 
+        // Нажатие на уведомление открывает окно статуса — то же самое делает
+        // тап по уведомлению на macOS. Обработчик ставится один раз на старте
+        // и больше не меняется.
+        let (open_sender, open_requests) = std::sync::mpsc::channel();
+        let open_sender = Mutex::new(open_sender);
+        let notifier = DesktopNotifier::with_open_handler(Arc::new(move || {
+            if let Ok(sender) = open_sender.lock() {
+                let _ = sender.send(());
+            }
+        }));
+
         let writer = JournalWriter {
             paths: paths.clone(),
             journal: journal.clone(),
             episode: Mutex::new(EpisodeLedger::new()),
             pause_episodes: Mutex::new(PauseEpisodes::default()),
-            notifier: Box::new(PortalNotifier::new()),
+            notifier: Box::new(notifier),
         };
 
         let controller = Arc::new(GuardController::new(
@@ -444,6 +466,9 @@ impl AppState {
             journal,
             checks,
             probing: Arc::new(AtomicBool::new(false)),
+            terminal: Box::new(DesktopTerminalActivator::new()),
+            registry: Box::new(ProcRegistry::new()),
+            open_requests: Mutex::new(open_requests),
         })
     }
 
@@ -455,6 +480,37 @@ impl AppState {
     /// в объяснении статуса читает часы отсюда, а не сама.
     pub fn remaining_pause(&self) -> Option<Duration> {
         self.controller.remaining_pause()
+    }
+
+    /// Кто держит терминал стоящей цели и можно ли его поднять.
+    ///
+    /// Ответ спрашивается на живом снимке `/proc` и на живой шине, поэтому
+    /// интерфейс держит его в кэше: пока цель стоит, терминала она не меняет.
+    pub fn terminal_for(&self, pid: i32) -> Option<TerminalHost> {
+        self.terminal.locate(pid, &self.registry.snapshot())
+    }
+
+    /// Показать пользователю терминал стоящей цели: под паузой процесс
+    /// не отвечает, и найти его окно самому — задача не для человека.
+    /// Порт macOS `GuardVM.showTerminal(for:)`.
+    pub fn show_terminal(&self, pid: i32) -> bool {
+        match self.terminal_for(pid) {
+            Some(host) => self.terminal.activate(&host),
+            None => false,
+        }
+    }
+
+    /// Просил ли пользователь показать окно нажатием на уведомление.
+    /// Копятся они по одному вопросу, поэтому очередь вычерпывается разом.
+    pub fn take_open_request(&self) -> bool {
+        let Ok(requests) = self.open_requests.lock() else {
+            return false;
+        };
+        let mut asked = false;
+        while requests.try_recv().is_ok() {
+            asked = true;
+        }
+        asked
     }
 
     pub fn journal(&self) -> Journal {

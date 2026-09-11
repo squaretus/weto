@@ -18,6 +18,11 @@ use weto_ui::theme::{self, Theme};
 /// Дублируется здесь намеренно: тест сторожит именно расхождение с каноном.
 const CONTROL_HEIGHT: i32 = 32;
 
+/// Значение токена `controlHeightCompact` оттуда же: компактная пилюля —
+/// «Показать терминал» у значка паузы — обязана быть ровно такой, а не
+/// «примерно ниже обычной».
+const COMPACT_HEIGHT: i32 = 24;
+
 fn height(widget: &impl IsA<Widget>) -> i32 {
     let (_, natural, _, _) = widget.measure(Orientation::Vertical, -1);
     natural
@@ -60,4 +65,14 @@ fn every_control_of_a_row_stands_at_one_height() {
             "«{name}» выпадает из ряда: {measured:?}"
         );
     }
+
+    // Компактная пилюля стоит не в ряду, а рядом со значком паузы, и высота
+    // у неё своя — из отдельного токена, как и на macOS.
+    let terminal = ui::compact_primary_button("Показать терминал");
+    row.append(&terminal);
+    assert_eq!(
+        height(&terminal),
+        COMPACT_HEIGHT,
+        "компактная кнопка обязана держать свой токен высоты"
+    );
 }

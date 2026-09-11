@@ -13,15 +13,20 @@ argument and the owner's 2026-09-09 amendment (tolerance and a standing "Про�
 tried and then removed — see below).
 
 ## Scope
-Both platforms behave the same way. On Linux the screen has not caught up yet: the pill per
-standing target, the countdown and the `fg` hint are not drawn, and the status titles are the
-interim ones — everything the screen needs is already in `GuardSnapshot` (`phase`, `paused`,
-`pause_deadline`). See `modules/linux-guard.md`.
+Both platforms behave the same way, and since the GTK screen was ported both also *show* it the
+same way: the five status titles come from `GuardPhase::title`, a standing target carries its pill
+with the countdown, and a target that lost its terminal carries the `fg` hint. What still differs
+on Linux is listed — with the reason for each — in `modules/linux-guard.md`; that list, not this
+document, is where deviations live.
 
 Linux files: `weto-core/src/guard_machine.rs` and `pause_plan.rs` (the reducer and the plan),
+`weto-core/src/terminal.rs` (which ancestor is the terminal),
 `weto-sys/src/process_signaler.rs` and `process_registry.rs` (the boundary),
+`weto-sys/src/desktop_entries.rs`, `terminal.rs`, `session_bus.rs` and `notifications.rs`
+(the `.desktop` index, raising the terminal, the shared session bus, the clickable notification),
 `weto-config/src/stopped.rs` (the ledger), `weto-guard/src/controller.rs` and `enforcer.rs`
-(the behaviour), `weto-app/src/state.rs` (the journal writer).
+(the behaviour), `weto-app/src/state.rs` (the journal writer), `weto-app/src/status_window.rs`
+(the badge, the hint and the "Показать терминал" button).
 
 - `WetoCore`: `GuardMachine.swift` (the reducer — `GuardPhase`, `GuardInput`, `GuardEffect`),
   `PausePlan.swift` (`PausePlanner`), `GuardPolicy.swift` (`UnprovenReason`/`UnsafeEvidence`
@@ -92,10 +97,10 @@ only a cause, no moment — nothing is timed from it. Wording landed in commit `
   episode opens, and reused verbatim when the episode resolves — recomputing it at resolution time
   would silently erase it, since the controller only carries a staleness diagnosis while actually
   `.paused`.
-- **Linux divergence is intentional but must stay a documented row, not silence.** `Pending`/
-  `Unproven` still kill on Linux, so they cannot borrow the macOS wording («Проверяю выход»/«Выход
-  не подтверждён») without lying about what happened to the targets — see
-  `modules/linux-guard.md`.
+- **Linux divergence is intentional but must stay a documented row, not silence.** The two rows
+  that remain are dictated by the desktop, not by the port: an emulator that owns no session-bus
+  name cannot be raised (so no button, hint only), and a notification server without `actions`
+  cannot report a click — see `modules/linux-guard.md`.
 
 ## How to test
 - [ ] `swift test --filter GuardMachineTests` — the reducer against `guard-transitions.json`.
@@ -115,8 +120,12 @@ only a cause, no moment — nothing is timed from it. Wording landed in commit `
       the terminal does not keep printing `suspended (tty input)` forever.
 - [ ] A paused terminal target loses its foreground job (backgrounded) → notification with
       "Показать терминал" fires; the button activates the hosting terminal app.
-- [ ] Linux: same scenarios end the same way — see `linux/docs/manual-check.md` §3 and §3а.
-      The screen still shows the interim titles and no pill; that is the remaining gap, not a bug.
+- [ ] `linux/scripts/dev.sh cargo test -p weto-sys --test notifications --test terminal` — the
+      notification wording and its action, and the choice of terminal, against a real session bus
+      the test starts itself (`dbus-daemon`).
+- [ ] Linux: same scenarios end the same way, screen included — see `linux/docs/manual-check.md`
+      §3 and §3а, and the pause section of `linux/docs/manual-ui-check.md` for the pill, the
+      countdown, the `fg` hint, the "Показать терминал" button and the notification click.
 
 ## Related modules
 - modules/weto-core.md

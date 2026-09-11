@@ -107,6 +107,16 @@ pub fn primary_button(text: &str) -> Button {
     pill(text, "weto-primary")
 }
 
+/// Компактная первичная пилюля — «Показать терминал» у значка паузы.
+/// Единственный компактный контрол в проекте: рядом со значком уже стоят
+/// отсчёт и (i), и полноразмерная кнопка спорит с заголовком цели.
+/// Порт `WetoPillButtonStyle(.primary)` c `.controlSize(.small)`.
+pub fn compact_primary_button(text: &str) -> Button {
+    let button = pill(text, "weto-primary");
+    button.add_css_class("weto-compact");
+    button
+}
+
 pub fn muted_button(text: &str) -> Button {
     pill(text, "weto-muted")
 }
@@ -289,11 +299,18 @@ pub fn pause_countdown_text(deadline: Option<SystemTime>, now: SystemTime) -> St
 
 /// Значок «на паузе»: капсула `amber` с отсчётом до потолка. `hint` — цель
 /// потеряла терминал (`fg`-подсказка); появляется как значок `(i)` с текстом
-/// во всплывающей подсказке. Порт `WetoPauseBadge` без кнопки «Показать
-/// терминал»: на Linux нет способа поднять окно чужого терминала без нового
-/// системного API (`wmctrl`/`xdotool`), проект такую зависимость не тянет —
-/// см. deviation в `linux-guard.md`.
-pub fn pause_badge(deadline: Option<SystemTime>, now: SystemTime, hint: Option<&str>) -> GtkBox {
+/// во всплывающей подсказке. `terminal` — рядом встаёт кнопка «Показать
+/// терминал»; её дают только тогда, когда терминал и правда есть чем поднять,
+/// иначе кнопка обещала бы то, чего не будет. Порт `WetoPauseBadge`.
+///
+/// Кнопка возвращается отдельно, как у баннера: обработчик знает про состояние
+/// приложения, а компонент про него не знает ничего.
+pub fn pause_badge(
+    deadline: Option<SystemTime>,
+    now: SystemTime,
+    hint: Option<&str>,
+    terminal: bool,
+) -> (GtkBox, Option<Button>) {
     let badge = GtkBox::new(Orientation::Horizontal, SPACE2);
     badge.add_css_class("weto-pause-badge");
 
@@ -312,7 +329,18 @@ pub fn pause_badge(deadline: Option<SystemTime>, now: SystemTime, hint: Option<&
         badge.append(&info);
     }
 
-    badge
+    if !terminal {
+        return (badge, None);
+    }
+
+    // Кнопка стоит рядом с капсулой, а не внутри неё: заливка `amber` — это
+    // фон значка, и первичная пилюля поверх него читалась бы как часть отсчёта.
+    let row = GtkBox::new(Orientation::Horizontal, SPACE2);
+    row.append(&badge);
+    let button = compact_primary_button("Показать терминал");
+    row.append(&button);
+
+    (row, Some(button))
 }
 
 /// Запись журнала: три строки без плашек, рамок и цвета.

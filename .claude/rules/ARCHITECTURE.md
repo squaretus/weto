@@ -17,7 +17,7 @@
 ## Стек Linux
 - Rust 2021 (floor 1.82), Cargo workspace в `linux/`, GTK4 без libadwaita.
 - Системные API: `/proc`, netlink (события сети), UDP-`connect` для поиска маршрута,
-  D-Bus (трей, уведомления).
+  D-Bus (трей, уведомления с действием, подъём окна терминала).
 - Цели: Ubuntu 24.04 LTS и новее, Arch; x86_64 и arm64. Пол GTK4 — 4.14.
   Обе архитектуры собираются нативно на раннерах GitHub, база размера бинарника
   у каждой своя.
@@ -171,11 +171,12 @@ docs/             канон дизайн-системы — общий, по п
   целями выводится из фазы (работают / на паузе / завершены и запуск запрещён).
   Стоящая фаза ровно одна — «Пауза»; «Проверка» цели не трогает.
   Обе платформы ведут себя так и рисуют это одинаково: пилюля стоящей цели с отсчётом
-  до потолка и подсказка про `fg` есть и на Linux — `GuardSnapshot` (`phase`, `paused`,
-  `pause_deadline`) читает сам экран. Кнопки «Показать терминал» рядом с подсказкой
-  на Linux нет — `TerminalLocating` не портирован, аналога `NSRunningApplication` без
-  новой зависимости (`wmctrl`/`xdotool`) не существует; см. deviation в
-  [linux-guard](../docs/modules/linux-guard.md#the-ui-is-a-port-not-a-redesign).
+  до потолка, подсказка про `fg` и кнопка «Показать терминал» есть и на Linux —
+  `GuardSnapshot` (`phase`, `paused`, `pause_deadline`) читает сам экран. Терминал там
+  поднимает не оконный менеджер, а само приложение (`org.freedesktop.Application.Activate`
+  по сессионной шине), поэтому кнопку получает только эмулятор, выходящий на шину;
+  остальным остаётся подсказка — см.
+  [linux-guard](../docs/modules/linux-guard.md#raising-the-terminal).
   Голден-фикстура — `shared/fixtures/guard-transitions.json`.
   [decisions/pause-instead-of-kill](../docs/decisions/pause-instead-of-kill.md).
 - **Пауза начинается с результата, а не с его ожидания.** Ни холодный старт, ни смена пути

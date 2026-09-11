@@ -20,6 +20,11 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, `T` state |
 | `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL` / `SIGTERM`, strictly in list order |
 | `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq |
+| `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
+| `weto-sys` | `desktop_entries.rs` | the `.desktop` index over the XDG application directories |
+| `weto-sys` | `terminal.rs` | raises it: `org.freedesktop.Application.Activate` over the session bus |
+| `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
+| `weto-sys` | `notifications.rs` | notifications over D-Bus; the `default` action opens the status window |
 | `weto-sys` | `secret_store.rs` | token file, mode `0600` |
 | `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings, ring-buffer journal, XDG paths |
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
@@ -57,8 +62,8 @@ the whole of what the Linux side is allowed to differ in:
 | — | tray context menu (check / settings / quit) | SNI needs one; the popup carries the same actions |
 | country flag in the menu bar | country name as text | no flag rendering here yet; the set ships with macOS only |
 | app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
-| pill countdown badge has a "Показать терминал" button next to the `fg` hint | `(i)` hint only, no button | `TerminalLocating` (`NSRunningApplication` activation, walking up from the shell to the process owning a bundle) has no Linux equivalent; the only way to raise an arbitrary terminal emulator's window is an external tool (`wmctrl`, `xdotool`), and the project does not silently add that dependency |
-| a target going to the background fires a system notification (`notifyBackgrounded`) | same notification, sent through `notify-send` (`KillNotifying::notify_backgrounded`) | same mechanism the kill notification already uses, just a second message |
+| the "Показать терминал" button raises any terminal | the button is there only for an emulator that comes out on the session bus | raising a window means asking the application itself (`org.freedesktop.Application.Activate`); an emulator that owns no bus name — xterm, alacritty, kitty, foot, xfce4-terminal, mate-terminal, terminator — cannot be asked, and nothing short of `wmctrl`/`xdotool` would change that. The `(i)` hint stays: it is the answer the user needs. See "Raising the terminal" below |
+| tapping the notification always opens the popup | tapping opens the status window when the notification server announces `actions` | the capability is the server's, not ours (`GetCapabilities`); without it the notification is still delivered, just not clickable |
 
 Everything else matches, including every wording that does not depend on the unported screen: the
 settings window is the same six cards in the same order
@@ -69,6 +74,56 @@ two icon buttons, then the geo readout, the update banner, and live targets.
 **There is no guard on/off switch, and that is deliberate.** `is_enabled` exists in the
 settings model on both platforms and is exposed by neither. The same goes for a
 "notify on kill" switch: macOS has no such setting, so notifications always fire.
+
+## Raising the terminal
+
+A target that lost its foreground job under pause gets the `fg` hint and, next to it, the
+"Показать терминал" button — the same affordance as macOS. What differs is the mechanism:
+macOS activates an `NSRunningApplication`, here the application is asked over the session bus.
+
+Two facts are collected about every ancestor of the standing target, and neither is enough
+alone:
+
+- the `.desktop` entry (`weto-sys/desktop_entries.rs`, XDG order: `$XDG_DATA_HOME`, then
+  `$XDG_DATA_DIRS`) says **who this ancestor is** — every emulator declares
+  `Categories=…TerminalEmulator…`, and that is what tells the terminal apart from the rest
+  of the ancestry;
+- the session bus says **whether it can be raised**: the well-known names owned by that pid
+  (`ListNames` + `GetConnectionUnixProcessID`), kept only when the object behind the name
+  really exports `org.freedesktop.Application` (`Introspect`).
+
+`weto_core::terminal::choose` then picks, nearest ancestor first: a declared terminal that can
+be raised, else any ancestor that can be raised, else a declared terminal that cannot. Nearest,
+not topmost — the macOS rule ("topmost process owning a bundle") does not translate, because
+above the terminal there is always `systemd --user`, which owns a bus name of its own.
+
+Rule two exists for GNOME Terminal, the default on Ubuntu: its entry declares
+`Exec=gnome-terminal` while the shell actually sits under `/usr/libexec/gnome-terminal-server`,
+so it is not in the index by executable at all — but it owns `org.gnome.Terminal` and exports
+the application interface like every GApplication. `DBusActivatable=true` is deliberately *not*
+the test: that flag is about the bus being allowed to **start** the app, and gnome-terminal does
+not set it, while the running server answers `Activate` perfectly well.
+
+What the mechanism covers, from the desktop files as shipped by Debian trixie: GNOME Terminal
+(`org.gnome.Terminal`, owned by the server), GNOME Console (`org.gnome.Console.desktop`,
+`DBusActivatable=true`), Tilix (`com.gexperts.Tilix.desktop`, `DBusActivatable=true`) and, by the
+same rule, KDE's Konsole, which registers `org.kde.konsole-<pid>` (the `-<pid>` tail is stripped
+when the object path is derived — the KDE convention). What it cannot cover: xterm, alacritty,
+kitty, foot, xfce4-terminal, mate-terminal, terminator — they never appear on the session bus,
+so there is no one to ask. Those targets keep the hint and lose the button, which is the honest
+outcome: a button that does nothing is worse than no button.
+
+The answer is cached per pid by the popup: it costs a `/proc` pass plus one `ListNames` and a
+`GetConnectionUnixProcessID` per name, and the popup refreshes twice a second. Every bus call
+is capped at 3 s (`session_bus::METHOD_TIMEOUT`) instead of zbus's 25 s default — the lookup runs
+on the GTK main loop — and `Activate` itself is sent from a detached thread, so a hung emulator
+cannot freeze the window.
+
+Notifications moved to the same bus for the same reason: `notify-send` cannot report a click,
+and clicking is what opens the popup on macOS. weto sends `Notify` with the `default` action when
+the server announces `actions`, remembers the ids of its own notifications and opens the status
+window on `ActionInvoked`. No session bus at all means no notifications — same contract as before,
+when the missing tool meant the same thing.
 
 ## Contracts that differ from macOS
 
@@ -195,11 +250,15 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-338 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+360 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
-`policy-routing-contract.sh` and `netlink-events-contract.sh`. Everything that cannot be
-faked — a real WireGuard tunnel, the look of the tray icon — is covered by the
-checklists in `linux/docs/manual-check.md` and `linux/docs/manual-ui-check.md`.
+`policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
+lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
+`org.freedesktop.Notifications` and a fake `org.freedesktop.Application`, and checks the wording,
+the action and the choice of ancestor (`weto-sys/tests/notifications.rs`, `tests/terminal.rs`).
+Everything that cannot be faked — a real WireGuard tunnel, the look of the tray icon, a window
+actually coming to the front — is covered by the checklists in `linux/docs/manual-check.md`
+and `linux/docs/manual-ui-check.md`.
 
 ## Sibling crates
 
@@ -245,7 +304,6 @@ per-target icons are not fetched, so the status window shows generic glyphs.
 three explanation lines straight from `GuardPhase` (`weto_core::presentation::shield_color`,
 `explanation`, `should_explain` — the same texts as macOS `GuardVM.statusColor` and
 `StatusPresentation.explanation`, word for word), and every standing target gets a pause
-badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`).
-The one thing genuinely missing is the "Показать терминал" button — see the deviation table
-above — and it is a deliberate absence, not an oversight: nothing in the codebase can raise
-an arbitrary terminal emulator's window without a new dependency.
+badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`),
+the `fg` hint and the "Показать терминал" button where the emulator can be raised —
+see "Raising the terminal" above.

@@ -1999,6 +1999,7 @@ dependencies = [
  "ureq",
  "weto-config",
  "weto-core",
+ "zbus",
 ]
 
 [[package]]

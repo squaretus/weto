@@ -28,6 +28,7 @@ const APP_ID: &str = "com.weto.app";
 thread_local! {
     static STYLES: RefCell<Option<CssProvider>> = const { RefCell::new(None) };
     static TRAY_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static NOTIFICATIONS_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Смена темы — подмена таблицы стилей целиком: CSS-переменных на GTK 4.14 нет,
@@ -85,6 +86,22 @@ fn main() -> gtk4::glib::ExitCode {
             // цикла подписываться не на что.
             if !TRAY_UP.with(|up| up.replace(true)) {
                 tray::install(app, state.clone());
+            }
+            // Нажатие на уведомление приходит с шины, из чужого потока, а окна
+            // открывают только из главного цикла — поэтому просьбу забирает
+            // такт. Трей для этого не годится: его в окружении может не быть.
+            if !NOTIFICATIONS_UP.with(|up| up.replace(true)) {
+                let app = app.clone();
+                let state = state.clone();
+                gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                    if state.take_open_request() {
+                        match app.active_window() {
+                            Some(window) => window.present(),
+                            None => status_window::build(&app, state.clone()).present(),
+                        }
+                    }
+                    gtk4::glib::ControlFlow::Continue
+                });
             }
             match app.active_window() {
                 Some(window) => window.present(),
