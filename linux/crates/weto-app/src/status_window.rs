@@ -10,6 +10,7 @@
 //! показания гео, баннер обновления и живые цели с бейджем паузы. Карточек
 //! и крупных кнопок в попапе нет — управление живёт в окне настроек.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -96,6 +97,10 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
         let app = app.clone();
         let banner_slot = banner_slot.clone();
         let mut shown_version: Option<String> = None;
+        // Терминал стоящей цели спрашивается один раз на pid: ответ стоит
+        // обхода `/proc` и полусотни вопросов шине, а такт идёт дважды
+        // в секунду. Пока цель стоит, терминала она не меняет.
+        let mut terminals: HashMap<i32, bool> = HashMap::new();
         move || {
             let snapshot = state.snapshot();
             let phase = &snapshot.phase;
@@ -157,7 +162,7 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
             clear(&targets_slot);
             if !state.settings.current().targets.is_empty() {
                 targets_slot.append(&ui::divider());
-                targets_slot.append(&targets_view(phase, &snapshot, now));
+                targets_slot.append(&targets_view(phase, &snapshot, now, &state, &mut terminals));
             }
         }
     };
@@ -189,12 +194,18 @@ fn explanation_line(text: &str, css_class: &str) -> Label {
 /// из фазы охраны, а не из самого факта «целей нет»: после срабатывания
 /// цели молчат именно потому, что VPN уже выключен. Стоящая цель получает
 /// бейдж паузы с отсчётом до потолка, а потерявшая терминал — ещё и (i)
-/// с подсказкой про `fg`: кнопки «Показать терминал» здесь нет, см.
-/// deviation в `linux-guard.md`.
+/// с подсказкой про `fg` и кнопку «Показать терминал».
+///
+/// Кнопку дают не всякому: эмулятор, не выходящий на сессионную шину
+/// (xterm, alacritty, kitty), поднять нечем, и обещать это кнопкой нельзя —
+/// остаётся одна подсказка. `terminals` помнит ответ по pid: он стоит обхода
+/// `/proc` и разговора с шиной, а такт идёт дважды в секунду.
 fn targets_view(
     phase: &weto_core::guard_machine::GuardPhase,
     snapshot: &weto_guard::controller::GuardSnapshot,
     now: SystemTime,
+    state: &Arc<AppState>,
+    terminals: &mut HashMap<i32, bool>,
 ) -> GtkBox {
     let box_ = GtkBox::new(Orientation::Vertical, ui::SPACE2);
 
@@ -205,7 +216,22 @@ fn targets_view(
                 let hint = paused
                     .is_backgrounded
                     .then(|| "Процесс вернулся в фон. Откройте терминал и введите fg".to_string());
-                ui::pause_badge(snapshot.pause_deadline, now, hint.as_deref())
+                let raisable = paused.is_backgrounded
+                    && *terminals.entry(paused.pid).or_insert_with(|| {
+                        state
+                            .terminal_for(paused.pid)
+                            .is_some_and(|host| host.can_activate())
+                    });
+                let (badge, button) =
+                    ui::pause_badge(snapshot.pause_deadline, now, hint.as_deref(), raisable);
+                if let Some(button) = button {
+                    let state = state.clone();
+                    let pid = paused.pid;
+                    button.connect_clicked(move |_| {
+                        state.show_terminal(pid);
+                    });
+                }
+                badge
             });
             box_.append(&ui::process_pill(
                 &target.display_name,

@@ -15,6 +15,10 @@ if-addrs = { workspace = true }
 libc = { workspace = true }
 ureq = { workspace = true }
 thiserror = { workspace = true }
+# Шина сессии: уведомления с действием и подъём терминала через
+# org.freedesktop.Application. Тот же zbus, что уже стоит под треем (ksni),
+# и та же его половина — tokio: async-io вторым реактором здесь ни к чему.
+zbus = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
