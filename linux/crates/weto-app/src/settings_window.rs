@@ -912,8 +912,10 @@ fn diagnostics(event: &weto_config::journal::KillEvent) -> String {
     if let (Some(source), Some(country)) = (&event.confirm_source, &event.confirmed_country) {
         parts.push(format!("{source}: {country}"));
     }
-    if event.matched_by == weto_config::journal::MatchBasis::Descendant {
-        parts.push(format!("потомок {}", event.parent_pid));
+    // Чем процесс попал под охрану: потомок называет родителя, шелл объясняет,
+    // что целью он не был вовсе, а стоял ради её терминала.
+    if let Some(basis) = event.matched_by.detail_text(event.parent_pid) {
+        parts.push(basis);
     }
     if let Some(resolution) = &event.resolution_text {
         parts.push(format!("итог: {resolution}"));

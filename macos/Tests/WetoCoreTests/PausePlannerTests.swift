@@ -23,6 +23,8 @@ final class PausePlannerTests: XCTestCase {
         XCTAssertEqual(plan.stopOrder, [100, 200, 201])
         XCTAssertEqual(plan.resumeOrder, [201, 200, 100])
         XCTAssertEqual(plan.shells, [100])
+        XCTAssertEqual(plan.shellTargets, [100: "claude"],
+                       "запись журнала обязана назвать цель, ради терминала которой шелл встал")
         XCTAssertTrue(plan.backgrounded.isEmpty)
     }
 

@@ -2749,6 +2749,100 @@ final class GuardVMTests: XCTestCase {
         h.vm.stop()
     }
 
+    /// Дерево переднего задания: терминал держит группа цели, шелл — её родитель
+    /// в своей группе. Ровно та форма, ради которой шелл входит в план паузы.
+    private func foregroundJobTree(stopped: Bool = false) -> [ProcessSnapshot] {
+        [
+            ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                            processGroup: 100, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                            processGroup: 200, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                            processGroup: 200, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+    }
+
+    private func makeForegroundJobHarness(
+        stopped: Bool = false,
+        ledgerStorage: InMemoryStoppedLedger = InMemoryStoppedLedger()
+    ) -> (h: DelayedHarness, locator: MutableLocator, ledgerStorage: InMemoryStoppedLedger) {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: foregroundJobTree(stopped: stopped)
+        )
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+        return (h, locator, ledgerStorage)
+    }
+
+    /// Инвариант: всё, чему weto послал SIGSTOP, объяснено журналом завершений.
+    /// Шелл цели — не цель, но встал он по нашей воле, и без записи заморозка
+    /// прослеживалась только по `stopped.json`, который вычёркивает запись при первом
+    /// же наблюдении. Проверяется не список pid из плана, а сами отправленные сигналы:
+    /// путь, замораживающий что-то мимо журнала, обязан валиться здесь.
+    func test_every_process_sent_sigstop_has_a_record_in_the_episode() async {
+        let (h, _, _) = makeForegroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+
+        let stopped = h.signaler.batches.filter { $0.signal == .stop }.flatMap(\.pids)
+        XCTAssertEqual(stopped, [100, 200, 201], "шелл раньше цели — порядок сигналов прежний")
+        let episode = h.log.events.first?.episodeID
+        XCTAssertNotNil(episode)
+        let episodeEvents = h.log.events.filter { $0.episodeID == episode }
+        XCTAssertEqual(Set(episodeEvents.map(\.pid)), Set(stopped),
+                       "каждый SIGSTOP объяснён записью того же эпизода")
+        XCTAssertEqual(episodeEvents.count, stopped.count, "и ровно одной записью на pid")
+        XCTAssertEqual(Set(episodeEvents.map(\.kind)), [.paused])
+        XCTAssertEqual(Set(episodeEvents.map(\.reasonText)),
+                       ["Не удалось определить внешний адрес: таймаут запроса"],
+                       "причина у эпизода одна на всех")
+
+        let shell = episodeEvents.first { $0.pid == 100 }
+        XCTAssertEqual(shell?.matchedBy, .shell, "шелл — не цель, и запись говорит это прямо")
+        XCTAssertEqual(shell?.targetName, "nano", "ради чьего терминала он встал")
+        XCTAssertEqual(shell?.executablePath, "/bin/zsh")
+        XCTAssertEqual(shell?.parentPID, 1)
+        XCTAssertEqual(h.log.events.first { $0.pid == 201 }?.matchedBy, .descendant)
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200],
+                       "пилюля остаётся у цели: шелл целью не становится")
+        XCTAssertTrue(h.notifier.backgrounded.isEmpty, "переднее задание в фон не уходило")
+        h.vm.stop()
+    }
+
+    /// Исход эпизода дописывается и шеллу: один эпизод объясняет заморозку целиком —
+    /// кто встал, почему и чем это кончилось.
+    func test_the_shell_record_gets_the_same_resolution_as_its_target() async {
+        let (h, locator, _) = makeForegroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertNil(h.log.events.first?.resolutionText, "стояние ещё не кончилось")
+
+        // Цели и шелл стоят, проверка сказала «безопасно» — SIGCONT ушёл.
+        locator.processes = foregroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200, 100],
+                       "продолжение — в обратном порядке, шелл последним")
+
+        // Ядро показало их идущими: возобновление наблюдалось, эпизод закрыт.
+        locator.processes = foregroundJobTree(stopped: false)
+        h.vm.handle(.tick)
+
+        let resolutions = Set(h.log.events.map(\.resolutionText))
+        XCTAssertEqual(resolutions,
+                       ["возобновлено: проверка подтвердила безопасный выход: 203.0.113.28, KZ"],
+                       "исход один на весь эпизод, включая шелл")
+
+        let events = h.log.events.count
+        h.vm.handle(.tick)
+        XCTAssertEqual(h.log.events.count, events, "второй записи про те же pid не бывает")
+        h.vm.stop()
+    }
+
     /// Тот же сеанс с фоновым заданием, но собранный один раз: локатор меняет состояние
     /// процессов по ходу теста, учёт живёт своим хранилищем.
     private func makeBackgroundJobHarness(
@@ -2796,10 +2890,9 @@ final class GuardVMTests: XCTestCase {
                        "цель по-прежнему стоит: пилюля не имеет права исчезнуть")
     }
 
-    /// Учёт, доживший до нового запуска, обязан быть видимым. Эпизода паузы в этом
-    /// запуске нет — журнал завершений про такие записи молчит по построению, — и без
-    /// этого пользователь после падения weto получал SIGCONT раз в секунду и ни слова:
-    /// ни пилюли, ни подсказки про `fg`, ни следа в журналах.
+    /// Учёт, доживший до нового запуска, обязан быть видимым: и пилюлей, и следом
+    /// в обоих журналах. Без этого пользователь после падения weto получал SIGCONT
+    /// раз в секунду и ни слова: ни пилюли, ни подсказки про `fg`, ни записи.
     func test_a_standing_orphan_is_visible_after_a_restart() async {
         let ledgerStorage = InMemoryStoppedLedger()
         let moment = Date(timeIntervalSince1970: 1_000)
@@ -2825,9 +2918,59 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(traces.first?.detail,
                        "учёт остановленных: процессы [200, 201] стояли на старте — "
                            + "продолжение отправлено, дальше их ведёт такт охраны")
-        XCTAssertTrue(h.log.events.isEmpty, "журнал завершений про эпизод, которого не было, молчит")
+        XCTAssertEqual(h.log.events.map(\.pid), [200, 201],
+                       "журнал завершений объясняет каждое стояние, а не только своё")
         XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
                        "обязательство держится до наблюдения и после перезапуска")
+        h.vm.stop()
+    }
+
+    /// «Почему этот процесс стоял» спрашивают у журнала завершений, а не у `stopped.json`:
+    /// учёт вычёркивает запись в тот миг, когда процесс увиден идущим, и заморозка
+    /// становилась непрослеживаемой. Стоящие с прошлого запуска заводят свой эпизод —
+    /// пробы за ними нет, и причина обязана говорить это прямо.
+    func test_processes_found_standing_at_startup_get_their_own_journal_episode() async {
+        let ledgerStorage = InMemoryStoppedLedger()
+        let moment = Date(timeIntervalSince1970: 1_000)
+        ledgerStorage.save([
+            StoppedProcess(pid: 100, executablePath: "/bin/zsh", stoppedAt: moment, isShell: true),
+            StoppedProcess(pid: 200, executablePath: "/usr/bin/pico", stoppedAt: moment, isShell: false),
+            StoppedProcess(pid: 201, executablePath: "/usr/bin/node", stoppedAt: moment, isShell: false)
+        ])
+        let (h, locator, _) = makeForegroundJobHarness(stopped: true, ledgerStorage: ledgerStorage)
+
+        h.vm.start()
+
+        XCTAssertEqual(Set(h.log.events.map(\.pid)), [100, 200, 201],
+                       "объяснён каждый, кого weto застал стоящим")
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1, "это один эпизод")
+        XCTAssertEqual(Set(h.log.events.map(\.kind)), [.paused])
+        XCTAssertEqual(Set(h.log.events.map(\.reasonText)), [GuardVM.recoveryReasonText])
+        XCTAssertEqual(Set(h.log.events.map(\.date)), [moment],
+                       "стоят они с прошлой жизни weto, а не с момента, когда мы это заметили")
+        XCTAssertEqual(h.log.events.first { $0.pid == 100 }?.matchedBy, .shell,
+                       "шелл остался шеллом и через перезапуск: это знает учёт")
+        XCTAssertEqual(h.log.events.first { $0.pid == 100 }?.targetName, "zsh",
+                       "цели у него нет — именем служит сам бинарник")
+        XCTAssertEqual(h.log.events.first { $0.pid == 200 }?.targetName, "nano")
+        // Исход дописывается по тому же правилу, что и эпизоду паузы: SIGCONT ушёл
+        // на старте, а первый же такт увидел их всё ещё стоящими — это ответ, и журнал
+        // называет его, не выдавая отправку сигнала за возобновление.
+        XCTAssertEqual(
+            Set(h.log.events.map(\.resolutionText)),
+            ["не возобновлено: процессы [100, 200, 201] остались остановленными — "
+                + "задание ушло в фон, продолжите его в терминале командой fg"],
+            "исход один на весь эпизод, включая шелл"
+        )
+
+        // Пользователь ввёл `fg`: процессы пошли, обязательство снято наблюдением —
+        // и второго эпизода про то же стояние журнал не заводит.
+        let events = h.log.events.count
+        locator.processes = foregroundJobTree(stopped: false)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(h.log.events.count, events, "эпизод восстановления один на запуск")
+        XCTAssertEqual(ledgerStorage.load(), .entries([]), "обязательство снимает наблюдение")
         h.vm.stop()
     }
 

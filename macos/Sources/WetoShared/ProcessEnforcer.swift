@@ -51,6 +51,11 @@ final class ProcessEnforcer {
         /// Цели, остановленные этим проходом: без шеллов и без уже стоявших. Ожившая
         /// запись учёта сюда входит — её остановили заново, и это событие.
         let fresh: [MatchedProcess]
+        /// Шеллы, остановленные этим проходом ради терминала своей цели. Целями они
+        /// не являются, но SIGSTOP получили — и journal обязан объяснить каждый SIGSTOP,
+        /// поэтому они приезжают сюда готовой записью: имя цели, родитель, путь
+        /// и `matchedBy == .shell`.
+        let freshShells: [MatchedProcess]
         let results: [SignalResult]
         /// Всё, что под правилами прямо сейчас, — включая стоящих с прошлых проходов.
         /// По нему видно, кто из стоящих больше не существует или перестал быть целью:
@@ -59,7 +64,7 @@ final class ProcessEnforcer {
 
         static let none = PauseOutcome(
             plan: PausePlan(stopOrder: [], shells: [], backgrounded: [], skipped: []),
-            fresh: [], results: [], matched: []
+            fresh: [], freshShells: [], results: [], matched: []
         )
     }
 
@@ -223,7 +228,7 @@ final class ProcessEnforcer {
         // ровно этот проход и обнаруживает, что стоящая цель умерла сама.
         guard !pending.isEmpty else {
             return PauseOutcome(plan: PausePlan(stopOrder: [], shells: [], backgrounded: [], skipped: []),
-                                fresh: [], results: [], matched: matched)
+                                fresh: [], freshShells: [], results: [], matched: matched)
         }
 
         let plan = PausePlanner.plan(matched: pending, processes: scan.processes)
@@ -243,8 +248,20 @@ final class ProcessEnforcer {
         // (`GuardVM.pausedEpisodePIDs`): здесь его хватало ровно до конца эпизода,
         // а цель, остановленную заново уже в следующем, глушило совсем — ни записи,
         // ни пилюли, ни уведомления про честно стоящий процесс.
+        // Шелл — не цель, но остановлен он нами, и запись о нём обязана быть такой же
+        // полной: имя цели, ради терминала которой он встал, его родитель и путь.
+        let freshShells: [MatchedProcess] = plan.shells.filter(delivered.contains).map { pid in
+            MatchedProcess(
+                pid: pid,
+                targetName: plan.shellTargets[pid] ?? "",
+                parentPID: snapshotByPID[pid]?.parentPID ?? 0,
+                executablePath: snapshotByPID[pid]?.executablePath ?? "",
+                matchedBy: .shell
+            )
+        }
+
         return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) },
-                            results: results, matched: matched)
+                            freshShells: freshShells, results: results, matched: matched)
     }
 
     /// Кого учёт всё ещё держит, а кого отпускает: `nil` в снимке — процесса нет,

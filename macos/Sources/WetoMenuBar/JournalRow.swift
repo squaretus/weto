@@ -50,7 +50,9 @@ struct JournalRow: View {
         if let confirmed = event.confirmedCountry {
             parts.append("\(event.confirmSource ?? "подтверждение"): \(confirmed)")
         }
-        if event.matchedBy == .descendant { parts.append("потомок \(event.parentPID)") }
+        // Чем процесс попал под охрану: потомок называет родителя, шелл объясняет,
+        // что целью он не был вовсе, а стоял ради её терминала.
+        if let basis = event.matchedBy.detailText(parentPID: event.parentPID) { parts.append(basis) }
         return parts.joined(separator: " · ")
     }
 

@@ -35,7 +35,10 @@ this layer decides *when* to ask and *what to do* with the answer.
   `pause(_:)` builds a `PausePlan` (skips only pids the kernel shows stopped *and* the ledger
   knows) and sends `.stop` in `stopOrder`; everything it actually stopped comes back in `fresh`,
   including a revived ledger entry — per-episode dedup of journal records lives one layer up, in
-  `GuardVM.pausedEpisodePIDs`. `resume(observing:skipping:)` sends `.resume` in the reverse of what
+  `GuardVM.pausedEpisodePIDs`. The shells it stopped come back too, in `freshShells`, already
+  shaped as `MatchedProcess(matchedBy: .shell)` with the name of the target whose terminal they
+  hold (`PausePlan.shellTargets`): every SIGSTOP weto sends must be explainable from the kill
+  journal alone, so `GuardVM.pauseTargets` journals `fresh + freshShells` into one episode. `resume(observing:skipping:)` sends `.resume` in the reverse of what
   the ledger holds (minus the entries that stopped being poked) and
   returns a `ResumeOutcome` (`released` / `unresolved`), `resumeOrphans()`
   is the crash-recovery path (only pids that are still stopped *and* still the same executable get
@@ -225,8 +228,10 @@ this layer decides *when* to ask and *what to do* with the answer.
   `ProcessEnforcerTests`.
 - **One record per killed process, one `episodeID` per pass.** A record used to describe the whole
   pass — "claude" plus thirty-four pids on one line — which answers neither "what exactly died" nor
-  "why so many". Each record now carries its pid, parent, resolved path and an `isDescendant` flag:
-  descendants are what explains dozens of kills for a single target.
+  "why so many". Each record now carries its pid, parent, resolved path and a `matchedBy` basis:
+  `rule` / `descendant` / `shell` — descendants are what explains dozens of kills for a single
+  target, and `shell` is the process that matched nothing and was stopped only because it holds
+  the target's terminal.
 - Journal dedup is by the pair **reason + pid**; both that set and `recordedReasons` are cleared
   only on `safe`. The same process under the same reason writes nothing twice; a relaunched one
   always writes.
@@ -301,10 +306,15 @@ this layer decides *when* to ask and *what to do* with the answer.
   the tick loop keeps signalling it — that is the bug that left three of the owner's processes
   in state `T` for hours with an empty `stopped.json`. An entry that survives that recovery is
   made visible in the same call, off the walk `resumeOrphans` already made:
-  `GuardVM.surfaceRecovered` seeds `pausedProcesses` from it (badge,
-  `fg` hint and «Показать терминал» — there is no pause episode in this launch, so the
-  kill-journal is silent by construction) and writes one `CheckEvent(trigger: .startupRecovery,
-  outcome: .standingProcessesRemain)` per recovery, not per tick.
+  `GuardVM.surfaceRecovered` seeds `pausedProcesses` from it (badge, `fg` hint and «Показать
+  терминал»), opens a kill-journal episode of its own for everything still standing
+  (`GuardVM.recordRecoveryEpisode`: `kind: paused`, reason «найдены остановленными от прошлого
+  запуска weto…», date from the ledger, `matchedBy: .shell` for a shell entry, resolution appended
+  by the same `resolvePauseEpisode`) and writes one `CheckEvent(trigger: .startupRecovery,
+  outcome: .standingProcessesRemain)` per recovery, not per tick. Both journals are needed: the
+  checks one answers "what did weto do at startup", the kill journal "why was this process
+  standing" — and the ledger cannot answer the latter, it drops an entry the moment the process
+  is observed running.
 - **Two notifications, two purposes, one delegate.** `notifyTerminated` is the pre-existing "your
   targets died" banner; `notifyBackgrounded` exists because a paused terminal target that loses its
   foreground job otherwise just vanishes from its terminal with no explanation — the notification

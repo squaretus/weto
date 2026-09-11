@@ -99,6 +99,13 @@ public final class GuardVM {
     @ObservationIgnored private var pauseStaleness: VerdictStaleness?
     @ObservationIgnored private var pauseEpisodeReason: String?
 
+    // Эпизод восстановления: процессы, найденные стоящими от прошлого запуска weto.
+    // Пробы за ними нет — поэтому это отдельный эпизод, а не продолжение чужого, — но
+    // остановил их weto, и журнал обязан их объяснить: «почему этот процесс стоял»
+    // спрашивают именно у журнала завершений. Исход дописывается ему там же,
+    // где и эпизоду паузы: по возобновлению, завершению или остановке охраны.
+    @ObservationIgnored private var recoveryEpisodeID: UUID?
+
     // pid, которым SIGCONT в текущем снятии паузы уже уходил. Цель, стоящая после
     // своего же сигнала, — это ответ, а не ожидание: обязательство держится дальше,
     // но журналу пора сказать, что возобновления не было.
@@ -569,7 +576,14 @@ public final class GuardVM {
         // один раз, и повтора журнал не допускает. А вот эпизод, закрытый исходом,
         // начинается заново — цель, остановленную после него снова, журнал обязан
         // описать, даже если её запись в учёте дожила с прошлой паузы.
-        let newcomers = outcome.fresh.filter { !pausedEpisodePIDs.contains($0.pid) }
+        //
+        // Шеллы идут тем же списком: объяснён обязан быть каждый SIGSTOP, а не только
+        // посланный цели. Шелл вошёл в план ради терминала цели, стоит он в том же
+        // эпизоде и по той же причине — и исход получит тот же, так что один эпизод
+        // объясняет всю заморозку целиком. Целями они при этом не становятся: пилюлю
+        // и уведомление про `fg` ниже получает только совпавший по правилу.
+        let stopped = outcome.fresh + outcome.freshShells
+        let newcomers = stopped.filter { !pausedEpisodePIDs.contains($0.pid) }
         guard !newcomers.isEmpty else { return }
 
         let episodeID = pauseEpisodeID ?? UUID()
@@ -692,11 +706,11 @@ public final class GuardVM {
     /// Учёт, доживший до нового запуска: SIGCONT этим записям только что ушёл,
     /// а ответа ядра в этой жизни процесса ещё никто не видел.
     ///
-    /// Эпизода паузы в этом запуске нет — журнал завершений про такие записи молчит
-    /// по построению, и без этого пользователь не узнал бы о стоящей цели ничего:
-    /// ни пилюли, ни подсказки про `fg`, ни следа в журналах. След остаётся там, где
-    /// ему место, — в журнале проверок с поводом «восстановление после падения»,
-    /// одной записью на восстановление, а не на такт.
+    /// Пробы за этим стоянием нет, поэтому эпизод у него свой — но эпизод есть:
+    /// остановил эти процессы weto, а «почему этот процесс стоял» спрашивают
+    /// у журнала завершений, и молчать ему там нельзя. Запись журнала проверок
+    /// остаётся на своём месте: она отвечает на другой вопрос — что именно weto
+    /// сделал на старте, — и пишется одна на восстановление, а не на такт.
     ///
     /// Обход приходит параметром: `resumeOrphans` только что прошёл по всем процессам,
     /// чтобы отличить стоящих от исчезнувших, и второй такой же проход дал бы то же самое
@@ -716,6 +730,7 @@ public final class GuardVM {
             pausedProcesses.append(PausedProcess(pid: entry.pid, targetName: name,
                                                  since: entry.stoppedAt, isBackgrounded: false))
         }
+        recordRecoveryEpisode(standing, in: scan)
         // Сигнал этим записям уже ушёл, поэтому следующее наблюдение — их ответ,
         // а не ожидание: иначе такт молча слал бы SIGCONT по второму разу.
         signalledForResume.formUnion(standing.map(\.pid))
@@ -727,6 +742,58 @@ public final class GuardVM {
             detail: "учёт остановленных: процессы \(standing.map(\.pid)) стояли на старте — "
                 + "продолжение отправлено, дальше их ведёт такт охраны"
         ))
+    }
+
+    /// Причина эпизода восстановления. Пробы за этим стоянием нет — и текст обязан
+    /// говорить это прямо, а не притворяться вердиктом: почему процессы встали,
+    /// рассказывает эпизод прошлой жизни weto, а этот отвечает за то, что они
+    /// пережили перезапуск.
+    static let recoveryReasonText =
+        "Найдены остановленными от прошлого запуска weto: пробы за этим стоянием нет"
+
+    /// Эпизод про то, что weto застал стоящим на старте. Записи те же, что у паузы
+    /// (`kind: paused`), и исход им дописывает общий `resolvePauseEpisode`:
+    /// возобновление, завершение по доказательству или остановка охраны.
+    ///
+    /// Имя цели берётся у текущих правил, а путь и родитель — у обхода: запись обязана
+    /// объяснять процесс, а не отсылать к учёту, которого читатель журнала не видит.
+    /// Цель, снятая пользователем с охраны между запусками, по имени не находится —
+    /// тогда именем служит сам бинарник, и это честнее пустой строки.
+    private func recordRecoveryEpisode(_ standing: [StoppedProcess], in scan: ProcessEnforcer.Scan) {
+        guard !standing.isEmpty else { return }
+        var nameByPID: [Int32: String] = [:]
+        for process in ProcessMatcher.matches(in: scan.processes, rules: scan.rules) {
+            nameByPID[process.pid] = process.targetName
+        }
+        var snapshotByPID: [Int32: ProcessSnapshot] = [:]
+        for process in scan.processes { snapshotByPID[process.pid] = process }
+
+        let episodeID = UUID()
+        let diagnostics = currentDiagnostics(staleness: nil)
+        eventLog.record(standing.map { entry in
+            KillEvent(
+                episodeID: episodeID,
+                // Дата записи — когда процесс встал, а не когда weto это заметил:
+                // стоит он с прошлой жизни, и «сейчас» в журнале было бы неправдой.
+                date: entry.stoppedAt,
+                targetName: nameByPID[entry.pid]
+                    ?? URL(fileURLWithPath: entry.executablePath).lastPathComponent,
+                pid: entry.pid,
+                parentPID: snapshotByPID[entry.pid]?.parentPID ?? 0,
+                executablePath: entry.executablePath,
+                // Шеллом запись сделал не текущий разбор, а учёт: ради терминала
+                // цели этот процесс остановили в прошлой жизни weto.
+                matchedBy: entry.isShell ? .shell : .rule,
+                kind: .paused,
+                reasonText: Self.recoveryReasonText,
+                ip: lastReading?.ip,
+                country: lastReading?.primaryCountry,
+                confirmedCountry: lastReading?.confirmedCountry,
+                confirmSource: lastReading?.confirmSource?.rawValue,
+                diagnostics: diagnostics
+            )
+        })
+        recoveryEpisodeID = episodeID
     }
 
     /// Исход эпизода, у которого возобновление наблюдалось.
@@ -773,21 +840,29 @@ public final class GuardVM {
     /// Исход эпизода паузы: записи те же, к ним дописывается, чем стояние кончилось.
     /// Без исхода запись навсегда остаётся с отговоркой «сервисы не ответили»,
     /// и пауза выглядит случайной.
+    ///
+    /// Эпизод восстановления закрывается тем же исходом и здесь же: стоящее с прошлой
+    /// жизни и остановленное сейчас кончается одним и тем же — SIGCONT, SIGKILL
+    /// или остановкой охраны, — и каждое стояние обязано быть объяснено до конца.
     private func resolvePauseEpisode(_ outcome: String) {
-        guard let episodeID = pauseEpisodeID else { return }
-        eventLog.refine(
-            episodeID: episodeID,
-            resolutionText: outcome,
-            ip: lastReading?.ip,
-            country: lastReading?.primaryCountry,
-            confirmedCountry: lastReading?.confirmedCountry,
-            confirmSource: lastReading?.confirmSource?.rawValue,
-            diagnostics: currentDiagnostics(staleness: pauseStaleness)
-        )
+        let episodes = [pauseEpisodeID, recoveryEpisodeID].compactMap { $0 }
+        guard !episodes.isEmpty else { return }
+        for episodeID in episodes {
+            eventLog.refine(
+                episodeID: episodeID,
+                resolutionText: outcome,
+                ip: lastReading?.ip,
+                country: lastReading?.primaryCountry,
+                confirmedCountry: lastReading?.confirmedCountry,
+                confirmSource: lastReading?.confirmSource?.rawValue,
+                diagnostics: currentDiagnostics(staleness: pauseStaleness)
+            )
+        }
         pauseEpisodeID = nil
         pausedEpisodePIDs.removeAll()
         pauseStaleness = nil
         pauseEpisodeReason = nil
+        recoveryEpisodeID = nil
     }
 
     private func terminateTargets(_ evidence: UnsafeEvidence) {
