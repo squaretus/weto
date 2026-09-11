@@ -9,7 +9,7 @@ pub mod geo_probe;
 pub mod network_events;
 pub mod network_snapshot;
 pub mod notifications;
-pub mod process_killer;
 pub mod process_registry;
+pub mod process_signaler;
 pub mod secret_store;
 pub mod target_resolver;

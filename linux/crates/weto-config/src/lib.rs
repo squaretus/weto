@@ -9,3 +9,4 @@ pub mod export;
 pub mod journal;
 pub mod paths;
 pub mod settings;
+pub mod stopped;

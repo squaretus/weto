@@ -30,8 +30,8 @@ use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
 use weto_sys::network_snapshot::KernelNetworkReader;
 use weto_sys::notifications::{KillNotifying, PortalNotifier};
-use weto_sys::process_killer::SigtermKiller;
 use weto_sys::process_registry::ProcRegistry;
+use weto_sys::process_signaler::ProcessSignaler;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
@@ -331,7 +331,10 @@ impl AppState {
             )),
             Box::new(FileSecretStore::new(paths.token_file())),
             Box::new(SettingsSource(settings.clone())),
-            ProcessEnforcer::new(Box::new(ProcRegistry::new()), Box::new(SigtermKiller)),
+            ProcessEnforcer::new(
+                Box::new(ProcRegistry::new()),
+                Box::new(ProcessSignaler::new()),
+            ),
             Box::new(writer),
             Box::new(CheckWriter {
                 paths: paths.clone(),

@@ -54,6 +54,13 @@ impl Paths {
     pub fn checks_file(&self) -> PathBuf {
         self.state_dir.join("checks.json")
     }
+
+    /// Учёт остановленных процессов. Не журнал, а обязательство: кому weto
+    /// послал SIGSTOP и кого обязан вернуть SIGCONT — в том числе после
+    /// собственного падения. Путь тот же, что назван каноном.
+    pub fn stopped_file(&self) -> PathBuf {
+        self.state_dir.join("stopped.json")
+    }
 }
 
 fn xdg(variable: &str, home: &std::path::Path, fallback: &str) -> PathBuf {
