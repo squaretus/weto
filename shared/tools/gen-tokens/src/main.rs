@@ -246,6 +246,7 @@ fn render_swift(tokens: &Tokens) -> String {
         "windowHeight",
         "controlHeight",
         "controlHeightCompact",
+        "badgeInset",
     ] {
         out.push_str(&number(&tokens.sizes, name));
     }

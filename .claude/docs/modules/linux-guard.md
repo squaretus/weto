@@ -18,7 +18,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic |
 | `weto-sys` | `network_events.rs` | netlink subscription |
 | `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, `T` state |
-| `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL` / `SIGTERM`, strictly in list order |
+| `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order |
 | `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq |
 | `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
 | `weto-sys` | `desktop_entries.rs` | the `.desktop` index over the XDG application directories |
@@ -184,7 +184,11 @@ Everything the policy decides is shared. What the system dictates is not:
 - **The journal keeps one record per killed process and one `episode_id` per pass**, same
   contract as `WetoShared`. `KillReporting` carries a `KillContext` — reason, geo readout,
   diagnostics — instead of a bare `&str`. `Journal::refine_episode` rewrites every record of the
-  episode; `refine_basis` rewrites only the records of one `MatchBasis`.
+  episode; `refine_basis` rewrites only the records of one `MatchBasis`. A record's `id` is
+  `{episode}-{n}` and `n` keeps counting across the passes of one episode (`StandingEpisode` in
+  `state.rs`): a pause lasts, and a target that joins it on a second pass — born under the pause,
+  or resumed and stopped again — would otherwise repeat `{episode}-0`. macOS gives every record
+  a UUID, and `id` is part of the shared export format.
 - **Everything weto sends `SIGSTOP` is explainable from the journal alone.** `KillReporting::paused`
   takes the targets, their descendants and the shell dragged along for the terminal
   (`MatchBasis::Shell`, named after the target it stood for); `recovered` opens its own episode for
@@ -195,11 +199,15 @@ Everything the policy decides is shared. What the system dictates is not:
   «Проверка» does not touch targets, so a kill is explained by its real cause from the first record.
 - **Terminating uses `SIGKILL`, not `SIGTERM`.** A stopped process runs no handler, so `SIGTERM`
   would queue until something resumed it and the target would stay alive and frozen. The canon
-  names `SIGKILL` for both platforms.
+  names `SIGKILL` for both platforms, so the boundary does not offer a soft signal at all:
+  `ProcessSignal` is `Kill` / `Stop` / `Resume`, and a `Terminate` variant nothing sent was
+  removed rather than left as an invitation.
 - The episode ledger lives in `weto_core::episode::EpisodeLedger`, not in the app layer:
-  the rule is identical on both platforms, and the app crate has no tests — a mistake in it
-  showed up only on a live machine, as "launch blocked" records for a process killed for the
-  first time. `episode_finished` fires on **every** transition to safe, not just for an episode
+  the rule is identical on both platforms, and the app crate is all but untestable — a mistake in
+  it showed up only on a live machine, as "launch blocked" records for a process killed for the
+  first time. What little of it can be tested is tested in place (`#[cfg(test)] mod tests` in
+  `state.rs` and `main.rs`): per-record journal ids and the exit funnel.
+  `episode_finished` fires on **every** transition to safe, not just for an episode
   that began before the verdict: that call is where the ledger is reset.
 - Dedup is by the pair **reason + pid**. It used to be by reason alone, which never let a target
   launched mid-episode into the journal at all: the user saw a kill the journal did not remember,
@@ -250,7 +258,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-360 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+363 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
@@ -292,8 +300,13 @@ them, so the rules stay under test.
    pids get reused), a `startupRecovery` / `standingProcessesRemain` record in the checks journal,
    and its own kill-journal episode. An unreadable ledger leaves a `ledgerUnreadable` record.
 5. `shutdown()` resumes everything on a clean exit and admits it cannot observe the result: the
-   outcome is «не подтверждено …, weto проверит их при следующем запуске». Wired into the tray's
-   quit item and both destructive buttons in the settings window.
+   outcome is «не подтверждено …, weto проверит их при следующем запуске». It hangs off one funnel —
+   `application.connect_shutdown` in `main.rs` — because buttons are not an exit path: GApplication
+   quits by itself once the last window is gone, and that route left the targets standing. A
+   `SIGTERM` handler turns the session logout into the same `quit`, so it goes through the funnel
+   too. The one hand-written call left is the uninstall button, where the order is load-bearing
+   (resume before the ledger file is deleted); `shutdown()` is idempotent, and the second call at
+   exit finds an empty ledger and does nothing.
 
 ## Not here yet
 

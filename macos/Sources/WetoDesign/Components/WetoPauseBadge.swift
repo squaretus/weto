@@ -32,7 +32,7 @@ public struct WetoPauseBadge: View {
             .font(WetoTokens.data)
             .foregroundStyle(WetoTokens.amber.resolve(scheme))
             .padding(.horizontal, WetoTokens.space2)
-            .padding(.vertical, 2)
+            .padding(.vertical, WetoTokens.badgeInset)
             .background(Capsule().fill(WetoTokens.amber.resolve(scheme).opacity(0.16)))
             .accessibilityLabel("на паузе, \(Self.countdown(until: deadline, at: now))")
 

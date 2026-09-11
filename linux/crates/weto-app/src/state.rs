@@ -116,16 +116,47 @@ struct JournalWriter {
 
 #[derive(Default)]
 struct PauseEpisodes {
-    pause: Option<String>,
-    recovery: Option<String>,
+    pause: Option<StandingEpisode>,
+    recovery: Option<StandingEpisode>,
 }
 
 impl PauseEpisodes {
     fn open(&self) -> Vec<String> {
-        [self.pause.clone(), self.recovery.clone()]
-            .into_iter()
-            .flatten()
-            .collect()
+        [
+            self.pause.as_ref().map(|episode| episode.id.clone()),
+            self.recovery.as_ref().map(|episode| episode.id.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+/// Открытый эпизод стояния: идентификатор и счётчик уже выданных записей.
+///
+/// Счётчик продолжается внутри эпизода, а не начинается заново на каждом
+/// проходе: цель, попавшая в ту же паузу вторым заходом — родившаяся под ней
+/// или продолженная и остановленная снова, — получала бы `{эпизод}-0` во второй
+/// раз, и две разные записи журнала оказывались бы неразличимы по `id`.
+/// На macOS у записи свой UUID, а `id` — часть общего формата выгрузки.
+struct StandingEpisode {
+    id: String,
+    next: usize,
+}
+
+impl StandingEpisode {
+    fn new() -> StandingEpisode {
+        StandingEpisode {
+            id: new_id(),
+            next: 0,
+        }
+    }
+
+    /// Номер первой из `count` записей; счётчик сдвигается на все сразу.
+    fn take(&mut self, count: usize) -> usize {
+        let first = self.next;
+        self.next += count;
+        first
     }
 }
 
@@ -142,9 +173,11 @@ impl JournalWriter {
 
     /// Записи стояния: по записи на процесс, `kind: paused`, эпизод один.
     /// Момент приходит функцией — у паузы это «сейчас», у восстановления
-    /// с прошлого запуска момент из учёта.
+    /// с прошлого запуска момент из учёта. Нумерация продолжается с `first`:
+    /// эпизод один на всё стояние, а проходов внутри него бывает несколько.
     fn pause_events(
         episode_id: &str,
+        first: usize,
         stopped: &[MatchedProcess],
         context: &KillContext,
         at: impl Fn(usize) -> std::time::SystemTime,
@@ -153,7 +186,7 @@ impl JournalWriter {
             .iter()
             .enumerate()
             .map(|(order, process)| KillEvent {
-                id: format!("{episode_id}-{order}"),
+                id: format!("{episode_id}-{}", first + order),
                 episode_id: episode_id.to_string(),
                 at: at(order),
                 target_name: process.target_name.clone(),
@@ -209,11 +242,12 @@ impl KillReporting for JournalWriter {
         if stopped.is_empty() {
             return;
         }
-        let episode_id = {
+        let (episode_id, first) = {
             let mut episodes = self.pause_episodes.lock().expect("эпизоды стояния");
-            episodes.pause.get_or_insert_with(new_id).clone()
+            let episode = episodes.pause.get_or_insert_with(StandingEpisode::new);
+            (episode.id.clone(), episode.take(stopped.len()))
         };
-        let events = Self::pause_events(&episode_id, stopped, context, |_| {
+        let events = Self::pause_events(&episode_id, first, stopped, context, |_| {
             std::time::SystemTime::now()
         });
 
@@ -228,16 +262,17 @@ impl KillReporting for JournalWriter {
         if standing.is_empty() {
             return;
         }
-        let episode_id = {
+        let (episode_id, first) = {
             let mut episodes = self.pause_episodes.lock().expect("эпизоды стояния");
-            episodes.recovery.get_or_insert_with(new_id).clone()
+            let episode = episodes.recovery.get_or_insert_with(StandingEpisode::new);
+            (episode.id.clone(), episode.take(standing.len()))
         };
         let processes: Vec<MatchedProcess> = standing
             .iter()
             .map(|recovered| recovered.process.clone())
             .collect();
         // Дата записи — когда процесс встал, а не когда weto это заметил.
-        let events = Self::pause_events(&episode_id, &processes, context, |order| {
+        let events = Self::pause_events(&episode_id, first, &processes, context, |order| {
             standing[order].stopped_at
         });
 
@@ -648,4 +683,65 @@ fn os_version() -> String {
     std::fs::read_to_string("/proc/version")
         .map(|text| text.trim().to_string())
         .unwrap_or_else(|_| "неизвестно".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(pid: i32) -> MatchedProcess {
+        MatchedProcess {
+            pid,
+            target_name: "claude".to_string(),
+            parent_pid: 1,
+            executable_path: "/usr/bin/claude".to_string(),
+            matched_by: MatchBasis::Rule,
+        }
+    }
+
+    /// `id` записи — ключ, которым разбор выгрузки отличает одну запись от другой.
+    /// Эпизод стояния живёт всё стояние, и проходов внутри него бывает несколько:
+    /// цель, родившаяся под паузой, встаёт вторым проходом того же эпизода —
+    /// и до этой правки получала `{эпизод}-0` во второй раз.
+    #[test]
+    fn a_second_pass_of_the_same_episode_does_not_repeat_a_record_id() {
+        let mut episode = StandingEpisode::new();
+        let context = KillContext::default();
+
+        let first_pass = [process(10), process(11)];
+        let first = episode.take(first_pass.len());
+        let mut events =
+            JournalWriter::pause_events(&episode.id, first, &first_pass, &context, |_| {
+                std::time::SystemTime::UNIX_EPOCH
+            });
+
+        let second_pass = [process(12)];
+        let next = episode.take(second_pass.len());
+        events.extend(JournalWriter::pause_events(
+            &episode.id,
+            next,
+            &second_pass,
+            &context,
+            |_| std::time::SystemTime::UNIX_EPOCH,
+        ));
+
+        let ids: Vec<&str> = events.iter().map(|event| event.id.as_str()).collect();
+        let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "повторившийся id: {ids:?}");
+        // Эпизод при этом один: записи объясняются вместе и получают один исход.
+        assert!(events.iter().all(|event| event.episode_id == episode.id));
+    }
+
+    /// У разных эпизодов — разные идентификаторы, и счётчик записей у каждого свой:
+    /// стояние с прошлого запуска и пауза этого живут рядом.
+    #[test]
+    fn two_episodes_number_their_records_independently() {
+        let mut pause = StandingEpisode::new();
+        let mut recovery = StandingEpisode::new();
+
+        assert_ne!(pause.id, recovery.id);
+        assert_eq!(pause.take(2), 0);
+        assert_eq!(recovery.take(1), 0);
+        assert_eq!(pause.take(1), 2);
+    }
 }

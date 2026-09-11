@@ -292,7 +292,7 @@ impl ProcessSignaling for World {
                         process.is_stopped = background;
                     }
                 }
-                ProcessSignal::Kill | ProcessSignal::Terminate => {
+                ProcessSignal::Kill => {
                     world.processes.retain(|p| p.pid != *pid);
                 }
             }

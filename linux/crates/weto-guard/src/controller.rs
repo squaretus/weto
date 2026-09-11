@@ -234,6 +234,11 @@ pub struct GuardController {
     checks: Box<dyn CheckReporting>,
     inner: Mutex<Inner>,
     probe_in_flight: Arc<AtomicBool>,
+    /// Штатный выход случается один раз. Воронка выхода одна, но удаление зовёт
+    /// выход и руками — цели обязаны продолжиться раньше, чем исчезнет учёт, —
+    /// и без этого признака второй вызов слал бы SIGCONT по второму разу
+    /// и заново сохранял бы уже удалённый файл учёта.
+    shut_down: AtomicBool,
     coalesce_window: Duration,
     now: Clock,
 }
@@ -271,6 +276,7 @@ impl GuardController {
                 snapshot: GuardSnapshot::default(),
             }),
             probe_in_flight: Arc::new(AtomicBool::new(false)),
+            shut_down: AtomicBool::new(false),
             coalesce_window: COALESCE_WINDOW,
             now: Box::new(SystemTime::now),
         }
@@ -969,7 +975,15 @@ impl GuardController {
     /// восстановлению при следующем запуске. Журнал говорит ровно то, что
     /// установлено: «не возобновлено» здесь было бы такой же неправдой, как
     /// «возобновлено», — стоящими записи показал обход, снятый ДО сигнала.
+    ///
+    /// Второй вызов не делает ничего. Выход проходит одной воронкой, но удаление
+    /// зовёт его и руками, раньше сноса учёта, — а повтор без этого стоил бы
+    /// второго SIGCONT (учёт-то не опустел: наблюдать результат нечем)
+    /// и сохранения уже удалённого файла учёта.
     pub fn shutdown(&self) {
+        if self.shut_down.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let settings = self.settings.settings();
         let outcome = self.enforcer.resume(None, &HashSet::new());
         let refused: Vec<i32> = outcome

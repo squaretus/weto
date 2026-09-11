@@ -109,9 +109,9 @@ fn moving_the_route_off_the_tunnel_re_verifies_without_touching_the_targets() {
     assert!(h.controller.snapshot().report.is_some());
 }
 
-/// Закрытый VPN-клиент — доказательство, а доказательство завершает: SIGKILL,
-/// не SIGTERM. Стоящий процесс обработчика не исполняет, и SIGTERM просто встал
-/// бы в очередь.
+/// Закрытый VPN-клиент — доказательство, а доказательство завершает, и завершает
+/// SIGKILL: мягкого сигнала граница не предлагает вовсе — стоящий процесс
+/// обработчика не исполняет, и SIGTERM просто встал бы в очередь.
 #[test]
 fn a_closed_vpn_app_is_noticed_locally_and_kills() {
     let h = harness();
@@ -122,7 +122,6 @@ fn a_closed_vpn_app_is_noticed_locally_and_kills() {
 
     assert_eq!(evidence(&phase), Some(&UnsafeEvidence::VpnAppNotRunning));
     assert_eq!(h.world.signalled(ProcessSignal::Kill), vec![42]);
-    assert!(h.world.signalled(ProcessSignal::Terminate).is_empty());
 }
 
 /// Упавший туннель виден по смене носителя трафика: вердикт недействителен,
