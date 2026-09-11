@@ -610,3 +610,56 @@ fn a_paused_record_round_trips_with_its_resolution() {
     assert_eq!(back, paused);
     assert_eq!(back.kind, KillEventKind::Paused);
 }
+
+/// Цель завершена, а шелл её терминала — продолжен: под общим исходом эпизода
+/// запись шелла лгала бы, он жив. Поэтому исход по основанию переписывается
+/// вторым, более узким проходом и не трогает остальные записи.
+#[test]
+fn a_shell_record_can_carry_its_own_outcome() {
+    let mut journal = Journal::default();
+    let mut shell = episode_event(100, "Сервисы не ответили", "стояние");
+    shell.kind = KillEventKind::Paused;
+    shell.matched_by = MatchBasis::Shell;
+    let mut target = episode_event(200, "Сервисы не ответили", "стояние");
+    target.kind = KillEventKind::Paused;
+    journal.append(vec![shell, target]);
+
+    journal.refine_episode(
+        "стояние",
+        None,
+        Some("завершено по доказательству: VPN-приложение не запущено"),
+        None,
+        None,
+    );
+    assert!(journal.refine_basis(
+        "стояние",
+        MatchBasis::Shell,
+        "продолжен: цель завершена по доказательству: VPN-приложение не запущено"
+    ));
+
+    let by_pid = |pid: i32| {
+        journal
+            .entries()
+            .iter()
+            .find(|event| event.pid == pid)
+            .and_then(|event| event.resolution_text.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        by_pid(100),
+        "продолжен: цель завершена по доказательству: VPN-приложение не запущено"
+    );
+    assert_eq!(
+        by_pid(200),
+        "завершено по доказательству: VPN-приложение не запущено"
+    );
+}
+
+/// Записей с таким основанием у эпизода нет — переписывать нечего.
+#[test]
+fn a_narrow_refinement_says_when_it_found_nothing() {
+    let mut journal = Journal::default();
+    journal.append(vec![episode_event(200, "Сервисы не ответили", "стояние")]);
+
+    assert!(!journal.refine_basis("стояние", MatchBasis::Shell, "продолжен"));
+}

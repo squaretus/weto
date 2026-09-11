@@ -12,15 +12,19 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
 | `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
 | `weto-core` | `ip.rs` | address validation and CIDR |
-| `weto-core` | `presentation.rs` | status wording, `ShieldState` |
+| `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the 60 s ceiling |
+| `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `PausedProcess`, `RecoveredProcess` |
+| `weto-core` | `presentation.rs` | status wording, `ShieldState`, `AppliedDecision::from_phase` |
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic |
 | `weto-sys` | `network_events.rs` | netlink subscription |
-| `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root |
-| `weto-sys` | `process_killer.rs` | `SIGTERM` |
+| `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, `T` state |
+| `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL` / `SIGTERM`, strictly in list order |
 | `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq |
 | `weto-sys` | `secret_store.rs` | token file, mode `0600` |
 | `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings, ring-buffer journal, XDG paths |
-| `weto-guard` | `controller.rs`, `enforcer.rs` | state machine, one `/proc` pass per tick |
+| `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
+| `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping |
+| `weto-guard` | `enforcer.rs` | one `/proc` pass per tick: pause, resume, terminate, the ledger |
 | `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
 
 ## Boundary invariant
@@ -53,9 +57,10 @@ the whole of what the Linux side is allowed to differ in:
 | — | tray context menu (check / settings / quit) | SNI needs one; the popup carries the same actions |
 | country flag in the menu bar | country name as text | no flag rendering here yet; the set ships with macOS only |
 | app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
-| `Pending`/`Unproven` show «Проверяю выход»/«Выход не подтверждён» (targets keep running / are paused) | same phases show «Проверка подключения»/«Ipinfo недоступен» (`ConfirmationUnavailable`: «Подтверждение недоступно») — targets are killed | the pause port (SIGSTOP/SIGCONT) has not landed on Linux; those two phases still kill here, so borrowing the macOS words would tell the user their targets are running or paused when they are dead — see `AppliedDecision.status_title` in `weto-core/src/presentation.rs` |
+| a pill per standing target, a countdown to the ceiling and the `fg` hint | nothing yet | the screen still reads `AppliedDecision`, not `GuardPhase`; `GuardSnapshot` already carries `phase`, `paused` and `pause_deadline` |
+| `Verifying`/`Paused` show «Проверяю выход»/«Выход не подтверждён» | same phases show «Проверка подключения»/«Ipinfo недоступен» (`ConfirmationUnavailable`: «Подтверждение недоступно») | wording follows the screen, and the screen has not been ported yet; the canonical titles already live in `GuardPhase::title` — see `AppliedDecision::status_title` in `weto-core/src/presentation.rs` |
 
-Everything else matches, including every wording that does not depend on this pause gap: the
+Everything else matches, including every wording that does not depend on the unported screen: the
 settings window is the same six cards in the same order
 (`Цели`, `Сеть и гео`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
 footer (github link, version, update tile), and the status popup is shield + title +
@@ -123,10 +128,19 @@ Everything the policy decides is shared. What the system dictates is not:
   whitelist existed loads as an empty one.
 - **The journal keeps one record per killed process and one `episode_id` per pass**, same
   contract as `WetoShared`. `KillReporting` carries a `KillContext` — reason, geo readout,
-  diagnostics — instead of a bare `&str`: `report` fires only when something was actually killed,
-  and by the time the verdict is known the targets are already dead, so `refine` and
-  `resolved_safe` exist as separate calls. Without them the records keep saying "not verified yet"
-  forever. `Journal::refine_episode` rewrites every record of the episode.
+  diagnostics — instead of a bare `&str`. `Journal::refine_episode` rewrites every record of the
+  episode; `refine_basis` rewrites only the records of one `MatchBasis`.
+- **Everything weto sends `SIGSTOP` is explainable from the journal alone.** `KillReporting::paused`
+  takes the targets, their descendants and the shell dragged along for the terminal
+  (`MatchBasis::Shell`, named after the target it stood for); `recovered` opens its own episode for
+  processes found standing at start-up, dated when they stopped rather than when weto noticed;
+  `pause_resolved` appends the outcome to both. One episode per standing, no second record for the
+  same pid, and a shell released while its target is killed gets «продолжен …» instead of
+  «завершено» — it is alive. The reason "not verified yet" no longer exists as a journal entry:
+  «Проверка» does not touch targets, so a kill is explained by its real cause from the first record.
+- **Terminating uses `SIGKILL`, not `SIGTERM`.** A stopped process runs no handler, so `SIGTERM`
+  would queue until something resumed it and the target would stay alive and frozen. The canon
+  names `SIGKILL` for both platforms.
 - The episode ledger lives in `weto_core::episode::EpisodeLedger`, not in the app layer:
   the rule is identical on both platforms, and the app crate has no tests — a mistake in it
   showed up only on a live machine, as "launch blocked" records for a process killed for the
@@ -175,9 +189,13 @@ predates the whitelist keeps its exact previous meaning. Both `weto-core/tests/p
 between platforms fails a test naming the case, instead of surfacing as a kill-switch
 that quietly stopped working on one OS.
 
+`shared/fixtures/guard-transitions.json` does the same for the reducer, and it is read here too
+(`weto-core/tests/guard_transition_fixtures.rs`): the policy answers about one moment, but a
+divergence between the implementations lives in the transitions.
+
 ## Testing
 
-196 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+326 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. Everything that cannot be
 faked — a real WireGuard tunnel, the look of the tray icon — is covered by the
@@ -192,12 +210,40 @@ checklists in `linux/docs/manual-check.md` and `linux/docs/manual-ui-check.md`.
 | `weto-update` | release check, show policy, install into `$HOME`, rollback |
 | `weto-app` | `weto` binary: status window, settings, update banner and window |
 
+## How a pause plays out here
+
+`GuardController` owns the reducer and does what it decides; there is no VM layer between
+them, so the rules stay under test.
+
+1. A probe answers *unproven* → `GuardEffect::Pause`. `ProcessEnforcer::pause` builds the plan
+   (`pause_plan::plan`) and sends `SIGSTOP` in order — shell, target, descendants — writing every
+   delivered pid into `stopped.json`. Processes the user had already stopped (`T`) are in
+   `plan.skipped` and get nothing.
+2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the bad
+   result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
+   restart it. At 60 s the phase becomes `Danger(PauseExpired)` and the targets are killed.
+3. A good answer gives `GuardEffect::Resume` — but the obligation is discharged by observation,
+   not by delivery. `settle_resume` runs on **every** pass with running targets while the ledger is
+   non-empty: it sends `SIGCONT` bottom-up and strikes an entry off only once the kernel shows the
+   process running (or gone). A real background job answers each `SIGCONT` with another stop; after
+   `RESUME_RETRY_LIMIT` (3, same as macOS) observed stops it stops being signalled — `notify` in zsh
+   would otherwise print `suspended (tty input)` once a second — but the entry stays on the books
+   and the journal says «не возобновлено … командой fg», never «возобновлено».
+4. `recover_stopped()` runs before the first tick: `SIGCONT` by identity (pid **and** path, because
+   pids get reused), a `startupRecovery` / `standingProcessesRemain` record in the checks journal,
+   and its own kill-journal episode. An unreadable ledger leaves a `ledgerUnreadable` record.
+5. `shutdown()` resumes everything on a clean exit and admits it cannot observe the result: the
+   outcome is «не подтверждено …, weto проверит их при следующем запуске». Wired into the tray's
+   quit item and both destructive buttons in the settings window.
+
 ## Not here yet
 
 Secret Service over D-Bus — the token lives in a `0600` file. Country flags and
 per-target icons are not fetched, so the status window shows generic glyphs.
 
-**Pause instead of kill.** The core mirrors the three-outcome policy
-(`Unproven` / `Kill(evidence)`), but the controller still applies *unproven* as the old kill
-(`AppliedDecision`). SIGSTOP/SIGCONT, the stopped ledger and the pause pill are the next plan;
-the transitions fixture `shared/fixtures/guard-transitions.json` is not yet read here.
+**The pause has no face yet.** The behaviour is complete and the transitions fixture
+`shared/fixtures/guard-transitions.json` is read by both runners, but GTK still renders
+`AppliedDecision`: no pill per standing target, no countdown, no `fg` hint, and the status
+titles are the interim ones. Everything the screen needs is already in `GuardSnapshot`
+(`phase`, `paused`, `pause_deadline`). Notifications about a target going to the background
+(macOS `notifyBackgrounded`) are not sent either.

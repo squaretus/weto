@@ -60,6 +60,34 @@ impl PausePlan {
     }
 }
 
+/// Стоящая цель — то, что интерфейс показывает пилюлей с отсчётом. Порт
+/// `PausedProcess` с macOS: там же лежит и правило про `is_backgrounded` —
+/// признак дописывает наблюдение, а не догадка плана паузы.
+///
+/// Шеллы сюда не попадают: они получили SIGSTOP ради терминала цели, объяснены
+/// журналом, но целями не являются и пилюли не заводят.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PausedProcess {
+    pub pid: i32,
+    pub target_name: String,
+    /// Когда цель встала. У восстановленной с прошлого запуска — момент из учёта,
+    /// а не «сейчас»: стоит она с прошлой жизни weto.
+    pub since: std::time::SystemTime,
+    /// Терминал цели забрал шелл: SIGCONT её не поднимет, нужен `fg`.
+    pub is_backgrounded: bool,
+}
+
+/// Процесс, застигнутый стоящим на старте: учёт пережил падение weto.
+///
+/// Момент едет отдельным полем, потому что запись журнала датируется тем, когда
+/// процесс встал, а не тем, когда weto это заметил: стоит он с прошлой жизни,
+/// и «сейчас» в журнале было бы неправдой.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredProcess {
+    pub process: MatchedProcess,
+    pub stopped_at: std::time::SystemTime,
+}
+
 pub fn plan(matched: &[MatchedProcess], processes: &[ProcessSnapshot]) -> PausePlan {
     let by_pid: HashMap<i32, &ProcessSnapshot> = processes.iter().map(|p| (p.pid, p)).collect();
     let tree = ProcessTree::new(processes);

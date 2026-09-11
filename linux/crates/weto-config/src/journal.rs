@@ -172,6 +172,32 @@ impl Journal {
         self.entries.truncate(CAPACITY);
     }
 
+    /// Исход, честный для записей одного основания.
+    ///
+    /// Нужен ровно одному случаю: цель эпизода паузы завершена, а шелл, вошедший
+    /// в план ради её терминала, — продолжен. Общее «завершено» в его записи было
+    /// бы неправдой, он жив. Вызывается вторым, более узким проходом после
+    /// `refine_episode`, и переписывает только `resolution_text`.
+    ///
+    /// `false` — записей с таким основанием у эпизода нет.
+    pub fn refine_basis(
+        &mut self,
+        episode_id: &str,
+        matched_by: MatchBasis,
+        resolution_text: &str,
+    ) -> bool {
+        let mut touched = false;
+        for event in self
+            .entries
+            .iter_mut()
+            .filter(|event| event.episode_id == episode_id && event.matched_by == matched_by)
+        {
+            event.resolution_text = Some(resolution_text.to_string());
+            touched = true;
+        }
+        touched
+    }
+
     /// Причина эпизода, ставшая известной, дописывается всем его записям.
     ///
     /// `false` — уточнять нечего, эпизод записи не оставил.

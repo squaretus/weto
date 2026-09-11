@@ -58,7 +58,12 @@ fn pump_events(receiver: &Receiver<TrayEvent>, app: &gtk4::Application, state: &
             },
             TrayEvent::CheckNow => state.probe_now(),
             TrayEvent::OpenSettings => crate::settings_window::present(app, state.clone()),
-            TrayEvent::Quit => app.quit(),
+            // Штатный выход замороженных целей не оставляет: SIGCONT уходит
+            // раньше, чем закрывается приложение.
+            TrayEvent::Quit => {
+                state.shutdown();
+                app.quit()
+            }
         }
     }
 }
