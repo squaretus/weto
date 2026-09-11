@@ -68,8 +68,13 @@ public final class EventLogStore {
     ///
     /// `reasonText` необязателен ровно поэтому: причина названа верно с самого начала,
     /// и у эпизода паузы меняется только исход.
+    ///
+    /// `matchedBy` сужает уточнение до одного основания записи: шелл в плане паузы
+    /// не завершается вместе с целью — его SIGCONT продолжает, — и исход у него честнее
+    /// сказать отдельным вызовом, не трогая записи с другим основанием того же эпизода.
     public func refine(
         episodeID: UUID,
+        matchedBy: MatchBasis? = nil,
         reasonText: String? = nil,
         resolutionText: String? = nil,
         ip: String? = nil,
@@ -79,7 +84,9 @@ public final class EventLogStore {
         diagnostics: KillDiagnostics? = nil
     ) {
         var touched = false
-        for index in events.indices where events[index].episodeID == episodeID {
+        for index in events.indices
+        where events[index].episodeID == episodeID
+            && (matchedBy == nil || events[index].matchedBy == matchedBy) {
             let event = events[index]
             events[index] = KillEvent(
                 id: event.id,

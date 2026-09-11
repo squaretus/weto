@@ -2843,6 +2843,47 @@ final class GuardVMTests: XCTestCase {
         h.vm.stop()
     }
 
+    /// На пути завершения `ProcessEnforcer.terminate` шлёт SIGKILL только совпавшим
+    /// под правило и их потомкам — шелл, вошедший в план ради терминала цели,
+    /// под правило не подходит и получает SIGCONT. Запись шелла обязана говорить
+    /// это прямо: «завершено» на живой, продолженный процесс — та же ложь,
+    /// которую этот файл проверяет для пути возобновления чуть выше.
+    func test_the_shell_record_is_released_not_terminated_on_the_kill_path() async {
+        let (h, locator, _) = makeForegroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertNil(h.log.events.first?.resolutionText, "стояние ещё не кончилось")
+
+        // Цели и шелл стоят, проверка называет заблокированную страну — доказательство.
+        locator.processes = foregroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome(primary: "RU"))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.signaler.killedBatches, [[200, 201]],
+                       "SIGKILL — цели и её потомку, шелл не под правилом")
+        XCTAssertEqual(h.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(h.signaler.batches.last?.pids, [100],
+                       "шелл жив: под доказательство он не попадает")
+
+        let byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        XCTAssertEqual(
+            byPID[200]?.resolutionText,
+            "завершено по доказательству: Обнаружена страна RU по данным ipinfo"
+        )
+        XCTAssertEqual(
+            byPID[201]?.resolutionText,
+            "завершено по доказательству: Обнаружена страна RU по данным ipinfo"
+        )
+        XCTAssertEqual(
+            byPID[100]?.resolutionText,
+            "продолжен: цель завершена по доказательству: Обнаружена страна RU по данным ipinfo",
+            "шелл — не цель: он продолжен, а не завершён, и запись обязана сказать это прямо"
+        )
+        h.vm.stop()
+    }
+
     /// Тот же сеанс с фоновым заданием, но собранный один раз: локатор меняет состояние
     /// процессов по ходу теста, учёт живёт своим хранилищем.
     private func makeBackgroundJobHarness(
@@ -2953,6 +2994,11 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.log.events.first { $0.pid == 100 }?.targetName, "zsh",
                        "цели у него нет — именем служит сам бинарник")
         XCTAssertEqual(h.log.events.first { $0.pid == 200 }?.targetName, "nano")
+        XCTAssertEqual(h.log.events.first { $0.pid == 200 }?.matchedBy, .rule,
+                       "цель совпала сама, а не как чей-то потомок")
+        XCTAssertEqual(h.log.events.first { $0.pid == 201 }?.matchedBy, .descendant,
+                       "201 — потомок 200, и это знает обход, а не только учёт: "
+                           + "иначе карточка теряла бы «потомок 200»")
         // Исход дописывается по тому же правилу, что и эпизоду паузы: SIGCONT ушёл
         // на старте, а первый же такт увидел их всё ещё стоящими — это ответ, и журнал
         // называет его, не выдавая отправку сигнала за возобновление.

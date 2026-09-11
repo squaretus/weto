@@ -226,8 +226,9 @@ public final class GuardVM {
 
         // После падения: SIGCONT всем из учёта, кто ещё стоит и остался тем же процессом.
         // Запись, которую этот проход не разрешил, остаётся в учёте — дальше её ведёт
-        // такт охраны через `settleResume()`, — и обязана быть видимой: эпизода паузы
-        // в этом запуске нет, и без этого пользователь не узнал бы о стоящей цели ничего.
+        // такт охраны через `settleResume()`. Пробы за этим стоянием не было, но эпизод
+        // журнала есть: `surfaceRecovered` заводит его сам, иначе пользователь узнал бы
+        // о стоящей цели только по пилюле, а «почему» осталось бы без ответа.
         let recovered = enforcer.resumeOrphans()
         if !recovered.outcome.unresolved.isEmpty {
             surfaceRecovered(recovered.outcome.unresolved, in: recovered.observed)
@@ -759,11 +760,17 @@ public final class GuardVM {
     /// объяснять процесс, а не отсылать к учёту, которого читатель журнала не видит.
     /// Цель, снятая пользователем с охраны между запусками, по имени не находится —
     /// тогда именем служит сам бинарник, и это честнее пустой строки.
+    ///
+    /// Основание — тоже у обхода, а не у догадки «не шелл, значит правило»: обход
+    /// уже знает, потомком чьей цели оказался процесс, и без этого «потомок N»
+    /// пропадал бы из карточки, притворяясь совпадением по правилу.
     private func recordRecoveryEpisode(_ standing: [StoppedProcess], in scan: ProcessEnforcer.Scan) {
         guard !standing.isEmpty else { return }
         var nameByPID: [Int32: String] = [:]
+        var basisByPID: [Int32: MatchBasis] = [:]
         for process in ProcessMatcher.matches(in: scan.processes, rules: scan.rules) {
             nameByPID[process.pid] = process.targetName
+            basisByPID[process.pid] = process.matchedBy
         }
         var snapshotByPID: [Int32: ProcessSnapshot] = [:]
         for process in scan.processes { snapshotByPID[process.pid] = process }
@@ -782,8 +789,9 @@ public final class GuardVM {
                 parentPID: snapshotByPID[entry.pid]?.parentPID ?? 0,
                 executablePath: entry.executablePath,
                 // Шеллом запись сделал не текущий разбор, а учёт: ради терминала
-                // цели этот процесс остановили в прошлой жизни weto.
-                matchedBy: entry.isShell ? .shell : .rule,
+                // цели этот процесс остановили в прошлой жизни weto. Разбор этого
+                // не знает и не обязан — про шелл рассказывает только учёт.
+                matchedBy: entry.isShell ? .shell : (basisByPID[entry.pid] ?? .rule),
                 kind: .paused,
                 reasonText: Self.recoveryReasonText,
                 ip: lastReading?.ip,
@@ -844,7 +852,14 @@ public final class GuardVM {
     /// Эпизод восстановления закрывается тем же исходом и здесь же: стоящее с прошлой
     /// жизни и остановленное сейчас кончается одним и тем же — SIGCONT, SIGKILL
     /// или остановкой охраны, — и каждое стояние обязано быть объяснено до конца.
-    private func resolvePauseEpisode(_ outcome: String) {
+    ///
+    /// `shellOutcome` — исход, честный для записи с основанием `.shell`, когда он
+    /// расходится с исходом цели: `ProcessEnforcer.terminate` шлёт SIGKILL только
+    /// совпавшим под правило и его потомкам, а шелла, вошедшего в план ради терминала
+    /// цели, возвращает SIGCONT — под общим «завершено» его запись лгала бы, ведь
+    /// он жив и продолжен, а не мёртв. Второй, более узкий вызов `refine` переписывает
+    /// исход только записи с этим основанием, не трогая остальные записи эпизода.
+    private func resolvePauseEpisode(_ outcome: String, shellOutcome: String? = nil) {
         let episodes = [pauseEpisodeID, recoveryEpisodeID].compactMap { $0 }
         guard !episodes.isEmpty else { return }
         for episodeID in episodes {
@@ -857,6 +872,18 @@ public final class GuardVM {
                 confirmSource: lastReading?.confirmSource?.rawValue,
                 diagnostics: currentDiagnostics(staleness: pauseStaleness)
             )
+            if let shellOutcome {
+                eventLog.refine(
+                    episodeID: episodeID,
+                    matchedBy: .shell,
+                    resolutionText: shellOutcome,
+                    ip: lastReading?.ip,
+                    country: lastReading?.primaryCountry,
+                    confirmedCountry: lastReading?.confirmedCountry,
+                    confirmSource: lastReading?.confirmSource?.rawValue,
+                    diagnostics: currentDiagnostics(staleness: pauseStaleness)
+                )
+            }
         }
         pauseEpisodeID = nil
         pausedEpisodePIDs.removeAll()
@@ -879,8 +906,13 @@ public final class GuardVM {
 
         // Исход эпизода паузы: те же pid новых записей не заводят.
         let skip = pausedEpisodePIDs
-        let prefix = evidence == .pauseExpired ? "завершено по потолку" : "завершено по доказательству"
-        resolvePauseEpisode("\(prefix): \(reasonKey)")
+        let cause = evidence == .pauseExpired ? "по потолку" : "по доказательству"
+        // Шелл под доказательство не попадает: `ProcessEnforcer.terminate` возвращает
+        // ему SIGCONT, а не SIGKILL, — «завершено» в его записи было бы неправдой.
+        resolvePauseEpisode(
+            "завершено \(cause): \(reasonKey)",
+            shellOutcome: "продолжен: цель завершена \(cause): \(reasonKey)"
+        )
         pausedProcesses.removeAll()
 
         // Уведомление — про то, что действительно завершено сейчас, включая цели,
