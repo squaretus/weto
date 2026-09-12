@@ -234,11 +234,25 @@ pub struct GuardController {
     checks: Box<dyn CheckReporting>,
     inner: Mutex<Inner>,
     probe_in_flight: Arc<AtomicBool>,
-    /// Штатный выход случается один раз. Воронка выхода одна, но удаление зовёт
-    /// выход и руками — цели обязаны продолжиться раньше, чем исчезнет учёт, —
-    /// и без этого признака второй вызов слал бы SIGCONT по второму разу
-    /// и заново сохранял бы уже удалённый файл учёта.
-    shut_down: AtomicBool,
+    /// Ворота применения решения к процессам — и признак штатного выхода под
+    /// теми же воротами.
+    ///
+    /// Такт идёт в своём потоке, а выход зовёт GTK из главного, и признаком
+    /// одним их не развести: такт, уже применяющий решение, успевал послать
+    /// SIGSTOP **после** последнего SIGCONT, а размораживать цель после выхода
+    /// некому — такта больше не будет. Ворота дают обе половины сразу: такт,
+    /// начавшийся после выхода, не делает ничего, а такт, уже вошедший
+    /// в применение, выход дожидается. Держатся они ровно на применение (обход,
+    /// сигналы, учёт), а не на весь такт: ждать за ними пробу значило бы держать
+    /// выход приложения пять секунд таймаута ipinfo.
+    ///
+    /// Порядок захвата всегда «ворота, потом `inner`» — обратного нет нигде.
+    ///
+    /// `true` — выход уже был. Воронка выхода одна, но удаление зовёт его
+    /// и руками (цели обязаны продолжиться раньше, чем исчезнет учёт), и без
+    /// этого признака второй вызов слал бы SIGCONT по второму разу и заново
+    /// сохранял бы уже удалённый файл учёта.
+    enforcement: Mutex<bool>,
     coalesce_window: Duration,
     now: Clock,
 }
@@ -276,7 +290,7 @@ impl GuardController {
                 snapshot: GuardSnapshot::default(),
             }),
             probe_in_flight: Arc::new(AtomicBool::new(false)),
-            shut_down: AtomicBool::new(false),
+            enforcement: Mutex::new(false),
             coalesce_window: COALESCE_WINDOW,
             now: Box::new(SystemTime::now),
         }
@@ -314,6 +328,13 @@ impl GuardController {
             .clone()
     }
 
+    /// Штатный выход уже был: применять решение к процессам больше нельзя
+    /// никому. По нему поток охраны и выходит из своего цикла — крутиться
+    /// пустым тактом ему незачем.
+    pub fn is_shut_down(&self) -> bool {
+        *self.enforcement.lock().expect("ворота применения")
+    }
+
     /// Сколько цели ещё могут стоять. `None` — не стоят.
     pub fn remaining_pause(&self) -> Option<Duration> {
         self.inner
@@ -341,6 +362,12 @@ impl GuardController {
     // --- такт ---------------------------------------------------------------
 
     fn run(&self, trigger: ProbeTrigger) -> GuardPhase {
+        // Такт, начавшийся после штатного выхода, не делает ничего: цели уже
+        // продолжены, а тронуть он их может только в одну сторону — обратно
+        // в стояние, из которого их никто не выведет.
+        if self.is_shut_down() {
+            return self.phase();
+        }
         let settings = self.settings.settings();
         let network = self.network.snapshot();
         let config = settings.guard_config();
@@ -501,6 +528,16 @@ impl GuardController {
     /// Обход процессов на всё применение один: и сигналы, и список живых целей,
     /// и наблюдение за учётом обязаны описывать один и тот же момент.
     fn dispatch(&self, input: GuardInput, settings: &Settings) -> GuardPhase {
+        // Ворота на всё применение: редьюсер, обход, сигналы и учёт — один шаг
+        // относительно штатного выхода. Такт, вошедший сюда раньше выхода,
+        // выход дожидается; такт, подошедший после, разворачивается здесь —
+        // проба, начатая до выхода, иначе ставила бы цели на паузу уже после
+        // последнего SIGCONT.
+        let gate = self.enforcement.lock().expect("ворота применения");
+        if *gate {
+            return self.phase();
+        }
+
         let moment = (self.now)();
         let (effect, phase) = {
             let mut inner = self.inner.lock().expect("состояние охраны");
@@ -860,6 +897,14 @@ impl GuardController {
     /// у журнала завершений, и молчать ему там нельзя. Запись журнала проверок
     /// отвечает на другой вопрос — что именно weto сделал на старте.
     pub fn recover_stopped(&self) {
+        // Восстановление — то же применение к процессам, и идти вперемежку
+        // со штатным выходом ему нельзя: выход, случившийся посреди него,
+        // не увидел бы половину учёта.
+        let gate = self.enforcement.lock().expect("ворота применения");
+        if *gate {
+            return;
+        }
+
         let settings = self.settings.settings();
         let fingerprint = self.network.snapshot().verdict_fingerprint();
 
@@ -980,10 +1025,17 @@ impl GuardController {
     /// зовёт его и руками, раньше сноса учёта, — а повтор без этого стоил бы
     /// второго SIGCONT (учёт-то не опустел: наблюдать результат нечем)
     /// и сохранения уже удалённого файла учёта.
+    ///
+    /// Ворота берутся до всего: такт, уже применяющий решение, обязан
+    /// закончиться раньше последнего SIGCONT, а начавшийся после — не начаться
+    /// вовсе. Иначе SIGSTOP уходил бы вслед за выходом, и цель оставалась
+    /// стоять до следующего запуска weto.
     pub fn shutdown(&self) {
-        if self.shut_down.swap(true, Ordering::SeqCst) {
+        let mut gate = self.enforcement.lock().expect("ворота применения");
+        if *gate {
             return;
         }
+        *gate = true;
         let settings = self.settings.settings();
         let outcome = self.enforcer.resume(None, &HashSet::new());
         let refused: Vec<i32> = outcome
