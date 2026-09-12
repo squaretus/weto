@@ -435,6 +435,118 @@ fn a_standing_target_is_recorded_once_per_episode() {
     assert_eq!(s.reporter.paused_pids(), after_first);
 }
 
+// --- рождённые под красным статусом ------------------------------------------
+
+/// Цель, запущенная, когда охрана уже стоит, обязана встать наравне с остальными.
+///
+/// Её запуск не меняет фазу, а значит не приносит и перехода — применяться
+/// обязано действие текущей фазы, каждый такт. Живого системного события про
+/// запуск терминального процесса не существует, ловить её больше нечем, и ровно
+/// за этим под красным статусом такт учащается до 250 мс. Порт macOS
+/// `GuardVM.applyCurrentAction`.
+#[test]
+fn a_target_born_under_the_pause_is_stopped_by_the_next_tick() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+    assert_eq!(s.world.signalled(Stop), vec![100, 200, 201]);
+
+    // Второй терминал: пользователь запустил claude, пока цели стоят.
+    s.world.add(process(300, 1, "/usr/bin/zsh", 300, 400));
+    s.world.add(process(400, 300, CLAUDE, 400, 400));
+
+    let phase = s.controller.tick();
+
+    assert_eq!(phase.action(), GuardAction::Pause, "{phase:?}");
+    assert_eq!(
+        s.world.signalled(Stop),
+        vec![100, 200, 201, 300, 400],
+        "порядок «шелл, потом цель» держится и у новорождённой: {:?}",
+        s.world.signals()
+    );
+    assert!(s.world.is_stopped(400));
+    assert_eq!(
+        ledger_pids(&s),
+        vec![100, 200, 201, 300, 400],
+        "обязательство «вернуть из паузы» распространяется и на новорождённую"
+    );
+
+    // Записи новорождённой — в том же эпизоде и с его причиной: свой текст
+    // она не приносит, а про уже описанные pid второй записи не бывает.
+    let recorded = s.reporter.recorded();
+    let mut pids: Vec<i32> = recorded.paused.iter().map(|entry| entry.pid).collect();
+    pids.sort_unstable();
+    assert_eq!(pids, vec![100, 200, 201, 300, 400]);
+    assert!(
+        recorded
+            .paused
+            .iter()
+            .all(|entry| entry.reason == "Не удалось определить внешний адрес: таймаут запроса"),
+        "{:?}",
+        recorded.paused
+    );
+    let newcomer = recorded
+        .paused
+        .iter()
+        .find(|entry| entry.pid == 400)
+        .expect("новорождённая цель обязана быть объяснена");
+    assert_eq!(newcomer.matched_by, MatchBasis::Rule);
+    assert_eq!(newcomer.target_name, "claude");
+    let shell = recorded
+        .paused
+        .iter()
+        .find(|entry| entry.pid == 300)
+        .expect("шелл новорождённой обязан быть объяснён");
+    assert_eq!(shell.matched_by, MatchBasis::Shell);
+    assert_eq!(shell.target_name, "claude");
+    drop(recorded);
+
+    // И снятие паузы у неё общее с остальными: обратный порядок внутри
+    // собственного плана — цель, потом её шелл.
+    s.geo.everything_answers_again();
+    s.controller.probe_now();
+    assert_eq!(s.world.signalled(Resume), vec![400, 300, 201, 200, 100]);
+}
+
+/// Под «Опасно» запуск целей запрещён, и запрет держится не одним переходом:
+/// цель, запущенная заново, завершается следующим же тактом и получает свою
+/// запись журнала с той же причиной.
+#[test]
+fn a_target_relaunched_under_danger_is_killed_by_the_next_tick() {
+    let s = stand();
+    guarded(&s);
+
+    s.geo.now_reports("RU");
+    let danger = s.controller.probe_now();
+    assert!(matches!(danger, GuardPhase::Danger(_)), "{danger:?}");
+    assert_eq!(s.world.signalled(Kill), vec![200, 201]);
+
+    // Пользователь запустил claude заново, пока статус красный.
+    s.world.add(process(400, 100, CLAUDE, 400, 400));
+
+    let phase = s.controller.tick();
+
+    assert_eq!(phase.action(), GuardAction::Terminate, "{phase:?}");
+    assert_eq!(s.world.signalled(Kill), vec![200, 201, 400]);
+    assert!(!s.world.is_alive(400));
+
+    let recorded = s.reporter.recorded();
+    assert_eq!(recorded.killed, vec![200, 201, 400]);
+    assert_eq!(
+        recorded.recordable,
+        vec![200, 201, 400],
+        "у запущенной под запретом цели своя запись, а старые не задваиваются"
+    );
+    assert!(
+        recorded
+            .kill_reasons
+            .iter()
+            .all(|reason| reason.contains("RU")),
+        "{:?}",
+        recorded.kill_reasons
+    );
+}
+
 /// Цель завершена по доказательству, а шелл — продолжен: под общим «завершено»
 /// его запись лгала бы, он жив.
 #[test]

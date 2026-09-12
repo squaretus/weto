@@ -34,9 +34,7 @@ use weto_config::settings::Settings;
 use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading};
-use weto_core::guard_machine::{
-    GuardAction, GuardEffect, GuardInput, GuardMachine, GuardPhase, PAUSE_CEILING,
-};
+use weto_core::guard_machine::{GuardAction, GuardInput, GuardMachine, GuardPhase, PAUSE_CEILING};
 use weto_core::network::NetworkSnapshot;
 use weto_core::network::VpnAppStatus;
 use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
@@ -539,26 +537,35 @@ impl GuardController {
         }
 
         let moment = (self.now)();
-        let (effect, phase) = {
+        let phase = {
             let mut inner = self.inner.lock().expect("состояние охраны");
-            let effect = inner.machine.apply(input, moment);
-            (effect, inner.machine.phase().clone())
+            // Эффект перехода здесь не нужен: применяется действие текущей фазы,
+            // и на переходе оно даёт ровно то же самое. Редьюсеру важно, что
+            // вход применён, — фаза после этого и есть решение.
+            inner.machine.apply(input, moment);
+            inner.machine.phase().clone()
         };
 
         let rules = settings.target_rules();
         let scan = self.enforcer.scan(&rules);
 
-        match effect {
-            // Снятие паузы разбирается ниже, в ветке работающих целей:
-            // обязательство держится до наблюдения, и разбирает его каждый проход
-            // с работающими целями, а не только тот, что принёс эффект.
-            GuardEffect::Pause => self.pause_targets(&scan, settings, &phase),
-            GuardEffect::Terminate => {
+        // Применяется действие фазы, а не эффект перехода: цель, родившаяся
+        // под паузой или под запретом, перехода не вызывает, и поймать её больше
+        // нечем — живого системного события про запуск терминального процесса
+        // без Endpoint Security не существует, а под красным статусом такт
+        // и идёт учащённо ровно ради этого. Порт `GuardVM.applyCurrentAction`
+        // с macOS, где то же делает сторож.
+        match phase.action() {
+            GuardAction::Pause => self.pause_targets(&scan, settings, &phase),
+            GuardAction::Terminate => {
                 if let GuardPhase::Danger(evidence) = &phase {
                     self.terminate_targets(&scan, settings, evidence);
                 }
             }
-            GuardEffect::None | GuardEffect::Resume => {}
+            // Снятие паузы разбирается ниже, в ветке работающих целей:
+            // обязательство держится до наблюдения, и разбирает его каждый проход
+            // с работающими целями, а не только тот, что принёс переход.
+            GuardAction::Run => {}
         }
 
         if phase.action() == GuardAction::Run {
