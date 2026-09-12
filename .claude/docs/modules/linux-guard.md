@@ -282,16 +282,27 @@ and `linux/docs/manual-ui-check.md`.
 `GuardController` owns the reducer and does what it decides; there is no VM layer between
 them, so the rules stay under test.
 
-1. A probe answers *unproven* → `GuardEffect::Pause`. `ProcessEnforcer::pause` builds the plan
-   (`pause_plan::plan`) and sends `SIGSTOP` in order — shell, target, descendants — writing every
-   delivered pid into `stopped.json`. Processes the user had already stopped (`T`) are in
-   `plan.skipped` and get nothing. `StoppedLedger::add` keys on pid **and** path, like everything
-   else that identifies an entry: an entry with the same pid but another path is a dead owner of a
-   recycled number, so the fresh record replaces it at the tail (the ledger is the stop order).
+1. A probe answers *unproven* → the phase becomes `Paused`, whose action is `Pause`.
+   `ProcessEnforcer::pause` builds the plan (`pause_plan::plan`) and sends `SIGSTOP` in order —
+   shell, target, descendants — writing every delivered pid into `stopped.json`. Processes the user
+   had already stopped (`T`) are in `plan.skipped` and get nothing. `StoppedLedger::add` keys on pid
+   **and** path, like everything else that identifies an entry: an entry with the same pid but
+   another path is a dead owner of a recycled number, so the fresh record replaces it at the tail
+   (the ledger is the stop order).
+
+   `dispatch()` applies **the current phase's action on every pass**, not the transition effect the
+   reducer returned. A target launched while the guard already stands causes no transition, and
+   nothing else can catch it — a launch event would need `CAP_NET_ADMIN` — which is exactly what the
+   250 ms tick under a red status is for. Same shape as macOS `GuardVM.applyCurrentAction`, driven
+   there by the watchdog. A newcomer joins the episode that is already open: it brings no reason of
+   its own, a pid already described gets no second record, its plan keeps the shell → target →
+   descendants order, and its ledger entry lands at the tail in stop order. Under `Danger` the same
+   re-application **is** the launch ban: `terminate_targets` runs each pass and kills whatever now
+   matches, with the episode's evidence as the reason.
 2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the bad
    result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
    restart it. At 60 s the phase becomes `Danger(PauseExpired)` and the targets are killed.
-3. A good answer gives `GuardEffect::Resume` — but the obligation is discharged by observation,
+3. A good answer moves the phase back to a `Run` action — but the obligation is discharged by observation,
    not by delivery. `settle_resume` runs on **every** pass with running targets while the ledger is
    non-empty: it sends `SIGCONT` bottom-up and strikes an entry off only once the kernel shows the
    process running (or gone). A real background job answers each `SIGCONT` with another stop; after
