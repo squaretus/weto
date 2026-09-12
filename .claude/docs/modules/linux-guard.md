@@ -308,7 +308,15 @@ them, so the rules stay under test.
    `SIGTERM` handler turns the session logout into the same `quit`, so it goes through the funnel
    too. The one hand-written call left is the uninstall button, where the order is load-bearing
    (resume before the ledger file is deleted); `shutdown()` is idempotent, and the second call at
-   exit finds an empty ledger and does nothing.
+   exit finds an empty ledger and does nothing. Idempotence and the exit flag live under one
+   mutex — `GuardController::enforcement` — which every pass through `dispatch()` (and
+   `recover_stopped()`) holds while it applies a decision to processes. The guard runs in its own
+   thread and `shutdown()` arrives from the GTK one: without those gates a tick already in flight
+   sent its `SIGSTOP` **after** the final `SIGCONT`, and nothing was left to thaw the target — the
+   ticks are over. A tick that arrives after the exit turns back at the gate, and the guard thread
+   leaves its loop on `is_shut_down()` instead of spinning as a no-op. The gates cover the
+   application only, not the probe: waiting behind a five-second ipinfo timeout would hang the
+   exit. Lock order is always `enforcement` → `inner`.
 
 ## Not here yet
 

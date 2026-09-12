@@ -7,16 +7,21 @@
 
 mod harness;
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use harness::{build, build_with_broken_ledger, detached, process, FakeSettings, Harness, World};
+use harness::{
+    build, build_with_broken_ledger, build_with_signaler, detached, process, FakeSettings, Harness,
+    World,
+};
 use weto_config::stopped::{StoppedLedger, StoppedProcess};
 use weto_core::check::{CheckOutcome, CheckTrigger};
 use weto_core::guard_machine::{GuardAction, GuardPhase};
 use weto_core::policy::UnsafeEvidence;
 use weto_core::process::{MatchBasis, ProcessSnapshot};
 use weto_sys::process_signaler::ProcessSignal::{Kill, Resume, Stop};
+use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
 
 const CLAUDE: &str = "/home/me/.local/bin/claude";
 
@@ -650,4 +655,154 @@ fn shutdown_twice_changes_nothing_the_second_time() {
     assert_eq!(s.world.signalled(Resume), signals_after_first);
     assert_eq!(s.reporter.resolutions(), resolutions_after_first);
     assert_eq!(s.controller.phase(), GuardPhase::Disabled);
+}
+
+/// Граница сигналов, умеющая замереть на первом SIGSTOP.
+///
+/// Подменяется та же граница, что и всегда, — просто она умеет придержать такт
+/// ровно посреди применения решения. Иначе поймать гонку «выход против такта»
+/// нечем: она измеряется тем, что происходит между двумя сигналами.
+#[derive(Clone)]
+struct Trap {
+    world: World,
+    arm: Arc<AtomicBool>,
+    entered: Arc<(Mutex<bool>, Condvar)>,
+    released: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Trap {
+    fn over(world: World) -> Trap {
+        Trap {
+            world,
+            arm: Arc::new(AtomicBool::new(false)),
+            entered: Arc::new((Mutex::new(false), Condvar::new())),
+            released: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    /// Следующий SIGSTOP замрёт внутри границы.
+    fn arm(&self) {
+        self.arm.store(true, Ordering::SeqCst);
+    }
+
+    fn wait_until_entered(&self) {
+        let (lock, cv) = &*self.entered;
+        let mut entered = lock.lock().unwrap();
+        while !*entered {
+            let (guard, timeout) = cv
+                .wait_timeout(entered, Duration::from_secs(10))
+                .expect("ожидание такта");
+            assert!(!timeout.timed_out(), "такт не дошёл до отправки SIGSTOP");
+            entered = guard;
+        }
+    }
+
+    fn release(&self) {
+        let (lock, cv) = &*self.released;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+}
+
+impl ProcessSignaling for Trap {
+    fn send(&self, signal: ProcessSignal, pids: &[i32]) -> Vec<SignalResult> {
+        if signal == Stop && self.arm.swap(false, Ordering::SeqCst) {
+            let (lock, cv) = &*self.entered;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+
+            let (lock, cv) = &*self.released;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cv.wait(released).unwrap();
+            }
+        }
+        self.world.send(signal, pids)
+    }
+}
+
+/// Такт и штатный выход идут в разных потоках, и без общих ворот такт успевал
+/// послать SIGSTOP **после** последнего SIGCONT: цель оставалась стоять, а вывести
+/// её из стояния было уже некому — такта после выхода не будет.
+///
+/// Такт здесь пойман ровно на отправке SIGSTOP, и выход зовётся, пока такт ещё
+/// идёт. Правильный исход один: выход дожидается такта и продолжает всё,
+/// что тот успел остановить.
+#[test]
+fn a_tick_in_flight_cannot_leave_anything_stopped_after_shutdown() {
+    let world = World::of(terminal_session());
+    let trap = Trap::over(world.clone());
+    let s = build_with_signaler(
+        FakeSettings::guarding(&[CLAUDE]),
+        world,
+        Box::new(trap.clone()),
+    );
+
+    let phase = s.controller.tick();
+    assert!(matches!(phase, GuardPhase::Protected(_)), "{phase:?}");
+
+    s.geo.everything_goes_silent();
+    trap.arm();
+
+    std::thread::scope(|scope| {
+        let ticking = scope.spawn(|| s.controller.probe_now());
+        trap.wait_until_entered();
+        let exiting = scope.spawn(|| s.controller.shutdown());
+        // Выход обязан упереться в ворота, а не проскочить мимо такта. Ждать
+        // этого нечем, кроме времени: ворота изнутри не видны.
+        std::thread::sleep(Duration::from_millis(200));
+        trap.release();
+        ticking.join().expect("такт");
+        exiting.join().expect("выход");
+    });
+
+    let signals = s.world.signals();
+    let last_resume = signals
+        .iter()
+        .rposition(|(signal, _)| *signal == Resume)
+        .expect("штатный выход обязан послать SIGCONT");
+    assert!(
+        !signals[last_resume..]
+            .iter()
+            .any(|(signal, _)| *signal == Stop),
+        "после последнего SIGCONT не бывает SIGSTOP: {signals:?}"
+    );
+
+    for pid in [100, 200, 201] {
+        assert!(
+            !s.world.is_stopped(pid),
+            "штатный выход замороженных целей не оставляет: {pid} остался стоять"
+        );
+    }
+    let resumed = s.world.signalled(Resume);
+    for pid in StoppedLedger::load(&s.ledger_path).pids() {
+        assert!(
+            resumed.contains(&pid),
+            "запись {pid} осталась в учёте без SIGCONT: {signals:?}"
+        );
+    }
+}
+
+/// Вторая половина того же: такт, начавшийся после выхода, не делает ничего.
+/// Флага у вершины такта для этого мало — но и ворот без флага мало: событие сети
+/// будит поток охраны, и он пошёл бы ставить цели на паузу уже после выхода.
+#[test]
+fn a_tick_after_shutdown_touches_nothing() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+
+    s.controller.shutdown();
+    let signals = s.world.signals();
+    let ledger = ledger_pids(&s);
+
+    let phase = s.controller.tick();
+    assert_eq!(phase, GuardPhase::Disabled);
+
+    assert_eq!(s.world.signals(), signals, "ни одного нового сигнала");
+    assert_eq!(ledger_pids(&s), ledger, "учёт не переписан");
+    assert!(
+        s.controller.is_shut_down(),
+        "по этому признаку поток охраны и выходит из своего цикла"
+    );
 }

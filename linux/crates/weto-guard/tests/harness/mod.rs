@@ -574,7 +574,30 @@ pub fn build(
         store.add(ledger);
         store.save(&ledger_path).expect("учёт записался");
     }
-    build_over(window, settings, world, home, ledger_path)
+    let signaler = Box::new(world.clone());
+    build_over(window, settings, world, signaler, home, ledger_path)
+}
+
+/// Стенд, у которого сигналы идут через свою границу поверх того же мира.
+///
+/// Нужен ровно там, где тесту надо замереть внутри прохода — например, поймать
+/// такт на отправке SIGSTOP и позвать штатный выход, пока такт ещё идёт.
+/// Подменяется при этом та же граница, что и всегда, а не внутренности охраны.
+pub fn build_with_signaler(
+    settings: FakeSettings,
+    world: World,
+    signaler: Box<dyn ProcessSignaling>,
+) -> Harness {
+    let home = tempfile::tempdir().expect("временный каталог");
+    let ledger_path = home.path().join("stopped.json");
+    build_over(
+        std::time::Duration::ZERO,
+        settings,
+        world,
+        signaler,
+        home,
+        ledger_path,
+    )
 }
 
 /// Стенд поверх испорченного файла учёта. Отдельной сборкой, потому что учёт
@@ -584,10 +607,12 @@ pub fn build_with_broken_ledger(settings: FakeSettings, world: World) -> Harness
     let home = tempfile::tempdir().expect("временный каталог");
     let ledger_path = home.path().join("stopped.json");
     std::fs::write(&ledger_path, "{ это не json").expect("файл записался");
+    let signaler = Box::new(world.clone());
     build_over(
         std::time::Duration::ZERO,
         settings,
         world,
+        signaler,
         home,
         ledger_path,
     )
@@ -597,6 +622,7 @@ fn build_over(
     window: std::time::Duration,
     settings: FakeSettings,
     world: World,
+    signaler: Box<dyn ProcessSignaling>,
     home: tempfile::TempDir,
     ledger_path: std::path::PathBuf,
 ) -> Harness {
@@ -610,11 +636,7 @@ fn build_over(
         Box::new(geo.clone()),
         Box::new(NoSecret),
         Box::new(settings.clone()),
-        ProcessEnforcer::new(
-            Box::new(world.clone()),
-            Box::new(world.clone()),
-            ledger_path.clone(),
-        ),
+        ProcessEnforcer::new(Box::new(world.clone()), signaler, ledger_path.clone()),
         Box::new(reporter.clone()),
         Box::new(checks.clone()),
     )

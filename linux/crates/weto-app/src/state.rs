@@ -654,6 +654,12 @@ impl AppState {
                 controller.recover_stopped();
                 let events = NetlinkEventSource.subscribe();
                 loop {
+                    // Штатный выход уже прошёл: цели продолжены, и такту здесь
+                    // делать нечего. Пустым тактом поток не крутится — он
+                    // кончается вместе с охраной.
+                    if controller.is_shut_down() {
+                        break;
+                    }
                     let phase = controller.tick();
                     // Шаг штатного тика перечитывается каждый раз: правка
                     // в настройках применяется со следующего же круга. Чаще —
