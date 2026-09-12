@@ -65,6 +65,65 @@ fn the_same_pid_is_not_recorded_twice_and_the_order_is_kept() {
     assert_eq!(ledger.pids(), vec![200, 201]);
 }
 
+/// Число ядро переиспользует, и запись про мёртвого владельца этого числа
+/// не имеет права вытеснить свежую: пара «pid + путь» у них разная, а значит
+/// это разные процессы — так их и различает всё остальное (`pause`, `settle`).
+/// Дедупликация по одному pid теряла свежую запись целиком: SIGSTOP ей уже
+/// послан, в учёт она не попадала, следующий проход вычёркивал по несовпадению
+/// путей чужую — и размораживать цель становилось некому.
+///
+/// Свежая встаёт в хвост: учёт хранит стоп-порядок, `resume` идёт по нему
+/// в обратную сторону, а остановлена она позже всего, что уже лежит.
+#[test]
+fn a_recycled_pid_replaces_the_stale_entry_instead_of_dropping_the_fresh_one() {
+    let mut ledger = StoppedLedger::default();
+    ledger.add(&[entry(100, false), entry(200, false), entry(300, false)]);
+
+    let fresh = StoppedProcess {
+        pid: 200,
+        executable_path: "/usr/bin/claude".to_string(),
+        stopped_at: UNIX_EPOCH + Duration::from_secs(1_756_400_000),
+        is_shell: false,
+    };
+    assert!(
+        ledger.add(std::slice::from_ref(&fresh)),
+        "учёт обязан измениться"
+    );
+
+    assert_eq!(
+        ledger
+            .entries()
+            .iter()
+            .map(|e| e.executable_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/usr/bin/цель-100", "/usr/bin/цель-300", "/usr/bin/claude"],
+        "запись про мёртвого владельца pid уступает место свежей"
+    );
+    assert_eq!(ledger.pids(), vec![100, 300, 200]);
+    assert_eq!(ledger.entries()[2].stopped_at, fresh.stopped_at);
+}
+
+/// Порядок партии при этом свой: переставить местами цель с её шеллом значило бы
+/// сломать контракт сигналов, по которому `resume` идёт задом наперёд.
+#[test]
+fn a_replacement_keeps_the_order_of_its_own_batch() {
+    let mut ledger = StoppedLedger::default();
+    ledger.add(&[entry(200, true)]);
+
+    ledger.add(&[
+        StoppedProcess {
+            pid: 200,
+            executable_path: "/usr/bin/zsh".to_string(),
+            stopped_at: UNIX_EPOCH + Duration::from_secs(1_756_400_000),
+            is_shell: true,
+        },
+        entry(201, false),
+        entry(202, false),
+    ]);
+
+    assert_eq!(ledger.pids(), vec![200, 201, 202]);
+}
+
 #[test]
 fn removal_and_clearing_report_whether_anything_changed() {
     let mut ledger = StoppedLedger::default();

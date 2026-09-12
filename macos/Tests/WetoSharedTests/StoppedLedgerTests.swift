@@ -31,6 +31,41 @@ final class StoppedLedgerTests: XCTestCase {
         XCTAssertEqual(ledger.pids, [200, 201])
     }
 
+    /// Число ядро переиспользует, и запись про мёртвого владельца этого числа
+    /// не имеет права вытеснить свежую: пара «pid + путь» у них разная, а значит
+    /// это разные процессы — так их и различает всё остальное (`pause`, `settle`).
+    /// Дедупликация по одному pid теряла свежую запись целиком: SIGSTOP ей уже
+    /// послан, в учёт она не попадала, следующий проход вычёркивал по несовпадению
+    /// путей чужую — и размораживать цель становилось некому.
+    func test_a_recycled_pid_replaces_the_stale_entry_instead_of_dropping_the_fresh_one() {
+        let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        ledger.add([entry(100), entry(200), entry(300)])
+
+        let fresh = StoppedProcess(pid: 200, executablePath: "/usr/bin/claude",
+                                   stoppedAt: Date(timeIntervalSince1970: 2), isShell: false)
+        ledger.add([fresh])
+
+        XCTAssertEqual(ledger.entries.map(\.executablePath), ["/p/100", "/p/300", "/usr/bin/claude"],
+                       "запись про мёртвого владельца pid уступает место свежей")
+        XCTAssertEqual(ledger.pids, [100, 300, 200],
+                       "свежая встаёт в хвост: учёт хранит стоп-порядок, а остановлена она позже всех")
+    }
+
+    /// Порядок партии при этом свой: `resume` идёт по учёту в обратную сторону,
+    /// и переставить местами цель с её шеллом значило бы сломать контракт сигналов.
+    func test_a_replacement_keeps_the_order_of_its_own_batch() {
+        let ledger = StoppedLedger(storage: InMemoryStoppedLedger())
+        ledger.add([entry(200, shell: true)])
+
+        ledger.add([
+            StoppedProcess(pid: 200, executablePath: "/bin/zsh", stoppedAt: Date(timeIntervalSince1970: 2), isShell: true),
+            entry(201),
+            entry(202),
+        ])
+
+        XCTAssertEqual(ledger.pids, [200, 201, 202])
+    }
+
     func test_file_round_trips_through_a_temporary_directory() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let file = try XCTUnwrap(StoppedFile(directory: directory))

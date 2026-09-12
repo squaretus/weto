@@ -310,6 +310,43 @@ final class ProcessEnforcerTests: XCTestCase {
         XCTAssertEqual(Set(ledgerStorage.load().entries.map(\.pid)), [100, 200, 201])
     }
 
+    /// Цель, остановленная на переиспользованном pid, обязана доехать до учёта —
+    /// иначе размораживать её будет некому.
+    ///
+    /// Учёт, дедуплицировавший по одному pid, свежую запись отбрасывал: «pid уже
+    /// известен». В учёте оставалось описание мёртвого владельца числа, следующий
+    /// проход вычёркивал его по несовпадению путей — как исчезнувший, без SIGCONT, —
+    /// и цель, которой SIGSTOP уже послан, оставалась стоять навсегда: ни такт,
+    /// ни завершение, ни восстановление на старте её больше не видели.
+    func test_a_target_stopped_on_a_recycled_pid_is_recorded_and_later_resumed() {
+        let signaler = RecordingSignaler()
+        let storage = InMemoryStoppedLedger()
+        storage.save([
+            StoppedProcess(pid: target.pid, executablePath: "/usr/bin/some-other-dead-process",
+                           stoppedAt: Date(timeIntervalSince1970: 1), isShell: false),
+        ])
+        let locator = MutableProcessLocator([shell, target, child])
+        let enforcer = makeEnforcer(targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+                                    locator: locator, clock: TestClock(), signaler: signaler,
+                                    ledger: StoppedLedger(storage: storage))
+
+        _ = enforcer.pause(enforcer.scan())
+
+        XCTAssertEqual(storage.load().entries.map(\.executablePath),
+                       ["/bin/zsh", oldVersionPath, "/usr/bin/node"],
+                       "мёртвый владелец pid уступает место остановленной цели")
+
+        // Следующий проход: ядро показывает всех троих стоящими.
+        locator.replace(with: [Self.stopped(shell), Self.stopped(target), Self.stopped(child)])
+        _ = enforcer.resume(observing: enforcer.scan())
+
+        XCTAssertEqual(signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(signaler.batches.last?.pids, [201, 200, 100],
+                       "цель на переиспользованном pid обязана получить SIGCONT наравне со всеми")
+        XCTAssertEqual(storage.load().entries.map(\.pid), [100, 200, 201],
+                       "обязательство держится до наблюдения: они всё ещё стоят")
+    }
+
     /// Второй обход под паузой не шлёт SIGSTOP уже стоящим — только новорождённым.
     ///
     /// «Уже стоит по нашей вине» спрашивается у ядра, а не у одного учёта: с тех пор

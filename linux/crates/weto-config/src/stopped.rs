@@ -11,6 +11,7 @@
 //! SIGCONT. Записи, дожившие до нового запуска, разбирает восстановление
 //! на старте.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -101,16 +102,32 @@ impl StoppedLedger {
 
     /// Порядок добавления сохраняется: продолжение идёт по нему в обратную
     /// сторону. `false` — учёт не изменился, и писать файл незачем.
+    ///
+    /// Повтором считается та же пара «pid + путь» — ровно та, по которой запись
+    /// опознают `ProcessEnforcer::pause` и `settle`. Прежняя запись с тем же pid,
+    /// но другим путём, заведомо мертва: двум живым процессам одно число ядро
+    /// не выдаёт, — и она уступает место свежей. Иначе свежая терялась целиком:
+    /// SIGSTOP ей уже послан, в учёт она не попадала, а следующий проход вычёркивал
+    /// по несовпадению путей чужую запись — и размораживать цель становилось некому.
+    ///
+    /// Свежая запись встаёт в хвост, а не на место вытесненной: учёт хранит
+    /// порядок остановки, и остановлена она сейчас — позже всего, что уже лежит.
     pub fn add(&mut self, fresh: &[StoppedProcess]) -> bool {
-        let known = self.pids();
+        let known: HashSet<(i32, &str)> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.pid, entry.executable_path.as_str()))
+            .collect();
         let additions: Vec<StoppedProcess> = fresh
             .iter()
-            .filter(|entry| !known.contains(&entry.pid))
+            .filter(|entry| !known.contains(&(entry.pid, entry.executable_path.as_str())))
             .cloned()
             .collect();
         if additions.is_empty() {
             return false;
         }
+        let recycled: HashSet<i32> = additions.iter().map(|entry| entry.pid).collect();
+        self.entries.retain(|entry| !recycled.contains(&entry.pid));
         self.entries.extend(additions);
         true
     }

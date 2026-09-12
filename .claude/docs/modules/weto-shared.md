@@ -143,7 +143,12 @@ this layer decides *when* to ask and *what to do* with the answer.
   the resume side is driven by `GuardVM.settleResume()` from `apply`'s `.run` branch and from
   every `handle(_:)` (a newsless tick never reaches `apply` — `GuardController.emit` swallows it).
 - Writes `stopped.json` on every ledger `add`/`remove`/`clear` — atomic temp+rename, same pattern
-  as the journals.
+  as the journals. `add` dedupes by the same identity the rest of the code uses — pid **and**
+  path — and an entry whose pid matches but whose path differs is provably dead (one pid, one live
+  process), so the fresh record replaces it and goes to the tail: the ledger holds the stop order,
+  and the replacement was stopped now. Deduping by pid alone silently dropped the fresh record, and
+  the next pass struck the stale one off as recycled — without `SIGCONT`, leaving the target frozen
+  with nothing on the books to thaw it.
 - `UserDefaults` writes on every settings setter (write-through, no batching) and on every
   journal `record`/`clear`.
 - Keychain write on `setIPInfoToken`; `Maintenance.uninstall` writes `nil` to the same account.
