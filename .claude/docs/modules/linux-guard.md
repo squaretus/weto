@@ -285,7 +285,9 @@ them, so the rules stay under test.
 1. A probe answers *unproven* → `GuardEffect::Pause`. `ProcessEnforcer::pause` builds the plan
    (`pause_plan::plan`) and sends `SIGSTOP` in order — shell, target, descendants — writing every
    delivered pid into `stopped.json`. Processes the user had already stopped (`T`) are in
-   `plan.skipped` and get nothing.
+   `plan.skipped` and get nothing. `StoppedLedger::add` keys on pid **and** path, like everything
+   else that identifies an entry: an entry with the same pid but another path is a dead owner of a
+   recycled number, so the fresh record replaces it at the tail (the ledger is the stop order).
 2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the bad
    result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
    restart it. At 60 s the phase becomes `Danger(PauseExpired)` and the targets are killed.

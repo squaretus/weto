@@ -124,12 +124,32 @@ public final class StoppedLedger {
 
     public var pids: [Int32] { entries.map(\.pid) }
 
+    /// Запись опознаётся парой «pid + путь» — ровно так же, как её опознают
+    /// `ProcessEnforcer.pause` и `settle`. Учёт по одному pid отличать их не мог.
+    private struct Identity: Hashable {
+        let pid: Int32
+        let executablePath: String
+    }
+
     /// Порядок добавления сохраняется: продолжение идёт по нему в обратную сторону.
+    ///
+    /// Повтором считается та же пара «pid + путь»: она уже стоит в учёте на своём
+    /// месте в стоп-порядке, и переписывать её нечем. А вот прежняя запись с тем же
+    /// pid, но другим путём, — провально мёртвая: двум живым процессам одно число
+    /// ядро не выдаёт. Она уступает место свежей, иначе свежая терялась целиком:
+    /// SIGSTOP ей уже послан, в учёт она не попадала, а следующий проход вычёркивал
+    /// по несовпадению путей чужую запись — и размораживать цель становилось некому.
+    ///
+    /// Свежая запись встаёт в хвост, а не на место вытесненной: учёт хранит порядок
+    /// остановки, и остановлена она сейчас — позже всего, что в учёте уже лежит.
     public func add(_ fresh: [StoppedProcess]) {
-        let known = Set(pids)
-        let additions = fresh.filter { !known.contains($0.pid) }
+        let known = Set(entries.map { Identity(pid: $0.pid, executablePath: $0.executablePath) })
+        let additions = fresh.filter {
+            !known.contains(Identity(pid: $0.pid, executablePath: $0.executablePath))
+        }
         guard !additions.isEmpty else { return }
-        entries.append(contentsOf: additions)
+        let recycled = Set(additions.map(\.pid))
+        entries = entries.filter { !recycled.contains($0.pid) } + additions
         storage.save(entries)
     }
 
