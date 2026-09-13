@@ -9,6 +9,7 @@
 //!   wetod --watch          цикл охраны с реакцией на события сети
 
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::Arc;
 use std::time::Duration;
 
 use weto_config::paths::Paths;
@@ -67,8 +68,8 @@ impl KillReporting for PrintingReporter {
     }
 }
 
-fn build_controller(paths: &Paths) -> GuardController {
-    GuardController::new(
+fn build_controller(paths: &Paths) -> Arc<GuardController> {
+    Arc::new(GuardController::new(
         Box::new(KernelNetworkReader::new()),
         Box::new(HttpGeoProbe::new(
             GeoEndpoints::default(),
@@ -83,7 +84,7 @@ fn build_controller(paths: &Paths) -> GuardController {
         ),
         Box::new(PrintingReporter),
         Box::new(SilentChecks),
-    )
+    ))
 }
 
 fn main() {
@@ -126,7 +127,11 @@ fn dump_network(paths: &Paths) {
 
 fn check(paths: &Paths) {
     let controller = build_controller(paths);
-    let phase = controller.probe_now();
+    // Проба уходит своей дорожкой, и охране ждать её незачем — а разовому
+    // вопросу без ответа печатать нечего.
+    controller.probe_now();
+    controller.await_probe();
+    let phase = controller.phase();
     let snapshot = controller.snapshot();
 
     let text = presentation::explanation(&phase, controller.remaining_pause());

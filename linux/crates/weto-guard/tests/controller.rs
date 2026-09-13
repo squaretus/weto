@@ -6,12 +6,14 @@
 
 mod harness;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use harness::{harness, harness_with_window, Harness};
+use harness::{detached, harness, harness_with_window, Harness};
 use weto_core::check::{CheckOutcome, CheckTrigger};
 use weto_core::guard_machine::{GuardAction, GuardPhase};
 use weto_core::policy::{UnprovenReason, UnsafeEvidence};
+use weto_sys::background::ThreadDispatcher;
 use weto_sys::process_signaler::ProcessSignal;
 
 fn evidence(phase: &GuardPhase) -> Option<&UnsafeEvidence> {
@@ -41,7 +43,7 @@ fn walks_in(h: &Harness, pass: impl FnOnce()) -> usize {
 fn the_first_tick_leaves_the_targets_running_until_the_probe_answers() {
     let h = harness();
 
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert!(is_protected(&phase), "{phase:?}");
     assert_eq!(h.geo.call_count(), 1);
@@ -56,9 +58,9 @@ fn the_first_tick_leaves_the_targets_running_until_the_probe_answers() {
 #[test]
 fn a_routine_tick_with_a_healthy_vpn_does_not_touch_the_targets() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
 
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert!(is_protected(&phase));
     assert!(h.world.signals().is_empty());
@@ -77,11 +79,11 @@ fn a_routine_tick_with_a_healthy_vpn_does_not_touch_the_targets() {
 #[test]
 fn a_foreign_vpn_reconnecting_does_not_touch_the_targets() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
 
     // Снимок пересобран заново, носитель трафика тот же.
     h.network.route_moves_to("wg0");
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert!(is_protected(&phase));
     assert!(h.world.signals().is_empty());
@@ -98,12 +100,12 @@ fn a_foreign_vpn_reconnecting_does_not_touch_the_targets() {
 #[test]
 fn moving_the_route_off_the_tunnel_re_verifies_without_touching_the_targets() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
     let probes_before = h.geo.call_count();
 
     h.geo.now_reports("KZ");
     h.network.route_moves_to("eth0");
-    h.controller.tick();
+    h.tick();
 
     assert!(
         h.world.signals().is_empty(),
@@ -122,10 +124,10 @@ fn moving_the_route_off_the_tunnel_re_verifies_without_touching_the_targets() {
 #[test]
 fn a_closed_vpn_app_is_noticed_locally_and_kills() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
 
     h.world.vpn_app_closes();
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert_eq!(evidence(&phase), Some(&UnsafeEvidence::VpnAppNotRunning));
     assert_eq!(h.world.signalled(ProcessSignal::Kill), vec![42]);
@@ -136,11 +138,11 @@ fn a_closed_vpn_app_is_noticed_locally_and_kills() {
 #[test]
 fn a_tunnel_that_went_down_invalidates_the_verdict() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
     let probes_before = h.geo.call_count();
 
     h.network.tunnel_goes_down();
-    h.controller.tick();
+    h.tick();
 
     assert!(h.geo.call_count() > probes_before);
 }
@@ -149,12 +151,12 @@ fn a_tunnel_that_went_down_invalidates_the_verdict() {
 #[test]
 fn editing_the_settings_invalidates_the_verdict() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
     let calls_before = h.geo.call_count();
 
     h.settings
         .edit(|s| s.blocked_countries.push("DE".to_string()));
-    h.controller.tick();
+    h.tick();
 
     assert_eq!(
         h.geo.call_count(),
@@ -168,12 +170,12 @@ fn editing_the_settings_invalidates_the_verdict() {
 #[test]
 fn editing_the_whitelist_invalidates_the_verdict() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
     let calls_before = h.geo.call_count();
 
     h.settings
         .edit(|s| s.add_allowed_entry("NL").expect("запись валидна"));
-    h.controller.tick();
+    h.tick();
 
     assert_eq!(h.geo.call_count(), calls_before + 1);
 }
@@ -184,12 +186,12 @@ fn editing_the_whitelist_invalidates_the_verdict() {
 #[test]
 fn a_burst_of_changes_does_not_become_a_burst_of_requests() {
     let h = harness_with_window(Duration::from_millis(300));
-    h.controller.tick();
+    h.tick();
     let calls_after_first = h.geo.call_count();
 
     h.settings
         .edit(|s| s.blocked_countries.push("DE".to_string()));
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert_eq!(
         h.geo.call_count(),
@@ -204,7 +206,7 @@ fn a_burst_of_changes_does_not_become_a_burst_of_requests() {
     assert!(h.world.signals().is_empty());
 
     std::thread::sleep(Duration::from_millis(350));
-    h.controller.tick();
+    h.tick();
     assert_eq!(
         h.geo.call_count(),
         calls_after_first + 1,
@@ -215,11 +217,11 @@ fn a_burst_of_changes_does_not_become_a_burst_of_requests() {
 #[test]
 fn a_blocked_country_kills_and_names_the_source() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
 
     h.geo.now_reports("RU");
     h.settings.edit(|_| {}); // сбрасываем свежесть, чтобы проба ушла заново
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert_eq!(
         evidence(&phase),
@@ -241,11 +243,11 @@ fn a_blocked_country_kills_and_names_the_source() {
 #[test]
 fn the_journal_never_starts_with_an_unverified_excuse() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
 
     h.geo.now_reports("RU");
     h.settings.edit(|_| {});
-    h.controller.tick();
+    h.tick();
 
     let recorded = h.reporter.recorded();
     assert!(
@@ -271,7 +273,7 @@ fn the_journal_never_starts_with_an_unverified_excuse() {
 fn a_manual_check_is_recorded_with_its_traces() {
     let h = harness();
 
-    h.controller.probe_now();
+    h.probe_now();
 
     let checks = h.checks.events();
     let manual = checks
@@ -289,7 +291,7 @@ fn a_manual_check_is_recorded_with_its_traces() {
 fn a_routine_scheduled_success_leaves_no_record() {
     let h = harness();
 
-    h.controller.tick();
+    h.tick();
 
     assert!(
         h.checks
@@ -306,10 +308,10 @@ fn a_routine_scheduled_success_leaves_no_record() {
 fn the_button_asks_the_network_even_when_the_verdict_is_local() {
     let h = harness();
     h.world.vpn_app_closes();
-    h.controller.tick();
+    h.tick();
     let calls_before = h.geo.call_count();
 
-    let phase = h.controller.probe_now();
+    let phase = h.probe_now();
 
     assert_eq!(
         evidence(&phase),
@@ -328,9 +330,9 @@ fn the_button_asks_the_network_even_when_the_verdict_is_local() {
 #[test]
 fn the_button_does_not_cost_the_user_their_targets() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
 
-    let phase = h.controller.probe_now();
+    let phase = h.probe_now();
 
     assert!(is_protected(&phase));
     assert!(h.world.signals().is_empty());
@@ -341,7 +343,7 @@ fn a_disabled_guard_leaves_everything_alone() {
     let h = harness();
     h.settings.edit(|s| s.is_enabled = false);
 
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert_eq!(phase, GuardPhase::Disabled);
     assert!(h.world.signals().is_empty());
@@ -353,7 +355,7 @@ fn without_targets_there_is_nothing_to_guard() {
     let h = harness();
     h.settings.edit(|s| s.targets.clear());
 
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert_eq!(phase, GuardPhase::Disabled);
     assert_eq!(h.geo.call_count(), 0);
@@ -366,7 +368,7 @@ fn an_unchosen_vpn_app_defers_to_geo() {
     let h = harness();
     h.settings.edit(|s| s.set_vpn_app(None));
 
-    let phase = h.controller.tick();
+    let phase = h.tick();
 
     assert!(is_protected(&phase), "{phase:?}");
 }
@@ -374,7 +376,7 @@ fn an_unchosen_vpn_app_defers_to_geo() {
 #[test]
 fn running_targets_are_reported_for_the_screen() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
 
     let running = h.controller.snapshot().running;
     assert_eq!(running.len(), 1);
@@ -391,14 +393,14 @@ fn running_targets_are_reported_for_the_screen() {
 fn the_readout_refreshes_when_the_tunnel_falls() {
     let h = harness();
 
-    h.controller.tick();
+    h.tick();
     let probes_while_guarded = h.geo.call_count();
     assert!(probes_while_guarded > 0, "на страже проба обязана быть");
     assert!(h.controller.snapshot().report.is_some());
 
     h.geo.now_reports("KZ");
     h.network.tunnel_goes_down();
-    h.controller.tick();
+    h.tick();
     assert!(
         h.geo.call_count() > probes_while_guarded,
         "после падения VPN показания обязаны обновиться"
@@ -420,11 +422,11 @@ fn a_settled_verdict_does_not_probe_every_tick() {
     let h = harness();
 
     h.network.tunnel_goes_down();
-    h.controller.tick();
+    h.tick();
     let after_first = h.geo.call_count();
 
     for _ in 0..5 {
-        h.controller.tick();
+        h.tick();
     }
 
     assert_eq!(
@@ -439,10 +441,10 @@ fn a_settled_verdict_does_not_probe_every_tick() {
 #[test]
 fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
     let h = harness();
-    assert!(is_protected(&h.controller.tick()));
+    assert!(is_protected(&h.tick()));
 
     h.geo.ipinfo_goes_silent("203.0.113.7");
-    let phase = h.controller.probe_now();
+    let phase = h.probe_now();
 
     assert!(
         matches!(phase, GuardPhase::Interference { .. }),
@@ -457,10 +459,10 @@ fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
 #[test]
 fn silent_ipinfo_with_a_new_address_pauses() {
     let h = harness();
-    assert!(is_protected(&h.controller.tick()));
+    assert!(is_protected(&h.tick()));
 
     h.geo.ipinfo_goes_silent("198.51.100.231");
-    let phase = h.controller.probe_now();
+    let phase = h.probe_now();
 
     assert!(
         matches!(
@@ -476,26 +478,36 @@ fn silent_ipinfo_with_a_new_address_pauses() {
     assert!(h.world.signalled(ProcessSignal::Kill).is_empty());
 }
 
-// --- один обход на такт ------------------------------------------------------
+// --- один обход на проход ----------------------------------------------------
 
-/// Такт, у которого сошлись расписание гео и ответ пробы, обходит процессы
-/// столько же раз, сколько молчаливый.
+/// Такт, отпустивший пробу, обходит процессы столько же раз, сколько молчаливый:
+/// запроса он не ждёт, и лишнего обхода в нём нет.
 ///
-/// Входов редьюсеру у него два (`Tick`, а следом `Verdict`), и так и должно быть:
-/// знание о выходе за такт меняется не один раз. Применение — другое дело, оно
-/// одно: обход `/proc` проект считает в миллисекундах, а второй проход посылал бы
-/// сигналы по данным, которые первый уже изменил.
+/// Ответ приходит своим проходом — со своим входом редьюсеру и своим
+/// применением. Это не «второй обход на такт», а второй проход: обход `/proc`
+/// проект считает в миллисекундах, но два применения подряд внутри одного
+/// прохода посылали бы сигналы по данным, которые первое уже изменило.
 #[test]
 fn a_tick_that_probes_walks_the_processes_once() {
     let h = harness();
 
-    // Холодный старт: расписания гео ещё не было, значит проба уйдёт и ответит
-    // этим же тактом.
+    // Холодный старт: расписания гео ещё не было, значит проба уйдёт этим тактом.
     let probing = walks_in(&h, || {
-        let phase = h.controller.tick();
+        h.controller.tick();
+    });
+    assert_eq!(
+        h.geo.call_count(),
+        0,
+        "проба ушла на свою дорожку, и запроса такт не ждёт"
+    );
+    assert_eq!(h.probes.pending(), 1, "она именно ушла, а не пропала");
+
+    // Ответ: свой проход, своё применение.
+    let answering = walks_in(&h, || {
+        let phase = h.settle();
         assert!(is_protected(&phase), "{phase:?}");
     });
-    assert_eq!(h.geo.call_count(), 1, "проба обязана уйти этим тактом");
+    assert_eq!(h.geo.call_count(), 1, "запрос состоялся ровно один");
 
     // Молчаливый такт: вердикт свеж, расписание не подошло — вход ровно один.
     let quiet = walks_in(&h, || {
@@ -505,12 +517,13 @@ fn a_tick_that_probes_walks_the_processes_once() {
 
     assert_eq!(
         probing, quiet,
-        "ответ пробы — ещё один вход редьюсеру, а не ещё один обход процессов"
+        "такт, отпустивший пробу, лишнего обхода не делает"
     );
+    assert_eq!(answering, quiet, "и проход ответа — один проход, а не два");
     assert_eq!(
         h.reporter.recorded().finished,
-        2,
-        "по одному применению на такт, а не по два"
+        3,
+        "по одному применению на проход, а не по два"
     );
 }
 
@@ -521,19 +534,19 @@ fn a_tick_that_probes_walks_the_processes_once() {
 #[test]
 fn a_reassessment_tick_walks_the_processes_once() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
 
     h.world.vpn_app_closes();
-    let closed = h.controller.tick();
+    let closed = h.tick();
     assert_eq!(evidence(&closed), Some(&UnsafeEvidence::VpnAppNotRunning));
 
     h.world.vpn_app_returns();
     let reassessing = walks_in(&h, || {
-        let phase = h.controller.tick();
+        let phase = h.tick();
         assert!(is_protected(&phase), "{phase:?}");
     });
     let quiet = walks_in(&h, || {
-        h.controller.tick();
+        h.tick();
     });
 
     assert_eq!(
@@ -552,13 +565,219 @@ fn a_reassessment_tick_walks_the_processes_once() {
 #[test]
 fn geo_schedule_asks_again_on_an_unchanged_path() {
     let h = harness();
-    h.controller.tick();
+    h.tick();
     let calls_after_verdict = h.geo.call_count();
 
-    h.controller.tick();
+    h.tick();
     assert_eq!(
         h.geo.call_count(),
         calls_after_verdict,
         "частота запросов не равна частоте тиков"
     );
+}
+
+// --- применение не ждёт пробы ------------------------------------------------
+
+/// Стенд, у которого проба уходит в настоящий поток — как в приложении.
+fn threaded() -> Harness {
+    let mut h = harness();
+    Arc::get_mut(&mut h.controller)
+        .expect("дорожка выбирается до охраны")
+        .set_probes(Box::new(ThreadDispatcher::named("тест-проба")));
+    h
+}
+
+/// Цель, запущенная под «Опасно», завершается тем же проходом, а не после
+/// ответа летящей пробы.
+///
+/// Расписание гео подходит раз в пять секунд, и запрос к ipinfo столько же
+/// и висит на мёртвом канале. Пока проба шла внутри такта, всё это время цель,
+/// запущенная под запретом, работала: поток охраны был занят ожиданием,
+/// и применять решение было некому.
+#[test]
+fn a_target_born_under_danger_is_killed_without_waiting_for_the_answer() {
+    let h = harness();
+    h.tick();
+
+    h.geo.now_reports("RU");
+    let danger = h.probe_now();
+    assert!(matches!(danger, GuardPhase::Danger(_)), "{danger:?}");
+    assert_eq!(h.world.signalled(ProcessSignal::Kill), vec![42]);
+
+    // Запрос ушёл и ответа ещё нет.
+    h.controller.probe_now();
+    assert_eq!(h.probes.pending(), 1, "проба в полёте");
+
+    // Пользователь запустил цель заново, пока проба летит.
+    h.world.add(detached(43, 1, "/usr/bin/nano"));
+    let phase = h.controller.tick();
+
+    assert_eq!(phase.action(), GuardAction::Terminate, "{phase:?}");
+    assert_eq!(
+        h.world.signalled(ProcessSignal::Kill),
+        vec![42, 43],
+        "запуск запрещён — и ждать ответа для этого не надо"
+    );
+    assert_eq!(
+        h.probes.pending(),
+        1,
+        "летящую пробу такт не снимал и второй не начинал"
+    );
+
+    // А ответ, когда он придёт, применяется своим проходом.
+    h.geo.now_reports("NL");
+    let phase = h.settle();
+    assert!(is_protected(&phase), "{phase:?}");
+    assert_eq!(h.geo.call_count(), 3);
+}
+
+/// То же под паузой: новорождённая цель встаёт наравне с остальными, не дожидаясь
+/// ответа, — а ответ, когда он придёт, снимает паузу со всех разом.
+#[test]
+fn a_target_born_under_the_pause_is_stopped_without_waiting_for_the_answer() {
+    let h = harness();
+    h.tick();
+
+    h.geo.everything_goes_silent();
+    let paused = h.probe_now();
+    assert_eq!(paused.action(), GuardAction::Pause, "{paused:?}");
+    assert_eq!(h.world.signalled(ProcessSignal::Stop), vec![42]);
+
+    h.controller.probe_now();
+    assert_eq!(h.probes.pending(), 1, "проба в полёте");
+
+    h.world.add(detached(43, 1, "/usr/bin/nano"));
+    let phase = h.controller.tick();
+
+    assert_eq!(phase.action(), GuardAction::Pause, "{phase:?}");
+    assert_eq!(
+        h.world.signalled(ProcessSignal::Stop),
+        vec![42, 43],
+        "обязательство «вернуть из паузы» распространяется и на новорождённую"
+    );
+    assert!(h.world.is_stopped(43));
+
+    h.geo.everything_answers_again();
+    let phase = h.settle();
+    assert!(is_protected(&phase), "{phase:?}");
+    assert_eq!(h.world.signalled(ProcessSignal::Resume), vec![43, 42]);
+}
+
+/// Проба на настоящем потоке: пока запрос висит, проход идёт и применяет решение.
+///
+/// Тот же случай, что и выше, но дорожка здесь такая же, как в приложении:
+/// если бы применение и запрос делили хоть один замок, такт встал бы тут намертво.
+#[test]
+fn a_pass_runs_while_the_request_hangs() {
+    let h = threaded();
+    h.controller.tick();
+    h.controller.await_probe();
+
+    h.geo.now_reports("RU");
+    h.controller.probe_now();
+    h.controller.await_probe();
+    assert_eq!(h.world.signalled(ProcessSignal::Kill), vec![42]);
+
+    // Запрос ушёл и висит — как ipinfo на мёртвом канале.
+    h.geo.holds_the_request();
+    h.controller.probe_now();
+    h.geo.wait_until_asked();
+
+    h.world.add(detached(43, 1, "/usr/bin/nano"));
+    let phase = h.controller.tick();
+
+    assert_eq!(phase.action(), GuardAction::Terminate, "{phase:?}");
+    assert_eq!(
+        h.world.signalled(ProcessSignal::Kill),
+        vec![42, 43],
+        "проход не ждёт ни запроса, ни его таймаута"
+    );
+    assert!(h.controller.is_probing(), "а запрос всё ещё в полёте");
+
+    h.geo.answers();
+    h.controller.await_probe();
+    assert!(
+        matches!(h.controller.phase(), GuardPhase::Danger(_)),
+        "{:?}",
+        h.controller.phase()
+    );
+}
+
+/// Ответ пробы, начатой при прежних настройках, не применяется вовсе — но след
+/// оставляет: запрос состоялся, и журнал проверок обязан назвать, почему
+/// от ответа отказались.
+#[test]
+fn an_answer_that_outlived_its_settings_is_discarded_and_recorded() {
+    let h = harness();
+    h.tick();
+
+    h.geo.now_reports("RU");
+    h.controller.probe_now();
+    // Пока проба летела, пользователь правил настройки.
+    h.settings
+        .edit(|s| s.blocked_countries.push("DE".to_string()));
+    let phase = h.settle();
+
+    assert!(
+        h.world.signalled(ProcessSignal::Kill).is_empty(),
+        "устаревший ответ целей не трогает: {phase:?}"
+    );
+    assert!(
+        h.checks
+            .events()
+            .iter()
+            .any(|c| c.outcome == CheckOutcome::DiscardedSettingsChanged),
+        "{:?}",
+        h.checks.events()
+    );
+}
+
+/// Ответ пробы, начатой на прежнем пути, описывает уже не нас: путь сменился,
+/// пока она летела.
+#[test]
+fn an_answer_that_outlived_its_path_is_discarded_and_recorded() {
+    let h = harness();
+    h.tick();
+
+    h.geo.now_reports("RU");
+    h.controller.probe_now();
+    h.network.tunnel_goes_down();
+    h.settle();
+
+    assert!(
+        h.world.signalled(ProcessSignal::Kill).is_empty(),
+        "ответ про прежний путь не доказательство про этот"
+    );
+    assert!(
+        h.checks
+            .events()
+            .iter()
+            .any(|c| c.outcome == CheckOutcome::DiscardedPathChanged),
+        "{:?}",
+        h.checks.events()
+    );
+}
+
+/// Нажатие в полёте запроса второго не порождает — и записывается: ровно это
+/// и означает «нажал пять раз, а ничего не поехало». Автоматические поводы
+/// приходят каждый такт, и их пропуски в журнале не нужны: полусотни записей
+/// не хватило бы и на минуту.
+#[test]
+fn only_the_button_records_a_skipped_probe() {
+    let h = harness();
+    h.controller.tick();
+    assert_eq!(h.probes.pending(), 1);
+
+    h.controller.tick();
+    h.controller.probe_now();
+
+    assert_eq!(h.probes.pending(), 1, "запрос в полёте остался один");
+    let skips: Vec<CheckTrigger> = h
+        .checks
+        .events()
+        .iter()
+        .filter(|c| c.outcome == CheckOutcome::SkippedProbeInFlight)
+        .map(|c| c.trigger)
+        .collect();
+    assert_eq!(skips, vec![CheckTrigger::Manual], "{skips:?}");
 }

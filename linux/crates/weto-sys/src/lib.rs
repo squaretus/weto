@@ -5,6 +5,7 @@
 //! от `WetoSystem` на macOS, где оно уже доказало свою пользу.
 
 pub mod autostart;
+pub mod background;
 pub mod desktop_entries;
 pub mod geo_probe;
 pub mod network_events;
