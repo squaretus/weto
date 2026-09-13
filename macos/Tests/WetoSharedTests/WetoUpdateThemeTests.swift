@@ -16,10 +16,6 @@ final class WetoUpdateThemeTests: XCTestCase {
         XCTAssertNotEqual(dark.text, light.text)
     }
 
-    func test_theme_width_matches_the_declared_one() {
-        XCTAssertEqual(WetoUpdateTheme.make(for: .dark).width, WetoUpdateTheme.width)
-    }
-
     /// Ряд кнопок окна обновления смешивает две пилюли и кнопку с меню.
     /// Пока высота бралась из шрифта и паддинга, «Напомнить позже» шла голым
     /// текстом и стояла ниже соседей — ряд выглядел разъехавшимся.

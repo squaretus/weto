@@ -13,8 +13,7 @@ use weto_core::geo::{ConfirmSource, GeoOutcome, GeoReading};
 use weto_core::ip::IpRange;
 use weto_core::network::VpnAppStatus;
 use weto_core::policy::{
-    decide, decide_local, pending_verification, GuardConfig, GuardDecision, GuardSignals,
-    UnsafeReason,
+    decide, decide_local, GuardConfig, GuardDecision, GuardSignals, UnprovenReason, UnsafeEvidence,
 };
 
 #[test]
@@ -70,7 +69,6 @@ fn run(fixture: &Case) -> Outcome {
                 .as_status();
             decide_local(fixture.is_enabled, vpn, &config)
         }
-        "pendingVerification" => Some(pending_verification(fixture.is_enabled, &config)),
         other => panic!("неизвестная функция «{other}» в случае «{}»", fixture.name),
     }
 }
@@ -122,6 +120,10 @@ struct Geo {
     kind: String,
     detail: Option<String>,
     ip: Option<String>,
+    /// Адрес прошлого чтения у `addressChanged`: фикстуры его почти никогда
+    /// не называют явно, потому что во всех имеющихся случаях он один и тот же.
+    #[serde(rename = "previousIP")]
+    previous_ip: Option<String>,
     #[serde(rename = "primaryCountry")]
     primary_country: Option<String>,
     #[serde(rename = "confirmedCountry")]
@@ -134,6 +136,26 @@ impl Geo {
     fn as_outcome(&self) -> GeoOutcome {
         if self.kind == "unavailable" {
             return GeoOutcome::Unavailable(self.detail.clone().unwrap_or_default());
+        }
+
+        if self.kind == "addressChanged" {
+            let observed = self
+                .ip
+                .clone()
+                .expect("addressChanged без наблюдаемого адреса");
+            let previous = GeoReading {
+                ip: self
+                    .previous_ip
+                    .clone()
+                    .unwrap_or_else(|| "203.0.113.28".to_string()),
+                primary_country: self.primary_country.clone().unwrap_or_default(),
+                confirmed_country: self.confirmed_country.clone(),
+                confirm_source: self
+                    .confirm_source
+                    .as_deref()
+                    .and_then(ConfirmSource::parse),
+            };
+            return GeoOutcome::AddressChanged { observed, previous };
         }
 
         let reading = GeoReading {
@@ -215,8 +237,17 @@ impl Expect {
         match self.decision.as_str() {
             "none" => None,
             "safe" => Some(GuardDecision::Safe),
+            "unproven" => Some(GuardDecision::Unproven(
+                self.reason
+                    .as_ref()
+                    .expect("unproven без причины")
+                    .as_unproven(),
+            )),
             _ => Some(GuardDecision::Kill(
-                self.reason.as_ref().expect("kill без причины").as_reason(),
+                self.reason
+                    .as_ref()
+                    .expect("kill без причины")
+                    .as_evidence(),
             )),
         }
     }
@@ -234,26 +265,34 @@ struct Reason {
 }
 
 impl Reason {
-    fn as_reason(&self) -> UnsafeReason {
+    fn as_unproven(&self) -> UnprovenReason {
         let text = |value: &Option<String>| value.clone().unwrap_or_default();
         match self.kind.as_str() {
-            "verificationPending" => UnsafeReason::VerificationPending,
-            "vpnAppNotChosen" => UnsafeReason::VpnAppNotChosen,
-            "vpnAppNotRunning" => UnsafeReason::VpnAppNotRunning,
-            "geoUnavailable" => UnsafeReason::GeoUnavailable(text(&self.detail)),
-            "blacklistedIP" => UnsafeReason::BlacklistedIp(text(&self.ip)),
-            "blockedCountry" => UnsafeReason::BlockedCountry {
+            "geoUnavailable" => UnprovenReason::GeoUnavailable(text(&self.detail)),
+            "addressChanged" => UnprovenReason::AddressChanged {
+                observed: text(&self.ip),
+            },
+            "confirmationUnavailable" => UnprovenReason::ConfirmationUnavailable,
+            other => panic!("неизвестная unproven-причина «{other}» в фикстурах"),
+        }
+    }
+
+    fn as_evidence(&self) -> UnsafeEvidence {
+        let text = |value: &Option<String>| value.clone().unwrap_or_default();
+        match self.kind.as_str() {
+            "vpnAppNotRunning" => UnsafeEvidence::VpnAppNotRunning,
+            "blacklistedIP" => UnsafeEvidence::BlacklistedIp(text(&self.ip)),
+            "blockedCountry" => UnsafeEvidence::BlockedCountry {
                 code: text(&self.code),
                 source: text(&self.source),
             },
-            "confirmationUnavailable" => UnsafeReason::ConfirmationUnavailable,
-            "countryConflict" => UnsafeReason::CountryConflict {
+            "countryConflict" => UnsafeEvidence::CountryConflict {
                 primary: text(&self.primary),
                 confirmed: text(&self.confirmed),
             },
-            "notWhitelistedIP" => UnsafeReason::NotWhitelistedIp(text(&self.ip)),
-            "notWhitelistedCountry" => UnsafeReason::NotWhitelistedCountry(text(&self.code)),
-            other => panic!("неизвестная причина «{other}» в фикстурах"),
+            "notWhitelistedIP" => UnsafeEvidence::NotWhitelistedIp(text(&self.ip)),
+            "notWhitelistedCountry" => UnsafeEvidence::NotWhitelistedCountry(text(&self.code)),
+            other => panic!("неизвестная evidence-причина «{other}» в фикстурах"),
         }
     }
 }

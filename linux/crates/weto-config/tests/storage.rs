@@ -1,8 +1,9 @@
 //! Настройки, журнал и пути XDG.
 
+use std::collections::HashSet;
 use std::time::SystemTime;
 
-use weto_config::journal::{Journal, KillEvent, KillEventKind, CAPACITY};
+use weto_config::journal::{Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY};
 use weto_config::paths::Paths;
 use weto_config::settings::{GeoListEntryError, GeoListKind, Settings, Target};
 use weto_core::process::TargetKind;
@@ -20,7 +21,7 @@ fn episode_event(pid: i32, reason: &str, episode_id: &str) -> KillEvent {
         pid,
         parent_pid: 1,
         executable_path: "/usr/bin/nano".to_string(),
-        is_descendant: false,
+        matched_by: MatchBasis::Rule,
         kind: KillEventKind::Terminated,
         reason_text: reason.to_string(),
         resolution_text: None,
@@ -199,7 +200,8 @@ fn journal_refines_every_record_of_the_episode() {
         Some("Адрес 203.0.113.231 в чёрном списке"),
         None,
         None,
-        None
+        None,
+        &HashSet::new()
     ));
 
     let ours: Vec<&str> = journal
@@ -242,7 +244,8 @@ fn journal_records_how_a_pending_episode_ended() {
         None,
         Some("проверка завершилась безопасным выходом: 1.2.3.4, KZ"),
         None,
-        None
+        None,
+        &HashSet::new()
     ));
 
     assert_eq!(
@@ -259,7 +262,14 @@ fn journal_records_how_a_pending_episode_ended() {
 #[test]
 fn refining_an_unknown_episode_changes_nothing() {
     let mut journal = Journal::default();
-    assert!(!journal.refine_episode("нет такого", Some("причина"), None, None, None));
+    assert!(!journal.refine_episode(
+        "нет такого",
+        Some("причина"),
+        None,
+        None,
+        None,
+        &HashSet::new()
+    ));
     assert!(journal.entries().is_empty());
 }
 
@@ -291,6 +301,54 @@ fn a_legacy_journal_expands_into_a_record_per_process() {
         journal.entries()[0].episode_id,
         journal.entries()[2].episode_id,
         "старая запись — один эпизод"
+    );
+}
+
+/// Шелл — третий способ попасть в журнал: под правило он не подходил, а SIGSTOP
+/// получил. Формат общий с macOS, поэтому запись обязана читаться и здесь; старый
+/// булев признак при этом читается по-прежнему.
+#[test]
+fn a_shell_record_round_trips_and_legacy_flag_still_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("state/journal.json");
+
+    let mut shell = event(100, "Подтверждающие сервисы недоступны");
+    shell.matched_by = MatchBasis::Shell;
+    shell.executable_path = "/bin/zsh".to_string();
+    shell.kind = KillEventKind::Paused;
+    let mut journal = Journal::default();
+    journal.append(vec![shell]);
+    journal.save(&path).unwrap();
+
+    let loaded = Journal::load(&path);
+    assert_eq!(loaded.entries()[0].matched_by, MatchBasis::Shell);
+    assert_eq!(
+        serde_json::to_value(MatchBasis::Shell).unwrap(),
+        serde_json::json!("shell"),
+        "имя в файле — часть общего с macOS формата"
+    );
+    assert_eq!(
+        MatchBasis::Shell.detail_text(1).as_deref(),
+        Some("шелл терминала цели")
+    );
+    assert_eq!(
+        MatchBasis::Descendant.detail_text(200).as_deref(),
+        Some("потомок 200")
+    );
+    assert!(MatchBasis::Rule.detail_text(1).is_none());
+
+    let legacy = tmp.path().join("legacy.json");
+    std::fs::write(
+        &legacy,
+        r#"{"entries":[{"id":"a","episodeID":"b","date":"1970-01-01T00:00:01Z",
+           "targetName":"claude","pid":5,"parentPID":1,"executablePath":"/c",
+           "isDescendant":true,"kind":"terminated","reasonText":"r"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        Journal::load(&legacy).entries()[0].matched_by,
+        MatchBasis::Descendant,
+        "журналы прежнего формата читаются по-прежнему"
     );
 }
 
@@ -527,4 +585,93 @@ fn the_guard_config_carries_the_whitelist() {
     assert!(config.allowed_countries.contains("NL"));
     assert_eq!(config.allowed_ip_ranges.len(), 1);
     assert!(config.allowed_ip_ranges[0].contains("198.51.100.7"));
+}
+
+/// Тексты видов записи общие с macOS дословно: файл выгрузки читают на обеих
+/// платформах, и «на паузе» обязано звучать одинаково. Сама пауза на Linux —
+/// следующий план, но формат её записи обязан совпадать уже сейчас.
+#[test]
+fn kind_texts_and_wire_names_match_macos() {
+    assert_eq!(KillEventKind::Terminated.display_text(), "завершено");
+    assert_eq!(
+        KillEventKind::LaunchBlocked.display_text(),
+        "запуск запрещён"
+    );
+    assert_eq!(KillEventKind::Paused.display_text(), "на паузе");
+    assert_eq!(
+        serde_json::to_value(KillEventKind::Paused).unwrap(),
+        serde_json::json!("paused"),
+        "имя в файле — часть общего формата"
+    );
+}
+
+/// Эпизод паузы отличается от завершения только видом и исходом: запись читается
+/// и пишется тем же путём, иначе выгрузка с macOS не разобралась бы на Linux.
+#[test]
+fn a_paused_record_round_trips_with_its_resolution() {
+    let mut paused = event(500, "Подключение ещё не проверено: вердикта ещё не было");
+    paused.kind = KillEventKind::Paused;
+    paused.resolution_text =
+        Some("завершено по потолку: Подтверждение не получено за 60 с".to_string());
+
+    let json = serde_json::to_string(&paused).unwrap();
+    let back: KillEvent = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(back, paused);
+    assert_eq!(back.kind, KillEventKind::Paused);
+}
+
+/// Цель завершена, а шелл её терминала — продолжен: под общим исходом эпизода
+/// запись шелла лгала бы, он жив. Поэтому исход по основанию переписывается
+/// вторым, более узким проходом и не трогает остальные записи.
+#[test]
+fn a_shell_record_can_carry_its_own_outcome() {
+    let mut journal = Journal::default();
+    let mut shell = episode_event(100, "Сервисы не ответили", "стояние");
+    shell.kind = KillEventKind::Paused;
+    shell.matched_by = MatchBasis::Shell;
+    let mut target = episode_event(200, "Сервисы не ответили", "стояние");
+    target.kind = KillEventKind::Paused;
+    journal.append(vec![shell, target]);
+
+    journal.refine_episode(
+        "стояние",
+        None,
+        Some("завершено по доказательству: VPN-приложение не запущено"),
+        None,
+        None,
+        &HashSet::new(),
+    );
+    assert!(journal.refine_basis(
+        "стояние",
+        MatchBasis::Shell,
+        "продолжен: цель завершена по доказательству: VPN-приложение не запущено",
+        &HashSet::new()
+    ));
+
+    let by_pid = |pid: i32| {
+        journal
+            .entries()
+            .iter()
+            .find(|event| event.pid == pid)
+            .and_then(|event| event.resolution_text.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        by_pid(100),
+        "продолжен: цель завершена по доказательству: VPN-приложение не запущено"
+    );
+    assert_eq!(
+        by_pid(200),
+        "завершено по доказательству: VPN-приложение не запущено"
+    );
+}
+
+/// Записей с таким основанием у эпизода нет — переписывать нечего.
+#[test]
+fn a_narrow_refinement_says_when_it_found_nothing() {
+    let mut journal = Journal::default();
+    journal.append(vec![episode_event(200, "Сервисы не ответили", "стояние")]);
+
+    assert!(!journal.refine_basis("стояние", MatchBasis::Shell, "продолжен", &HashSet::new()));
 }

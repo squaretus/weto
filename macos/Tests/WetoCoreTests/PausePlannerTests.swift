@@ -1,0 +1,225 @@
+import XCTest
+@testable import WetoCore
+
+final class PausePlannerTests: XCTestCase {
+
+    // zsh (pid 100, своя группа 100, tty в переднем плане у группы 200) → claude (200, лидер группы 200)
+    // → node (201, потомок в той же группе).
+    private let shell = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                        processGroup: 100, terminalForegroundGroup: 200)
+    private let claude = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/Users/me/.local/bin/claude",
+                                         processGroup: 200, terminalForegroundGroup: 200)
+    private let child = ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                                        processGroup: 200, terminalForegroundGroup: 200)
+
+    private func matched(_ pids: [(Int32, MatchBasis)]) -> [MatchedProcess] {
+        pids.map { MatchedProcess(pid: $0.0, targetName: "claude", matchedBy: $0.1) }
+    }
+
+    /// Стоп — шелл, цель, потомки; продолжение — в обратном порядке. Проверено на zsh и bash 3.2.
+    func test_foreground_job_takes_its_shell_along_shell_first() {
+        let plan = PausePlanner.plan(matched: matched([(200, .rule), (201, .descendant)]),
+                                     processes: [shell, claude, child])
+        XCTAssertEqual(plan.stopOrder, [100, 200, 201])
+        XCTAssertEqual(plan.resumeOrder, [201, 200, 100])
+        XCTAssertEqual(plan.shells, [100])
+        XCTAssertEqual(plan.shellTargets, [100: "claude"],
+                       "запись журнала обязана назвать цель, ради терминала которой шелл встал")
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+    }
+
+    /// Фоновое задание (`claude &`): группа не передняя — шелл не трогаем, цель помечена.
+    func test_background_job_leaves_the_shell_alone_and_is_marked() {
+        let backgroundClaude = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/c",
+                                               processGroup: 200, terminalForegroundGroup: 100)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule)]), processes: [shell, backgroundClaude])
+        XCTAssertEqual(plan.stopOrder, [200])
+        XCTAssertTrue(plan.shells.isEmpty)
+        XCTAssertEqual(plan.backgrounded, [200])
+    }
+
+    /// GUI-приложение без tty — обычное дерево, родитель первым, без пометок.
+    func test_gui_app_without_tty_is_ordered_parent_first() {
+        let app = ProcessSnapshot(pid: 300, parentPID: 1, executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT")
+        let helper = ProcessSnapshot(pid: 301, parentPID: 300, executablePath: "/Applications/ChatGPT.app/Contents/Frameworks/H")
+        let grandchild = ProcessSnapshot(pid: 302, parentPID: 301, executablePath: "/usr/bin/node")
+        let plan = PausePlanner.plan(matched: matched([(301, .rule), (300, .rule), (302, .descendant)]),
+                                     processes: [grandchild, helper, app])
+        XCTAssertEqual(plan.stopOrder, [300, 301, 302])
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+        XCTAssertTrue(plan.shells.isEmpty)
+    }
+
+    /// Уже стоящий (Ctrl-Z) не трогаем ни при паузе, ни при возобновлении.
+    func test_already_stopped_processes_are_skipped() {
+        let stopped = ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                                      processGroup: 200, terminalForegroundGroup: 200, isStopped: true)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule), (201, .descendant)]),
+                                     processes: [shell, claude, stopped])
+        XCTAssertEqual(plan.stopOrder, [100, 200])
+        XCTAssertEqual(plan.skipped, [201])
+    }
+
+    /// Шелл, который сам является целью, вторым разом в план не попадает. Он же — регресс-тест
+    /// на то, что интерактивный шелл, ждущий СВОЙ передний план (его группа — не передняя группа
+    /// tty, потому что передняя группа принадлежит ребёнку), не помечается как «фоновое задание»:
+    /// `backgrounded` описывает цели, вернуть которым терминал после SIGCONT нельзя, а тут
+    /// терминал и так остаётся у шелла.
+    func test_shell_that_is_itself_matched_is_not_added_twice() {
+        let plan = PausePlanner.plan(matched: matched([(100, .rule), (200, .descendant), (201, .descendant)]),
+                                     processes: [shell, claude, child])
+        XCTAssertEqual(plan.stopOrder, [100, 200, 201])
+        XCTAssertEqual(plan.resumeOrder, [201, 200, 100])
+        XCTAssertTrue(plan.shells.isEmpty)
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+    }
+
+    /// Лидер группы — не сама цель, а обёртка: шелл ищется от лидера.
+    func test_shell_is_found_from_the_group_leader_not_the_target() {
+        let wrapper = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/bin/sh",
+                                      processGroup: 200, terminalForegroundGroup: 200)
+        let target = ProcessSnapshot(pid: 210, parentPID: 200, executablePath: "/c",
+                                     processGroup: 200, terminalForegroundGroup: 200)
+        let plan = PausePlanner.plan(matched: matched([(210, .rule)]), processes: [shell, wrapper, target])
+        XCTAssertEqual(plan.stopOrder, [100, 210])
+        XCTAssertEqual(plan.shells, [100])
+    }
+
+    func test_ancestors_walk_to_the_root() {
+        let tree = ProcessTree(processes: [shell, claude, child])
+        XCTAssertEqual(tree.ancestors(of: 201), [200, 100, 1])
+    }
+
+    /// Шелл, найденный через лидера группы, уже стоял (Ctrl-Z) до нас — это не наша пауза,
+    /// и трогать его нельзя ни при остановке, ни при возобновлении: SIGCONT пользовательскому
+    /// Ctrl-Z запрещён спекой так же, как SIGSTOP.
+    func test_shell_found_via_group_leader_that_is_already_stopped_is_untouched() {
+        let stoppedShell = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                           processGroup: 100, terminalForegroundGroup: 200, isStopped: true)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule), (201, .descendant)]),
+                                     processes: [stoppedShell, claude, child])
+        XCTAssertEqual(plan.stopOrder, [200, 201])
+        XCTAssertEqual(plan.resumeOrder, [201, 200])
+        XCTAssertTrue(plan.shells.isEmpty)
+    }
+
+    /// Двое потомков на одной глубине: сортировка внутри группы одной глубины — по pid,
+    /// а не по порядку появления в `matched`.
+    func test_siblings_at_equal_depth_are_ordered_by_pid() {
+        let parent = ProcessSnapshot(pid: 400, parentPID: 1, executablePath: "/a")
+        let childB = ProcessSnapshot(pid: 402, parentPID: 400, executablePath: "/b")
+        let childA = ProcessSnapshot(pid: 401, parentPID: 400, executablePath: "/a2")
+        let plan = PausePlanner.plan(matched: matched([(400, .rule), (402, .descendant), (401, .descendant)]),
+                                     processes: [childB, childA, parent])
+        XCTAssertEqual(plan.stopOrder, [400, 401, 402])
+        XCTAssertEqual(plan.resumeOrder, [402, 401, 400])
+    }
+
+    /// Лидер группы цели уже вышел и в снимке отсутствует — root намеренно считается собственным
+    /// лидером, а поиск шелла-родителя идёт как обычно через `parentPID`.
+    func test_missing_group_leader_falls_back_to_root_as_its_own_leader() {
+        let target = ProcessSnapshot(pid: 210, parentPID: 100, executablePath: "/c",
+                                     processGroup: 200, terminalForegroundGroup: 200)
+        let plan = PausePlanner.plan(matched: matched([(210, .rule)]), processes: [shell, target])
+        XCTAssertEqual(plan.stopOrder, [100, 210])
+        XCTAssertEqual(plan.shells, [100])
+    }
+
+    // MARK: - Передний план принадлежит поддереву цели, а не только её группе
+
+    /// Цель отдала терминал своему ребёнку, поставившему себя в отдельную группу
+    /// (`setpgid` + `tcsetpgrp`): группа цели передней не является, но цель по-прежнему
+    /// переднее задание шелла. Шелл обязан войти в план первым — иначе zsh узнаёт о SIGSTOP
+    /// цели, забирает терминал и цель становится фоновым заданием насовсем.
+    func test_foreground_group_owned_by_a_child_still_takes_the_shell_along() {
+        let shellWaiting = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                           processGroup: 100, terminalForegroundGroup: 300)
+        let target = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/bin/sh",
+                                     processGroup: 200, terminalForegroundGroup: 300)
+        let grabber = ProcessSnapshot(pid: 300, parentPID: 200, executablePath: "/usr/bin/perl",
+                                      processGroup: 300, terminalForegroundGroup: 300)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule), (300, .descendant)]),
+                                     processes: [shellWaiting, target, grabber])
+        XCTAssertEqual(plan.stopOrder, [100, 200, 300],
+                       "Порядок — часть контракта: шелл раньше своей цели, цель раньше потомков.")
+        XCTAssertEqual(plan.resumeOrder, [300, 200, 100])
+        XCTAssertEqual(plan.shells, [100])
+        XCTAssertTrue(plan.backgrounded.isEmpty,
+                      "Терминал держит потомок цели — цель в переднем плане, а не в фоне.")
+    }
+
+    /// То же, но группу держит внук: членство в поддереве, а не глубина ровно один.
+    func test_foreground_group_owned_by_a_grandchild_still_takes_the_shell_along() {
+        let shellWaiting = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                           processGroup: 100, terminalForegroundGroup: 400)
+        let target = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/bin/sh",
+                                     processGroup: 200, terminalForegroundGroup: 400)
+        let middle = ProcessSnapshot(pid: 300, parentPID: 200, executablePath: "/usr/bin/node",
+                                     processGroup: 200, terminalForegroundGroup: 400)
+        let grabber = ProcessSnapshot(pid: 400, parentPID: 300, executablePath: "/usr/bin/perl",
+                                      processGroup: 400, terminalForegroundGroup: 400)
+        let plan = PausePlanner.plan(
+            matched: matched([(200, .rule), (300, .descendant), (400, .descendant)]),
+            processes: [shellWaiting, target, middle, grabber]
+        )
+        XCTAssertEqual(plan.stopOrder, [100, 200, 300, 400])
+        XCTAssertEqual(plan.resumeOrder, [400, 300, 200, 100])
+        XCTAssertEqual(plan.shells, [100])
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+    }
+
+    /// Передняя группа принадлежит чужому заданию того же шелла: терминал у соседа,
+    /// цель действительно в фоне. Шелл не трогаем, подсказку про `fg` цель получает.
+    func test_foreground_group_owned_by_an_unrelated_process_is_genuinely_backgrounded() {
+        let shellWaiting = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                           processGroup: 100, terminalForegroundGroup: 500)
+        let target = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/c",
+                                     processGroup: 200, terminalForegroundGroup: 500)
+        let sibling = ProcessSnapshot(pid: 500, parentPID: 100, executablePath: "/usr/bin/vim",
+                                      processGroup: 500, terminalForegroundGroup: 500)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule)]),
+                                     processes: [shellWaiting, target, sibling])
+        XCTAssertEqual(plan.stopOrder, [200])
+        XCTAssertTrue(plan.shells.isEmpty)
+        XCTAssertEqual(plan.backgrounded, [200])
+    }
+
+    /// Цель — сам интерактивный шелл, ждущий своего переднего задания. Он в переднем плане
+    /// (терминал у его потомка) и в план входит сам, а его родитель — `login -fp user`
+    /// из настоящего дерева Terminal.app (`Terminal → login → -zsh`) — job control не ведёт
+    /// и терминал у остановленной цели не отбирает: SIGSTOP ему — сигнал не по делу.
+    ///
+    /// Форма родителя здесь честная и самая неудобная: тот же управляющий терминал, что
+    /// у шелла (`terminalForegroundGroup` совпадает), своя группа процессов. Ни условие
+    /// «на том же терминале», ни лидерство сессии его не отсекают — отсекает только то,
+    /// что `login` шеллом не является.
+    func test_interactive_shell_target_does_not_drag_in_its_own_parent() {
+        let login = ProcessSnapshot(pid: 50, parentPID: 1, executablePath: "/usr/bin/login",
+                                    processGroup: 50, terminalForegroundGroup: 200)
+        let plan = PausePlanner.plan(matched: matched([(100, .rule), (200, .descendant), (201, .descendant)]),
+                                     processes: [login, shell, claude, child])
+        XCTAssertEqual(plan.stopOrder, [100, 200, 201])
+        XCTAssertEqual(plan.resumeOrder, [201, 200, 100])
+        XCTAssertTrue(plan.shells.isEmpty, "`login` шеллом цели не является: терминал он не отберёт")
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+    }
+
+    /// Обратная сторона того же условия: вложенный шелл на том же терминале — настоящий
+    /// шелл цели, и он обязан войти в план первым. Форма та же, что у `login`
+    /// (родитель в своей группе на том же tty), и разводит их только то, что здесь
+    /// родитель ведёт job control: узнав о SIGSTOP, он и заберёт терминал себе.
+    func test_nested_shell_on_the_same_terminal_is_taken_along() {
+        let outer = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                    processGroup: 100, terminalForegroundGroup: 300)
+        let inner = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/bin/bash",
+                                    processGroup: 200, terminalForegroundGroup: 300)
+        let job = ProcessSnapshot(pid: 300, parentPID: 200, executablePath: "/usr/bin/vim",
+                                  processGroup: 300, terminalForegroundGroup: 300)
+        let plan = PausePlanner.plan(matched: matched([(200, .rule), (300, .descendant)]),
+                                     processes: [outer, inner, job])
+        XCTAssertEqual(plan.stopOrder, [100, 200, 300])
+        XCTAssertEqual(plan.resumeOrder, [300, 200, 100])
+        XCTAssertEqual(plan.shells, [100])
+        XCTAssertTrue(plan.backgrounded.isEmpty)
+    }
+}

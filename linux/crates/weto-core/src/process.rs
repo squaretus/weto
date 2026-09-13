@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessSnapshot {
     pub pid: i32,
     pub parent_pid: i32,
@@ -18,6 +18,19 @@ pub struct ProcessSnapshot {
     /// argv как есть. У скрипта с shebang `exe` указывает на интерпретатор,
     /// и опознать цель можно только отсюда.
     pub arguments: Option<Vec<String>>,
+    /// Группа процессов (`pgrp` из `/proc/<pid>/stat`). 0 — неизвестно.
+    #[serde(default)]
+    pub process_group: i32,
+    /// Передняя группа управляющего терминала (`tpgid` из `/proc/<pid>/stat`).
+    /// 0 — терминала нет; у переднего задания интерактивного шелла совпадает
+    /// с `process_group`. -1 ядро отдаёт процессам без управляющего терминала,
+    /// и приводить его к нулю обязан читающий (это делает стадия B).
+    #[serde(default)]
+    pub terminal_foreground_group: i32,
+    /// Уже остановлен (`T` в `/proc/<pid>/stat`) — пользовательский Ctrl-Z,
+    /// не наша пауза.
+    #[serde(default)]
+    pub is_stopped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +38,34 @@ pub struct ProcessSnapshot {
 pub enum TargetKind {
     Binary,
     Script,
+}
+
+/// Чем процесс попал под охрану: сам совпал с правилом или оказался потомком
+/// совпавшего. Потомки объясняют, почему у одной цели десятки завершений.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum MatchBasis {
+    #[default]
+    Rule,
+    Descendant,
+    /// Не цель вовсе: шелл, вошедший в план паузы ради терминала цели. Под правило
+    /// он не подходил ни одной буквой, а SIGSTOP получил — и значит, обязан быть
+    /// объяснён журналом наравне с целями. Паузы на Linux пока нет, но формат журнала
+    /// общий: запись с этим признаком приезжает сюда из выгрузки macOS.
+    Shell,
+}
+
+impl MatchBasis {
+    /// Чем запись объясняет своё присутствие в журнале. У совпавшего по правилу
+    /// объяснять нечего — он и есть цель. Текст общий с macOS
+    /// (`MatchBasis.detailText(parentPID:)`).
+    pub fn detail_text(&self, parent_pid: i32) -> Option<String> {
+        match self {
+            MatchBasis::Rule => None,
+            MatchBasis::Descendant => Some(format!("потомок {parent_pid}")),
+            MatchBasis::Shell => Some("шелл терминала цели".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +111,7 @@ pub struct MatchedProcess {
     pub executable_path: String,
     /// Процесс попал под охрану не сам по себе, а как потомок совпавшего.
     /// Именно потомки объясняют, откуда у одной цели десятки завершений.
-    pub is_descendant: bool,
+    pub matched_by: MatchBasis,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +186,21 @@ impl ProcessTree {
         result
     }
 
+    /// Предки от родителя к корню. Ограничен числом процессов: цикл в дереве
+    /// не должен вешать обход.
+    pub fn ancestors(&self, pid: i32) -> Vec<i32> {
+        let mut result = Vec::new();
+        let mut current = self.parent_by_pid.get(&pid).copied().unwrap_or(0);
+        let mut steps = 0usize;
+
+        while current > 0 && current != pid && steps < self.parent_by_pid.len() + 1 {
+            result.push(current);
+            current = self.parent_by_pid.get(&current).copied().unwrap_or(0);
+            steps += 1;
+        }
+        result
+    }
+
     /// Самый верхний предок, который сам является совпавшим процессом.
     /// Нужен, чтобы совпавший потомок не выглядел отдельным сеансом.
     pub fn topmost_match(&self, pid: i32, matched: &HashSet<i32>) -> i32 {
@@ -203,7 +259,7 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
                 target_name: rule.display_name.clone(),
                 parent_pid: process.parent_pid,
                 executable_path: process.executable_path.clone(),
-                is_descendant: false,
+                matched_by: MatchBasis::Rule,
             });
             name_by_root.insert(process.pid, rule.display_name.clone());
         }
@@ -221,7 +277,7 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
                     .get(&pid)
                     .map(|p| p.executable_path.clone())
                     .unwrap_or_default(),
-                is_descendant: true,
+                matched_by: MatchBasis::Descendant,
             });
         }
     }
@@ -307,6 +363,7 @@ mod tests {
             } else {
                 Some(argv.iter().map(|a| (*a).to_string()).collect())
             },
+            ..ProcessSnapshot::default()
         }
     }
 

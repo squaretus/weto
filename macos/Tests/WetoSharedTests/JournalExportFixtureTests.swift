@@ -52,6 +52,7 @@ final class JournalExportFixtureTests: XCTestCase {
 
         let trace = (diagnostics?["services"] as? [[String: Any]])?.first
         assertKeys(of: trace, equal: contract.traceKeys, at: "трасса сервиса")
+        assertKeys(of: trace?["phases"], equal: contract.phasesKeys, at: "фазы трассы")
 
         XCTAssertTrue(contract.eventKinds.contains(event["kind"] as? String ?? ""))
         XCTAssertTrue(
@@ -59,6 +60,8 @@ final class JournalExportFixtureTests: XCTestCase {
                 (diagnostics?["staleness"] as? [String: Any])?["cause"] as? String ?? ""
             )
         )
+        XCTAssertTrue(contract.verdictOrigins.contains(diagnostics?["verdictOrigin"] as? String ?? ""))
+        XCTAssertTrue(contract.matchBases.contains(event["matchedBy"] as? String ?? ""))
     }
 
     /// `SystemTime` в Rust по умолчанию сериализуется объектом, а не строкой:
@@ -171,7 +174,7 @@ final class JournalExportFixtureTests: XCTestCase {
             pid: 92594,
             parentPID: 1,
             executablePath: "/Users/square/.local/bin/claude",
-            isDescendant: true,
+            matchedBy: .descendant,
             kind: .terminated,
             reasonText: "Подключение ещё не проверено",
             resolutionText: "проверка завершилась безопасным выходом: 203.0.113.15, KZ",
@@ -191,6 +194,7 @@ final class JournalExportFixtureTests: XCTestCase {
                 hasNetworkPath: true,
                 vpnAppEntry: "su.ffg.happ",
                 vpnAppStatus: "running",
+                verdictOrigin: .established,
                 services: [
                     GeoServiceTrace(
                         service: "ipinfo",
@@ -199,6 +203,10 @@ final class JournalExportFixtureTests: XCTestCase {
                         durationMilliseconds: 42,
                         body: #"{"ip":"203.0.113.15","country_code":"KZ"}"#,
                         failure: "нет",
+                        phases: NetworkPhases(
+                            dnsMilliseconds: 3, connectMilliseconds: 20,
+                            tlsMilliseconds: 41, firstByteMilliseconds: 300
+                        ),
                         fromCache: true,
                         cacheAgeSeconds: 7
                     )
@@ -226,6 +234,13 @@ final class JournalExportFixtureTests: XCTestCase {
                     durationMilliseconds: 42,
                     body: #"{"ip":"203.0.113.15","country_code":"KZ"}"#,
                     failure: "нет",
+                    // Ответ из кэша: ни одна фаза не выполнялась, реальных длительностей
+                    // нет — только сам ключ `phases` обязан остаться в трассе проверки
+                    // (см. `contract.traceKeys`), фабриковать цифры незачем.
+                    phases: NetworkPhases(
+                        dnsMilliseconds: nil, connectMilliseconds: nil,
+                        tlsMilliseconds: nil, firstByteMilliseconds: nil
+                    ),
                     fromCache: true,
                     cacheAgeSeconds: 7
                 )
@@ -274,11 +289,14 @@ final class JournalExportFixtureTests: XCTestCase {
         let diagnosticsKeys: [String]
         let stalenessKeys: [String]
         let traceKeys: [String]
+        let phasesKeys: [String]
         let checkKeys: [String]
         let checkTriggers: [String]
         let checkOutcomes: [String]
         let stalenessCauses: [String]
         let eventKinds: [String]
+        let verdictOrigins: [String]
+        let matchBases: [String]
         let timestampPattern: String
         let timestampFields: [String]
         let bodyLimit: Int

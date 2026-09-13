@@ -20,7 +20,7 @@ RUNTIME_SIZE=256
 echo "=== weto — сборка иконки ==="
 
 # Рантайм: две картинки, по одной на тему. 256 пт хватает и попапу, и диалогу
-# обновления (52 пт), а вес в бандле проверяет бюджет размера в build.sh.
+# обновления (52 пт).
 for theme in dark light; do
     swift scripts/render-icon.swift "$ICON_SRC/${theme}.icon" \
         "$RUNTIME_DIR/app-icon-${theme}.png" "$RUNTIME_SIZE"

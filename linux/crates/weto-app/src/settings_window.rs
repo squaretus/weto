@@ -666,31 +666,31 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
     actions.append(&uninstall);
     card.append(&actions);
 
-    {
-        let state = state.clone();
-        close.connect_clicked(move |button| {
-            confirm(
-                button,
-                "Закрыть weto?",
-                "Приложение завершится и перестанет охранять цели до следующего входа \
-                 в систему. Настройки, журнал и автозапуск сохранятся.",
-                "Закрыть",
-                {
-                    let _state = state.clone();
-                    move || {
-                        if let Some(app) = gtk4::gio::Application::default() {
-                            app.quit();
-                        }
-                    }
-                },
-            );
-        });
-    }
+    close.connect_clicked(move |button| {
+        confirm(
+            button,
+            "Закрыть weto?",
+            "Приложение завершится и перестанет охранять цели до следующего входа \
+             в систему. Настройки, журнал и автозапуск сохранятся.",
+            "Закрыть",
+            || {
+                // Замороженных целей выход не оставляет: SIGCONT шлёт воронка
+                // `connect_shutdown`, а не эта кнопка — иначе обязательство
+                // держалось бы на трёх кнопках, а закрытие последнего окна
+                // проходило бы мимо него.
+                if let Some(app) = gtk4::gio::Application::default() {
+                    app.quit();
+                }
+            },
+        );
+    });
 
     {
         let error = error.clone();
+        let state = state.clone();
         uninstall.connect_clicked(move |button| {
             let error = error.clone();
+            let state = state.clone();
             confirm(
                 button,
                 "Удалить weto?",
@@ -698,6 +698,13 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
                  Действие необратимо.",
                 "Удалить",
                 move || {
+                    // Единственное место, где выход зовут руками: порядок
+                    // важен. Стоящие цели продолжаются раньше удаления —
+                    // вместе с учётом исчезает и последний, кто помнит, кому
+                    // должен SIGCONT, а воронка отработала бы уже после него.
+                    // Повтор безвреден: вызов идемпотентен, и второй раз
+                    // на выходе не находит в учёте ничего.
+                    state.shutdown();
                     // Приложение не закрывается молча, если что-то не удалилось:
                     // иначе пользователь считал бы систему чистой.
                     match crate::uninstall::run() {
@@ -912,8 +919,10 @@ fn diagnostics(event: &weto_config::journal::KillEvent) -> String {
     if let (Some(source), Some(country)) = (&event.confirm_source, &event.confirmed_country) {
         parts.push(format!("{source}: {country}"));
     }
-    if event.is_descendant {
-        parts.push(format!("потомок {}", event.parent_pid));
+    // Чем процесс попал под охрану: потомок называет родителя, шелл объясняет,
+    // что целью он не был вовсе, а стоял ради её терминала.
+    if let Some(basis) = event.matched_by.detail_text(event.parent_pid) {
+        parts.push(basis);
     }
     if let Some(resolution) = &event.resolution_text {
         parts.push(format!("итог: {resolution}"));

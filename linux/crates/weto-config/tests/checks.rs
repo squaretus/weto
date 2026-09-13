@@ -80,6 +80,39 @@ fn network_and_settings_checks_are_always_recorded() {
     assert_eq!(log.entries().len(), 2);
 }
 
+/// Старт с непрочитанным учётом остановленных — не проверка подключения, но
+/// единственный след невыполненного обязательства: он обязан писаться всегда,
+/// и звучать так же, как на macOS.
+#[test]
+fn startup_recovery_trace_is_always_recorded() {
+    let mut log = CheckLog::default();
+
+    assert!(log.append(check(
+        CheckTrigger::StartupRecovery,
+        CheckOutcome::LedgerUnreadable,
+        1
+    )));
+
+    assert_eq!(log.entries().len(), 1);
+    assert_eq!(
+        CheckTrigger::StartupRecovery.display_text(),
+        "восстановление после падения"
+    );
+    assert_eq!(
+        CheckOutcome::LedgerUnreadable.display_text(),
+        "учёт остановленных не прочитан"
+    );
+    assert_eq!(
+        serde_json::to_value(CheckTrigger::StartupRecovery).unwrap(),
+        serde_json::json!("startupRecovery"),
+        "имя в файле — часть общего формата"
+    );
+    assert_eq!(
+        serde_json::to_value(CheckOutcome::LedgerUnreadable).unwrap(),
+        serde_json::json!("ledgerUnreadable")
+    );
+}
+
 #[test]
 fn capacity_is_fifty_and_the_freshest_stay() {
     assert_eq!(CAPACITY, 50);

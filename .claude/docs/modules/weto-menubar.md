@@ -11,7 +11,13 @@ parsing, validation and persistence happen in the stores.
 ## Key files
 - `macos/Sources/WetoMenuBar/WetoMenuBarApp.swift` — `@main` scene, `AppDelegate`, `SingleInstanceGuard`
 - `macos/Sources/WetoMenuBar/MenuBarLabel.swift`
-- `macos/Sources/WetoMenuBar/StatusPopupView.swift`
+- `macos/Sources/WetoMenuBar/StatusPopupView.swift` — shield + title + refresh/gear, the three
+  explanation lines (`StatusPresentation.explanation`, shown when `.shouldExplain`), the geo
+  readout, live target pills each with a `WetoPauseBadge` when paused
+- `macos/Sources/WetoMenuBar/MenuBarPopupPresenter.swift` — `PopupPresenting` implementation:
+  finds the menu-bar-extra status button and popup window by class-name substring (no public
+  AppKit/SwiftUI API for either) and toggles the popup open from code, the way a notification tap
+  needs to
 - `macos/Sources/WetoMenuBar/JournalRow.swift`
 - `macos/Sources/WetoMenuBar/Settings/SettingsWindow.swift`
 - `macos/Sources/WetoMenuBar/Settings/TargetsCard.swift`
@@ -31,12 +37,16 @@ parsing, validation and persistence happen in the stores.
 - `AppDelegate.coordinator: AppCoordinator` — injected into both scenes via `.environment(...)`
 - `SettingsWindow.identifier` — the only string shared with `StatusPopupView`'s gear button
   (`openWindow(id:)` + `NSApplication.shared.activate`)
+- `UserNotificationGuardNotifier.onOpen = { popupPresenter.openPopup() }`, wired once in
+  `WetoMenuBarApp.init` — a tap on either notification (`GuardNotifying.notifyTerminated`/
+  `.notifyBackgrounded`, see `weto-shared.md`) opens the popup instead of just foregrounding
+  the app, so the explanation the user needs is already on screen
 
 ## Dependencies
 - Package targets: `WetoShared` (`AppCoordinator`, `GuardVM`, `SettingsStore`, `EventLogStore`,
   `UpdateController` (from `UpdateKit`), `LaunchAgentManaging`, `Maintenance`, `StatusPresentation`), `WetoDesign`
   (`WetoTokens`, `WetoCard/Row/Panel/Divider`, `WetoSegmentedControl`, `WetoBanner`,
-  button/field styles, `StatusShield`, `MenuBarImageRenderer`, `TargetIconStore`),
+  button/field styles, `StatusShield`, `WetoPauseBadge`, `MenuBarImageRenderer`, `TargetIconStore`),
   `WetoCore` (`KillEvent`, `GuardStatusColor`, `Constants`, `AppTheme`), `WetoSystem`
   (`FlagImageStore` only)
 - Frameworks: SwiftUI, AppKit (`NSAlert`, `NSOpenPanel`, `NSWorkspace`, `NSApplication`,
@@ -100,6 +110,18 @@ parsing, validation and persistence happen in the stores.
 - The ipinfo token is never displayed in full unless the field is focused; `maskedToken`
   is compared against the draft to avoid saving the mask itself.
 
+- **One clock drives every countdown in the popup.** `StatusPopupView` wraps its content in
+  `TimelineView(.periodic(from: .now, by: 1))` only while `guardVM.pauseDeadline != nil`, and
+  passes that single `Date` down to both the explanation's third line and every target's
+  `WetoPauseBadge`. Two independent per-badge timers would drift a second apart from each other
+  and from the explanation text — the popup would visibly disagree with itself about how much
+  time is left.
+- **`MenuBarPopupPresenter` reads private AppKit/SwiftUI class names**
+  (`…StatusBarWindow…`, `…MenuBarExtraWindow…`) because `MenuBarExtra` exposes no public way to
+  open its own popup from code. A future AppKit/SwiftUI version can silently break the match; the
+  fallback is deliberately "always click" (which can toggle an already-open popup shut) rather than
+  a crash — see the file's own comment for the exact visibility check that avoids that in the
+  common case.
 - **The app reaches the Dock only when it owns a window.** It is an accessory by default
   (`LSUIElement` plus `.accessory`), but the settings and update windows are ordinary
   windows, and without a Dock icon they cannot be found in Cmd+Tab or with the mouse.
@@ -125,6 +147,8 @@ parsing, validation and persistence happen in the stores.
 
 ## Related docs
 - `.claude/rules/ARCHITECTURE.md` — module index and key contracts
-- `docs/design-system.md` — visual language the cards and popup must follow
+- `docs/design-system.md` — visual language the cards and popup must follow, including the pause
+  badge and "Показать терминал"
 - `features/geo-whitelist.md` — why the settings screen shows six cards
+- `features/pause-instead-of-kill.md` — the popup states this view renders
 - `.claude/docs/debug-map.md`

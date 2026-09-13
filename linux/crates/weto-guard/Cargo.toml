@@ -12,3 +12,6 @@ weto-config = { path = "../weto-config" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Только ради errno в стенде: тесту нужен настоящий отказ ядра (EPERM),
+# а не выдуманное число.
+libc = { workspace = true }

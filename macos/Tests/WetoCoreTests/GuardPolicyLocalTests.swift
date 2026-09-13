@@ -55,11 +55,18 @@ final class GuardPolicyLocalTests: XCTestCase {
         )
     }
 
-    func test_local_decision_kills_when_the_vpn_app_is_not_chosen() {
-        XCTAssertEqual(
-            GuardPolicy.decideLocal(isEnabled: true, vpn: .notChosen, config: config(vpn: nil)),
-            .kill(.vpnAppNotChosen)
-        )
+    /// Невыбранное приложение — не причина: локальных оснований нет, решает гео.
+    func test_unchosen_vpn_app_gives_no_local_grounds() {
+        let config = GuardConfig(vpnAppRule: nil, blockedCountries: [], blockedIPRanges: [],
+                                 allowedCountries: [], allowedIPRanges: [], targets: ["nano"])
+        XCTAssertNil(GuardPolicy.decideLocal(isEnabled: true, vpn: .notChosen, config: config))
+    }
+
+    func test_closed_vpn_app_is_local_proof() {
+        let config = GuardConfig(vpnAppRule: "su.ffg.happ", blockedCountries: [], blockedIPRanges: [],
+                                 allowedCountries: [], allowedIPRanges: [], targets: ["nano"])
+        XCTAssertEqual(GuardPolicy.decideLocal(isEnabled: true, vpn: .notRunning, config: config),
+                       .kill(.vpnAppNotRunning))
     }
 
     func test_local_and_full_decisions_agree_on_local_reasons() {

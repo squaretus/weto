@@ -28,31 +28,108 @@ public struct IdleTargetsNotice: Equatable, Sendable {
     }
 }
 
+/// Три строки объяснения: что сделал weto, почему, что дальше. Заголовок — состояние, не причина.
+public struct StatusExplanation: Equatable, Sendable {
+    public let title: String
+    public let action: String
+    public let evidence: String
+    public let next: String
+
+    public init(title: String, action: String, evidence: String, next: String) {
+        self.title = title
+        self.action = action
+        self.evidence = evidence
+        self.next = next
+    }
+}
+
 public enum StatusPresentation {
 
-    public static func idleTargets(for state: GuardState) -> IdleTargetsNotice {
-        switch state {
-        case .safe:
-            return IdleTargetsNotice(text: "Цели не запущены", hint: "— VPN можно выключать")
-        case .unsafe, .disabled:
-            return IdleTargetsNotice(text: "Цели не запущены", hint: nil)
+    /// Объяснение состояния тремя строками: что сделано с целями, почему —
+    /// улика фазы, и что дальше — счётчик паузы или совет действия. `remainingPause`
+    /// приходит параметром (обычно из `GuardMachine.remainingPause(at:)`): представление
+    /// не читает часы само.
+    public static func explanation(
+        for phase: GuardPhase,
+        remainingPause: TimeInterval?
+    ) -> StatusExplanation {
+        let remaining = Int((remainingPause ?? 0).rounded(.up))
+        switch phase {
+        case .disabled:
+            return StatusExplanation(
+                title: phase.title, action: "Цели работают",
+                evidence: "Цели не выбраны — охрана ничего не завершает",
+                next: "Добавьте приложение или команду в настройках"
+            )
+        case .verifying(let cause):
+            // Проба в полёте, вердикта про текущий путь ещё нет — и цели работают:
+            // пауза начинается с плохого результата, а не с его ожидания. Ни «на паузе»,
+            // ни отсчёта здесь быть не может — считать нечего, пока ответа нет.
+            return StatusExplanation(
+                title: phase.title, action: "Цели работают",
+                evidence: "Прежний вердикт не годится: \(cause.displayText)",
+                next: "Жду ответа сервисов о безопасности выхода"
+            )
+        case .protected(let reading):
+            return StatusExplanation(
+                title: phase.title, action: "Цели работают",
+                evidence: exitDescription(reading),
+                next: "Дальше ничего делать не нужно"
+            )
+        case .interference(let reading, let reason):
+            // Это ответ, а не тишина: резервный сервис назвал прежний адрес.
+            // Считать тут нечего — отсчёта неудачных проб у охраны больше нет.
+            return StatusExplanation(
+                title: phase.title, action: "Цели работают", evidence: reason.displayText,
+                next: "Адрес \(reading.ip) доказанно тот же — жду восстановления ipinfo"
+            )
+        case .paused(_, let reason):
+            return StatusExplanation(
+                title: phase.title, action: "Цели остановлены", evidence: reason.displayText,
+                next: "Ждём ответа сервисов, \(remaining) с до завершения; возобновятся при подтверждении безопасного выхода"
+            )
+        case .danger(let evidence):
+            return StatusExplanation(
+                title: phase.title, action: "Цели завершены", evidence: evidence.displayText,
+                next: "Запуск запрещён до подтверждения безопасного выхода"
+            )
         }
+    }
+
+    /// Стоит ли показывать объяснение в попапе. `explanation` остаётся тотальной — отвечает
+    /// на каждую фазу три непустые строки, — а это отдельное решение о том, что видит
+    /// пользователь: там, где охрана ничего не сделала с целями (`.disabled` — целей нет,
+    /// `.protected` — работают штатно, объяснять нечего), попап выглядит так же, как до
+    /// появления паузы — заголовок, гео-показания, футер целей, без строк объяснения.
+    public static func shouldExplain(_ phase: GuardPhase) -> Bool {
+        switch phase {
+        case .disabled, .protected: return false
+        case .verifying, .interference, .paused, .danger: return true
+        }
+    }
+
+    private static func exitDescription(_ reading: GeoReading) -> String {
+        guard let confirmed = reading.confirmedCountry, let source = reading.confirmSource else {
+            return "Выход \(reading.ip), страна \(reading.primaryCountry) по данным ipinfo"
+        }
+        return "Выход \(reading.ip), страна \(confirmed) подтверждена \(source.rawValue)"
+    }
+
+    /// Совет «VPN можно выключать» правдив ровно в одном состоянии: свежий safe.
+    /// Под паузой и после доказательства цели молчат не потому, что всё хорошо.
+    public static func idleTargets(for phase: GuardPhase) -> IdleTargetsNotice {
+        if case .protected = phase {
+            return IdleTargetsNotice(text: "Цели не запущены", hint: "— VPN можно выключать")
+        }
+        return IdleTargetsNotice(text: "Цели не запущены", hint: nil)
     }
 
     public static let unknownIP = "неизвестен"
     public static let missingValue = "—"
     public static let confirmationLabel = "подтверждение"
 
-    public static func title(for state: GuardState) -> String {
-        switch state {
-        case .disabled: return "Охрана выключена"
-        case .safe: return "На страже"
-        case .unsafe(let reason): return reason.statusTitle
-        }
-    }
-
-    public static func lines(for state: GuardState, reading: GeoReading?) -> [StatusLine] {
-        let known = knownReading(for: state, reading: reading)
+    public static func lines(for phase: GuardPhase, reading: GeoReading?) -> [StatusLine] {
+        let known = knownReading(for: phase, reading: reading)
 
         // Подпись строки — имя сервиса, который реально ответил: подтверждающих
         // два, и показывать чужое имя было бы ложью.
@@ -69,7 +146,7 @@ public enum StatusPresentation {
     /// Строки по отчёту последней пробы: показываем, кто именно ответил, кто молчит
     /// и была ли вообще сеть. Без этого отказ ipinfo выглядел на экране как пустые прочерки.
     public static func lines(
-        for state: GuardState,
+        for phase: GuardPhase,
         report: GeoProbeReport,
         timeZone: TimeZone = .current
     ) -> [StatusLine] {
@@ -113,15 +190,22 @@ public enum StatusPresentation {
         return formatter.string(from: date)
     }
 
-    private static func knownReading(for state: GuardState, reading: GeoReading?) -> GeoReading? {
-        if case .unsafe(let reason) = state, case .geoUnavailable = reason { return nil }
-        if case .safe(let current) = state { return current ?? reading }
-        return reading
+    /// Что мы имеем право показывать как известное про выход.
+    ///
+    /// «Проверка» не знает ничего: вердикта про текущий путь нет, и прошлые адрес
+    /// со страной читались бы как «я всё ещё под VPN». Закрытый клиент — то же самое.
+    private static func knownReading(for phase: GuardPhase, reading: GeoReading?) -> GeoReading? {
+        switch phase {
+        case .verifying: return nil
+        case .protected(let current), .interference(let current, _): return current
+        case .danger(.vpnAppNotRunning): return nil
+        default: return reading
+        }
     }
 
-    public static func detail(for state: GuardState, reading: GeoReading?) -> String? {
-        guard knownReading(for: state, reading: reading) != nil else { return nil }
-        return lines(for: state, reading: reading)
+    public static func detail(for phase: GuardPhase, reading: GeoReading?) -> String? {
+        guard knownReading(for: phase, reading: reading) != nil else { return nil }
+        return lines(for: phase, reading: reading)
             .map { "\($0.key): \($0.value)" }
             .joined(separator: " · ")
     }

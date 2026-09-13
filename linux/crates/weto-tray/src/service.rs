@@ -8,18 +8,18 @@
 use std::sync::mpsc::Sender;
 
 use tokio::sync::mpsc::UnboundedSender;
-use weto_core::presentation::ShieldState;
+use weto_core::presentation::GuardStatusColor;
 
 use crate::{TrayEvent, WetoTray};
 
 /// Ручка для обновления иконки. Отправка синхронная — вызывается из главного
 /// цикла GTK.
 pub struct TrayHandle {
-    updates: UnboundedSender<(ShieldState, String)>,
+    updates: UnboundedSender<(GuardStatusColor, String)>,
 }
 
 impl TrayHandle {
-    pub fn set_status(&self, state: ShieldState, title: &str) {
+    pub fn set_status(&self, state: GuardStatusColor, title: &str) {
         // Приёмник исчезает только вместе с потоком трея; молчание здесь
         // означает, что показывать уже нечего.
         let _ = self.updates.send((state, title.to_string()));
@@ -32,7 +32,7 @@ impl TrayHandle {
 /// например. Это свойство окружения, а не ошибка: у приложения есть второй
 /// вход через ярлык и повторный запуск.
 pub fn spawn(events: Sender<TrayEvent>) -> Option<TrayHandle> {
-    let (updates, mut inbox) = tokio::sync::mpsc::unbounded_channel::<(ShieldState, String)>();
+    let (updates, mut inbox) = tokio::sync::mpsc::unbounded_channel::<(GuardStatusColor, String)>();
     let (ready, ready_rx) = std::sync::mpsc::channel();
 
     std::thread::Builder::new()

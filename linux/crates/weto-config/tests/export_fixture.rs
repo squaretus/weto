@@ -15,7 +15,8 @@ use serde_json::Value;
 use weto_config::checks::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_config::export::JournalExport;
 use weto_config::journal::{
-    GeoServiceTrace, KillDiagnostics, KillEvent, KillEventKind, VerdictStaleness, BODY_LIMIT,
+    GeoServiceTrace, KillDiagnostics, KillEvent, KillEventKind, MatchBasis, NetworkPhases,
+    VerdictStaleness, BODY_LIMIT,
 };
 use weto_config::settings::{Settings, Target};
 use weto_core::process::TargetKind;
@@ -31,11 +32,14 @@ struct Contract {
     diagnostics_keys: Vec<String>,
     staleness_keys: Vec<String>,
     trace_keys: Vec<String>,
+    phases_keys: Vec<String>,
     check_keys: Vec<String>,
     check_triggers: Vec<String>,
     check_outcomes: Vec<String>,
     staleness_causes: Vec<String>,
     event_kinds: Vec<String>,
+    verdict_origins: Vec<String>,
+    match_bases: Vec<String>,
     timestamp_fields: Vec<String>,
     body_limit: usize,
     forbidden_substrings: Vec<String>,
@@ -88,7 +92,7 @@ fn export() -> (Value, String) {
         pid: 92594,
         parent_pid: 1,
         executable_path: "/home/square/.local/bin/claude".to_string(),
-        is_descendant: true,
+        matched_by: MatchBasis::Descendant,
         kind: KillEventKind::Terminated,
         reason_text: "Подключение ещё не проверено".to_string(),
         resolution_text: Some(
@@ -110,6 +114,7 @@ fn export() -> (Value, String) {
             has_network_path: Some(true),
             vpn_app_entry: Some("org.happ.Happ".to_string()),
             vpn_app_status: Some("Running".to_string()),
+            verdict_origin: Some("established".to_string()),
             services: vec![GeoServiceTrace {
                 service: "ipinfo".to_string(),
                 url: "https://v4.api.ipinfo.io/lite/me".to_string(),
@@ -117,6 +122,12 @@ fn export() -> (Value, String) {
                 duration_milliseconds: Some(42),
                 body: Some(r#"{"ip":"203.0.113.15","country_code":"KZ"}"#.to_string()),
                 failure: Some("нет".to_string()),
+                phases: Some(NetworkPhases {
+                    dns_milliseconds: Some(3),
+                    connect_milliseconds: Some(20),
+                    tls_milliseconds: Some(41),
+                    first_byte_milliseconds: Some(300),
+                }),
                 from_cache: true,
                 cache_age_seconds: Some(7),
             }],
@@ -143,6 +154,7 @@ fn export() -> (Value, String) {
             duration_milliseconds: Some(42),
             body: Some(r#"{"ip":"203.0.113.15","country_code":"KZ"}"#.to_string()),
             failure: Some("нет".to_string()),
+            phases: None,
             from_cache: true,
             cache_age_seconds: Some(7),
         }],
@@ -216,6 +228,11 @@ fn event_matches_the_shared_contract() {
         expected(&contract.trace_keys),
         "трасса сервиса"
     );
+    assert_eq!(
+        keys(&diagnostics["services"][0]["phases"]),
+        expected(&contract.phases_keys),
+        "фазы трассы"
+    );
 
     assert!(contract
         .event_kinds
@@ -226,6 +243,15 @@ fn event_matches_the_shared_contract() {
             .unwrap()
             .to_string()
     ));
+    assert!(contract.verdict_origins.contains(
+        &diagnostics["verdictOrigin"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    ));
+    assert!(contract
+        .match_bases
+        .contains(&event["matchedBy"].as_str().unwrap_or_default().to_string()));
 }
 
 /// Проверки — второй журнал в том же файле: «нажал и ничего не произошло»
@@ -333,7 +359,7 @@ fn kill_event(pid: i32, seconds: u64) -> KillEvent {
         pid,
         parent_pid: 1,
         executable_path: "/usr/bin/claude".to_string(),
-        is_descendant: false,
+        matched_by: MatchBasis::Rule,
         kind: KillEventKind::Terminated,
         reason_text: "причина".to_string(),
         resolution_text: None,

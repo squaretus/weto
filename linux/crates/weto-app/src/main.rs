@@ -28,6 +28,7 @@ const APP_ID: &str = "com.weto.app";
 thread_local! {
     static STYLES: RefCell<Option<CssProvider>> = const { RefCell::new(None) };
     static TRAY_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static NOTIFICATIONS_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Смена темы — подмена таблицы стилей целиком: CSS-переменных на GTK 4.14 нет,
@@ -69,13 +70,35 @@ fn main() -> gtk4::glib::ExitCode {
 
     {
         let state = state.clone();
-        application.connect_startup(move |_| {
+        application.connect_startup(move |app| {
             apply_theme(state.theme());
             // Охрана стартует здесь, а не при первом открытии окна: окно
             // может не открыться никогда, а защита нужна с первой секунды.
             state.start_guard();
             update::start(state.clone());
+
+            // Выход из сессии — тоже штатный выход, и обязательство «вернуть
+            // цели из паузы» на нём держится. Без обработчика SIGTERM убивает
+            // процесс на месте, мимо воронки ниже, и замороженная цель ждала бы
+            // следующего запуска. Сигнал уводится в `quit`: воронка одна,
+            // а выполняется она в главном цикле, а не в обработчике сигнала.
+            let app = app.clone();
+            gtk4::glib::unix_signal_add_local(libc::SIGTERM, move || {
+                app.quit();
+                gtk4::glib::ControlFlow::Break
+            });
         });
+    }
+
+    {
+        let state = state.clone();
+        // Единственная воронка штатного выхода: замороженных целей не оставляем.
+        //
+        // Кнопок и пункта трея для этого мало: GApplication завершает приложение
+        // сам, когда закрылось последнее окно, — и этот путь, самый обычный
+        // из всех, оставлял цели стоять до следующего запуска. На macOS ту же
+        // роль исполняет один `applicationWillTerminate`.
+        application.connect_shutdown(move |_| state.shutdown());
     }
 
     {
@@ -85,6 +108,22 @@ fn main() -> gtk4::glib::ExitCode {
             // цикла подписываться не на что.
             if !TRAY_UP.with(|up| up.replace(true)) {
                 tray::install(app, state.clone());
+            }
+            // Нажатие на уведомление приходит с шины, из чужого потока, а окна
+            // открывают только из главного цикла — поэтому просьбу забирает
+            // такт. Трей для этого не годится: его в окружении может не быть.
+            if !NOTIFICATIONS_UP.with(|up| up.replace(true)) {
+                let app = app.clone();
+                let state = state.clone();
+                gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                    if state.take_open_request() {
+                        match app.active_window() {
+                            Some(window) => window.present(),
+                            None => status_window::build(&app, state.clone()).present(),
+                        }
+                    }
+                    gtk4::glib::ControlFlow::Continue
+                });
             }
             match app.active_window() {
                 Some(window) => window.present(),
@@ -126,5 +165,68 @@ fn handle_cli(arguments: &[String]) -> Option<gtk4::glib::ExitCode> {
             }
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use gtk4::prelude::*;
+    use gtk4::{Application, ApplicationWindow};
+
+    /// На чём держится воронка: GApplication завершается сам, когда закрылось
+    /// последнее окно, и на этом пути обязан прийти `shutdown`. Проверка
+    /// не про GTK, а про наше допущение: ради него `state.shutdown()` и убран
+    /// из пункта трея и кнопки «Закрыть приложение» — выход без кнопок ходит
+    /// здесь, и держать обязательство на них значило бы его терять.
+    ///
+    /// Сам `state.shutdown()` отсюда недосягаем: `main` не вызвать, а состоянию
+    /// нужны настоящие пути и поток охраны. Что именно делает выход, проверяет
+    /// `weto-guard/tests/pause.rs`, здесь — что выход вообще случается.
+    #[test]
+    fn closing_the_last_window_goes_through_the_shutdown_funnel() {
+        let shut_down = Rc::new(Cell::new(false));
+        let timed_out = Rc::new(Cell::new(false));
+
+        let application = Application::builder()
+            .application_id("com.weto.app.tests")
+            // Без шины: в контейнере её нет, а уникальность здесь ни при чём.
+            .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+
+        {
+            let shut_down = shut_down.clone();
+            application.connect_shutdown(move |_| shut_down.set(true));
+        }
+
+        application.connect_activate(|app| {
+            let window = ApplicationWindow::new(app);
+            window.present();
+            // Закрытие — отдельным тактом: внутри `activate` приложение ещё
+            // держит себя само, и окно закрылось бы раньше, чем это заметят.
+            gtk4::glib::idle_add_local_once(move || window.close());
+        });
+
+        // Страховка: не завершись приложение само, `run` крутился бы вечно
+        // и уносил с собой весь прогон.
+        {
+            let timed_out = timed_out.clone();
+            let application = application.clone();
+            gtk4::glib::timeout_add_local_once(Duration::from_secs(10), move || {
+                timed_out.set(true);
+                application.quit();
+            });
+        }
+
+        application.run_with_args::<&str>(&[]);
+
+        assert!(
+            !timed_out.get(),
+            "приложение не завершилось от закрытия последнего окна"
+        );
+        assert!(shut_down.get(), "выход прошёл мимо `connect_shutdown`");
     }
 }

@@ -9,11 +9,74 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Key files
 - `macos/Sources/WetoShared/AppCoordinator.swift` — composition root, wired once in `WetoMenuBarApp`
-- `macos/Sources/WetoShared/GuardVM.swift` — observable facade for the UI, journal dedup, watchdog, tick loop
-- `macos/Sources/WetoShared/GuardController.swift` — decision state machine, owns the network probe
-- `macos/Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event
+- `macos/Sources/WetoShared/GuardVM.swift` — observable facade for the UI, journal dedup, watchdog, tick loop.
+  Owns the pause side: `pausedProcesses` (popup badges), `pauseDeadline`, `pauseTargets()`/`settleResume()`,
+  which call `ProcessEnforcer.pause`/`.resume` and record/refine the `kind: .paused` episode.
+  `settleResume()` runs on every pass with running targets while the ledger is non-empty
+  (the `.resume` effect is not a one-shot): the obligation is discharged by observation, so
+  the episode is refined «возобновлено» only once the process was seen running again, and
+  «не возобновлено: …» when SIGCONT did not stick (background job) or was refused. An entry that
+  answered with a stop `Constants.resumeRetryLimit` times stops being poked (zsh's `notify` would
+  print `suspended (tty input)` to the user once a second) — it stays on the books, and
+  `terminate`/`stop` still signal it. `stop()` cannot observe anything after its own SIGCONT,
+  so its outcome is «не подтверждено: … weto проверит их при следующем запуске» — neither the
+  optimistic nor the pessimistic lie. A pill whose target worked between episodes and was stopped
+  again adopts the new moment — that standing did start now, and `pause` only reports as `fresh`
+  what it actually signalled, so a target that never came back up keeps its original `since`,
+  which is the truth about it. `PausedProcess.since` records when weto stopped that pid; the
+  countdown the badge shows is not read from it but from the reducer's phase
+  (`pauseDeadline` → `phase.pausedSince`), because the 60 s ceiling belongs to the episode, not to
+  one target. Only `isBackgrounded` is inherited across episodes — that one was written by
+  observation, not by the plan's guess.
+- `macos/Sources/WetoShared/GuardController.swift` — owns the one live `GuardMachine` (the reducer
+  lives in `WetoCore`, see `weto-core.md`) plus the network probe: turns triggers into
+  `GuardInput`, applies it, and asks `GuardVM` to enact whatever `GuardEffect` came back
+- `macos/Sources/WetoShared/ProcessEnforcer.swift` — rule cache + single process scan per event;
+  `pause(_:)` builds a `PausePlan` (skips only pids the kernel shows stopped *and* the ledger
+  knows) and sends `.stop` in `stopOrder`; everything it actually stopped comes back in `fresh`,
+  including a revived ledger entry — per-episode dedup of journal records lives one layer up, in
+  `GuardVM.pausedEpisodePIDs`. The shells it stopped come back too, in `freshShells`, already
+  shaped as `MatchedProcess(matchedBy: .shell)` with the name of the target whose terminal they
+  hold (`PausePlan.shellTargets`): every SIGSTOP weto sends must be explainable from the kill
+  journal alone, so `GuardVM.pauseTargets` journals `fresh + freshShells` into one episode. `resume(observing:skipping:)` sends `.resume` in the reverse of what
+  the ledger holds (minus the entries that stopped being poked) and
+  returns a `ResumeOutcome` (`released` / `unresolved`), `resumeOrphans()`
+  is the crash-recovery path (only pids that are still stopped *and* still the same executable get
+  `SIGCONT` — pid reuse must not resume a stranger). It reverses the ledger too: the file keeps
+  entries in the order they were added, and `pause` adds them in the order the SIGSTOPs went out,
+  so the real stop order survives into the next launch and the resume is its exact reverse.
+  Reconstructing it from `isShell` ("non-shells, then shells") was an approximation that swapped a
+  target and its own child. `resumeOrphans` also returns the walk it made
+  (`(outcome:, observed:)`), and `GuardVM.surfaceRecovered` names the standing targets from that
+  scan rather than walking every process a second time. Neither one clears the ledger: an entry is
+  struck off only when the process is gone or the kernel showed it running, so a target that
+  falls back to `T` via `SIGTTIN` keeps its entry and gets SIGCONT again next pass.
+  `release(guarded:observing:)` is the third caller of that same settle: a live ledger entry that
+  matches nothing in the current scan lost its only reason to stand — the user removed its rule —
+  and it gets `SIGCONT` on that very pass instead of waiting for the episode's outcome, i.e. up to
+  the 60 s ceiling after the user said «this is no longer mine». A shell is the exception, for the
+  same reason it joins the plan at all: it is released only when no non-shell entry is still
+  guarded, otherwise it takes the terminal back and its target lands on `SIGTTIN`. Signals go in
+  the same reverse stop order, and the obligation is still discharged by observation —
+  `freed` is who got the signal, `released` is who was observed and left the ledger
+- `macos/Sources/WetoShared/StoppedLedger.swift` — `StoppedProcess` (pid + path + `isShell`),
+  `StoppedLedgerPersisting` (`StoppedFile` at `stopped.json`, atomic temp+rename, next to the
+  journals; `InMemoryStoppedLedger` for tests), `StoppedLedgerReadout` (`.entries`/`.corrupted` —
+  a corrupted file reads as empty but is distinguishable at the boundary, so a broken ledger and
+  an empty one don't silently mean the same thing to `startupRecovery`)
+- `macos/Sources/WetoShared/GuardNotifying.swift` — `UserNotificationGuardNotifier`: two distinct
+  notifications, `notifyTerminated` (existing) and `notifyBackgrounded` (a paused terminal target
+  lost its foreground job — the process just "disappears" from its terminal without one).
+  `onOpen` is the tap handler that opens the popup; `presentationWhileActive` makes notifications
+  show even while weto's own window has focus, which is exactly when the user is watching status
+  and needs the explanation
+- `macos/Sources/WetoShared/PopupPresenting.swift` — the one-method boundary `MenuBarPopupPresenter`
+  needs to open the popup from a notification tap, without pulling `WetoMenuBar` into this module
 - `macos/Sources/WetoShared/SettingsStore.swift` — `UserDefaults` + Keychain, guard-config change bus
 - `macos/Sources/WetoShared/EventLogStore.swift` — 100-entry ring buffer of `KillEvent`, one per killed process
+- `macos/Sources/WetoShared/CheckLogStore.swift` — 50-entry ring buffer of `CheckEvent` (the second
+  journal: every connectivity-check attempt, not just the ones that killed something).
+  `CheckEvent.isWorthRecording` is the filter — see invariants
 - `macos/Sources/WetoShared/JournalFile.swift` — `~/Library/Application Support/weto/journal.json`, temp + rename
 - `macos/Sources/WetoShared/JournalExporter.swift` — the export envelope handed to a human or an agent
 - `macos/Sources/WetoShared/LaunchAgentController.swift` — `~/Library/LaunchAgents/com.weto.app.plist`
@@ -25,8 +88,9 @@ this layer decides *when* to ask and *what to do* with the answer.
   `Resources/uninstall-weto.sh` is machine-checked — `scripts/tests/uninstall-parity-contract.sh`
 - `macos/Sources/WetoShared/WetoUpdateTheme.swift` — weto skin for the `UpdateKit` dialog
 - `macos/Sources/WetoCore/WetoUpdate.swift` — the update configuration this module wires up
-- `macos/Sources/WetoShared/StatusPresentation.swift`, `KillNotifying.swift`, `URLOpening.swift`
-- Tests: `macos/Tests/WetoSharedTests/` (`GuardVMTests` is the behavioural bulk, 31 KB)
+- `macos/Sources/WetoShared/StatusPresentation.swift`, `URLOpening.swift`
+- Tests: `macos/Tests/WetoSharedTests/` (`GuardVMTests` is the behavioural bulk); `StoppedLedgerTests`,
+  `GuardNotifyingTests`, `CheckLogStoreTests` cover the additions above
 
 ## Entry points
 - `AppCoordinator.init()` → wires real system adapters; `start()`, `stopForTermination()`
@@ -52,13 +116,23 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `WetoUpdateTheme.make(for:) → UpdateTheme` — the only weto-specific part of the dialog
 - `UpdateInstalling.requestInstall(completion:)`, `requestLastFailure(completion:)`;
   `HelperUninstalling.uninstallHelper(completion:)`
-- `StatusPresentation.title(for:)`, `lines(for:reading:)`, `lines(for:report:timeZone:)`,
-  `detail(for:reading:)`
+- `StatusPresentation.explanation(for:remainingPause:) → StatusExplanation` — the three popup
+  lines (what weto did / why / what's next); `shouldExplain(_:)` gates them off for `.disabled`
+  and `.protected`, where there is nothing to explain
+- `StatusPresentation.lines(for:reading:)`, `lines(for:report:timeZone:)`, `detail(for:reading:)`
+- `GuardVM.showTerminal(for pid:) → Bool` — the popup's "Показать терминал" button, delegates to
+  `TerminalLocating`
+- `StoppedLedger.add(_:)`/`.remove(_:)`/`.clear()`, `.pids`, `.startedFromCorruptedFile`
+- `CheckLogStore.record(_:)` (drops anything `!isWorthRecording`), `.all`, `.clear()`
+- `GuardNotifying.notifyTerminated(reasonText:killedCount:)`, `.notifyBackgrounded(targetName:)`;
+  `UserNotificationGuardNotifier.activate()`, `.onOpen` (tap → open popup)
 
 ## Dependencies
 - `WetoCore`: `GuardPolicy`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`
 - `WetoSystem` protocols (injected, mocked in tests): `NetworkSnapshotReading`, `NetworkEventSourcing`,
-  `GeoProbing`, `ProcessLocating`, `ProcessKilling`, `TargetResolving`, `SecretStoring`, `HTTPFetching`
+  `GeoProbing`, `ProcessLocating`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`,
+  `TargetResolving`, `SecretStoring`, `HTTPFetching`
+- `StoppedLedgerPersisting` (injected, mocked in tests as `InMemoryStoppedLedger`)
 - `UpdateKit` / `UpdateKitUI`: `UpdateController`, `HelperUpdateInstaller`, `UserDefaultsUpdateStore`,
   `UpdateWindowPresenter` (see `modules/update-kit.md`)
 - Frameworks: `AppKit` (`NSWorkspace.open`, bundle paths), `UserNotifications`, `Observation`
@@ -68,8 +142,27 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Side effects
 <!-- generated, verify -->
-- Kills processes: `ProcessEnforcer.enforce` → `ProcessKilling.kill(pids:)`, driven from
-  `GuardVM.apply(.kill)` and from the 250 ms watchdog while state is `.unsafe`.
+- Signals processes: `ProcessEnforcer.pause(_:)` → `ProcessSignaling.send(.stop, …)` in
+  `PausePlan.stopOrder`; `.terminate(_:)` → `.send(.kill, …)` for matched pids and `.send(.resume, …)`
+  for anyone in the stopped ledger that no longer matches (a rule change or the shell of a target
+  under `.danger` — leaving it stopped would freeze it until the next weto launch); `.resume(observing:)` →
+  `.send(.resume, …)` over every live ledger entry, reversed. Driven from `GuardVM.applyCurrentAction`
+  (`phase.action`: `.pause`/`.terminate`) and from the 250 ms watchdog while paused or unsafe;
+  the resume side is driven by `GuardVM.settleResume()` from `apply`'s `.run` branch and from
+  every `handle(_:)` (a newsless tick never reaches `apply` — `GuardController.emit` swallows it).
+  `.release(guarded:observing:)` → `.send(.resume, …)` for ledger entries the guard no longer
+  holds, driven from `GuardVM.pauseTargets` (watchdog) and from `handle(_:)` while `phase.action`
+  is `.pause`, once per pass (`releasedPass`). The record gets its own outcome —
+  «не подтверждено: цель снята с охраны …» when the signal went out, «продолжен: цель снята
+  с охраны» once observed — and the episode-wide refine leaves it alone
+  (`EventLogStore.refine(skipping:)`), because its standing ended earlier and for another reason.
+- Writes `stopped.json` on every ledger `add`/`remove`/`clear` — atomic temp+rename, same pattern
+  as the journals. `add` dedupes by the same identity the rest of the code uses — pid **and**
+  path — and an entry whose pid matches but whose path differs is provably dead (one pid, one live
+  process), so the fresh record replaces it and goes to the tail: the ledger holds the stop order,
+  and the replacement was stopped now. Deduping by pid alone silently dropped the fresh record, and
+  the next pass struck the stale one off as recycled — without `SIGCONT`, leaving the target frozen
+  with nothing on the books to thaw it.
 - `UserDefaults` writes on every settings setter (write-through, no batching) and on every
   journal `record`/`clear`.
 - Keychain write on `setIPInfoToken`; `Maintenance.uninstall` writes `nil` to the same account.
@@ -154,8 +247,10 @@ this layer decides *when* to ask and *what to do* with the answer.
   `ProcessEnforcerTests`.
 - **One record per killed process, one `episodeID` per pass.** A record used to describe the whole
   pass — "claude" plus thirty-four pids on one line — which answers neither "what exactly died" nor
-  "why so many". Each record now carries its pid, parent, resolved path and an `isDescendant` flag:
-  descendants are what explains dozens of kills for a single target.
+  "why so many". Each record now carries its pid, parent, resolved path and a `matchedBy` basis:
+  `rule` / `descendant` / `shell` — descendants are what explains dozens of kills for a single
+  target, and `shell` is the process that matched nothing and was stopped only because it holds
+  the target's terminal.
 - Journal dedup is by the pair **reason + pid**; both that set and `recordedReasons` are cleared
   only on `safe`. The same process under the same reason writes nothing twice; a relaunched one
   always writes.
@@ -209,14 +304,61 @@ this layer decides *when* to ask and *what to do* with the answer.
   which also clears `lastReading`, since the popup falls back to it): a dash is more honest
   than someone else's country. Such a probe never softens the verdict.
 
+- **A pause episode's staleness is captured once, at open, and survives resolution.**
+  `pauseTargets()` reads `controller.lastStaleness` into `pauseStaleness` only when
+  `pauseEpisodeID` is still `nil` (the episode is new); `resolvePauseEpisode` reuses that same
+  stored value for the `.refine` call, never re-asking the controller — outside `.paused` the
+  controller answers `nil`, and a safe resume would otherwise silently erase the freshness
+  diagnosis from an already-written record (`GuardVMTests.test_a_bad_result_on_a_cold_start_pauses…`
+  asserts it survives).
+- **The stopped ledger is the only thing standing between a weto crash and a target frozen
+  forever.** `GuardVM.start()` calls `enforcer.resumeOrphans()` once, before the event source and
+  the tick loop start. A clean or absent `stopped.json` needs no journal entry — an empty read is a
+  legitimate "nothing to resume" — but a *corrupted* file writes `CheckEvent(trigger:
+  .startupRecovery, outcome: .ledgerUnreadable)`: the obligation ("SIGCONT whoever we stopped last
+  time") went unfulfilled, and the check-journal is the only record of it, since the kill-journal
+  only ever hears about processes actually terminated. `resumeOrphans` never trusts a bare pid: an
+  entry only resumes if the live process at that pid is still stopped *and* still the same
+  `executablePath` — pid reuse must not `SIGCONT` a stranger. And it never forgets an entry it did
+  not resolve: sending SIGCONT is not resuming (`kill` returns 0 for a background job that
+  immediately takes `SIGTTIN` and stops again), so a still-stopped entry stays on the books and
+  the tick loop keeps signalling it — that is the bug that left three of the owner's processes
+  in state `T` for hours with an empty `stopped.json`. An entry that survives that recovery is
+  made visible in the same call, off the walk `resumeOrphans` already made:
+  `GuardVM.surfaceRecovered` seeds `pausedProcesses` from it (badge, `fg` hint and «Показать
+  терминал»), opens a kill-journal episode of its own for everything still standing
+  (`GuardVM.recordRecoveryEpisode`: `kind: paused`, reason «найдены остановленными от прошлого
+  запуска weto…», date from the ledger, `matchedBy: .shell` for a shell entry, resolution appended
+  by the same `resolvePauseEpisode`) and writes one `CheckEvent(trigger: .startupRecovery,
+  outcome: .standingProcessesRemain)` per recovery, not per tick. Both journals are needed: the
+  checks one answers "what did weto do at startup", the kill journal "why was this process
+  standing" — and the ledger cannot answer the latter, it drops an entry the moment the process
+  is observed running.
+- **Two notifications, two purposes, one delegate.** `notifyTerminated` is the pre-existing "your
+  targets died" banner; `notifyBackgrounded` exists because a paused terminal target that loses its
+  foreground job otherwise just vanishes from its terminal with no explanation — the notification
+  is the only place the user learns `fg` will bring it back. Both must show even while weto's own
+  window has focus (`presentationWhileActive`), because "the popup is open" is exactly when the
+  user is looking for the explanation, not when they've stopped caring.
+- **Not every check is worth a journal entry.** `CheckEvent.isWorthRecording`: a button press, a
+  path change, a settings edit or the crash-recovery check always write; the 5 s geo schedule
+  writes only a *failed* request — a successful routine tick says nothing new, and recording every
+  scheduled attempt would evict the one entry the check-journal exists for (the real failure) from
+  its 50-slot ring within about four minutes.
+
 ## Failure hotspots
 <!-- generated, verify -->
 - `LaunchAgentController.enable/disable` — the self-bootout trap above; cost the project two
   releases. Any change here needs `LaunchAgentControllerTests` (`…does_not_boot_out_the_job_the_app_itself_is`).
-- `GuardController.beginNetworkVerification` / `applyLatestNetworkOutcome` — revision bookkeeping;
-  errors here show up as either kills on a healthy VPN or a stale `safe` after the VPN dropped.
-- `GuardVM.enforce` journal dedup — the classic regression is `verificationPending` swallowing the
-  real reason, or a relaunch an hour later leaving no trace.
+- `GuardController.evaluate` / `applyLatestNetworkOutcome` — revision bookkeeping; errors here show
+  up as either kills on a healthy VPN or a stale `safe` after the VPN dropped. Since the pause
+  model landed, a lost verdict routes through `GuardMachine.apply(.verdictLost)` — a wrong branch
+  there shows up as targets pausing when they should keep running, or the reverse.
+- `GuardVM.applyCurrentAction` journal dedup (`pauseTargets`/`terminateTargets`) — the classic
+  regression is a stale reason swallowing the real one, a relaunch leaving no trace, or a pause
+  episode's `diagnostics.staleness` getting recomputed at resolution instead of reused from the
+  moment the episode opened (`resolvePauseEpisode` must reuse `pauseStaleness`, not call
+  `controller.lastStaleness` again — the latter is `nil` outside `.paused`).
 - Task lifecycles (`tickTask`, `watchdogTask`, `probeTask`, `periodicTask`):
   leaked loops keep killing after `stop()`; over-eager cancellation silently disables the
   watchdog or the install-outcome poll (the latter's symptom is an eternal install spinner).
@@ -232,6 +374,9 @@ this layer decides *when* to ask and *what to do* with the answer.
   mutates settings again would recurse.
 
 ## Related docs
-- `.claude/rules/ARCHITECTURE.md` — key contracts (policy order, fail-closed, autostart)
+- `.claude/rules/ARCHITECTURE.md` — key contracts (policy order, fail-closed, autostart, pause)
 - `features/geo-whitelist.md` — the allowed-exits list this store persists
-- `docs/design-system.md` — for the UI that consumes `StatusPresentation`
+- `features/pause-instead-of-kill.md` — pause/resume path end to end
+- `decisions/pause-instead-of-kill.md` — why unproven pauses instead of killing
+- `docs/design-system.md` — for the UI that consumes `StatusPresentation`, the pause badge and
+  the "Показать терминал" affordance

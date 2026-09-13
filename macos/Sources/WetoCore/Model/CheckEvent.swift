@@ -7,6 +7,10 @@ import Foundation
 /// завершения, не оставляет следа. Отсюда второй журнал — про сами проверки,
 /// включая те, где запрос так и не ушёл.
 ///
+/// Он же — единственное место для следа о невыполненном обязательстве охраны
+/// (`startupRecovery`): завершений там нет по построению, а журнал завершений
+/// пишет только их.
+///
 /// В интерфейс не попадает никогда: это материал выгрузки.
 public struct CheckEvent: Codable, Equatable, Identifiable, Sendable {
 
@@ -20,6 +24,12 @@ public struct CheckEvent: Codable, Equatable, Identifiable, Sendable {
         case schedule
         /// Правка настроек обесценила вердикт.
         case settingsChange
+        /// Не проверка, а восстановление на старте: единственное место, где охрана
+        /// обязана отчитаться о невыполненном обязательстве — вернуть SIGCONT тем,
+        /// кого остановила прошлая жизнь процесса. Журнал завершений про это молчит
+        /// по построению (никого не завершали), а молча пустое чтение учёта
+        /// неотличимо от «возобновлять нечего».
+        case startupRecovery
 
         public var displayText: String {
             switch self {
@@ -27,6 +37,7 @@ public struct CheckEvent: Codable, Equatable, Identifiable, Sendable {
             case .networkChange: return "сменился путь наружу"
             case .schedule: return "расписание"
             case .settingsChange: return "правка настроек"
+            case .startupRecovery: return "восстановление после падения"
             }
         }
     }
@@ -45,6 +56,14 @@ public struct CheckEvent: Codable, Equatable, Identifiable, Sendable {
         case discardedPathChanged
         /// Ответ пришёл, но настройки успели измениться.
         case discardedSettingsChanged
+        /// Учёт остановленных процессов не прочитался: обязательство «вернуть
+        /// остановленным SIGCONT» в этот запуск выполнено не было.
+        case ledgerUnreadable
+        /// Учёт прочитан, и процессы из него на старте всё ещё стояли: SIGCONT им ушёл,
+        /// но эпизода паузы в этом запуске нет, и журнал завершений про них молчит
+        /// по построению. Без этой записи стоящая цель после падения weto не оставляла
+        /// следа нигде.
+        case standingProcessesRemain
 
         public var displayText: String {
             switch self {
@@ -53,6 +72,8 @@ public struct CheckEvent: Codable, Equatable, Identifiable, Sendable {
             case .skippedProbeInFlight: return "запрос не отправлен: проба уже в полёте"
             case .discardedPathChanged: return "ответ отброшен: путь сменился"
             case .discardedSettingsChanged: return "ответ отброшен: настройки изменились"
+            case .ledgerUnreadable: return "учёт остановленных не прочитан"
+            case .standingProcessesRemain: return "остановленные процессы остались стоять"
             }
         }
 
@@ -118,7 +139,7 @@ public struct CheckEvent: Codable, Equatable, Identifiable, Sendable {
     /// раз в пять секунд съела бы ёмкость за четыре минуты и не сказала бы ничего.
     public var isWorthRecording: Bool {
         switch trigger {
-        case .manual, .networkChange, .settingsChange:
+        case .manual, .networkChange, .settingsChange, .startupRecovery:
             return true
         case .schedule:
             return outcome.isFailedRequest

@@ -1946,6 +1946,7 @@ name = "weto-app"
 version = "0.0.0"
 dependencies = [
  "gtk4",
+ "libc",
  "weto-config",
  "weto-core",
  "weto-guard",
@@ -1980,6 +1981,7 @@ dependencies = [
 name = "weto-guard"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "tempfile",
  "weto-config",
  "weto-core",
@@ -1998,6 +2000,7 @@ dependencies = [
  "ureq",
  "weto-config",
  "weto-core",
+ "zbus",
 ]
 
 [[package]]

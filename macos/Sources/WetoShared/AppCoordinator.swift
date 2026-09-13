@@ -62,8 +62,9 @@ public final class AppCoordinator {
                 token: { [box = settings.tokenBox] in box.value }
             ),
             locator: ProcessRegistry(),
-            killer: ProcessKiller(),
-            notifier: UserNotificationKillNotifier(),
+            signaler: ProcessSignaler(),
+            ledger: StoppedLedger(),
+            notifier: UserNotificationGuardNotifier(),
             events: NetworkEventSource(),
             launchAgent: LaunchAgentController()
         )
@@ -84,7 +85,7 @@ public final class AppCoordinator {
     }
 
     public func start() {
-        UserNotificationKillNotifier.activate()
+        UserNotificationGuardNotifier.activate()
         applyAppIcon()
         dockPresence.start()
         guardVM.start()

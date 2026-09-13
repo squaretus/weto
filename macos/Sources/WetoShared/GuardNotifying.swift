@@ -1,15 +1,23 @@
 import Foundation
 import UserNotifications
 
-public protocol KillNotifying: Sendable {
-    func notify(reasonText: String, killedCount: Int)
+/// Что охрана сообщает пользователю системным уведомлением.
+///
+/// Две новости, а не одна: завершённые цели и цель, потерявшая терминал под паузой.
+/// Вторую без уведомления не заметить вовсе — процесс просто «пропал» из терминала.
+public protocol GuardNotifying: Sendable {
+    func notifyTerminated(reasonText: String, killedCount: Int)
+    /// Терминальная цель ушла в фон по запасному пути паузы: вернуть её пользователю — `fg`.
+    func notifyBackgrounded(targetName: String)
 }
 
-public struct UserNotificationKillNotifier: KillNotifying {
+public struct UserNotificationGuardNotifier: GuardNotifying {
+
+    public static let backgroundedCategory = "com.weto.paused.backgrounded"
 
     public init() {}
 
-    public func notify(reasonText: String, killedCount: Int) {
+    public func notifyTerminated(reasonText: String, killedCount: Int) {
 
         guard Bundle.main.bundleIdentifier != nil else { return }
 
@@ -25,6 +33,28 @@ public struct UserNotificationKillNotifier: KillNotifying {
         )
         UNUserNotificationCenter.current().add(request)
     }
+
+    public func notifyBackgrounded(targetName: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Weto: \(targetName) вернулся в фон"
+        content.body = "Процесс на паузе потерял терминал. Откройте терминал и введите fg."
+        content.categoryIdentifier = Self.backgroundedCategory
+        content.sound = .default
+
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        )
+    }
+
+    /// Нажатие на уведомление открывает попап: обработчик задаёт приложение (задача 18).
+    ///
+    /// `nonisolated(unsafe)` здесь безопасно ровно потому, что запись одна:
+    /// приложение ставит обработчик один раз на старте и больше его не меняет,
+    /// а делегат уведомлений только читает. Появится второй писатель — свойство
+    /// обязано переехать под актор.
+    nonisolated(unsafe) public static var onOpen: (@MainActor @Sendable () -> Void)?
 
     /// Как показывать уведомление, пришедшее при активном приложении.
     ///
@@ -45,7 +75,16 @@ public struct UserNotificationKillNotifier: KillNotifying {
             willPresent notification: UNNotification,
             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
         ) {
-            completionHandler(UserNotificationKillNotifier.presentationWhileActive)
+            completionHandler(UserNotificationGuardNotifier.presentationWhileActive)
+        }
+
+        func userNotificationCenter(
+            _ center: UNUserNotificationCenter,
+            didReceive response: UNNotificationResponse,
+            withCompletionHandler completionHandler: @escaping () -> Void
+        ) {
+            Task { @MainActor in UserNotificationGuardNotifier.onOpen?() }
+            completionHandler()
         }
     }
 

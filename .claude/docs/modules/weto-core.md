@@ -7,20 +7,53 @@ bulk of the project's tests stay synchronous and mock-free. Everything that talk
 in `WetoSystem`; everything that holds state lives in `WetoShared`.
 
 ## Key files
-- `macos/Sources/WetoCore/GuardPolicy.swift` — `GuardConfig`, `GuardSignals`, `UnsafeReason`, `GuardDecision`, the three decision entry points
+- `macos/Sources/WetoCore/GuardPolicy.swift` — `GuardConfig`, `GuardSignals`, `UnprovenReason`
+  (pauses), `UnsafeEvidence` (kills), `GuardDecision` (`.safe`/`.unproven`/`.kill`), the two
+  decision entry points
 - `macos/Sources/WetoCore/ProcessMatcher.swift` — rules × processes → pids to kill / rows to show
 - `macos/Sources/WetoCore/ProcessTree.swift` — parent/child index shared by both matcher passes
 - `macos/Sources/WetoCore/IPAddress.swift`, `IPRange.swift` — `inet_pton` parsing, CIDR containment
 - `macos/Sources/WetoCore/GeoResponses.swift` — DTOs and decoding for ipinfo / freeipapi / geojs
 - `macos/Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user
 - `macos/Sources/WetoCore/VoidResult.swift`, `Constants.swift`
-- `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `KillEvent`, `KillDiagnostics`, `JournalExport`
-- Tests: `macos/Tests/WetoCoreTests/` (~100 cases; `ProcessMatcherTests` and `GuardPolicyTests` are the load-bearing ones)
+- `macos/Sources/WetoCore/GuardMachine.swift` — `GuardPhase` (six phases, five titles — see
+  `docs/design-system.md` "Щит статуса"), `GuardInput`, `GuardEffect`, the pure reducer
+  `GuardMachine.apply(_:at:)`. Pinned by the shared golden fixture
+  `shared/fixtures/guard-transitions.json` (version 2), run by both `GuardMachineTests` here
+  and the Rust counterpart in `linux-guard`.
+- `macos/Sources/WetoCore/PausePlan.swift` — `PausePlanner.plan(matched:processes:)`: who gets
+  SIGSTOP and in what order (shell before its target, parent before descendants; `resumeOrder`
+  is the reverse), which roots are already stopped (`skipped`), which lost their foreground
+  job (`backgrounded`) and, for every shell in the plan, the target whose terminal it holds
+  (`shellTargets` — the journal record of a stopped shell is named after that target). A target is in the foreground when the leader of the tty's foreground
+  group is the target itself or a descendant of it — subtree membership, not group equality:
+  a tool the target started with its own job control (`setpgid` + `tcsetpgrp`) holds the group,
+  and equality called such a target backgrounded and left its shell out of the plan. The shell
+  candidate must therefore also share the target's terminal, otherwise the shell's own parent
+  (`script`, tmux, Terminal) would be signalled — and it must actually be a shell
+  (`PausePlanner.shellNames`): `login -fp user` from a real Terminal.app tree
+  (`Terminal → login → -zsh`) holds the *same* controlling tty in its own process group, so
+  when the matched root is itself the interactive shell nothing structural tells `login` from
+  the zsh of a `script`/tmux session (both are session leaders — session leadership excludes
+  exactly the shell we need). Only the job control does: `login` never takes the terminal back
+  from a stopped target, so SIGSTOP to it is a signal off the point
+- `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`,
+  `TargetRule`, `KillEvent`, `KillDiagnostics`, `JournalExport`, `NetworkPhases` (per-request DNS /
+  connect / TLS / first-byte timings, `stalledPhase` tells a dead tunnel from a slow service),
+  `CheckEvent` (one connectivity-check attempt — trigger, outcome, fingerprint; the second journal,
+  see `weto-shared.md`)
+- Tests: `macos/Tests/WetoCoreTests/` (~100 cases; `ProcessMatcherTests`, `GuardPolicyTests` and
+  `GuardMachineTests` are the load-bearing ones)
 
 ## Entry points
 - `GuardPolicy.decideLocal(isEnabled:vpn:config:) → GuardDecision?` — tri-state, see invariants; `vpn` is a `VPNAppStatus`, computed by the caller from the process scan
-- `GuardPolicy.decide(GuardSignals) → GuardDecision` — full ordered chain
-- `GuardPolicy.pendingVerification(isEnabled:config:) → GuardDecision`
+- `GuardPolicy.decide(GuardSignals) → GuardDecision` — full ordered chain. `pendingVerification`
+  is gone: a lost verdict is `GuardMachine.apply(.verdictLost(cause:))` now, a reducer input,
+  not a policy outcome — see `GuardMachine.swift` below.
+- `GuardMachine.apply(_ input: GuardInput, at: Date) → GuardEffect` — the pure reducer:
+  `.verdict`/`.reassessment`/`.evidence`/`.verdictLost`/`.tick`/`.disarmed` in,
+  `.none`/`.pause`/`.resume`/`.terminate` out. `GuardController` owns the one live instance.
+- `PausePlanner.plan(matched:processes:) → PausePlan`
 - `GuardConfig.hasTargets`, `GuardConfig.hasWhitelist` — the whitelist stage is skipped entirely
   when the latter is `false`
 - `ProcessMatcher.matches(in:rules:) → [MatchedProcess]`, `.pids(in:rules:) → [Int32]`
@@ -29,7 +62,8 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `IPAddress.isValid(_:)`, `IPRange.init?(_:)`, `IPRange.contains(_:)`
 - `GeoResponses.decodeIPInfo/decodeFreeIPAPI/decodeGeoJS/makeReading`
 - `ReleaseParser.parse(_:currentVersion:) → Result<UpdateInfo, Error>`, `ReleaseParser.latestReleaseURL`
-- `UnsafeReason.displayText / statusTitle / isDegradedRatherThanBlocked` — user-facing wording lives here, not in the views
+- `UnprovenReason.displayText`, `UnsafeEvidence.displayText`, `GuardPhase.title` — user-facing
+  wording lives here, not in the views (ported word-for-word to `weto-core::presentation` on Linux)
 - `Result<Void, _>.isSuccess / .failureValue`
 - `ProcessTree` is `public` but has no call site outside `ProcessMatcher`
 
@@ -62,8 +96,10 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   verdict is required"; `.safe` is returned only when the guard is off or no targets are configured.
   `GuardController` depends on that distinction — a caller that coalesces `nil` into `.safe` disables
   the whole geo half of the policy.
-- **All three entry points re-check `isEnabled && config.hasTargets` first.** That guard is what makes
-  a disabled switch inert; it is duplicated on purpose in `decide`, `decideLocal` and `pendingVerification`.
+- **Both `GuardPolicy` entry points re-check `isEnabled && config.hasTargets` first.** That guard is
+  what makes a disabled switch inert; it is duplicated on purpose in `decide` and `decideLocal`.
+  `GuardMachine.apply(.disarmed)` is the reducer's own version of the same check — it always wins
+  and returns to `.disabled` regardless of the current phase.
 - **Country comparison is case-insensitive at compare time**, not at storage time: both the blocked
   and the allowed sets, and the readings, are uppercased inside `decide`, so persisted settings may
   hold any casing.
@@ -91,9 +127,10 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   picks for the verdict request plus that interface's local address. The address is in there because
   a tunnel can keep its name and change its address — that is a different network state. The set of
   interfaces is deliberately absent: a second VPN reconnecting on its own used to change the
-  machine-wide fingerprint and kill targets with `verificationPending` while the traffic never moved.
-  `out=-` (no carrier, or the geo host not resolved yet) is its own state, and a verdict cannot
-  exist in it.
+  machine-wide fingerprint and pause, then kill, targets while the traffic never moved (before the
+  pause model, that state was `verificationPending` and killed immediately — see
+  `decisions/pause-instead-of-kill.md`). `out=-` (no carrier, or the geo host not resolved yet) is
+  its own state, and a verdict cannot exist in it.
 - **`VPNAppStatus` is the caller's answer, not the core's.** The core never scans processes; it only
   knows whether something was chosen (`config.vpnAppRule`) and what the caller reports. `decideLocal`
   kills on an empty selection *before* looking at the status, so a caller whose status drifts out of
@@ -133,5 +170,6 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - Project pitfalls that shape this module (symlinked binaries, shebang scripts, GUI-only workspace
   notifications): `.claude/CLAUDE.md` → "Ловушки предметной области"
 - `features/geo-whitelist.md` — the optional allowed-exits list and where its stage sits
-- `bugs/`, `decisions/` — no entries beyond `decisions/vpn-app-instead-of-tunnel.md`,
-  `decisions/geo-confirmation-services.md`
+- `features/pause-instead-of-kill.md` — the six-phase reducer and the SIGSTOP/SIGCONT plan
+- `bugs/`, `decisions/` — `decisions/vpn-app-instead-of-tunnel.md`,
+  `decisions/geo-confirmation-services.md`, `decisions/pause-instead-of-kill.md`

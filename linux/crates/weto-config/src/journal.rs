@@ -11,15 +11,17 @@
 //! безопасным выходом, дописывает исход: без него запись навсегда оставалась
 //! с отговоркой, и завершение выглядело беспричинным.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
 pub use weto_core::diagnostics::{
-    GeoReadingPatch, GeoServiceTrace, KillContext, KillDiagnostics, StalenessCause,
+    GeoReadingPatch, GeoServiceTrace, KillContext, KillDiagnostics, NetworkPhases, StalenessCause,
     VerdictStaleness, BODY_LIMIT,
 };
+pub use weto_core::process::MatchBasis;
 
 /// Сто записей, а не десять: запись теперь на процесс, и одно падение VPN
 /// на тридцати четырёх процессах вытесняло прежний журнал целиком.
@@ -31,6 +33,10 @@ pub const CAPACITY: usize = 100;
 pub enum KillEventKind {
     Terminated,
     LaunchBlocked,
+    /// Процесс остановлен (SIGSTOP), а не завершён. Чем кончилось стояние —
+    /// в `resolution_text`: возобновлено, завершено по доказательству или по потолку.
+    /// Формат общий с macOS; сама пауза на Linux — следующий план.
+    Paused,
 }
 
 impl KillEventKind {
@@ -38,6 +44,7 @@ impl KillEventKind {
         match self {
             KillEventKind::Terminated => "завершено",
             KillEventKind::LaunchBlocked => "запуск запрещён",
+            KillEventKind::Paused => "на паузе",
         }
     }
 }
@@ -60,8 +67,12 @@ pub struct KillEvent {
     pub parent_pid: i32,
     #[serde(default)]
     pub executable_path: String,
-    #[serde(default)]
-    pub is_descendant: bool,
+    #[serde(
+        default,
+        alias = "isDescendant",
+        deserialize_with = "matched_by_compat"
+    )]
+    pub matched_by: MatchBasis,
 
     pub kind: KillEventKind,
     pub reason_text: String,
@@ -97,6 +108,30 @@ impl KillEvent {
         };
         format!("{name} · pid {}", self.pid)
     }
+}
+
+/// Журналы до переименования писали булев признак `isDescendant`: читаем его,
+/// но больше не пишем.
+fn matched_by_compat<'de, D>(deserializer: D) -> Result<MatchBasis, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Basis(MatchBasis),
+        Legacy(bool),
+    }
+    Ok(match Compat::deserialize(deserializer)? {
+        Compat::Basis(basis) => basis,
+        Compat::Legacy(is_descendant) => {
+            if is_descendant {
+                MatchBasis::Descendant
+            } else {
+                MatchBasis::Rule
+            }
+        }
+    })
 }
 
 /// Аббревиатуру не трогаем: «VPN не поднят» не должно стать «vPN не поднят».
@@ -138,7 +173,61 @@ impl Journal {
         self.entries.truncate(CAPACITY);
     }
 
+    /// Исход, честный для записей одного основания.
+    ///
+    /// Нужен ровно одному случаю: цель эпизода паузы завершена, а шелл, вошедший
+    /// в план ради её терминала, — продолжен. Общее «завершено» в его записи было
+    /// бы неправдой, он жив. Вызывается вторым, более узким проходом после
+    /// `refine_episode`, и переписывает только `resolution_text`.
+    ///
+    /// `false` — записей с таким основанием у эпизода нет.
+    pub fn refine_basis(
+        &mut self,
+        episode_id: &str,
+        matched_by: MatchBasis,
+        resolution_text: &str,
+        skip: &HashSet<i32>,
+    ) -> bool {
+        let mut touched = false;
+        for event in self.entries.iter_mut().filter(|event| {
+            event.episode_id == episode_id
+                && event.matched_by == matched_by
+                && !skip.contains(&event.pid)
+        }) {
+            event.resolution_text = Some(resolution_text.to_string());
+            touched = true;
+        }
+        touched
+    }
+
+    /// Исход записи, чьё стояние кончилось раньше эпизода: цель сняли с охраны,
+    /// и держать процесс стало не за чем. Исход у неё свой, поэтому и проход свой —
+    /// по перечисленным pid, а не по всему эпизоду.
+    ///
+    /// `false` — записей с такими pid у эпизода нет.
+    pub fn refine_released(
+        &mut self,
+        episode_id: &str,
+        pids: &HashSet<i32>,
+        resolution_text: &str,
+    ) -> bool {
+        let mut touched = false;
+        for event in self
+            .entries
+            .iter_mut()
+            .filter(|event| event.episode_id == episode_id && pids.contains(&event.pid))
+        {
+            event.resolution_text = Some(resolution_text.to_string());
+            touched = true;
+        }
+        touched
+    }
+
     /// Причина эпизода, ставшая известной, дописывается всем его записям.
+    ///
+    /// `skip` — записи, получившие свой исход раньше: процесс, снятый пользователем
+    /// с охраны, продолжен своим проходом, и общий исход эпизода — «возобновлено
+    /// проверкой» или «завершено по доказательству» — не про него.
     ///
     /// `false` — уточнять нечего, эпизод записи не оставил.
     pub fn refine_episode(
@@ -148,12 +237,13 @@ impl Journal {
         resolution_text: Option<&str>,
         reading: Option<&GeoReadingPatch>,
         diagnostics: Option<&KillDiagnostics>,
+        skip: &HashSet<i32>,
     ) -> bool {
         let mut touched = false;
         for event in self
             .entries
             .iter_mut()
-            .filter(|event| event.episode_id == episode_id)
+            .filter(|event| event.episode_id == episode_id && !skip.contains(&event.pid))
         {
             if let Some(reason) = reason_text {
                 event.reason_text = reason.to_string();
@@ -253,7 +343,7 @@ impl LegacyJournal {
                     pid: *pid,
                     parent_pid: 0,
                     executable_path: String::new(),
-                    is_descendant: false,
+                    matched_by: MatchBasis::Rule,
                     kind: legacy.kind,
                     reason_text: legacy.reason_text.clone(),
                     resolution_text: None,

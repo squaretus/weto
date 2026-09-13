@@ -10,7 +10,9 @@ public struct JournalExport: Codable, Equatable, Sendable {
 
     /// Версия формата. Меняется, когда старый разбор перестаёт понимать новый файл.
     /// Версия 2: рядом с завершениями появились проверки.
-    public static let currentSchemaVersion = 2
+    /// Версия 3: записи паузы, происхождение показаний, фазы запроса, matchedBy.
+    /// Версия 4: matchBases пополнился shell — записи шелла в плане паузы.
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public let exportedAt: Date

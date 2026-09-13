@@ -6,15 +6,18 @@
 //! это нечем, кроме отказа от Wayland.
 //!
 //! Состав повторяет `StatusPopupView` построчно: шапка со щитом, заголовком
-//! и двумя иконками, показания гео, баннер обновления и живые цели. Карточек
+//! и двумя иконками, три строки объяснения (там, где есть что объяснять),
+//! показания гео, баннер обновления и живые цели с бейджем паузы. Карточек
 //! и крупных кнопок в попапе нет — управление живёт в окне настроек.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use gtk4::prelude::*;
-use gtk4::{Align, ApplicationWindow, Box as GtkBox, Orientation};
+use gtk4::{Align, ApplicationWindow, Box as GtkBox, Label, Orientation};
 
-use weto_core::presentation::{self, ShieldState};
+use weto_core::presentation::{self, GuardStatusColor};
 use weto_ui::components as ui;
 use weto_ui::theme;
 
@@ -36,7 +39,7 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
     // --- Шапка: щит, заголовок, проверка, настройки ---
     let header = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
     let shield_holder = GtkBox::new(Orientation::Horizontal, 0);
-    let title = ui::status_title("…", ShieldState::Pending);
+    let title = ui::status_title("…", GuardStatusColor::Grey);
     title.set_hexpand(true);
     header.append(&shield_holder);
     header.append(&title);
@@ -56,6 +59,13 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
     settings_button.set_tooltip_text(Some("Настройки"));
     header.append(&settings_button);
     panel.append(&header);
+
+    // --- Три строки объяснения: что сделал weto, почему, что дальше ---
+    // Скрыто там, где охрана ничего не сделала с целями (`Disabled`, `Protected`):
+    // попап выглядит так же, как до появления паузы.
+    let explanation_slot = GtkBox::new(Orientation::Vertical, 2);
+    explanation_slot.set_halign(Align::Fill);
+    panel.append(&explanation_slot);
 
     // --- Показания гео ---
     let readout = GtkBox::new(Orientation::Vertical, 2);
@@ -87,8 +97,14 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
         let app = app.clone();
         let banner_slot = banner_slot.clone();
         let mut shown_version: Option<String> = None;
+        // Терминал стоящей цели спрашивается один раз на pid: ответ стоит
+        // обхода `/proc` и полусотни вопросов шине, а такт идёт дважды
+        // в секунду. Пока цель стоит, терминала она не меняет.
+        let mut terminals: HashMap<i32, bool> = HashMap::new();
         move || {
             let snapshot = state.snapshot();
+            let phase = &snapshot.phase;
+            let now = SystemTime::now();
 
             let pending = crate::update::shared().and_then(|updates| updates.pending());
             let pending_version = pending.as_ref().map(|info| info.latest_version.clone());
@@ -111,15 +127,22 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
                 shown_version = pending_version;
             }
 
-            if let Some(view) = &snapshot.presentation {
-                title.set_text(&view.title);
-                for class in ["guarded", "pending", "killed", "disabled"] {
-                    title.remove_css_class(class);
-                }
-                title.add_css_class(theme::shield_class(view.shield));
+            title.set_text(phase.title());
+            for class in ["guarded", "pending", "killed", "disabled"] {
+                title.remove_css_class(class);
+            }
+            let color = presentation::shield_color(phase);
+            title.add_css_class(theme::shield_class(color));
 
-                clear(&shield_holder);
-                shield_holder.append(&ui::shield(view.shield));
+            clear(&shield_holder);
+            shield_holder.append(&ui::shield(color));
+
+            clear(&explanation_slot);
+            if presentation::should_explain(phase) {
+                let text = presentation::explanation(phase, state.remaining_pause());
+                explanation_slot.append(&explanation_line(&text.action, "weto-label"));
+                explanation_slot.append(&explanation_line(&text.evidence, "weto-explain-evidence"));
+                explanation_slot.append(&explanation_line(&text.next, "weto-caption"));
             }
 
             let probing = state.is_probing();
@@ -139,14 +162,16 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
             clear(&targets_slot);
             if !state.settings.current().targets.is_empty() {
                 targets_slot.append(&ui::divider());
-                targets_slot.append(&targets_view(&state, &snapshot));
+                targets_slot.append(&targets_view(phase, &snapshot, now, &state, &mut terminals));
             }
         }
     };
 
     refresh();
     // Пол-секунды: чаще незачем — охрана и сама тикает не быстрее, — а реже
-    // заметно на глаз после нажатия проверки.
+    // заметно на глаз после нажатия проверки. Тот же такт двигает и отсчёт
+    // на бейджах паузы: секундного таймера внутри значка нет, `now` берётся
+    // здесь же и одним значением на весь попап.
     gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
         refresh();
         gtk4::glib::ControlFlow::Continue
@@ -155,24 +180,70 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
     window
 }
 
+/// Строка объяснения статуса: класс задаёт и размер шрифта, и цвет.
+fn explanation_line(text: &str, css_class: &str) -> Label {
+    let label = Label::new(Some(text));
+    label.add_css_class(css_class);
+    label.set_halign(Align::Start);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label
+}
+
 /// Живые цели пилюлями, а когда их нет — строка с советом. Цвет и совет берём
-/// из состояния охраны, а не из самого факта «целей нет»: после срабатывания
-/// цели молчат именно потому, что VPN уже выключен.
-fn targets_view(state: &Arc<AppState>, snapshot: &weto_guard::controller::GuardSnapshot) -> GtkBox {
+/// из фазы охраны, а не из самого факта «целей нет»: после срабатывания
+/// цели молчат именно потому, что VPN уже выключен. Стоящая цель получает
+/// бейдж паузы с отсчётом до потолка, а потерявшая терминал — ещё и (i)
+/// с подсказкой про `fg` и кнопку «Показать терминал».
+///
+/// Кнопку дают не всякому: эмулятор, не выходящий на сессионную шину
+/// (xterm, alacritty, kitty), поднять нечем, и обещать это кнопкой нельзя —
+/// остаётся одна подсказка. `terminals` помнит ответ по pid: он стоит обхода
+/// `/proc` и разговора с шиной, а такт идёт дважды в секунду.
+fn targets_view(
+    phase: &weto_core::guard_machine::GuardPhase,
+    snapshot: &weto_guard::controller::GuardSnapshot,
+    now: SystemTime,
+    state: &Arc<AppState>,
+    terminals: &mut HashMap<i32, bool>,
+) -> GtkBox {
     let box_ = GtkBox::new(Orientation::Vertical, ui::SPACE2);
 
     if !snapshot.running.is_empty() {
         for target in &snapshot.running {
+            let paused = snapshot.paused.iter().find(|p| p.pid == target.pid);
+            let accessory = paused.map(|paused| {
+                let hint = paused
+                    .is_backgrounded
+                    .then(|| "Процесс вернулся в фон. Откройте терминал и введите fg".to_string());
+                let raisable = paused.is_backgrounded
+                    && *terminals.entry(paused.pid).or_insert_with(|| {
+                        state
+                            .terminal_for(paused.pid)
+                            .is_some_and(|host| host.can_activate())
+                    });
+                let (badge, button) =
+                    ui::pause_badge(snapshot.pause_deadline, now, hint.as_deref(), raisable);
+                if let Some(button) = button {
+                    let state = state.clone();
+                    let pid = paused.pid;
+                    button.connect_clicked(move |_| {
+                        state.show_terminal(pid);
+                    });
+                }
+                badge
+            });
             box_.append(&ui::process_pill(
                 &target.display_name,
                 Some(&target.path),
                 target.extra_process_count(),
+                accessory.as_ref(),
             ));
         }
         return box_;
     }
 
-    let notice = presentation::idle_targets(&state.guard_state());
+    let notice = presentation::idle_targets(phase);
 
     let row = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
     let glyph = gtk4::Image::from_icon_name(if notice.hint.is_some() {

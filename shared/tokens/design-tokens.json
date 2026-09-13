@@ -48,7 +48,9 @@
     "popupWidth": 352,
     "windowWidth": 500,
     "windowHeight": 640,
-    "controlHeight": 32
+    "controlHeight": 32,
+    "controlHeightCompact": 24,
+    "badgeInset": 2
   },
   "typography": {
     "status":      { "size": 15, "weight": "semibold" },

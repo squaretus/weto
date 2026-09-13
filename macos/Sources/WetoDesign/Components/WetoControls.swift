@@ -66,6 +66,10 @@ public struct WetoPillButtonStyle: ButtonStyle {
 
     @Environment(\.colorScheme) private var scheme
     @Environment(\.isEnabled) private var isEnabled
+    // Значок паузы просит `.controlSize(.small)` для кнопки «Показать терминал»:
+    // рядом с ней уже стоят отсчёт и (i), и полноразмерная пилюля там не влезает
+    // без спора с длинным заголовком цели.
+    @Environment(\.controlSize) private var controlSize
 
     public init(_ kind: Kind, expands: Bool = false) {
         self.kind = kind
@@ -76,11 +80,11 @@ public struct WetoPillButtonStyle: ButtonStyle {
         configuration.label
             .font(WetoTokens.button)
             .foregroundStyle(foreground)
-            .padding(.horizontal, 15)
+            .padding(.horizontal, horizontalPadding)
             // Высота — из токена, а не из суммы шрифта и вертикального паддинга:
             // подписи в ряду разной длины и с разными выносными, и кнопки
             // выходили разной высоты. Ряд обязан стоять на одной линии.
-            .frame(height: WetoTokens.controlHeight)
+            .frame(height: height)
             .frame(maxWidth: expands ? .infinity : nil)
             .background(
                 RoundedRectangle(cornerRadius: WetoTokens.radiusPill, style: .continuous)
@@ -112,6 +116,20 @@ public struct WetoPillButtonStyle: ButtonStyle {
 
     private var border: Color {
         kind == .ghost ? WetoTokens.line.resolve(scheme) : .clear
+    }
+
+    private var height: CGFloat { Self.height(for: controlSize) }
+    private var horizontalPadding: CGFloat { Self.horizontalPadding(for: controlSize) }
+
+    /// Пилюля обычного размера держит `controlHeight` (32 pt); `.small` — компактный
+    /// токен, а не пересчёт от системного `ControlSize`, чтобы метрика была той же,
+    /// что заявлена в дизайн-системе.
+    public static func height(for controlSize: ControlSize) -> CGFloat {
+        controlSize == .small ? WetoTokens.controlHeightCompact : WetoTokens.controlHeight
+    }
+
+    public static func horizontalPadding(for controlSize: ControlSize) -> CGFloat {
+        controlSize == .small ? WetoTokens.space3 : 15
     }
 
     private func opacity(pressed: Bool) -> Double {

@@ -94,11 +94,6 @@ final class GuardPolicyTests: XCTestCase {
         XCTAssertEqual(GuardPolicy.decide(s), .safe)
     }
 
-    func test_vpn_not_configured_kills() {
-        let s = signals(config: config(vpn: nil))
-        XCTAssertEqual(GuardPolicy.decide(s), .kill(.vpnAppNotChosen))
-    }
-
     func test_a_closed_vpn_app_kills() {
         XCTAssertEqual(GuardPolicy.decide(signals(vpn: .notRunning)), .kill(.vpnAppNotRunning))
     }
@@ -109,9 +104,9 @@ final class GuardPolicyTests: XCTestCase {
         XCTAssertEqual(GuardPolicy.decide(s), .kill(.vpnAppNotRunning))
     }
 
-    func test_geo_unavailable_kills_with_reason_text() {
+    func test_geo_unavailable_is_unproven_with_reason_text() {
         let s = signals(geo: .unavailable("timeout"))
-        XCTAssertEqual(GuardPolicy.decide(s), .kill(.geoUnavailable("timeout")))
+        XCTAssertEqual(GuardPolicy.decide(s), .unproven(.geoUnavailable("timeout")))
     }
 
     func test_blacklisted_ip_kills_even_when_country_is_allowed() {
@@ -163,10 +158,10 @@ final class GuardPolicyTests: XCTestCase {
         )
     }
 
-    func test_missing_confirmation_kills_even_when_ipinfo_says_allowed_country() {
+    func test_missing_confirmation_is_unproven_even_when_ipinfo_says_allowed_country() {
 
         let s = signals(geo: geo(primary: "KZ", confirmed: nil, source: nil))
-        XCTAssertEqual(GuardPolicy.decide(s), .kill(.confirmationUnavailable))
+        XCTAssertEqual(GuardPolicy.decide(s), .unproven(.confirmationUnavailable))
     }
 
     func test_blocked_primary_country_precedes_missing_confirmation() {
@@ -190,20 +185,41 @@ final class GuardPolicyTests: XCTestCase {
         XCTAssertEqual(GuardPolicy.decide(s), .safe)
     }
 
-    func test_pending_verification_kills_when_guard_is_armed() {
-        XCTAssertEqual(
-            GuardPolicy.pendingVerification(isEnabled: true, config: config()),
-            .kill(.verificationPending)
-        )
+    // MARK: - Три исхода: safe / unproven / kill
+
+    /// Без ответа ipinfo нет ни доказательства утечки, ни доказательства защиты.
+    func test_silent_ipinfo_is_unproven_not_a_kill() {
+        let signals = GuardSignals(isEnabled: true, vpn: .running,
+                                   geo: .unavailable("таймаут запроса"), config: config())
+        XCTAssertEqual(GuardPolicy.decide(signals), .unproven(.geoUnavailable("таймаут запроса")))
     }
 
-    func test_pending_verification_is_harmless_when_disabled_or_targetless() {
+    func test_missing_confirmation_is_unproven() {
+        let reading = GeoReading(ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: nil, confirmSource: nil)
+        let signals = GuardSignals(isEnabled: true, vpn: .running, geo: .resolved(reading), config: config())
+        XCTAssertEqual(GuardPolicy.decide(signals), .unproven(.confirmationUnavailable))
+    }
+
+    /// Резервный сервис назвал другой адрес: страна не проверена, но и утечка не доказана.
+    func test_changed_address_is_unproven() {
+        let previous = GeoReading(ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .freeipapi)
+        let signals = GuardSignals(isEnabled: true, vpn: .running,
+                                   geo: .addressChanged(observed: "198.51.100.7", previous: previous), config: config())
+        XCTAssertEqual(GuardPolicy.decide(signals), .unproven(.addressChanged(observed: "198.51.100.7")))
+    }
+
+    func test_blocked_country_is_still_a_kill() {
+        let reading = GeoReading(ip: "203.0.113.28", primaryCountry: "RU", confirmedCountry: "RU", confirmSource: .freeipapi)
+        let signals = GuardSignals(isEnabled: true, vpn: .running, geo: .resolved(reading), config: config())
+        XCTAssertEqual(GuardPolicy.decide(signals), .kill(.blockedCountry(code: "RU", source: "ipinfo")))
+    }
+
+    /// Невыбранное VPN-приложение — не причина: охрана работает по гео одной.
+    func test_unchosen_vpn_app_leaves_the_decision_to_geo() {
+        let unchosenConfig = config(vpn: nil)
+        let reading = GeoReading(ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .freeipapi)
         XCTAssertEqual(
-            GuardPolicy.pendingVerification(isEnabled: false, config: config()),
-            .safe
-        )
-        XCTAssertEqual(
-            GuardPolicy.pendingVerification(isEnabled: true, config: config(targets: [])),
+            GuardPolicy.decide(GuardSignals(isEnabled: true, vpn: .notChosen, geo: .resolved(reading), config: unchosenConfig)),
             .safe
         )
     }
@@ -292,13 +308,13 @@ final class GuardPolicyTests: XCTestCase {
 
     /// Отсутствие подтверждения решает раньше whitelist — иначе строгий
     /// fail-closed превратился бы в «нам хватило разрешённой страны».
-    func test_missing_confirmation_kills_before_the_whitelist_is_consulted() {
+    func test_missing_confirmation_is_unproven_before_the_whitelist_is_consulted() {
         XCTAssertEqual(
             GuardPolicy.decide(signals(
                 geo: geo(confirmed: nil, source: nil),
                 config: config(allowed: ["KZ"])
             )),
-            .kill(.confirmationUnavailable)
+            .unproven(.confirmationUnavailable)
         )
     }
 

@@ -17,7 +17,7 @@ final class KillEventTests: XCTestCase {
             pid: pid,
             parentPID: 1,
             executablePath: "/Users/square/.local/bin/claude",
-            isDescendant: false,
+            matchedBy: .rule,
             kind: .terminated,
             reasonText: reason,
             ip: nil,
@@ -108,5 +108,55 @@ final class KillEventTests: XCTestCase {
     /// мешать не должны.
     func test_broken_log_reads_as_empty() {
         XCTAssertEqual(try? KillEvent.decodeLog(Data("не json".utf8)), nil)
+    }
+
+    /// Тексты видов записи общие с Linux дословно: файл выгрузки читают на обеих
+    /// платформах, и «на паузе» обязано звучать одинаково.
+    func test_kind_texts_are_the_shared_wording() {
+        XCTAssertEqual(KillEventKind.terminated.displayText, "завершено")
+        XCTAssertEqual(KillEventKind.launchBlocked.displayText, "запуск запрещён")
+        XCTAssertEqual(KillEventKind.paused.displayText, "на паузе")
+        XCTAssertEqual(KillEventKind.paused.rawValue, "paused", "имя в файле — часть формата")
+    }
+
+    // MARK: - matchedBy
+
+    /// Поле означало «совпал только как потомок», а читалось как «имеет родителя».
+    func test_matched_by_is_encoded_instead_of_is_descendant() throws {
+        let event = KillEvent(
+            episodeID: UUID(), date: Date(), targetName: "codex", pid: 7, parentPID: 3,
+            executablePath: "/x", matchedBy: .descendant, kind: .terminated,
+            reasonText: "r", ip: nil, country: nil
+        )
+        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode([event])) as? [[String: Any]]
+        XCTAssertEqual(object?.first?["matchedBy"] as? String, "descendant")
+        XCTAssertNil(object?.first?["isDescendant"])
+    }
+
+    /// Шелл — третий способ попасть в журнал: под правило он не подходил, а SIGSTOP
+    /// получил. Имя в файле — часть общего с Linux формата, текст — общий дословно.
+    func test_shell_is_a_match_basis_of_its_own() throws {
+        let event = KillEvent(
+            episodeID: UUID(), date: Date(), targetName: "claude", pid: 100, parentPID: 1,
+            executablePath: "/bin/zsh", matchedBy: .shell, kind: .paused,
+            reasonText: "r", ip: nil, country: nil
+        )
+        let data = try JSONEncoder().encode([event])
+        let object = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        XCTAssertEqual(object?.first?["matchedBy"] as? String, "shell")
+        XCTAssertEqual(try KillEvent.decodeLog(data).first?.matchedBy, .shell)
+        XCTAssertEqual(MatchBasis.shell.detailText(parentPID: 1), "шелл терминала цели")
+        XCTAssertEqual(MatchBasis.descendant.detailText(parentPID: 200), "потомок 200")
+        XCTAssertNil(MatchBasis.rule.detailText(parentPID: 1))
+    }
+
+    func test_legacy_is_descendant_is_read_as_matched_by() throws {
+        let legacy = """
+        [{"id":"5D2C1F1E-0000-4000-8000-000000000001","episodeID":"5D2C1F1E-0000-4000-8000-000000000002",
+          "date":0,"targetName":"claude","pid":5,"parentPID":1,"executablePath":"/c",
+          "isDescendant":true,"kind":"terminated","reasonText":"r"}]
+        """
+        let events = try KillEvent.decodeLog(Data(legacy.utf8))
+        XCTAssertEqual(events.first?.matchedBy, .descendant)
     }
 }

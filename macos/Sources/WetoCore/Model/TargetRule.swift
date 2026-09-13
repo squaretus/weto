@@ -70,6 +70,29 @@ public struct RunningTarget: Equatable, Sendable, Identifiable {
     }
 }
 
+/// Чем процесс попал под охрану: сам совпал с правилом или оказался потомком совпавшего.
+/// Потомки объясняют, почему у одной цели десятки записей; «совпал сам» у процесса
+/// внутри бандла — тоже норма (хелперы приложения совпадают по пути).
+public enum MatchBasis: String, Codable, Equatable, Sendable {
+    case rule
+    case descendant
+
+    /// Не цель вовсе: шелл, вошедший в план паузы ради терминала цели. Под правило
+    /// он не подходил ни одной буквой, а SIGSTOP получил — и значит, обязан быть
+    /// объяснён журналом наравне с целями.
+    case shell
+
+    /// Чем запись объясняет своё присутствие в журнале. У совпавшего по правилу
+    /// объяснять нечего — он и есть цель.
+    public func detailText(parentPID: Int32) -> String? {
+        switch self {
+        case .rule: return nil
+        case .descendant: return "потомок \(parentPID)"
+        case .shell: return "шелл терминала цели"
+        }
+    }
+}
+
 public struct MatchedProcess: Equatable, Sendable {
     public let pid: Int32
 
@@ -81,19 +104,19 @@ public struct MatchedProcess: Equatable, Sendable {
 
     /// Процесс попал под охрану не сам по себе, а как потомок совпавшего.
     /// Именно потомки объясняют, почему у одной цели десятки завершений.
-    public let isDescendant: Bool
+    public let matchedBy: MatchBasis
 
     public init(
         pid: Int32,
         targetName: String,
         parentPID: Int32 = 0,
         executablePath: String = "",
-        isDescendant: Bool = false
+        matchedBy: MatchBasis = .rule
     ) {
         self.pid = pid
         self.targetName = targetName
         self.parentPID = parentPID
         self.executablePath = executablePath
-        self.isDescendant = isDescendant
+        self.matchedBy = matchedBy
     }
 }

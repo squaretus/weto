@@ -57,16 +57,33 @@ public final class EventLogStore {
         persist()
     }
 
-    /// Уточнение причины у всех записей эпизода.
+    /// Уточнение причины и исхода у всех записей эпизода.
     ///
-    /// Fail-closed завершает цели раньше, чем причина известна, и в журнал попадает
-    /// «подключение ещё не проверено» — ответ «пока не знаю». Секундой позже вердикт
-    /// готов, но завершать уже нечего, и новой записи не будет: журнал навсегда
-    /// сохранял отговорку вместо того, из-за чего цели и умерли. Уточняется весь
+    /// Пауза приходит с причиной — её приносит плохой результат пробы, — но не с исходом:
+    /// в журнале остаётся «сервисы не ответили», а чем стояние кончилось, известно
+    /// секундами позже. Новой записи к тому моменту не будет: те же процессы либо
+    /// возобновлены, либо завершены, и второй набор записей о них был бы ложью. Журнал
+    /// навсегда сохранял отговорку вместо того, чем всё кончилось. Уточняется весь
     /// эпизод, а не одна запись: процессов в нём десятки, и причина у них общая.
+    ///
+    /// `reasonText` необязателен ровно поэтому: причина названа верно с самого начала,
+    /// и у эпизода паузы меняется только исход.
+    ///
+    /// `matchedBy` сужает уточнение до одного основания записи: шелл в плане паузы
+    /// не завершается вместе с целью — его SIGCONT продолжает, — и исход у него честнее
+    /// сказать отдельным вызовом, не трогая записи с другим основанием того же эпизода.
+    ///
+    /// `pids` сужает до перечисленных процессов, `skipping` — наоборот, оставляет их
+    /// в покое. Оба нужны одному и тому же: процесс, снятый пользователем с охраны,
+    /// продолжается своим проходом и получает свой исход, а общий исход эпизода,
+    /// пришедший позже, не имеет права переписать его чужим — стояние у этой записи
+    /// кончилось раньше и по другой причине.
     public func refine(
         episodeID: UUID,
-        reasonText: String,
+        matchedBy: MatchBasis? = nil,
+        pids: Set<Int32>? = nil,
+        skipping: Set<Int32> = [],
+        reasonText: String? = nil,
         resolutionText: String? = nil,
         ip: String? = nil,
         country: String? = nil,
@@ -75,7 +92,11 @@ public final class EventLogStore {
         diagnostics: KillDiagnostics? = nil
     ) {
         var touched = false
-        for index in events.indices where events[index].episodeID == episodeID {
+        for index in events.indices
+        where events[index].episodeID == episodeID
+            && (matchedBy == nil || events[index].matchedBy == matchedBy)
+            && (pids == nil || pids?.contains(events[index].pid) == true)
+            && !skipping.contains(events[index].pid) {
             let event = events[index]
             events[index] = KillEvent(
                 id: event.id,
@@ -85,9 +106,9 @@ public final class EventLogStore {
                 pid: event.pid,
                 parentPID: event.parentPID,
                 executablePath: event.executablePath,
-                isDescendant: event.isDescendant,
+                matchedBy: event.matchedBy,
                 kind: event.kind,
-                reasonText: reasonText,
+                reasonText: reasonText ?? event.reasonText,
                 resolutionText: resolutionText ?? event.resolutionText,
                 ip: ip ?? event.ip,
                 country: country ?? event.country,

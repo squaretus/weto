@@ -3,10 +3,11 @@ import Foundation
 /// Почему прежний вердикт перестал быть свежим.
 ///
 /// Свежесть — пара «ревизия конфигурации + отпечаток снимка сети». Потеряв её,
-/// охрана завершает цели ещё до запроса к ipinfo, и в журнал попадает
-/// «подключение ещё не проверено». Без этой записи ответить на вопрос
-/// «что именно изменилось» нельзя: и правка настроек, и смена интерфейса
-/// выглядят одинаково.
+/// охрана просит пробу, и цели ставит уже её плохой результат — вот к записи этой
+/// паузы разбор и прикладывается. Без него ответить на вопрос «что именно
+/// изменилось» нельзя: и правка настроек, и смена интерфейса выглядят одинаково.
+/// В записи разбора нет вовсе, когда терять было нечего: сервисы промолчали,
+/// а выход не менялся.
 public struct VerdictStaleness: Codable, Equatable, Sendable {
 
     public enum Cause: String, Codable, Sendable {
@@ -15,6 +16,16 @@ public struct VerdictStaleness: Codable, Equatable, Sendable {
         case configurationChanged
         case networkChanged
         case configurationAndNetworkChanged
+
+        /// Сменился ли путь, через который ядро выпускает трафик. Правка настроек
+        /// путь не меняет, а холодный старт про путь ничего не утверждает: только
+        /// смена пути обесценивает знание о выходе.
+        public var includesNetworkChange: Bool {
+            switch self {
+            case .networkChanged, .configurationAndNetworkChanged: return true
+            case .coldStart, .configurationChanged: return false
+            }
+        }
 
         public var displayText: String {
             switch self {
@@ -61,8 +72,7 @@ public struct VerdictStaleness: Codable, Equatable, Sendable {
     /// «сменился выход в сеть: utun6/10.2.0.2 → utun6/10.2.0.5» — то, ради чего
     /// диагностика и собирается.
     public var displayText: String {
-        guard cause == .networkChanged || cause == .configurationAndNetworkChanged,
-              let previousFingerprint
+        guard cause.includesNetworkChange, let previousFingerprint
         else { return cause.displayText }
         return "\(cause.displayText): \(previousFingerprint) → \(fingerprint)"
     }
@@ -80,6 +90,12 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
     /// и для опознания её хватает начала.
     public static let bodyLimit = 4096
 
+    /// Причина в трассе сервиса, которого не спрашивали: он остывает после отказа,
+    /// а спросили взаимозаменяемого соседа. Молчанием это не считается, поэтому
+    /// в разборе обязано быть видно, что запроса не было. Текст общий с Linux —
+    /// выгрузку читают одними глазами на обеих платформах.
+    public static let coolingDown = "остывает после отказа"
+
     public let service: String
 
     /// Токена в адресе нет никогда: ipinfo принимает его заголовком, а заголовки
@@ -90,6 +106,10 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
     public let durationMilliseconds: Int?
     public let body: String?
     public let failure: String?
+
+    /// Длительности фаз запроса: единственный способ отличить мёртвый туннель
+    /// от медленного сервиса. `nil` у ответа из кэша и у запроса, до которого не дошло.
+    public let phases: NetworkPhases?
 
     /// Ответ взят из кэша подтверждения, а не получен сейчас.
     public let fromCache: Bool
@@ -102,6 +122,7 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
         durationMilliseconds: Int? = nil,
         body: String? = nil,
         failure: String? = nil,
+        phases: NetworkPhases? = nil,
         fromCache: Bool = false,
         cacheAgeSeconds: Int? = nil
     ) {
@@ -111,6 +132,7 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
         self.durationMilliseconds = durationMilliseconds
         self.body = body.map(Self.trimmed)
         self.failure = failure
+        self.phases = phases
         self.fromCache = fromCache
         self.cacheAgeSeconds = cacheAgeSeconds
     }
@@ -119,6 +141,13 @@ public struct GeoServiceTrace: Codable, Equatable, Sendable {
         guard body.count > bodyLimit else { return body }
         return String(body.prefix(bodyLimit)) + "…(обрезано)"
     }
+}
+
+/// Откуда в записи адрес и страна: из пробы, породившей это решение, или из прошлого вердикта.
+/// Без пометки запись «таймаут запроса» с адресом и страной читается как противоречие.
+public enum VerdictOrigin: String, Codable, Equatable, Sendable {
+    case established
+    case current
 }
 
 /// Всё, что известно о завершении, но не показывается пользователю.
@@ -137,6 +166,10 @@ public struct KillDiagnostics: Codable, Equatable, Sendable {
     public let vpnAppEntry: String?
     public let vpnAppStatus: String?
 
+    /// Откуда взяты адрес и страна этой записи: из пробы, только что ответившей,
+    /// или из прошлого вердикта.
+    public let verdictOrigin: VerdictOrigin?
+
     public let services: [GeoServiceTrace]
 
     public let probedAt: Date?
@@ -149,6 +182,7 @@ public struct KillDiagnostics: Codable, Equatable, Sendable {
         hasNetworkPath: Bool? = nil,
         vpnAppEntry: String? = nil,
         vpnAppStatus: String? = nil,
+        verdictOrigin: VerdictOrigin? = nil,
         services: [GeoServiceTrace] = [],
         probedAt: Date? = nil,
         appVersion: String? = nil
@@ -159,6 +193,7 @@ public struct KillDiagnostics: Codable, Equatable, Sendable {
         self.hasNetworkPath = hasNetworkPath
         self.vpnAppEntry = vpnAppEntry
         self.vpnAppStatus = vpnAppStatus
+        self.verdictOrigin = verdictOrigin
         self.services = services
         self.probedAt = probedAt
         self.appVersion = appVersion

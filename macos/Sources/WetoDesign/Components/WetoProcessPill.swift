@@ -1,20 +1,28 @@
 import SwiftUI
 import AppKit
 
-public struct WetoProcessPill: View {
+public struct WetoProcessPill<Accessory: View>: View {
 
     private let icon: NSImage?
     private let title: String
     private let isCommandLine: Bool
     private let childCount: Int
+    private let accessory: Accessory
 
     @Environment(\.colorScheme) private var scheme
 
-    public init(icon: NSImage?, title: String, isCommandLine: Bool, childCount: Int) {
+    public init(
+        icon: NSImage?,
+        title: String,
+        isCommandLine: Bool,
+        childCount: Int,
+        @ViewBuilder accessory: () -> Accessory
+    ) {
         self.icon = icon
         self.title = title
         self.isCommandLine = isCommandLine
         self.childCount = childCount
+        self.accessory = accessory()
     }
 
     public var body: some View {
@@ -34,6 +42,8 @@ public struct WetoProcessPill: View {
             }
 
             Spacer(minLength: WetoTokens.space2)
+
+            accessory
 
             if childCount > 0 {
                 Text(verbatim: "+\(childCount)")
@@ -67,5 +77,11 @@ public struct WetoProcessPill: View {
                 .fill(WetoTokens.line.resolve(scheme))
                 .frame(width: 32, height: 32)
         }
+    }
+}
+
+extension WetoProcessPill where Accessory == EmptyView {
+    public init(icon: NSImage?, title: String, isCommandLine: Bool, childCount: Int) {
+        self.init(icon: icon, title: title, isCommandLine: isCommandLine, childCount: childCount) { EmptyView() }
     }
 }

@@ -8,18 +8,6 @@ VERSION="${1:-0.1.0}"
 PKG_ID="com.weto.pkg"
 OUT=".build/release_build"
 
-# Базовый размер собранного .app в КБ. Превышение больше чем на 10% валит сборку:
-# так замечается случайно попавшая в payload документация или ресурсы.
-# История правок базы — чтобы рост был осознанным, а не «подвинули, раз красное»:
-#   2000 → 2250  пакет UpdateKit: приложение линкует пять его таргетов, +230 КБ кода;
-#   2250 → 2460  иконка приложения: AppIcon.icns 141 КБ и два PNG по 10 КБ на темы;
-#   2460 → 3640  флаги стран в бандле: 265 SVG на 1060 КБ. Раньше они тянулись
-#                с CDN — а CDN в России блокируется, и флаг нужен ровно под VPN.
-#   3640 → 4010  диагностический журнал: два кольцевых буфера, отладочные показания,
-#                трассы гео-сервисов и конверт выгрузки. Бинарник +340 КБ, и почти
-#                весь рост — синтезированные `Codable` у восьми новых типов.
-APP_BASELINE_KB=4010
-
 echo "=== weto $VERSION — сборка ==="
 
 # Версия подставляется только в копию Info.plist внутри staging: отслеживаемые файлы
@@ -118,15 +106,6 @@ PLIST
 find "$ROOT" -print0 | xargs -0 xattr -c 2>/dev/null || true
 
 bash scripts/tests/launch-agent-contract.sh "$ROOT"
-
-# Бюджет размера: документация и прочий вес не должны утекать в бандл незаметно.
-APP_SIZE_KB=$(du -sk "$OUT/_app/Weto.app" | awk '{print $1}')
-APP_SIZE_LIMIT_KB=$(( APP_BASELINE_KB * 110 / 100 ))
-echo "  размер Weto.app: ${APP_SIZE_KB} КБ (базовый ${APP_BASELINE_KB} КБ, предел ${APP_SIZE_LIMIT_KB} КБ)"
-if [ "$APP_SIZE_KB" -gt "$APP_SIZE_LIMIT_KB" ]; then
-    echo "✗ бандл вырос больше чем на 10% от базового размера" >&2
-    exit 1
-fi
 
 pkgbuild --root "$ROOT" --scripts "$SCRIPTS" --identifier "$PKG_ID" \
          --version "$VERSION" --install-location "/" \

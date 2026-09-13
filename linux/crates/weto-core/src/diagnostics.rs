@@ -85,6 +85,18 @@ impl VerdictStaleness {
     }
 }
 
+/// Длительности фаз запроса в миллисекундах. Порт `NetworkPhases` с macOS: `None` — фаза
+/// не завершилась, `Some(0)` — фазы не было. На Linux пока не заполняется: ureq
+/// таймингов по фазам не отдаёт, поле держит формат выгрузки общим.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPhases {
+    pub dns_milliseconds: Option<u64>,
+    pub connect_milliseconds: Option<u64>,
+    pub tls_milliseconds: Option<u64>,
+    pub first_byte_milliseconds: Option<u64>,
+}
+
 /// Что ответил один гео-сервис в одной пробе — как есть, до разбора.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +109,8 @@ pub struct GeoServiceTrace {
     pub duration_milliseconds: Option<u64>,
     pub body: Option<String>,
     pub failure: Option<String>,
+    #[serde(default)]
+    pub phases: Option<NetworkPhases>,
     pub from_cache: bool,
     pub cache_age_seconds: Option<u64>,
 }
@@ -107,6 +121,13 @@ pub struct GeoServiceTrace {
 pub const BODY_LIMIT: usize = 4096;
 
 impl GeoServiceTrace {
+    /// Причина в трассе сервиса, которого не спрашивали: он остывает после отказа,
+    /// а спросили взаимозаменяемого соседа. Молчанием это не считается, поэтому
+    /// в разборе обязано быть видно, что запроса не было. Текст общий с macOS
+    /// (`GeoServiceTrace.coolingDown`) — выгрузку читают одними глазами
+    /// на обеих платформах.
+    pub const COOLING_DOWN: &'static str = "остывает после отказа";
+
     pub fn trimmed(body: &str) -> String {
         if body.chars().count() <= BODY_LIMIT {
             return body.to_string();
@@ -126,6 +147,10 @@ pub struct KillDiagnostics {
     pub has_network_path: Option<bool>,
     pub vpn_app_entry: Option<String>,
     pub vpn_app_status: Option<String>,
+    /// Откуда взяты адрес и страна этой записи: из пробы, только что ответившей,
+    /// или из прошлого вердикта. Зеркало macOS `VerdictOrigin`, здесь — строкой
+    /// (`established`/`current`), потому что вычисляется на стороне вызывающего.
+    pub verdict_origin: Option<String>,
     #[serde(default)]
     pub services: Vec<GeoServiceTrace>,
     #[serde(default, with = "crate::timestamp::iso8601_option")]
@@ -149,9 +174,6 @@ pub struct GeoReadingPatch {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KillContext {
     pub reason: String,
-    /// Эпизод начался до вердикта: причина ещё «подключение не проверено»,
-    /// и её предстоит уточнить.
-    pub is_pending: bool,
     pub reading: GeoReadingPatch,
     pub diagnostics: KillDiagnostics,
 }

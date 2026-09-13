@@ -384,4 +384,157 @@ final class GeoProbeTests: XCTestCase {
         let confirmCalls = await fetcher.count("freeipapi")
         XCTAssertEqual(confirmCalls, 2)
     }
+
+    /// Источников собственного адреса ровно два, и оба провайдер выпускает через
+    /// выбранный профиль. Третьего нет намеренно: почти все ip-чекеры провайдер выпускает
+    /// как RU, и при полностью исправном профиле такой хост назвал бы чужой адрес —
+    /// смену выхода, которой не было, то есть паузу по лжи.
+    func test_no_third_self_ip_source_is_asked_when_the_reference_source_refuses() async {
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .failure(FetchFailure()),
+            "ip/country.json": .failure(HTTPFetchError(statusCode: 503, response: HTTPResponse(data: Data("service unavailable".utf8), statusCode: 503, duration: 0.004))),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, networkPath: FakeNetworkPath(hasPath: true), token: { "t" })
+
+        let report = await probe.probe()
+
+        XCTAssertNil(report.ip)
+        XCTAssertEqual(report.confirmation, .failed(GeoFailure(httpStatus: 503)))
+        XCTAssertEqual(
+            report.traces.map(\.service), ["ipinfo", "geojs-self"],
+            "спрашиваются только те, кого профиль на этой машине выпускает сам"
+        )
+    }
+
+    /// Подтверждающие сервисы взаимозаменяемы: отказавший уходит остывать, и его место
+    /// занимает сосед. Переспрашивать только что отказавший — тратить общую с соседями
+    /// по выходу квоту на заведомое «нет».
+    func test_a_rate_limited_confirmation_is_replaced_and_then_skipped() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .failure(HTTPFetchError(statusCode: 429, response: HTTPResponse(data: Data("rate limit exceeded".utf8), statusCode: 429, duration: 0.005))),
+            "ip/country/": .success(geojsKZ),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" }, now: { clock.now })
+
+        let first = await probe.probe()
+        XCTAssertEqual(first.confirmSource, .geojs, "место отказавшего занимает сосед")
+
+        clock.advance(by: Constants.confirmationSoftTTLSeconds + 1)
+        let second = await probe.probe()
+
+        XCTAssertEqual(second.confirmation, .answered("KZ"))
+        XCTAssertEqual(second.confirmSource, .geojs)
+        let freeipapiCalls = await fetcher.count("freeipapi")
+        let geojsCalls = await fetcher.count("ip/country/")
+        XCTAssertEqual(freeipapiCalls, 1, "остывающий сервис не спрашивается заново")
+        XCTAssertEqual(geojsCalls, 2, "обновление по мягкому потолку идёт к тому, кто отвечает")
+    }
+
+    /// Остывающий сервис молчанием не считается: его не спрашивали, подтверждение
+    /// получено, и в разборе обязано быть видно, что запроса не было.
+    func test_a_cooling_confirmation_is_not_counted_as_silence() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .failure(HTTPFetchError(statusCode: 429, response: HTTPResponse(data: Data("rate limit exceeded".utf8), statusCode: 429, duration: 0.005))),
+            "ip/country/": .success(geojsKZ),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" }, now: { clock.now })
+        _ = await probe.probe()
+
+        clock.advance(by: Constants.confirmationSoftTTLSeconds + 1)
+        let report = await probe.probe()
+
+        guard case .resolved(let reading) = report.outcome else {
+            return XCTFail("подтверждение получено — вердикт обязан быть разрешённым")
+        }
+        XCTAssertEqual(reading.confirmedCountry, "KZ")
+        let skipped = report.traces.first { $0.service == "freeipapi" }
+        XCTAssertEqual(skipped?.failure, GeoServiceTrace.coolingDown)
+        XCTAssertNil(skipped?.httpStatus, "запроса не было — статуса быть не может")
+    }
+
+    /// Остывание кончается само: пять минут прошло — сервис снова полноправный.
+    /// Без этого один отказ уводил бы сервис из ротации навсегда, и пара
+    /// взаимозаменяемых подтверждений тихо превращалась бы в одиночку.
+    func test_a_cooled_confirmation_returns_when_its_cooldown_expires() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .failure(FetchFailure()),
+            "ip/country/": .success(geojsKZ),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" }, now: { clock.now })
+        _ = await probe.probe()
+        let afterFailure = await fetcher.count("freeipapi")
+        XCTAssertEqual(afterFailure, 1, "отказал и ушёл остывать")
+
+        await fetcher.setResponse("freeipapi", .success(freeipapiKZ))
+
+        // Ещё остывает: адрес тот же, мягкий потолок прошёл — спрашивают соседа.
+        clock.advance(by: Constants.confirmationSoftTTLSeconds + 1)
+        _ = await probe.probe()
+        let whileCooling = await fetcher.count("freeipapi")
+        XCTAssertEqual(whileCooling, 1, "внутри остывания не спрашивают")
+
+        // Остывание истекло — сервис снова полноправный кандидат. Видно это там, где
+        // сосед отказал: пока сосед отвечает, второго и не спрашивают, а вот отказ соседа
+        // при остывающем freeipapi оставил бы охрану без подтверждения вовсе.
+        clock.advance(by: Constants.confirmationCooldownSeconds + 1)
+        await fetcher.setResponse("ip/country/", .failure(FetchFailure()))
+        let report = await probe.probe()
+
+        let afterCooldown = await fetcher.count("freeipapi")
+        XCTAssertEqual(afterCooldown, 2, "остывание кончилось — сервис снова в круге")
+        XCTAssertEqual(report.confirmation, .answered("KZ"))
+        XCTAssertNil(
+            report.traces.first { $0.service == "freeipapi" }?.failure,
+            "остывшему сервису пометка «остывает» больше не положена"
+        )
+    }
+
+    /// Остывание — предпочтение между равными, а не запрет. Круг, в котором отказали все,
+    /// иначе оставлял бы охрану без подтверждения на все пять минут, и вернуть его
+    /// было бы нечем.
+    func test_when_every_confirmation_is_cooling_they_are_asked_anyway() async {
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .failure(FetchFailure()),
+            "ip/country/": .failure(FetchFailure()),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" })
+        _ = await probe.probe()
+
+        await fetcher.setResponse("freeipapi", .success(freeipapiKZ))
+        let report = await probe.probe()
+
+        XCTAssertEqual(report.confirmation, .answered("KZ"))
+        let freeipapiCalls = await fetcher.count("freeipapi")
+        XCTAssertEqual(freeipapiCalls, 2, "спрашиваются все, когда остывают все")
+    }
+
+    /// Молчание всех подтверждающих сервисов ничего в модели не меняет: подтверждения
+    /// нет — safe не бывает, и цели встают на паузу.
+    func test_both_confirmations_unavailable_still_yields_the_unproven_path() async {
+        let fetcher = FakeFetcher(responses: [
+            "ipinfo.io": .success(ipinfoData(ip: "203.0.113.28", country: "KZ")),
+            "freeipapi": .failure(HTTPFetchError(statusCode: 429, response: HTTPResponse(data: Data("rate limit exceeded".utf8), statusCode: 429, duration: 0.005))),
+            "ip/country/": .failure(HTTPFetchError(statusCode: 503, response: HTTPResponse(data: Data("service unavailable".utf8), statusCode: 503, duration: 0.004))),
+        ])
+        let probe = GeoProbe(fetcher: fetcher, token: { "t" })
+
+        let decision = GuardPolicy.decide(GuardSignals(
+            isEnabled: true,
+            vpn: .notChosen,
+            geo: await probe.probe().outcome,
+            config: GuardConfig(
+                vpnAppRule: nil, blockedCountries: [], blockedIPRanges: [],
+                allowedCountries: [], allowedIPRanges: [], targets: ["claude"]
+            )
+        ))
+
+        XCTAssertEqual(decision, .unproven(.confirmationUnavailable))
+    }
 }

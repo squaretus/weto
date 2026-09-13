@@ -28,7 +28,7 @@ final class GeoFailureTests: XCTestCase {
     func test_silent_service_is_reported_as_timeout() {
         let failure = GeoFailure(urlErrorCode: -1001, description: "The request timed out.")
 
-        XCTAssertEqual(failure, .timedOut)
+        XCTAssertEqual(failure, .timedOut(nil))
         XCTAssertEqual(failure.displayText, "таймаут запроса")
     }
 

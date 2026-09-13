@@ -6,10 +6,15 @@ public enum KillEventKind: String, Codable, Equatable, Sendable {
 
     case launchBlocked
 
+    /// Процесс остановлен (SIGSTOP), а не завершён. Чем кончилось стояние —
+    /// в `resolutionText`: возобновлено, завершено по доказательству или по потолку.
+    case paused
+
     public var displayText: String {
         switch self {
         case .terminated: return "завершено"
         case .launchBlocked: return "запуск запрещён"
+        case .paused: return "на паузе"
         }
     }
 }
@@ -36,17 +41,18 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
 
     /// Процесс попал под охрану не сам по себе, а как потомок совпавшего.
     /// Именно потомки объясняют, почему у одной цели десятки записей.
-    public let isDescendant: Bool
+    public let matchedBy: MatchBasis
 
     public let kind: KillEventKind
     public let reasonText: String
 
     /// Чем эпизод закончился.
     ///
-    /// Fail-closed завершает цели раньше вердикта, и причина у записи — «подключение
-    /// ещё не проверено». Через секунду вердикт готов, но завершать уже нечего,
-    /// и запись навсегда оставалась с этой отговоркой: по журналу выходило, что
-    /// процессы умирают без причины. Исход дописывается и тогда, когда проверка
+    /// Цели ставит плохой результат пробы, и причина у записи — его: «сервисы
+    /// не ответили». Через секунду вердикт готов, но новой записи не будет —
+    /// процессы уже либо возобновлены, либо завершены, — и запись навсегда
+    /// оставалась с этой отговоркой: по журналу выходило, что процессы стоят
+    /// и умирают без причины. Исход дописывается и тогда, когда проверка
     /// в итоге сказала «безопасно», — именно этот случай и выглядит как
     /// «рандомно завершает процессы».
     public let resolutionText: String?
@@ -67,7 +73,7 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         pid: Int32,
         parentPID: Int32 = 0,
         executablePath: String = "",
-        isDescendant: Bool = false,
+        matchedBy: MatchBasis = .rule,
         kind: KillEventKind,
         reasonText: String,
         resolutionText: String? = nil,
@@ -84,7 +90,7 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         self.pid = pid
         self.parentPID = parentPID
         self.executablePath = executablePath
-        self.isDescendant = isDescendant
+        self.matchedBy = matchedBy
         self.kind = kind
         self.reasonText = reasonText
         self.resolutionText = resolutionText
@@ -93,6 +99,56 @@ public struct KillEvent: Codable, Equatable, Identifiable, Sendable {
         self.confirmedCountry = confirmedCountry
         self.confirmSource = confirmSource
         self.diagnostics = diagnostics
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, episodeID, date, targetName, pid, parentPID, executablePath, matchedBy, isDescendant,
+             kind, reasonText, resolutionText, ip, country, confirmedCountry, confirmSource, diagnostics
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        episodeID = try c.decode(UUID.self, forKey: .episodeID)
+        date = try c.decode(Date.self, forKey: .date)
+        targetName = try c.decode(String.self, forKey: .targetName)
+        pid = try c.decode(Int32.self, forKey: .pid)
+        parentPID = try c.decodeIfPresent(Int32.self, forKey: .parentPID) ?? 0
+        executablePath = try c.decodeIfPresent(String.self, forKey: .executablePath) ?? ""
+        // Журналы до переименования писали булев признак: читаем его, но не пишем.
+        if let basis = try c.decodeIfPresent(MatchBasis.self, forKey: .matchedBy) {
+            matchedBy = basis
+        } else {
+            matchedBy = (try c.decodeIfPresent(Bool.self, forKey: .isDescendant) ?? false) ? .descendant : .rule
+        }
+        kind = try c.decode(KillEventKind.self, forKey: .kind)
+        reasonText = try c.decode(String.self, forKey: .reasonText)
+        resolutionText = try c.decodeIfPresent(String.self, forKey: .resolutionText)
+        ip = try c.decodeIfPresent(String.self, forKey: .ip)
+        country = try c.decodeIfPresent(String.self, forKey: .country)
+        confirmedCountry = try c.decodeIfPresent(String.self, forKey: .confirmedCountry)
+        confirmSource = try c.decodeIfPresent(String.self, forKey: .confirmSource)
+        diagnostics = try c.decodeIfPresent(KillDiagnostics.self, forKey: .diagnostics)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(episodeID, forKey: .episodeID)
+        try c.encode(date, forKey: .date)
+        try c.encode(targetName, forKey: .targetName)
+        try c.encode(pid, forKey: .pid)
+        try c.encode(parentPID, forKey: .parentPID)
+        try c.encode(executablePath, forKey: .executablePath)
+        try c.encode(matchedBy, forKey: .matchedBy)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(reasonText, forKey: .reasonText)
+        try c.encodeIfPresent(resolutionText, forKey: .resolutionText)
+        try c.encodeIfPresent(ip, forKey: .ip)
+        try c.encodeIfPresent(country, forKey: .country)
+        try c.encodeIfPresent(confirmedCountry, forKey: .confirmedCountry)
+        try c.encodeIfPresent(confirmSource, forKey: .confirmSource)
+        try c.encodeIfPresent(diagnostics, forKey: .diagnostics)
     }
 
     public var summaryText: String {
@@ -165,50 +221,27 @@ private struct LegacyKillEvent: Decodable {
     }
 }
 
-extension UnsafeReason {
-
+extension UnprovenReason {
     public var displayText: String {
         switch self {
-        case .verificationPending:
-            return "Подключение ещё не проверено"
-        case .vpnAppNotChosen:
-            return "VPN-приложение не выбрано в настройках"
-        case .vpnAppNotRunning:
-            return "VPN-приложение не запущено"
-        case .geoUnavailable(let detail):
-            return "Не удалось определить внешний адрес: \(detail)"
-        case .blacklistedIP(let ip):
-            return "Адрес \(ip) в чёрном списке"
-        case .blockedCountry(let code, let source):
-            return "Обнаружена страна \(code) по данным \(source)"
-        case .confirmationUnavailable:
-            return "Подтверждающие сервисы недоступны"
+        case .geoUnavailable(let detail): return "Не удалось определить внешний адрес: \(detail)"
+        case .addressChanged(let observed): return "Адрес сменился на \(observed), страна не проверена"
+        case .confirmationUnavailable: return "Подтверждающие сервисы недоступны"
+        }
+    }
+}
+
+extension UnsafeEvidence {
+    public var displayText: String {
+        switch self {
+        case .vpnAppNotRunning: return "VPN-приложение не запущено"
+        case .blacklistedIP(let ip): return "Адрес \(ip) в чёрном списке"
+        case .blockedCountry(let code, let source): return "Обнаружена страна \(code) по данным \(source)"
         case .countryConflict(let primary, let confirmed):
             return "Расхождение стран: ipinfo — \(primary), подтверждение — \(confirmed)"
-        case .notWhitelistedIP(let ip):
-            return "Адрес \(ip) не входит в белый список"
-        case .notWhitelistedCountry(let code):
-            return "Страна \(code) не входит в белый список"
-        }
-    }
-
-    public var isDegradedRatherThanBlocked: Bool {
-        switch self {
-        case .confirmationUnavailable, .geoUnavailable: return true
-        default: return false
-        }
-    }
-
-    public var statusTitle: String {
-        switch self {
-        case .verificationPending:
-            return "Проверка подключения"
-        case .geoUnavailable:
-            return "Ipinfo недоступен"
-        case .confirmationUnavailable:
-            return "Подтверждение недоступно"
-        default:
-            return "Цели завершены"
+        case .notWhitelistedIP(let ip): return "Адрес \(ip) не входит в белый список"
+        case .notWhitelistedCountry(let code): return "Страна \(code) не входит в белый список"
+        case .pauseExpired: return "Подтверждение не получено за \(Int(Constants.pauseCeilingSeconds)) с"
         }
     }
 }

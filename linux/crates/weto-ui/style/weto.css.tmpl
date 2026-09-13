@@ -111,6 +111,13 @@
     color: {{faint}};
 }
 
+/* Вторая строка объяснения статуса («почему») — тот же размер, что у капшена,
+   но цветом `dim`: она называет улику, а не второстепенную деталь. */
+.weto-explain-evidence {
+    font-size: {{fontCaptionSize}};
+    color: {{dim}};
+}
+
 /* --- Строка данных ------------------------------------------------------ */
 
 .weto-data-key {
@@ -190,6 +197,15 @@
 .weto-destructive {
     background-color: alpha({{red}}, 0.16);
     color: {{red}};
+}
+
+/* Компактная пилюля — «Показать терминал» у значка паузы, единственный
+   компактный контрол в проекте. Высота из своего токена, а не пересчётом
+   от обычной: метрика обязана быть той же, что заявлена в каноне. Рамка
+   прозрачная, как у обычной первичной, иначе кнопка была бы на 2px ниже. */
+.weto-compact {
+    padding: 0 {{space3}};
+    min-height: calc({{controlHeightCompact}} - 2px);
 }
 
 /* Нажатие — только непрозрачность заливки: геометрия не сдвигается. */
@@ -333,6 +349,25 @@
 .weto-pill-extra {
     font-size: {{fontCaptionSize}};
     color: {{faint}};
+    font-feature-settings: "tnum";
+}
+
+/* Значок «на паузе»: капсула `amber` c прозрачностью 0.16, отсчёт табличными
+   цифрами того же цвета. Icon и label наследуют цвет от контейнера.
+
+   `999px` — не значение, а идиома капсулы: у Capsule на macOS радиус равен
+   половине высоты, а высота значка складывается из шрифта и паддинга, и токеном
+   такое не задаётся. Вертикальный паддинг — токен `badgeInset`: метрика
+   компонента, общая с `WetoPauseBadge`. */
+.weto-pause-badge {
+    background-color: alpha({{amber}}, 0.16);
+    border-radius: 999px;
+    padding: {{badgeInset}} {{space2}};
+    color: {{amber}};
+}
+
+.weto-pause-countdown {
+    font-size: {{fontDataSize}};
     font-feature-settings: "tnum";
 }
 

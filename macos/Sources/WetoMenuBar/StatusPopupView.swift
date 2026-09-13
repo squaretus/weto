@@ -14,57 +14,97 @@ struct StatusPopupView: View {
 
     var body: some View {
         WetoPanel(width: WetoTokens.popupWidth) {
-            VStack(alignment: .leading, spacing: WetoTokens.space4) {
-                header
-                readout
-
-                if let failure = coordinator.guardVM.permissionFailure {
-                    Text(failure)
-                        .font(WetoTokens.caption)
-                        .foregroundStyle(WetoTokens.red.resolve(scheme))
-                        .fixedSize(horizontal: false, vertical: true)
+            // Один тикающий таймер на весь попап: три строки объяснения и отсчёт
+            // на бейдже каждой стоящей цели обязаны показывать одно и то же число
+            // в один и тот же момент, а не два независимых `TimelineView`
+            // с собственной точкой отсчёта, расходящихся на секунду.
+            if coordinator.guardVM.pauseDeadline != nil {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    content(at: context.date)
                 }
-
-                // Новость об обновлении видна там, где пользователь бывает чаще всего,
-                // а не только в футере настроек. Пропущенная и отложенная версии
-                // сюда не попадают: их прячет bannerUpdate.
-                if let update = coordinator.update.bannerUpdate {
-                    WetoBanner(
-                        tone: coordinator.update.progress.phase == .failed ? .warning : .info,
-                        systemImage: "arrow.down.circle.fill",
-                        text: coordinator.update.strings.bannerProgress(
-                            coordinator.update.progress,
-                            version: update.latestVersion
-                        )
-                    ) {
-                        if coordinator.update.progress.isInFlight {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Button("Подробнее") { coordinator.update.presentDialog() }
-                                .buttonStyle(WetoPillButtonStyle(.primary))
-                        }
-                    }
-                }
-
-                if coordinator.settings.guardConfig.hasTargets {
-                    WetoDivider()
-                    processes
-                }
+            } else {
+                content(at: Date())
             }
         }
         .environment(\.colorScheme, scheme)
         .onAppear { coordinator.guardVM.refreshRunningTargets() }
     }
 
+    private func content(at now: Date) -> some View {
+        VStack(alignment: .leading, spacing: WetoTokens.space4) {
+            header
+            // Скрыто там, где охрана ничего не сделала с целями (`.disabled`, `.protected`):
+            // попап выглядит как заголовок → гео-показания → футер, без строк объяснения.
+            if StatusPresentation.shouldExplain(coordinator.guardVM.phase) {
+                explanationLines(at: now)
+            }
+            readout
+
+            if let failure = coordinator.guardVM.permissionFailure {
+                Text(failure)
+                    .font(WetoTokens.caption)
+                    .foregroundStyle(WetoTokens.red.resolve(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Новость об обновлении видна там, где пользователь бывает чаще всего,
+            // а не только в футере настроек. Пропущенная и отложенная версии
+            // сюда не попадают: их прячет bannerUpdate.
+            if let update = coordinator.update.bannerUpdate {
+                WetoBanner(
+                    tone: coordinator.update.progress.phase == .failed ? .warning : .info,
+                    systemImage: "arrow.down.circle.fill",
+                    text: coordinator.update.strings.bannerProgress(
+                        coordinator.update.progress,
+                        version: update.latestVersion
+                    )
+                ) {
+                    if coordinator.update.progress.isInFlight {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("Подробнее") { coordinator.update.presentDialog() }
+                            .buttonStyle(WetoPillButtonStyle(.primary))
+                    }
+                }
+            }
+
+            if coordinator.settings.guardConfig.hasTargets {
+                WetoDivider()
+                processes(at: now)
+            }
+        }
+    }
+
+    /// Три строки: что сделал weto, почему, что дальше.
+    private func explanationLines(at now: Date) -> some View {
+        let vm = coordinator.guardVM
+        let remaining = vm.pauseDeadline.map { max(0, $0.timeIntervalSince(now)) }
+        let text = StatusPresentation.explanation(for: vm.phase, remainingPause: remaining)
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(text.action)
+                .font(WetoTokens.label)
+                .foregroundStyle(WetoTokens.ink.resolve(scheme))
+            Text(text.evidence)
+                .font(WetoTokens.caption)
+                .foregroundStyle(WetoTokens.dim.resolve(scheme))
+            Text(text.next)
+                .font(WetoTokens.caption)
+                .foregroundStyle(WetoTokens.faint.resolve(scheme))
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
+    }
+
     @ViewBuilder
-    private var processes: some View {
-        let running = coordinator.guardVM.runningTargets
+    private func processes(at now: Date) -> some View {
+        let vm = coordinator.guardVM
+        let running = vm.runningTargets
 
         if running.isEmpty {
             // Цвет и совет берём из состояния охраны, а не из самого факта
             // «целей нет»: после срабатывания kill switch цели молчат именно
             // потому, что VPN уже выключен.
-            let notice = StatusPresentation.idleTargets(for: coordinator.guardVM.state)
+            let notice = StatusPresentation.idleTargets(for: vm.phase)
 
             HStack(spacing: WetoTokens.space2) {
                 Image(systemName: notice.hint == nil ? "circle.slash" : "checkmark")
@@ -84,12 +124,29 @@ struct StatusPopupView: View {
         } else {
             VStack(spacing: WetoTokens.space2) {
                 ForEach(running) { target in
+                    // Пилюля приложения объединяет несколько корней в одну строку
+                    // с pid: min(...); pausedProcesses хранит все корни `.rule`,
+                    // поэтому совпадение есть, пока стоит хотя бы главный процесс.
+                    let paused = vm.pausedProcesses.first { $0.pid == target.pid }
                     WetoProcessPill(
                         icon: TargetIconStore.shared.icon(for: iconKind(for: target), size: 32),
                         title: target.displayName,
                         isCommandLine: target.kind != .appBundle,
                         childCount: target.extraProcessCount
-                    )
+                    ) {
+                        if let paused {
+                            WetoPauseBadge(
+                                deadline: vm.pauseDeadline,
+                                now: now,
+                                hint: paused.isBackgrounded
+                                    ? "Процесс вернулся в фон. Откройте терминал и введите fg"
+                                    : nil,
+                                onShowTerminal: paused.isBackgrounded
+                                    ? { vm.showTerminal(for: paused.pid) }
+                                    : nil
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -110,7 +167,7 @@ struct StatusPopupView: View {
         HStack(spacing: WetoTokens.space3) {
             StatusShield(tone: tone)
 
-            Text(StatusPresentation.title(for: coordinator.guardVM.state))
+            Text(coordinator.guardVM.phase.title)
                 .font(WetoTokens.status)
                 .foregroundStyle(tone.color.resolve(scheme))
 
@@ -151,10 +208,10 @@ struct StatusPopupView: View {
     /// последнего известного чтения; дальше говорит отчёт последней пробы.
     private var lines: [StatusLine] {
         if let report = coordinator.guardVM.lastReport {
-            return StatusPresentation.lines(for: coordinator.guardVM.state, report: report)
+            return StatusPresentation.lines(for: coordinator.guardVM.phase, report: report)
         }
         return StatusPresentation.lines(
-            for: coordinator.guardVM.state,
+            for: coordinator.guardVM.phase,
             reading: coordinator.guardVM.lastReading
         )
     }

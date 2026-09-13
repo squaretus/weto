@@ -5,6 +5,10 @@
 //! завершения, следа не оставляет. Отсюда второй журнал — про сами проверки,
 //! включая те, где запрос так и не ушёл.
 //!
+//! Он же — единственное место для следа о невыполненном обязательстве охраны
+//! (`StartupRecovery`): завершений там нет по построению, а журнал завершений
+//! пишет только их.
+//!
 //! Зеркало макосного `CheckEvent`. В интерфейс не попадает никогда: это материал
 //! выгрузки.
 
@@ -26,6 +30,11 @@ pub enum CheckTrigger {
     Schedule,
     /// Правка настроек обесценила вердикт.
     SettingsChange,
+    /// Не проверка, а восстановление на старте: единственное место, где охрана
+    /// обязана отчитаться о невыполненном обязательстве — вернуть SIGCONT тем,
+    /// кого остановила прошлая жизнь процесса. Журнал завершений про это молчит
+    /// по построению, а молча пустое чтение учёта неотличимо от «возобновлять нечего».
+    StartupRecovery,
 }
 
 impl CheckTrigger {
@@ -35,6 +44,7 @@ impl CheckTrigger {
             CheckTrigger::NetworkChange => "сменился путь наружу",
             CheckTrigger::Schedule => "расписание",
             CheckTrigger::SettingsChange => "правка настроек",
+            CheckTrigger::StartupRecovery => "восстановление после падения",
         }
     }
 }
@@ -54,6 +64,14 @@ pub enum CheckOutcome {
     DiscardedPathChanged,
     /// Ответ пришёл, но настройки успели измениться.
     DiscardedSettingsChanged,
+    /// Учёт остановленных процессов не прочитался: обязательство «вернуть
+    /// остановленным SIGCONT» в этот запуск выполнено не было.
+    LedgerUnreadable,
+    /// Учёт прочитан, и процессы из него на старте всё ещё стояли: SIGCONT им ушёл,
+    /// но эпизода паузы в этом запуске нет, и журнал завершений про них молчит
+    /// по построению. На Linux паузы пока нет вовсе — вариант приезжает вместе
+    /// с форматом, чтобы выгрузка описывала одно и то же на обеих платформах.
+    StandingProcessesRemain,
 }
 
 impl CheckOutcome {
@@ -64,6 +82,8 @@ impl CheckOutcome {
             CheckOutcome::SkippedProbeInFlight => "запрос не отправлен: проба уже в полёте",
             CheckOutcome::DiscardedPathChanged => "ответ отброшен: путь сменился",
             CheckOutcome::DiscardedSettingsChanged => "ответ отброшен: настройки изменились",
+            CheckOutcome::LedgerUnreadable => "учёт остановленных не прочитан",
+            CheckOutcome::StandingProcessesRemain => "остановленные процессы остались стоять",
         }
     }
 
@@ -107,9 +127,10 @@ impl CheckEvent {
     /// раз в пять секунд съела бы ёмкость за четыре минуты и не сказала бы ничего.
     pub fn is_worth_recording(&self) -> bool {
         match self.trigger {
-            CheckTrigger::Manual | CheckTrigger::NetworkChange | CheckTrigger::SettingsChange => {
-                true
-            }
+            CheckTrigger::Manual
+            | CheckTrigger::NetworkChange
+            | CheckTrigger::SettingsChange
+            | CheckTrigger::StartupRecovery => true,
             CheckTrigger::Schedule => self.outcome.is_failed_request(),
         }
     }

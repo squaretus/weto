@@ -61,6 +61,10 @@ private func stubReport(_ outcome: GeoOutcome) -> GeoProbeReport {
             hasNetworkPath: true,
             checkedAt: Date()
         )
+    case .addressChanged:
+        // Не форма ответа пробы: `addressChanged` синтезирует сам `GuardController`
+        // из молчания ipinfo и ответа резервного сервиса. Стаб его не производит.
+        fatalError("addressChanged не бывает сырым ответом пробы")
     }
 }
 
@@ -188,38 +192,99 @@ private final class StubResolver: TargetResolving, @unchecked Sendable {
     }
 }
 
-private final class SpyKiller: ProcessKilling, @unchecked Sendable {
+private final class SpySignaler: ProcessSignaling, @unchecked Sendable {
     private let lock = NSLock()
-    private var batches: [[Int32]] = []
+    private var stored: [(signal: ProcessSignal, pids: [Int32])] = []
     private var errors: [Int32: Int32] = [:]
 
+    /// Все партии сигналов по порядку: пауза, продолжение и завершение — разные
+    /// новости, и тест обязан их различать.
+    var batches: [(signal: ProcessSignal, pids: [Int32])] {
+        lock.lock(); defer { lock.unlock() }
+        return stored
+    }
+
+    /// Пакеты, отправленные `.kill`: их смотрят тесты, где судьба целей решена
+    /// доказательством, а не паузой.
     var killedBatches: [[Int32]] {
         lock.lock(); defer { lock.unlock() }
-        return batches
+        return stored.filter { $0.signal == .kill }.map(\.pids)
     }
 
     func setError(_ code: Int32, forPID pid: Int32) {
         lock.lock(); errors[pid] = code; lock.unlock()
     }
 
-    func kill(pids: [Int32]) -> [KillResult] {
+    func send(_ signal: ProcessSignal, to pids: [Int32]) -> [SignalResult] {
         lock.lock()
-        batches.append(pids)
+        stored.append((signal: signal, pids: pids))
         let snapshot = errors
         lock.unlock()
-        return pids.map { KillResult(pid: $0, errorCode: snapshot[$0]) }
+        return pids.map { SignalResult(pid: $0, errorCode: snapshot[$0]) }
     }
 }
 
-private final class SpyNotifier: KillNotifying, @unchecked Sendable {
+private final class SpyNotifier: GuardNotifying, @unchecked Sendable {
     private let lock = NSLock()
-    private var stored: [String] = []
-    var messages: [String] {
+    private var kills: [String] = []
+    private var backgroundedTargets: [String] = []
+
+    var terminated: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return kills
+    }
+
+    /// Цели, ушедшие в фон под паузой: им нужен `fg`, и об этом обязано прийти
+    /// уведомление — иначе процесс просто «пропал».
+    var backgrounded: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return backgroundedTargets
+    }
+
+    func notifyTerminated(reasonText: String, killedCount: Int) {
+        lock.lock(); kills.append(reasonText); lock.unlock()
+    }
+
+    func notifyBackgrounded(targetName: String) {
+        lock.lock(); backgroundedTargets.append(targetName); lock.unlock()
+    }
+}
+
+/// Учёт, чей файл не прочитался: единственный способ проверить, что признак порчи
+/// не тонет молча, — граница хранилища.
+private final class CorruptedStoppedLedger: StoppedLedgerPersisting, @unchecked Sendable {
+    func load() -> StoppedLedgerReadout { .corrupted }
+    func save(_ entries: [StoppedProcess]) {}
+}
+
+/// Кого попросили показать терминал: граница активации чужого окна.
+private final class SpyTerminalLocator: TerminalLocating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [Int32] = []
+
+    var asked: [Int32] {
         lock.lock(); defer { lock.unlock() }
         return stored
     }
-    func notify(reasonText: String, killedCount: Int) {
-        lock.lock(); stored.append(reasonText); lock.unlock()
+
+    func activateTerminal(owning pid: Int32, in processes: [ProcessSnapshot]) -> Bool {
+        lock.lock(); stored.append(pid); lock.unlock()
+        return true
+    }
+}
+
+/// Часы под управлением теста: потолок паузы считается по времени, а не по числу тактов.
+private final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = Date(timeIntervalSince1970: 1_000_000)
+
+    var now: Date {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.lock(); value = value.addingTimeInterval(interval); lock.unlock()
     }
 }
 
@@ -292,7 +357,7 @@ final class GuardVMTests: XCTestCase {
 
     private struct Harness {
         let vm: GuardVM
-        let killer: SpyKiller
+        let signaler: SpySignaler
         let probe: StubGeoProbe
         let notifier: SpyNotifier
         let events: ManualEventSource
@@ -307,7 +372,8 @@ final class GuardVMTests: XCTestCase {
         geo: GeoOutcome,
         enabled: Bool = true,
         processes: [ProcessSnapshot]? = nil,
-        executables: [String] = []
+        executables: [String] = [],
+        now: @escaping () -> Date = Date.init
     ) -> Harness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = enabled
@@ -316,7 +382,7 @@ final class GuardVMTests: XCTestCase {
         settings.targets = [targetBundleID]
         settings.targets += executables
 
-        let killer = SpyKiller()
+        let signaler = SpySignaler()
         let probe = StubGeoProbe(geo)
         let notifier = SpyNotifier()
         let events = ManualEventSource()
@@ -339,21 +405,24 @@ final class GuardVMTests: XCTestCase {
                 processes: processes ?? defaultProcesses
             ),
             resolver: resolver,
-            killer: killer,
+            signaler: signaler,
+            ledger: StoppedLedger(storage: InMemoryStoppedLedger()),
             notifier: notifier,
             events: events,
-            debounceInterval: 0.01
+            debounceInterval: 0.01,
+            now: now
         )
 
-        return Harness(vm: vm, killer: killer, probe: probe, notifier: notifier,
+        return Harness(vm: vm, signaler: signaler, probe: probe, notifier: notifier,
                        events: events, settings: settings, log: log, network: network,
                        resolver: resolver)
     }
 
     private struct DelayedHarness {
         let vm: GuardVM
-        let killer: SpyKiller
+        let signaler: SpySignaler
         let probe: DelayedGeoProbe
+        let notifier: SpyNotifier
         let settings: SettingsStore
         let log: EventLogStore
         let network: StubSnapshotReader
@@ -361,16 +430,23 @@ final class GuardVMTests: XCTestCase {
 
     private func makeDelayedHarness(
         snapshot: NetworkSnapshot,
-        checkLog: CheckLogStore = CheckLogStore(storage: InMemoryCheckLog())
+        checkLog: CheckLogStore = CheckLogStore(storage: InMemoryCheckLog()),
+        now: @escaping () -> Date = Date.init,
+        processes: [ProcessSnapshot]? = nil,
+        executables: [String] = [],
+        ledger: StoppedLedger? = nil,
+        locator: ProcessLocating? = nil
     ) -> DelayedHarness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
         settings.vpnAppRule = vpnAppID
         settings.blockedCountryCodes = ["RU"]
         settings.targets = [targetBundleID]
+        settings.targets += executables
 
-        let killer = SpyKiller()
+        let signaler = SpySignaler()
         let probe = DelayedGeoProbe()
+        let notifier = SpyNotifier()
         let log = EventLogStore(storage: InMemoryEventLog())
         let network = StubSnapshotReader(snapshotValue: snapshot)
 
@@ -380,25 +456,59 @@ final class GuardVMTests: XCTestCase {
             checkLog: checkLog,
             snapshotReader: network,
             geoProbe: probe,
-            locator: StubLocator(
+            locator: locator ?? StubLocator(
                 bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
-                processes: defaultProcesses
+                processes: processes ?? defaultProcesses
             ),
-            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: killer,
-            notifier: SpyNotifier(),
+            resolver: StubResolver(mapping: [
+                targetBundleID: targetPath,
+                vpnAppID: vpnAppPath,
+                "nano": "/usr/bin/pico",
+            ]),
+            signaler: signaler,
+            ledger: ledger ?? StoppedLedger(storage: InMemoryStoppedLedger()),
+            notifier: notifier,
             events: ManualEventSource(),
-            debounceInterval: 0
+            debounceInterval: 0,
+            now: now
         )
 
         return DelayedHarness(
-            vm: vm, killer: killer, probe: probe, settings: settings, log: log, network: network
+            vm: vm, signaler: signaler, probe: probe, notifier: notifier,
+            settings: settings, log: log, network: network
         )
+    }
+
+    /// Выход через `utun5` — тот, на котором сняты оба эпизода из журнала владельца.
+    private func utun5Snapshot() -> NetworkSnapshot {
+        NetworkSnapshot(outgoing: OutgoingRoute(interface: "utun5", address: "198.18.0.1"))
     }
 
     /// Даёт отменённым задачам добежать до своих проверок, не привязываясь ко времени.
     private func settle() async {
         for _ in 0..<20 { await Task.yield() }
+    }
+
+    /// Ставит цели на паузу единственным способом, которым это теперь делается:
+    /// одной пробой с плохим результатом.
+    ///
+    /// Терпимости к молчанию сервисов больше нет — первый же неответ ставит на паузу.
+    /// Расписанием, а не кнопкой: кнопка занята индикатором `isProbing`, который гаснет
+    /// своей задачей, и второе нажатие подряд может не уйти.
+    ///
+    /// `startedProbes` — сколько проб уже стартовало до вызова: `DelayedGeoProbe`
+    /// считает старты с начала теста.
+    @discardableResult
+    private func pauseWithABadResult(
+        _ h: DelayedHarness,
+        after startedProbes: Int,
+        answering outcome: GeoOutcome = .unavailable("таймаут запроса")
+    ) async -> Int {
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: startedProbes + 1)
+        await h.probe.resumeFirst(with: outcome)
+        await h.vm.awaitPendingProbe()
+        return startedProbes + 1
     }
 
     /// Такт охраны не имеет права отменять пробу, которая ещё в полёте.
@@ -413,7 +523,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.probe.waitUntilStarted()
-        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
 
         // Секунда прошла, охрана сделала штатный такт — проба всё ещё в полёте.
         h.vm.handle(.tick)
@@ -427,7 +537,7 @@ final class GuardVMTests: XCTestCase {
             starts, 1,
             "такт запустил вторую пробу поверх летящей: первая отменена, запрос выброшен"
         )
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "ответ пробы обязан примениться")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "ответ пробы обязан примениться")
     }
 
     /// То же про кнопку: пользователь нажал, запрос ушёл, и следующий такт
@@ -444,7 +554,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
         await settle()
 
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "проверка по кнопке обязана доехать")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "проверка по кнопке обязана доехать")
     }
 
     /// Ответ пробы про прежний путь нельзя применять к новому.
@@ -464,19 +574,32 @@ final class GuardVMTests: XCTestCase {
         await settle()
 
         XCTAssertEqual(
-            h.vm.state, .unsafe(.verificationPending),
+            h.vm.phase.title, "Проверяю выход",
             "безопасный ответ про прежний выход не открывает цели на новом"
         )
     }
 
-    func test_start_kills_targets_while_initial_probe_is_suspended() async {
+    /// Холодный старт целей не трогает: пауза начинается с плохого результата пробы,
+    /// а не с её ожидания. Цена принята владельцем — до ~5 с цели работают без вердикта.
+    func test_start_leaves_targets_running_while_the_initial_probe_is_suspended() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
 
         h.vm.start()
         await h.probe.waitUntilStarted()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
-        XCTAssertEqual(h.killer.killedBatches, [[500, 501]])
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
+        XCTAssertEqual(h.vm.phase.action, .run)
+        XCTAssertTrue(h.signaler.batches.isEmpty, "ни одного сигнала до ответа пробы")
+        XCTAssertNil(h.vm.pauseDeadline, "отсчёт до завершения появляется только вместе с паузой")
+
+        // А вот неответ — уже результат: цели встают, но не умирают.
+        await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(h.signaler.batches.first?.signal, .stop)
+        XCTAssertEqual(h.signaler.batches.first?.pids, [500, 501])
+        XCTAssertTrue(h.signaler.killedBatches.isEmpty, "ни одного SIGKILL без доказательства")
         h.vm.stop()
     }
 
@@ -517,18 +640,18 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
-        let killsBefore = h.killer.killedBatches.count
+        let killsBefore = h.signaler.killedBatches.count
 
         // Инструмент обновился: путь цели поменялся целиком.
         h.resolver.point(targetBundleID, to: "\(targetPath)-2.1.251")
         for _ in 0..<5 { h.vm.handle(.tick) }
         await settle()
 
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "вердикт не трогается")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "вердикт не трогается")
         XCTAssertEqual(
-            h.killer.killedBatches.count, killsBefore,
+            h.signaler.killedBatches.count, killsBefore,
             "обновление цели — не повод завершать её сеанс"
         )
     }
@@ -586,14 +709,19 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.probe.waitUntilStarted()
-        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
 
         h.vm.stop()
         await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
         await settle()
 
-        XCTAssertEqual(
-            h.vm.state, .unsafe(.verificationPending),
+        // Остановка гасит и фазу: цели возобновлены, и отсчёт до потолка считать
+        // больше некому. Применённый ответ дал бы «На страже» и показания на экране —
+        // ни того, ни другого быть не должно.
+        XCTAssertEqual(h.vm.phase.title, "Охрана выключена", "остановленная охрана фазу за собой не тянет")
+        XCTAssertNil(h.vm.pauseDeadline, "стоящих целей нет — нет и отсчёта")
+        XCTAssertNil(
+            h.vm.lastReading,
             "ответ после остановки к состоянию не применяется"
         )
     }
@@ -640,7 +768,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.resumeFirst(with: geoOutcome())
         await settle()
 
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "путь тот же — ответ про нас")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "путь тот же — ответ про нас")
     }
 
     func test_old_config_probe_result_is_ignored_after_blacklist_change() async {
@@ -655,7 +783,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.resumeFirst(with: geoOutcome())
         await settle()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
     }
 
     /// Whitelist входит в ревизию конфигурации: его правка обязана обесценить
@@ -672,7 +800,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.resumeFirst(with: geoOutcome())
         await settle()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
     }
 
     /// Ужесточение whitelist на работающей цели: страна выхода перестаёт быть
@@ -683,17 +811,20 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.settings.allowedCountryCodes = ["DE"]
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.notWhitelistedCountry("KZ")))
-        XCTAssertEqual(h.killer.killedBatches.last, [500, 501])
+        XCTAssertEqual(h.vm.phase, .danger(.notWhitelistedCountry("KZ")))
+        XCTAssertEqual(h.signaler.killedBatches.last, [500, 501])
+        // Пауза холодного старта к этому моменту снята вердиктом, и завершение —
+        // самостоятельный эпизод со своей причиной, а не исход стояния.
+        XCTAssertEqual(h.log.events.first?.kind, .terminated)
         XCTAssertEqual(
             h.log.events.first?.reasonText,
-            UnsafeReason.notWhitelistedCountry("KZ").displayText
+            UnsafeEvidence.notWhitelistedCountry("KZ").displayText
         )
     }
 
@@ -708,43 +839,43 @@ final class GuardVMTests: XCTestCase {
         )
 
         h.vm.handle(.networkPath)
-        XCTAssertEqual(h.killer.killedBatches, [[500]])
+        XCTAssertEqual(h.signaler.killedBatches, [[500]])
 
         h.settings.targets = [targetBundleID, "nano"]
 
         XCTAssertEqual(
-            h.killer.killedBatches.count, 2,
+            h.signaler.killedBatches.count, 2,
             "добавленная цель должна быть завершена сразу, а не на следующем тике"
         )
-        XCTAssertEqual(h.killer.killedBatches.last, [500, 600])
+        XCTAssertEqual(h.signaler.killedBatches.last, [500, 600])
     }
 
     func test_choosing_a_vpn_app_that_is_not_running_kills_immediately() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.settings.vpnAppRule = "com.example.absent"
 
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning))
-        XCTAssertFalse(h.killer.killedBatches.isEmpty)
+        XCTAssertEqual(h.vm.phase, .danger(.vpnAppNotRunning))
+        XCTAssertFalse(h.signaler.killedBatches.isEmpty)
     }
 
     func test_routine_tick_keeps_safe_state_while_verdict_is_fresh() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        let batchesAfterFirstVerdict = h.killer.killedBatches.count
+        let batchesAfterFirstVerdict = h.signaler.killedBatches.count
 
         h.vm.handle(.tick)
 
         XCTAssertEqual(
-            h.vm.state, .safe(h.vm.lastReading),
+            h.vm.phase.title, "На страже",
             "штатный тик при неизменном снимке и настройках не обязан ронять цели"
         )
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
+        XCTAssertEqual(h.signaler.killedBatches.count, batchesAfterFirstVerdict)
     }
 
     /// Штатный тик — локальная работа: процессы, статус, отпечаток. В сеть он не ходит,
@@ -761,7 +892,7 @@ final class GuardVMTests: XCTestCase {
 
         let callsAfterTick = await h.probe.calls()
         XCTAssertEqual(callsAfterTick, callsAfterVerdict, "тик в сеть не ходит")
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
     }
 
     /// А расписание гео — ходит: страна выхода может смениться и на неизменном пути.
@@ -802,7 +933,7 @@ final class GuardVMTests: XCTestCase {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        let batchesAfterFirstVerdict = h.killer.killedBatches.count
+        let batchesAfterFirstVerdict = h.signaler.killedBatches.count
 
         h.network.snapshotValue = NetworkSnapshot(
             outgoing: OutgoingRoute(interface: "utun6", address: "198.18.0.1")
@@ -810,11 +941,11 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.networkPath)
 
         XCTAssertEqual(
-            h.vm.state, .safe(h.vm.lastReading),
+            h.vm.phase.title, "На страже",
             "чужой туннель не повод объявлять подключение непроверенным"
         )
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
+        XCTAssertEqual(h.signaler.killedBatches.count, batchesAfterFirstVerdict)
     }
 
     /// Обратная сторона: туннель переподключился и трафик уходит через другой
@@ -829,23 +960,23 @@ final class GuardVMTests: XCTestCase {
         )
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
     }
 
     func test_manual_recheck_does_not_kill_targets_on_a_healthy_vpn() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        let batchesAfterFirstVerdict = h.killer.killedBatches.count
+        let batchesAfterFirstVerdict = h.signaler.killedBatches.count
 
         h.vm.recheckNow()
 
         XCTAssertEqual(
-            h.vm.state, .safe(h.vm.lastReading),
+            h.vm.phase.title, "На страже",
             "нажатие кнопки — не повод объявлять подключение непроверенным"
         )
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.killer.killedBatches.count, batchesAfterFirstVerdict)
+        XCTAssertEqual(h.signaler.killedBatches.count, batchesAfterFirstVerdict)
     }
 
     func test_manual_recheck_shows_as_running_until_the_answer_arrives() async {
@@ -870,7 +1001,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("таймаут запроса")))
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён", "неответ — плохой результат, цели встают")
 
         h.vm.recheckNow()
         await h.probe.waitUntilStarted(atLeast: 2)
@@ -878,9 +1009,10 @@ final class GuardVMTests: XCTestCase {
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(
-            h.vm.state, .safe(h.vm.lastReading),
+            h.vm.phase.title, "На страже",
             "восстановившийся сервис снимает блокировку сразу, а не через тик поллинга"
         )
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume])
         h.vm.stop()
     }
 
@@ -897,8 +1029,8 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
-        let batchesAfterVerdict = h.killer.killedBatches.count
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+        let batchesAfterVerdict = h.signaler.batches.count
 
         h.vm.recheckNow()
         await h.probe.waitUntilStarted(atLeast: 2)
@@ -913,13 +1045,20 @@ final class GuardVMTests: XCTestCase {
         ))
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading), "адрес тот же — перепроверять нечего")
-        XCTAssertEqual(h.killer.killedBatches.count, batchesAfterVerdict)
+        XCTAssertEqual(h.vm.phase.title, "На страже", "адрес тот же — перепроверять нечего")
+        XCTAssertEqual(
+            h.vm.statusColor, .yellow,
+            "заголовок тот же, что и у полноценного safe, но зелёный тут врал бы"
+        )
+        XCTAssertEqual(h.vm.phase.action, .run, "цели работают")
+        XCTAssertEqual(h.signaler.batches.count, batchesAfterVerdict, "ни паузы, ни завершения")
         h.vm.stop()
     }
 
-    /// Адрес сменился, а страны для него никто не назвал — вердикта нет, и снисхождения тоже.
-    func test_silent_ipinfo_with_a_new_address_kills() async {
+    /// Адрес сменился, а страны для него никто не назвал — вердикта нет, и снисхождения тоже:
+    /// цели встают немедленно, но не завершаются. Прошлое чтение про новый адрес
+    /// не говорит ничего, а значит и доказательством неизменности не является.
+    func test_silent_ipinfo_with_a_new_address_pauses_on_the_first_probe() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
         h.vm.handle(.networkPath)
         await h.probe.waitUntilStarted()
@@ -940,28 +1079,121 @@ final class GuardVMTests: XCTestCase {
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(
-            h.vm.state,
-            .unsafe(.geoUnavailable("адрес сменился, страна не проверена")),
+            h.vm.phase.title,
+            "Выход не подтверждён",
             "новый адрес не наследует страну прошлого"
         )
+        XCTAssertEqual(h.signaler.batches.last?.signal, .stop)
+        XCTAssertTrue(h.signaler.killedBatches.isEmpty, "смена адреса — не доказательство утечки")
         h.vm.stop()
     }
 
     /// Молчат оба сервиса — адреса нет вовсе, доказывать нечем.
-    func test_silence_from_both_services_kills() async {
+    ///
+    /// Терпимости к молчанию больше нет: она обменивала минуты работы целей
+    /// на догадку, что молчание временное. Первая же проба без ответа ставит
+    /// на паузу — и ставит, а не завершает.
+    func test_the_first_silence_from_both_services_pauses() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
         h.vm.handle(.networkPath)
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
+        let batchesAfterVerdict = h.signaler.batches.count
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
-        h.vm.recheckNow()
+        h.vm.handle(.geoSchedule)
         await h.probe.waitUntilStarted(atLeast: 2)
         await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("таймаут запроса")))
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён", "первое же молчание ставит цели")
+        XCTAssertEqual(h.signaler.batches.count, batchesAfterVerdict + 1, "ровно один сигнал")
+        XCTAssertEqual(h.signaler.batches.last?.signal, .stop)
+        XCTAssertTrue(h.signaler.killedBatches.isEmpty, "молчание сервисов не завершает цели")
         h.vm.stop()
+    }
+
+    /// Запись эпизода 19:31 несла адрес и страну прошлого вердикта под причиной «таймаут»
+    /// без пометки, что это прошлое. Плоские поля не меняем — пометка едет в diagnostics.
+    func test_silence_after_a_verdict_marks_the_readings_as_established() async {
+        let harness = makeDelayedHarness(snapshot: healthySnapshot())
+        harness.vm.start()
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: geoOutcome())
+        await harness.vm.awaitPendingProbe()
+
+        await pauseWithABadResult(harness, after: 1)
+
+        let event = harness.log.events.first
+        XCTAssertEqual(event?.ip, "203.0.113.28", "плоские поля остаются прошлым чтением")
+        XCTAssertEqual(event?.diagnostics?.verdictOrigin, .established)
+    }
+
+    func test_a_fresh_blocked_country_marks_the_readings_as_current() async {
+        let harness = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "RU", confirmed: "RU"))
+        harness.vm.start()
+        await harness.vm.awaitPendingProbe()
+
+        XCTAssertEqual(harness.log.events.first?.diagnostics?.verdictOrigin, .current)
+    }
+
+    /// Происхождение показаний не приклеивается к следующему эпизоду.
+    ///
+    /// Прежний флаг `decisionCameFromProbe` гаснул не на всех путях, и эпизод,
+    /// вызванный не пробой, а сменой пути, наследовал его от давно отвеченной пробы:
+    /// устаревшее чтение подписывалось как «текущее». Теперь происхождение приходит
+    /// от контроллера с каждой применённой фазой.
+    func test_the_origin_of_the_readings_does_not_stick_to_the_next_episode() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+        h.vm.start()
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+
+        // Подтверждения нет — непроверенность, и первый же такой ответ ставит цели.
+        let started = await pauseWithABadResult(h, after: 1, answering: geoOutcome(confirmed: nil))
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(
+            h.log.events.first?.diagnostics?.verdictOrigin, .current,
+            "решение принято прямо по ответу пробы"
+        )
+
+        // Пауза снята полноценным вердиктом — следующий эпизод начинается с нуля.
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: started + 1)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+        let eventsAfterFirstEpisode = h.log.events.count
+
+        h.network.snapshotValue = directSnapshot()
+        h.vm.handle(.networkPath)
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
+        XCTAssertEqual(
+            h.log.events.count, eventsAfterFirstEpisode,
+            "смена пути целей не трогает — и записывать про них нечего"
+        )
+
+        // Эпизод на новом пути заводит его собственный плохой результат. Показаний
+        // про этот путь нет вовсе — ни свежих, ни прошлых, — и подписывать в записи
+        // нечего: «текущее» от давно отвеченной пробы наследоваться не имеет права.
+        await h.probe.waitUntilStarted(atLeast: started + 2)
+        await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(h.log.events.first?.kind, .paused)
+        XCTAssertNil(
+            h.log.events.first?.diagnostics?.verdictOrigin,
+            "эпизод на новом пути не наследует происхождение показаний прошлого"
+        )
+        // Смена пути гасит показания целиком (`onReport(nil)`): экран не имеет права
+        // показывать страну туннеля, которого уже нет, — а вместе с ней подписывать
+        // в записи нечего.
+        XCTAssertNil(h.log.events.first?.ip)
     }
 
     /// Цели живут, но защита держится на том, что адрес не менялся, а не на свежем
@@ -987,8 +1219,9 @@ final class GuardVMTests: XCTestCase {
         ))
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
         XCTAssertEqual(h.vm.statusColor, .yellow)
+        XCTAssertEqual(h.vm.currentCountryCode, "KZ", "страна известна: адрес доказанно тот же")
         h.vm.stop()
     }
 
@@ -1000,7 +1233,7 @@ final class GuardVMTests: XCTestCase {
         await h.probe.waitUntilStarted()
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.network.snapshotValue = NetworkSnapshot(
             outgoing: OutgoingRoute(interface: "utun9", address: "198.18.0.1")
@@ -1019,7 +1252,11 @@ final class GuardVMTests: XCTestCase {
         ))
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("HTTP 429")))
+        XCTAssertEqual(
+            h.vm.phase.title, "Выход не подтверждён",
+            "безопасный ответ про прежний выход не открывает цели на новом — он их ставит"
+        )
+        XCTAssertEqual(h.signaler.batches.last?.signal, .stop)
         h.vm.stop()
     }
 
@@ -1047,65 +1284,209 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
-    /// Fail-closed срабатывает раньше вердикта, поэтому в журнал первым попадает
-    /// «подключение ещё не проверено» — ответ «пока не знаю». Через миг причина
-    /// известна, и запись эпизода обязана назвать её: иначе журнал навсегда
-    /// сохраняет отговорку вместо того, из-за чего цели и умерли.
-    func test_journal_entry_of_an_episode_gets_the_settled_reason() async {
-        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "RU"))
-
-        h.vm.handle(.networkPath)
-
-        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
-        XCTAssertEqual(h.log.events.count, 2, "два завершённых процесса — две записи")
-        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1, "и один эпизод на них")
-        XCTAssertEqual(Set(h.log.events.map(\.reasonText)), ["Подключение ещё не проверено"])
-
+    /// Такт под паузой на чужом пути повторяет объявление потери вердикта каждую
+    /// секунду. Повтор обязан быть немым: показания гасятся один раз на потерю,
+    /// иначе следующий такт затирал бы свежий отчёт пробы, которая уже ответила
+    /// про этот путь, — и попап переставал бы говорить, кто именно молчал.
+    /// Отсчёт потолка повтор не перезапускает по той же причине: он считается
+    /// от плохого результата.
+    func test_a_repeated_loss_announcement_keeps_the_report_and_the_countdown() async {
+        let clock = TestClock()
+        let h = makeDelayedHarness(snapshot: healthySnapshot(), now: { clock.now })
+        h.vm.start()
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
-        XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
-        XCTAssertEqual(h.log.events.count, 2, "эпизод не удваивается от уточнения причины")
+        // Вердикт остался про прежний выход, а проба по новому не ответила ничем.
+        h.network.snapshotValue = directSnapshot()
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        let deadline = h.vm.pauseDeadline
+        XCTAssertEqual(h.vm.lastReport?.ipinfo, .failed(.other("таймаут запроса")))
+
+        clock.advance(by: 1)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
         XCTAssertEqual(
-            Set(h.log.events.map(\.reasonText)),
-            ["Обнаружена страна RU по данным ipinfo"]
+            h.vm.lastReport?.ipinfo, .failed(.other("таймаут запроса")),
+            "такт погасил отчёт про этот же путь — попапу больше нечего показать"
         )
-        XCTAssertEqual(Set(h.log.events.map(\.country)), ["RU"], "показания вердикта тоже дописываются")
-        XCTAssertEqual(Set(h.log.events.map(\.ip)), ["203.0.113.28"])
+        XCTAssertEqual(h.vm.pauseDeadline, deadline, "и отсчёт не перезапустил")
+        h.vm.stop()
     }
 
-    /// Причина «подключение ещё не проверено» без разбора неотличима от «изменили
-    /// настройки»: и то, и другое обнуляет свежесть вердикта. Запись обязана
-    /// сказать, что именно изменилось и на что.
-    func test_pending_episode_records_what_lost_the_freshness() async {
-        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ", confirmed: "KZ"))
+    /// Пауза приходит по неответу, поэтому в журнал первым попадает «не удалось
+    /// определить внешний адрес» — ответ «пока не знаю». Через миг вердикт готов
+    /// и оказывается доказательством: новой записи о тех же pid не будет, а исход
+    /// эпизода обязан быть дописан — иначе журнал навсегда сохраняет отговорку
+    /// вместо того, из-за чего цели и умерли.
+    func test_journal_entry_of_an_episode_gets_the_settled_reason() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        await pauseWithABadResult(h, after: 0)
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(h.log.events.count, 2, "два остановленных процесса — две записи")
+        XCTAssertEqual(Set(h.log.events.map(\.kind)), [.paused])
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1, "и один эпизод на них")
+        XCTAssertEqual(
+            Set(h.log.events.map(\.reasonText)),
+            ["Не удалось определить внешний адрес: таймаут запроса"]
+        )
+
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome(primary: "RU"))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.phase, .danger(.blockedCountry(code: "RU", source: "ipinfo")))
+        XCTAssertEqual(h.log.events.count, 2, "тем же pid новых записей не заводят")
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1)
+        XCTAssertEqual(
+            Set(h.log.events.map(\.resolutionText)),
+            ["завершено по доказательству: Обнаружена страна RU по данным ipinfo"]
+        )
+        XCTAssertEqual(Set(h.log.events.map(\.country)), ["RU"], "исход принёс показания вердикта")
+        XCTAssertEqual(Set(h.log.events.map(\.ip)), ["203.0.113.28"])
+        XCTAssertEqual(h.signaler.killedBatches, [[500, 501]], "SIGKILL один — по доказательству")
+    }
+
+    /// Запись паузы описывает процесс целиком, включая признак потомка: именно потомки
+    /// объясняют, почему у одной цели десятки записей.
+    func test_pause_records_describe_descendants_as_such() async {
+        let h = makeHarness(snapshot: healthySnapshot(), geo: .unavailable("таймаут запроса"), processes: [
+            .init(pid: 500, parentPID: 1, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+            .init(pid: 501, parentPID: 500, executablePath: "/usr/bin/curl"),
+            .init(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ])
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+
+        let child = h.log.events.first { $0.pid == 501 }
+        XCTAssertEqual(child?.kind, .paused)
+        XCTAssertEqual(child?.matchedBy, .descendant)
+        XCTAssertEqual(child?.parentPID, 500)
+        XCTAssertEqual(child?.executablePath, "/usr/bin/curl")
+        XCTAssertEqual(h.log.events.first { $0.pid == 500 }?.matchedBy, .rule)
+    }
+
+    /// Смена пути вердикт обесценивает, но целей не трогает: пауза приходит только
+    /// с плохим результатом пробы, и до него эпизода нет вовсе.
+    ///
+    /// А когда эпизод всё-таки заводится, разбор свежести (`diagnostics.staleness`)
+    /// обязан быть в нём: без него выгрузка не отвечает, что именно случилось с выходом,
+    /// и смена интерфейса неотличима от правки настроек.
+    func test_a_path_change_alone_starts_no_episode() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+
+        h.vm.handle(.networkPath)
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
 
+        XCTAssertEqual(h.vm.phase, .verifying(cause: .networkChanged))
+        XCTAssertEqual(h.vm.phase.action, .run, "цели работают, пока проба не ответила")
+        XCTAssertTrue(h.log.events.isEmpty, "эпизода без плохого результата не бывает")
+        XCTAssertTrue(h.signaler.batches.isEmpty, "ни одного сигнала")
+
+        // А ответ по новому пути уже заводит эпизод — и он про паузу, не про завершение.
+        // Проба по смене пути уже в полёте, поэтому отвечаем ей, а не просим новую.
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(h.log.events.first?.kind, .paused, "цели стоят, а не завершены")
+        XCTAssertEqual(h.signaler.batches.last?.signal, .stop)
+
+        // Разбор свежести доехал до записи и описывает выход на момент постановки:
+        // прежний вердикт был про другой интерфейс, и запись обязана это назвать.
         let staleness = h.log.events.first?.diagnostics?.staleness
-        XCTAssertEqual(staleness?.cause, .networkChanged, "сменился выход, а не настройки")
-        XCTAssertNotEqual(staleness?.previousFingerprint, staleness?.fingerprint)
+        XCTAssertEqual(staleness?.cause, .networkChanged)
+        XCTAssertEqual(staleness?.previousFingerprint, healthySnapshot().verdictFingerprint)
         XCTAssertEqual(staleness?.fingerprint, directSnapshot().verdictFingerprint)
+        h.vm.stop()
     }
 
-    /// Правка настроек тоже обнуляет свежесть — и это обязано отличаться в журнале
-    /// от смены сети, иначе искать причину пользователю негде.
-    func test_settings_change_is_recorded_as_its_own_cause() async {
+    /// Правка настроек свежесть вердикта больше не обнуляет (п. 11): вердикт — знание
+    /// о сети, и от состава списков он не зависит. Решение пересчитывается по
+    /// установленному чтению синхронно — без пробы, без паузы и без записи в журнале.
+    ///
+    /// До задачи 14 такая правка объявляла fail-closed и заводила эпизод с причиной
+    /// `configurationChanged`; из-за этого пользователь терял цели, поправив список.
+    func test_settings_change_keeps_the_verdict_and_writes_no_episode() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ", confirmed: "KZ"))
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+        let eventsAfterVerdict = h.log.events.count
+        let killsAfterVerdict = h.signaler.killedBatches.count
+        let callsAfterVerdict = await h.probe.calls()
 
         h.settings.blockedCountryCodes = ["DE"]
         h.vm.handle(.tick)
+        await h.vm.awaitPendingProbe()
 
-        let staleness = h.log.events.first?.diagnostics?.staleness
-        XCTAssertEqual(staleness?.cause, .configurationChanged)
-        XCTAssertEqual(staleness?.previousFingerprint, staleness?.fingerprint, "сеть та же")
+        XCTAssertEqual(h.vm.phase.title, "На страже", "правка списков вердикт не обесценивает")
+        XCTAssertEqual(h.log.events.count, eventsAfterVerdict, "эпизода нет: цели не трогали")
+        XCTAssertEqual(h.signaler.killedBatches.count, killsAfterVerdict)
+        let calls = await h.probe.calls()
+        XCTAssertEqual(calls, callsAfterVerdict, "правка настроек пробы не просит: путь тот же")
+    }
+
+    /// Свежесть, потерянная в момент смены пути, установившей новый вердикт, не
+    /// имеет права сопровождать эпизод более позднего таймаута: `lastStaleness`
+    /// относится только к тому результату, ради которого посчитан, а не ко всем
+    /// эпизодам до следующей смены пути.
+    ///
+    /// Разбора в этой записи нет вовсе, и это ответ, а не пробел: выход не менялся,
+    /// вердикту нечего было терять, промолчали сервисы. Что механизм при этом жив,
+    /// пришпилено в `test_a_path_change_alone_starts_no_episode`.
+    func test_timeout_after_a_settled_verdict_carries_no_stale_staleness() async {
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
+        h.vm.start()
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+
+        h.network.snapshotValue = directSnapshot()
+        h.vm.handle(.networkPath)
+        XCTAssertEqual(h.vm.phase, .verifying(cause: .networkChanged), "fail-closed объявлен")
+        XCTAssertTrue(
+            h.log.events.isEmpty,
+            "смена пути целей не трогает: эпизода, а с ним и разбора свежести, ещё нет"
+        )
+
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже", "вердикт на новом пути состоялся")
+
+        await pauseWithABadResult(h, after: 2)
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertNil(
+            h.log.events.first?.diagnostics?.staleness,
+            "таймаут по установленному вердикту не наследует смену пути из прошлого эпизода"
+        )
+        XCTAssertEqual(
+            h.log.events.first?.diagnostics?.outgoingInterface, directSnapshot().outgoing?.interface,
+            "выход в момент постановки записан всё равно — отдельным полем"
+        )
     }
 
     /// Сырые ответы гео-сервисов доезжают до записи: разобранный ответ уже прошёл
@@ -1125,47 +1506,65 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
-    /// Самый частый и самый непонятный для пользователя случай: вердикт потерял
-    /// свежесть, fail-closed завершил цели, а через миг проверка сказала «всё
-    /// в порядке». Уточнять причину нечем — она и была «ещё не проверено», — но
-    /// запись обязана сказать, чем дело кончилось. Без этого в журнале навсегда
-    /// оставалась отговорка без единой цифры, и завершение выглядело беспричинным.
+    /// Самый частый и самый непонятный для пользователя случай: сервисы не ответили,
+    /// цели встали, а через миг проверка сказала «всё в порядке». Запись обязана
+    /// сказать, чем это кончилось, — без исхода она навсегда остаётся с отговоркой,
+    /// и пауза выглядит случайной.
     func test_episode_that_ends_safe_records_how_it_ended() async {
-        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(primary: "KZ", confirmed: "KZ"))
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
 
-        h.vm.handle(.networkPath)
-        XCTAssertEqual(Set(h.log.events.map(\.reasonText)), ["Подключение ещё не проверено"])
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertEqual(
+            Set(h.log.events.map(\.reasonText)),
+            ["Не удалось определить внешний адрес: таймаут запроса"]
+        )
         XCTAssertNil(h.log.events.first?.resolutionText, "пока вердикта нет, исход неизвестен")
 
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
         XCTAssertEqual(
             h.log.events.first?.resolutionText,
-            "проверка завершилась безопасным выходом: 203.0.113.28, KZ"
+            "возобновлено: проверка подтвердила безопасный выход: 203.0.113.28, KZ"
         )
-        XCTAssertEqual(h.log.events.first?.ip, "203.0.113.28", "показания вердикта дописываются тоже")
+        XCTAssertEqual(Set(h.log.events.map(\.kind)), [.paused])
+        XCTAssertEqual(h.log.events.first?.ip, "203.0.113.28")
         XCTAssertEqual(h.log.events.first?.country, "KZ")
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume])
     }
 
     /// Уточнение — про один эпизод. Новое падение после возврата к жизни обязано
     /// заводить свою запись, а не переписывать прошлую.
     func test_a_new_episode_does_not_rewrite_the_previous_entry() async {
-        let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
+        let h = makeDelayedHarness(snapshot: healthySnapshot())
 
-        h.vm.handle(.networkPath)
-        await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        // Эпизод заводит плохой результат пробы, а не сама смена пути: до ответа
+        // цели работают, и записывать про них нечего.
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
         XCTAssertEqual(h.log.events.count, 2)
         let firstEpisode = h.log.events[0].episodeID
 
-        h.network.snapshotValue = directSnapshot()
-        h.vm.handle(.networkPath)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+
+        await pauseWithABadResult(h, after: 2)
 
         XCTAssertEqual(h.log.events.count, 4, "второй эпизод — свои записи")
         XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 2)
         XCTAssertEqual(h.log.events.last?.episodeID, firstEpisode, "прошлый эпизод остался внизу")
+        XCTAssertEqual(Set(h.log.events.map(\.kind)), [.paused])
+        XCTAssertEqual(
+            h.log.events.last?.resolutionText,
+            "возобновлено: проверка подтвердила безопасный выход: 203.0.113.28, KZ",
+            "исход прошлого эпизода не переписан вторым"
+        )
     }
 
     private func makeCountingHarness(
@@ -1192,7 +1591,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: resolverMapping),
-            killer: SpyKiller(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0
@@ -1261,7 +1660,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: StubLocator(bundlePaths: [targetBundleID: targetPath], processes: processes),
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpyKiller(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0
@@ -1319,8 +1718,8 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning))
-        XCTAssertEqual(h.killer.killedBatches, [[500, 501]], "убиты только процессы цели")
+        XCTAssertEqual(h.vm.phase, .danger(.vpnAppNotRunning))
+        XCTAssertEqual(h.signaler.killedBatches, [[500, 501]], "убиты только процессы цели")
         let probeCalls = await h.probe.calls()
         XCTAssertEqual(probeCalls, 0, "сетевая проба не должна была запускаться")
     }
@@ -1331,12 +1730,12 @@ final class GuardVMTests: XCTestCase {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome())
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(h.vm.state, .unsafe(.verificationPending))
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
     }
 
     /// Закрыли VPN-клиент — цели завершаются в ту же секунду, не дожидаясь тика:
@@ -1351,15 +1750,16 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let signaler = SpySignaler()
+        let log = EventLogStore(storage: InMemoryEventLog())
         let vm = GuardVM(
             settings: settings,
-            eventLog: EventLogStore(storage: InMemoryEventLog()),
+            eventLog: log,
             snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: killer,
+            signaler: signaler,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1367,13 +1767,17 @@ final class GuardVMTests: XCTestCase {
 
         vm.handle(.networkPath)
         await vm.awaitPendingProbe()
-        XCTAssertEqual(vm.state, .safe(vm.lastReading))
+        XCTAssertEqual(vm.phase.title, "На страже")
 
         locator.processes = processesWithoutVPNApp
         vm.handle(.appTerminated(bundleID: vpnAppID))
 
-        XCTAssertEqual(vm.state, .unsafe(.vpnAppNotRunning))
-        XCTAssertEqual(killer.killedBatches.last, [500, 501], "убиты цели, но не сам клиент")
+        XCTAssertEqual(vm.phase, .danger(.vpnAppNotRunning))
+        XCTAssertEqual(signaler.killedBatches.last, [500, 501], "убиты цели, но не сам клиент")
+        // Доказательство пришло к работающим целям: пауза кончилась вердиктом раньше,
+        // и эта запись — не исход эпизода паузы, а полноценное завершение.
+        XCTAssertEqual(log.events.first?.kind, .terminated)
+        XCTAssertEqual(log.events.first?.reasonText, "VPN-приложение не запущено")
     }
 
     /// Запуск VPN-клиента пересчитывает вердикт сразу, как и его закрытие.
@@ -1399,7 +1803,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpyKiller(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1407,13 +1811,13 @@ final class GuardVMTests: XCTestCase {
 
         vm.handle(.networkPath)
         await vm.awaitPendingProbe()
-        XCTAssertEqual(vm.state, .unsafe(.vpnAppNotRunning))
+        XCTAssertEqual(vm.phase, .danger(.vpnAppNotRunning))
 
         locator.processes = defaultProcesses
         vm.handle(.appLaunched(bundleID: vpnAppID))
         await vm.awaitPendingProbe()
 
-        XCTAssertEqual(vm.state, .safe(vm.lastReading), "клиент поднялся — вердикт пересчитан")
+        XCTAssertEqual(vm.phase.title, "На страже", "клиент поднялся — вердикт пересчитан")
     }
 
     /// Выбранное VPN-приложение не завершается никогда: охрана, убившая свой
@@ -1424,11 +1828,11 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
-        XCTAssertFalse(h.killer.killedBatches.isEmpty, "цели обязаны быть завершены")
+        XCTAssertEqual(h.vm.phase, .danger(.blockedCountry(code: "RU", source: "ipinfo")))
+        XCTAssertFalse(h.signaler.killedBatches.isEmpty, "цели обязаны быть завершены")
         XCTAssertFalse(
-            h.killer.killedBatches.flatMap { $0 }.contains(700),
-            "процесс VPN-клиента не должен попадать под нож"
+            h.signaler.batches.flatMap(\.pids).contains(700),
+            "процесс VPN-клиента не должен попадать ни под нож, ни под паузу"
         )
     }
 
@@ -1444,7 +1848,7 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let signaler = SpySignaler()
         let probe = StubGeoProbe(geoOutcome())
         let vm = GuardVM(
             settings: settings,
@@ -1457,7 +1861,7 @@ final class GuardVMTests: XCTestCase {
                 vpnAppID: vpnAppPath,
                 "nano": "/usr/bin/pico",
             ]),
-            killer: killer,
+            signaler: signaler,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1465,7 +1869,7 @@ final class GuardVMTests: XCTestCase {
 
         vm.handle(.networkPath)
         await vm.awaitPendingProbe()
-        XCTAssertEqual(vm.state, .safe(vm.lastReading))
+        XCTAssertEqual(vm.phase.title, "На страже")
         XCTAssertFalse(
             vm.runningTargets.contains { $0.entry == "nano" },
             "цели ещё нет в списке — проверяем именно её появление"
@@ -1492,7 +1896,7 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let signaler = SpySignaler()
         let vm = GuardVM(
             settings: settings,
             eventLog: EventLogStore(storage: InMemoryEventLog()),
@@ -1504,19 +1908,19 @@ final class GuardVMTests: XCTestCase {
                 vpnAppID: vpnAppPath,
                 "nano": "/usr/bin/pico",
             ]),
-            killer: killer,
+            signaler: signaler,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
         )
 
         vm.handle(.networkPath)
-        XCTAssertEqual(vm.state, .unsafe(.vpnAppNotRunning))
+        XCTAssertEqual(vm.phase, .danger(.vpnAppNotRunning))
 
         settings.targets += ["nano"]
 
         XCTAssertTrue(
-            killer.killedBatches.flatMap { $0 }.contains(601),
+            signaler.killedBatches.flatMap { $0 }.contains(601),
             "цель, добавленная под красным статусом, обязана быть завершена сразу"
         )
     }
@@ -1543,7 +1947,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: ProcessRegistry(),
             resolver: TargetResolver(),
-            killer: SpyKiller(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1567,8 +1971,8 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(h.vm.state, .disabled)
-        XCTAssertTrue(h.killer.killedBatches.isEmpty)
+        XCTAssertEqual(h.vm.phase, .disabled)
+        XCTAssertTrue(h.signaler.batches.isEmpty, "выключенная охрана не трогает процессы вовсе")
     }
 
     func test_healthy_network_ends_in_safe_state_after_verification() async {
@@ -1576,18 +1980,21 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
         XCTAssertEqual(
-            h.vm.state, .unsafe(.verificationPending),
-            "пока страна не подтверждена, состояние обязано быть небезопасным"
+            h.vm.phase.title, "Проверяю выход",
+            "проба ещё в полёте, а цели тем временем работают"
         )
 
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .safe(h.vm.lastReading))
+        XCTAssertEqual(h.vm.phase.title, "На страже")
         XCTAssertEqual(h.vm.lastReading?.ip, "203.0.113.28")
-        XCTAssertEqual(h.vm.state.statusColor, .green)
+        XCTAssertEqual(h.vm.statusColor, .green)
         XCTAssertEqual(h.vm.currentCountryCode, "KZ")
     }
 
+    /// Доказательство пришло к целям, которые работали: холодный старт их больше
+    /// не останавливает, и завершение — первое, что с ними случилось. SIGKILL один,
+    /// записей две — по процессу, — и уведомление одно.
     func test_blocked_country_kills_and_records_event() async {
         let h = makeHarness(
             snapshot: healthySnapshot(),
@@ -1597,25 +2004,32 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.blockedCountry(code: "RU", source: "ipinfo")))
-        XCTAssertEqual(h.killer.killedBatches, [[500, 501], [500, 501]])
+        XCTAssertEqual(h.vm.phase, .danger(.blockedCountry(code: "RU", source: "ipinfo")))
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.kill], "ни одной паузы до вердикта")
+        XCTAssertEqual(h.signaler.killedBatches, [[500, 501]])
 
-        // Одно падение — один эпизод: записей в нём столько, сколько процессов
-        // завершено, а причина у всех уточняется с «ещё не проверено» на настоящую,
-        // как только вердикт готов. Вторым эпизодом это выглядело бы как два разных
-        // события, а на живой машине второй записи не было вовсе — цели к тому
-        // моменту уже мертвы, завершать нечего.
         XCTAssertEqual(h.log.events.count, 2, "два процесса — две записи")
-        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1, "и один эпизод")
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1)
+        XCTAssertEqual(Set(h.log.events.map(\.kind)), [.terminated], "эпизод сразу про завершение")
         XCTAssertEqual(Set(h.log.events.map(\.country)), ["RU"])
         XCTAssertEqual(
             Set(h.log.events.map(\.reasonText)),
-            [UnsafeReason.blockedCountry(code: "RU", source: "ipinfo").displayText]
+            [UnsafeEvidence.blockedCountry(code: "RU", source: "ipinfo").displayText]
         )
-        XCTAssertEqual(h.notifier.messages.count, 1, "уведомление — на проход, а не на процесс")
+        XCTAssertEqual(
+            Set(h.log.events.map(\.resolutionText)), [nil],
+            "эпизоду, начавшемуся завершением, дописывать исход не нужно"
+        )
+        XCTAssertEqual(h.notifier.terminated.count, 1, "одно завершение — одно уведомление")
+        XCTAssertEqual(
+            h.notifier.terminated.first,
+            "\(targetBundleID) ×2: Обнаружена страна RU по данным ipinfo"
+        )
     }
 
-    func test_missing_confirmation_kills_and_shows_yellow() async {
+    /// ipinfo ответил, подтверждения нет: доказательства утечки тоже нет — цели стоят,
+    /// а статус жёлтый, потому что зелёный тут врал бы.
+    func test_missing_confirmation_pauses_and_shows_yellow() async {
         let h = makeHarness(
             snapshot: healthySnapshot(),
             geo: geoOutcome(primary: "KZ", confirmed: nil)
@@ -1624,23 +2038,24 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.confirmationUnavailable))
-        XCTAssertEqual(h.vm.state.statusColor, .yellow)
-        XCTAssertFalse(h.killer.killedBatches.isEmpty, "жёлтый — тоже убийство")
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(h.vm.statusColor, .yellow)
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop], "непроверенность ставит на паузу")
+        XCTAssertTrue(h.signaler.killedBatches.isEmpty)
     }
 
-    func test_geo_unavailable_kills_and_shows_yellow_without_flag() async {
+    func test_geo_unavailable_pauses_and_shows_yellow_without_flag() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: .unavailable("timeout"))
 
         h.vm.handle(.networkPath)
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(h.vm.state, .unsafe(.geoUnavailable("timeout")))
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
         XCTAssertEqual(
-            h.vm.state.statusColor, .yellow,
-            "отказ ipinfo — деградация сервиса, а не блокировка: цели всё равно завершены"
+            h.vm.statusColor, .yellow,
+            "цели стоят, а не завершены: красный оставлен доказательству"
         )
-        XCTAssertFalse(h.killer.killedBatches.isEmpty, "жёлтый — тоже убийство")
+        XCTAssertTrue(h.signaler.killedBatches.isEmpty)
         XCTAssertNil(h.vm.currentCountryCode)
     }
 
@@ -1658,13 +2073,126 @@ final class GuardVMTests: XCTestCase {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(),
                             processes: processesWithoutVPNApp)
         h.vm.handle(.networkPath)
-        XCTAssertEqual(h.killer.killedBatches.count, 1)
+        XCTAssertEqual(h.signaler.killedBatches.count, 1)
 
         h.vm.handle(.appLaunched(bundleID: targetBundleID))
 
-        XCTAssertEqual(h.killer.killedBatches.count, 2, "перезапущенная цель должна быть добита")
+        XCTAssertEqual(h.signaler.killedBatches.count, 2, "перезапущенная цель должна быть добита")
         XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1,
                        "те же pid по той же причине второго эпизода не заводят")
+    }
+
+    /// Цель, запустившаяся во время паузы, обязана встать вместе с остальными
+    /// и попасть в тот же эпизод с той же причиной: эпизод паузы — один, пока цели стоят.
+    func test_relaunch_while_paused_joins_the_same_episode() async {
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let log = EventLogStore(storage: InMemoryEventLog())
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: [
+                .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+                .init(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+            ]
+        )
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: log,
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: StubGeoProbe(.unavailable("таймаут запроса")),
+            locator: locator,
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
+            signaler: SpySignaler(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        // Пауза начинается с плохого результата, поэтому пробу здесь надо дождаться,
+        // а не задержать: без ответа цели работают и записывать про них нечего.
+        vm.handle(.networkPath)
+        await vm.awaitPendingProbe()
+        let originalReason = log.events.first?.reasonText
+        XCTAssertEqual(originalReason, "Не удалось определить внешний адрес: таймаут запроса")
+        XCTAssertEqual(log.events.first?.kind, .paused)
+        let episode = log.events.first?.episodeID
+
+        // Цель перезапущена с новым pid, пока вердикт всё ещё не установлен.
+        locator.processes = [
+            .init(pid: 777, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+            .init(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+        vm.handle(.appLaunched(bundleID: targetBundleID))
+
+        XCTAssertEqual(log.events.count, 2, "цель, запущенная под паузой, остановлена и записана")
+        XCTAssertEqual(log.events.first?.pid, 777)
+        XCTAssertEqual(
+            log.events.first?.reasonText, originalReason,
+            "причина эпизода одна: текст состояния её не подменяет"
+        )
+        XCTAssertEqual(log.events.first?.kind, .paused)
+        XCTAssertEqual(log.events.first?.episodeID, episode, "эпизод паузы один, пока цели стоят")
+    }
+
+    /// Тот же путь, но через сторожа: он срабатывает каждые
+    /// `Constants.watchdogIntervalSeconds`, пока цели стоят, и обязан ставить
+    /// новорождённых в тот же эпизод с той же причиной.
+    func test_watchdog_pauses_newcomers_within_the_same_episode() async {
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let log = EventLogStore(storage: InMemoryEventLog())
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: [
+                .init(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+                .init(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+            ]
+        )
+        let probe = DelayedGeoProbe()
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: log,
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: probe,
+            locator: locator,
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
+            signaler: SpySignaler(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        // Пауза приходит с неответом пробы; следующие пробы теста так и висят
+        // неотвеченными, поэтому причина эпизода за время проверки не меняется.
+        vm.handle(.networkPath)
+        await probe.waitUntilStarted()
+        await probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await vm.awaitPendingProbe()
+        let originalReason = log.events.first?.reasonText
+        XCTAssertEqual(originalReason, "Не удалось определить внешний адрес: таймаут запроса")
+        let episode = log.events.first?.episodeID
+
+        locator.processes = [
+            .init(pid: 777, executablePath: "\(targetPath)/Contents/MacOS/Target"),
+            .init(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+        try? await Task.sleep(for: .seconds(Constants.watchdogIntervalSeconds + 0.15))
+
+        XCTAssertEqual(log.events.count, 2, "сторож обязан остановить процесс, запущенный под паузой")
+        XCTAssertEqual(log.events.first?.pid, 777)
+        XCTAssertEqual(
+            log.events.first?.reasonText, originalReason,
+            "сторож обязан переиспользовать причину эпизода, а не текст состояния"
+        )
+        XCTAssertEqual(log.events.first?.kind, .paused)
+        XCTAssertEqual(log.events.first?.episodeID, episode)
+        vm.stop()
     }
 
     func test_newly_launched_target_is_recorded_even_while_already_unsafe() async {
@@ -1674,7 +2202,7 @@ final class GuardVMTests: XCTestCase {
         settings.vpnAppRule = vpnAppID
         settings.targets = [targetBundleID]
 
-        let killer = SpyKiller()
+        let signaler = SpySignaler()
         let log = EventLogStore(storage: InMemoryEventLog())
         let locator = MutableLocator(
             bundlePaths: [targetBundleID: targetPath],
@@ -1688,7 +2216,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: killer,
+            signaler: signaler,
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1711,13 +2239,13 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.appLaunched(bundleID: "com.apple.TextEdit"))
 
-        XCTAssertEqual(h.killer.killedBatches.count, 1)
+        XCTAssertEqual(h.signaler.killedBatches.count, 1)
     }
 
     func test_eperm_is_surfaced_instead_of_being_swallowed() async {
         let h = makeHarness(snapshot: healthySnapshot(), geo: geoOutcome(),
                             processes: processesWithoutVPNApp)
-        h.killer.setError(EPERM, forPID: 500)
+        h.signaler.setError(EPERM, forPID: 500)
 
         h.vm.handle(.networkPath)
 
@@ -1734,9 +2262,9 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
 
-        XCTAssertTrue(h.killer.killedBatches.isEmpty)
+        XCTAssertTrue(h.signaler.killedBatches.isEmpty)
         XCTAssertTrue(h.log.events.isEmpty)
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning), "состояние всё равно небезопасное")
+        XCTAssertEqual(h.vm.phase, .danger(.vpnAppNotRunning), "состояние всё равно небезопасное")
     }
 
     func test_symlinked_command_is_matched_by_resolved_path() async {
@@ -1753,7 +2281,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(h.killer.killedBatches, [[700]], "убит pico, vim не тронут")
+        XCTAssertEqual(h.signaler.killedBatches, [[700]], "убит pico, vim не тронут")
     }
 
     func test_script_target_is_matched_by_command_line_not_by_interpreter() async {
@@ -1772,7 +2300,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
 
-        XCTAssertEqual(h.killer.killedBatches, [[800]], "посторонний Node-процесс не тронут")
+        XCTAssertEqual(h.signaler.killedBatches, [[800]], "посторонний Node-процесс не тронут")
     }
 
     func test_unknown_command_matches_nothing() async {
@@ -1785,7 +2313,7 @@ final class GuardVMTests: XCTestCase {
 
         h.vm.handle(.networkPath)
 
-        XCTAssertTrue(h.killer.killedBatches.isEmpty)
+        XCTAssertTrue(h.signaler.killedBatches.isEmpty)
     }
 
     func test_executable_only_targets_still_arm_the_guard() async {
@@ -1821,7 +2349,7 @@ final class GuardVMTests: XCTestCase {
             geoProbe: StubGeoProbe(geoOutcome()),
             locator: locator,
             resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
-            killer: SpyKiller(),
+            signaler: SpySignaler(),
             notifier: SpyNotifier(),
             events: ManualEventSource(),
             debounceInterval: 0.01
@@ -1887,7 +2415,7 @@ final class GuardVMTests: XCTestCase {
         let calls = await h.probe.calls()
         XCTAssertEqual(calls, before + 1, "кнопка обязана сходить в сеть и при выключенном VPN")
         XCTAssertEqual(h.vm.lastReport?.ipinfo, .answered("KZ"))
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning), "вердикт охраны кнопка не смягчает")
+        XCTAssertEqual(h.vm.phase, .danger(.vpnAppNotRunning), "вердикт охраны кнопка не смягчает")
     }
 
     /// Показания обязаны обновляться и тогда, когда судьба целей решена локально.
@@ -1907,7 +2435,7 @@ final class GuardVMTests: XCTestCase {
             .answered("KZ"),
             "экран обязан сказать, где пользователь сейчас, а не где был под VPN"
         )
-        XCTAssertEqual(h.vm.state, .unsafe(.vpnAppNotRunning), "показания вердикт не смягчают")
+        XCTAssertEqual(h.vm.phase, .danger(.vpnAppNotRunning), "показания вердикт не смягчают")
     }
 
     /// Свежая установка: охрана выключена, целей нет — но узнать своё положение
@@ -1923,6 +2451,1086 @@ final class GuardVMTests: XCTestCase {
         let calls = await h.probe.calls()
         XCTAssertEqual(calls, 1, "выключенная охрана не отменяет вопрос «где я сейчас»")
         XCTAssertNotNil(h.vm.lastReport)
-        XCTAssertEqual(h.vm.state, .disabled, "состояние охраны от кнопки не меняется")
+        XCTAssertEqual(h.vm.phase, .disabled, "состояние охраны от кнопки не меняется")
+    }
+
+    // MARK: - Регрессия по журналу 2026-09-07 и п. 11
+
+    /// 18:03:21Z: холодный старт, вердикт через 2 с. Прежде цели встали и через две
+    /// секунды возобновились — теперь их никто не трогает: пауза начинается с плохого
+    /// результата, а этот вердикт хороший. Журнал молчит, потому что рассказывать нечего.
+    func test_episode_1803_cold_start_touches_nothing_and_the_verdict_confirms_it() async {
+        let harness = makeDelayedHarness(snapshot: utun5Snapshot())
+        harness.vm.start()
+
+        XCTAssertEqual(harness.vm.phase.title, "Проверяю выход")
+        XCTAssertEqual(harness.vm.phase.action, .run)
+        XCTAssertTrue(harness.signaler.batches.isEmpty, "ни стопа, ни завершения до ответа")
+        XCTAssertTrue(harness.log.events.isEmpty, "эпизода нет: с целями ничего не случилось")
+
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: .resolved(GeoReading(
+            ip: "203.0.113.177", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .freeipapi)))
+        await harness.vm.awaitPendingProbe()
+
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
+        XCTAssertTrue(harness.signaler.batches.isEmpty, "возобновлять нечего — цели и не стояли")
+        XCTAssertTrue(harness.log.events.isEmpty)
+        XCTAssertTrue(harness.vm.pausedProcesses.isEmpty)
+        harness.vm.stop()
+    }
+
+    /// Тот же холодный старт, но проба ответила «не доказано»: вот здесь цели встают,
+    /// и следующий хороший ответ их возвращает — SIGCONT, потомок раньше родителя.
+    func test_a_bad_result_on_a_cold_start_pauses_and_the_next_good_one_resumes() async {
+        let harness = makeDelayedHarness(snapshot: utun5Snapshot())
+        harness.vm.start()
+
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await harness.vm.awaitPendingProbe()
+
+        XCTAssertEqual(harness.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(harness.signaler.batches.first?.signal, .stop)
+        XCTAssertEqual(Set(harness.signaler.batches.first?.pids ?? []), [500, 501])
+        XCTAssertEqual(harness.log.events.first?.kind, .paused)
+        XCTAssertEqual(
+            harness.log.events.first?.reasonText,
+            "Не удалось определить внешний адрес: таймаут запроса"
+        )
+        XCTAssertEqual(
+            harness.log.events.first?.diagnostics?.staleness?.cause, .coldStart,
+            "разбор свежести в записи: вердикта про этот выход не было вовсе"
+        )
+
+        harness.vm.handle(.geoSchedule)
+        await harness.probe.waitUntilStarted(atLeast: 2)
+        await harness.probe.resumeFirst(with: .resolved(GeoReading(
+            ip: "203.0.113.177", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .freeipapi)))
+        await harness.vm.awaitPendingProbe()
+
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
+        XCTAssertEqual(harness.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(harness.signaler.batches.last?.pids, [501, 500], "потомок раньше родителя")
+        XCTAssertFalse(harness.signaler.batches.contains { $0.signal == .kill }, "ни одного SIGKILL")
+        XCTAssertEqual(
+            harness.log.events.first?.resolutionText,
+            "возобновлено: проверка подтвердила безопасный выход: 203.0.113.177, KZ"
+        )
+        XCTAssertEqual(
+            harness.log.events.first?.diagnostics?.staleness?.cause, .coldStart,
+            "разбор свежести переживает разрешение эпизода: холодный старт открыл паузу, "
+                + "и safe-резолюция не вправе стереть его из уже написанной записи"
+        )
+        XCTAssertTrue(harness.vm.pausedProcesses.isEmpty)
+        harness.vm.stop()
+    }
+
+    /// 19:31:51Z: оба сервиса молчат три минуты при действующем вердикте и неизменном
+    /// отпечатке. Первый же неответ — Пауза; через 60 с — завершение по потолку.
+    /// Терпимости, пропускавшей первые неудачи, больше нет.
+    func test_episode_1931_the_first_silence_pauses_and_the_ceiling_kills() async {
+        let clock = TestClock()
+        let harness = makeDelayedHarness(snapshot: utun5Snapshot(), now: { clock.now })
+        harness.vm.start()
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: geoOutcome())
+        await harness.vm.awaitPendingProbe()
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
+        let batchesBeforeSilence = harness.signaler.batches.count
+        let eventsBeforeSilence = harness.log.events.count
+
+        func failProbe(_ ordinal: Int) async {
+            clock.advance(by: 5)
+            harness.vm.handle(.geoSchedule)
+            await harness.probe.waitUntilStarted(atLeast: ordinal)
+            await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+            await harness.vm.awaitPendingProbe()
+        }
+
+        // Пауза началась на 5-й секунде — первым же неответом.
+        await failProbe(2)
+        XCTAssertEqual(harness.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(
+            harness.signaler.batches.count, batchesBeforeSilence + 1,
+            "первая же неудача ставит цели, и ровно одним сигналом"
+        )
+        XCTAssertEqual(harness.signaler.batches.last?.signal, .stop)
+        XCTAssertEqual(harness.log.events.first?.kind, .paused)
+        XCTAssertEqual(harness.log.events.first?.reasonText, "Не удалось определить внешний адрес: таймаут запроса")
+        XCTAssertEqual(harness.log.events.first?.ip, "203.0.113.28", "плоские поля — прошлый вердикт")
+        XCTAssertEqual(harness.log.events.first?.diagnostics?.verdictOrigin, .established)
+        XCTAssertNil(
+            harness.log.events.first?.diagnostics?.staleness,
+            "выход не менялся — винить сеть журнал не имеет права: промолчали сервисы"
+        )
+        XCTAssertEqual(harness.log.events.first?.diagnostics?.outgoingInterface, "utun5")
+        XCTAssertEqual(
+            harness.vm.pauseDeadline?.timeIntervalSince(clock.now), Constants.pauseCeilingSeconds,
+            "потолок отсчитывается от начала стояния"
+        )
+
+        for ordinal in 3...8 { await failProbe(ordinal) }
+        XCTAssertEqual(harness.vm.phase.title, "Выход не подтверждён", "молчание в пределах потолка ничего не меняет")
+        XCTAssertFalse(harness.signaler.batches.contains { $0.signal == .kill })
+
+        clock.advance(by: 31)   // 5 с до паузы + 5 × 6 + 31 = 61 с стояния
+        harness.vm.handle(.tick)
+
+        XCTAssertEqual(harness.vm.phase, .danger(.pauseExpired))
+        XCTAssertEqual(harness.signaler.batches.last?.signal, .kill)
+        XCTAssertEqual(harness.signaler.batches.last?.pids, [500, 501])
+        XCTAssertEqual(harness.log.events.first?.kind, .paused, "повторных записей terminated нет")
+        XCTAssertEqual(harness.log.events.first?.resolutionText, "завершено по потолку: Подтверждение не получено за 60 с")
+        XCTAssertEqual(
+            harness.log.events.count, eventsBeforeSilence + 2,
+            "две записи паузы по молчанию, ни одной новой при завершении"
+        )
+        XCTAssertTrue(harness.log.events.allSatisfy { $0.kind == .paused }, "ни одной записи kind: terminated")
+        XCTAssertTrue(harness.vm.pausedProcesses.isEmpty)
+        harness.vm.stop()
+    }
+
+    /// п. 11: добавление цели при действующем вердикте не трогает ни запущенные, ни сеть.
+    func test_adding_a_target_under_an_established_verdict_touches_nothing() async {
+        let harness = makeHarness(snapshot: utun5Snapshot(), geo: geoOutcome())
+        harness.vm.start()
+        await harness.vm.awaitPendingProbe()
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
+        let probes = await harness.probe.calls()
+        let batches = harness.signaler.batches.count
+        let events = harness.log.events.count
+
+        harness.settings.targets += ["nano"]
+
+        XCTAssertEqual(harness.vm.phase.title, "На страже")
+        XCTAssertEqual(harness.signaler.batches.count, batches, "ни стопа, ни завершения")
+        let probesAfter = await harness.probe.calls()
+        XCTAssertEqual(probesAfter, probes, "пробы нет — вердикт в силе")
+        XCTAssertEqual(harness.log.events.count, events, "нового эпизода нет")
+    }
+
+    /// Правка чёрного списка при действующем вердикте — переоценка: доказательство завершает сразу.
+    /// Показания при этом взяты из прошлого вердикта, и запись обязана так и сказать.
+    func test_blacklisting_the_current_country_terminates_by_reassessment() async {
+        let harness = makeHarness(snapshot: utun5Snapshot(), geo: geoOutcome())
+        harness.vm.start()
+        await harness.vm.awaitPendingProbe()
+
+        harness.settings.blockedCountryCodes = ["RU", "KZ"]
+
+        XCTAssertEqual(harness.vm.phase, .danger(.blockedCountry(code: "KZ", source: "ipinfo")))
+        XCTAssertEqual(harness.signaler.batches.last?.signal, .kill)
+        XCTAssertEqual(harness.log.events.first?.kind, .terminated)
+        XCTAssertEqual(harness.log.events.first?.reasonText, "Обнаружена страна KZ по данным ipinfo")
+        XCTAssertEqual(
+            harness.log.events.first?.diagnostics?.verdictOrigin, .established,
+            "решение принято по прошлому вердикту, а не по только что ответившей пробе"
+        )
+    }
+
+    /// Штатный выход снимает паузу: замороженных целей weto не оставляет.
+    func test_stop_resumes_paused_targets() async {
+        let harness = makeDelayedHarness(snapshot: utun5Snapshot())
+        harness.vm.start()
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await harness.vm.awaitPendingProbe()
+        XCTAssertEqual(harness.signaler.batches.last?.signal, .stop)
+
+        harness.vm.stop()
+
+        XCTAssertEqual(harness.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(
+            harness.log.events.first?.resolutionText, "возобновлено: охрана остановлена",
+            "исход эпизода дописан и при выходе"
+        )
+        XCTAssertTrue(harness.vm.pausedProcesses.isEmpty)
+    }
+
+    /// Фоновая терминальная цель получает пометку и уведомление с подсказкой про fg.
+    func test_backgrounded_terminal_target_is_flagged_and_notified() async {
+        let shell = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                    processGroup: 100, terminalForegroundGroup: 100)
+        let nano = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                                   processGroup: 200, terminalForegroundGroup: 100)
+        let harness = makeDelayedHarness(snapshot: utun5Snapshot(),
+                                         processes: [shell, nano] + defaultProcesses,
+                                         executables: ["nano"])
+        harness.vm.start()
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await harness.vm.awaitPendingProbe()
+
+        XCTAssertEqual(harness.vm.pausedProcesses.first { $0.pid == 200 }?.isBackgrounded, true)
+        XCTAssertEqual(harness.notifier.backgrounded, ["nano"])
+        XCTAssertFalse(harness.signaler.batches.first?.pids.contains(100) ?? true, "шелл фонового задания не трогаем")
+        harness.vm.stop()
+    }
+
+    /// Дерево фонового задания: шелл держит терминал сам, цель и её потомок — в своей
+    /// группе. Ровно та форма, в которой стояли процессы на машине владельца.
+    private func backgroundJobTree(stopped: Bool) -> [ProcessSnapshot] {
+        [
+            ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                            processGroup: 100, terminalForegroundGroup: 100),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                            processGroup: 200, terminalForegroundGroup: 100, isStopped: stopped),
+            ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                            processGroup: 200, terminalForegroundGroup: 100, isStopped: stopped),
+            ProcessSnapshot(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+    }
+
+    /// Тот самый случай с машины владельца: `claude` стоял фоновым заданием, проверка
+    /// сказала «безопасно», weto послал SIGCONT — и вычеркнул запись из учёта, потому
+    /// что `kill` вернул 0. Процесс проснулся, тронул tty, получил SIGTTIN и встал
+    /// обратно; досылать ему сигнал стало некому, и он остался стоять на часы, а журнал
+    /// написал «возобновлено». Обязательство держится до наблюдения, и следующий проход
+    /// обязан послать SIGCONT снова.
+    func test_a_background_target_that_falls_back_to_stopped_keeps_its_obligation() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: backgroundJobTree(stopped: false)
+        )
+        let ledgerStorage = InMemoryStoppedLedger()
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+
+        await pauseWithABadResult(h, after: 0)
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop])
+        XCTAssertEqual(h.signaler.batches.first?.pids, [200, 201], "шелла в плане нет: задание уже в фоне")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200])
+        XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true)
+        XCTAssertNil(h.log.events.first?.resolutionText, "стояние ещё не кончилось")
+
+        // Теперь ядро показывает их стоящими — как и было у владельца часами.
+        locator.processes = backgroundJobTree(stopped: true)
+
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume])
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200], "продолжение — в обратном порядке")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "отправка сигнала обязательства не снимает")
+        XCTAssertNil(h.log.events.first?.resolutionText,
+                     "возобновления ещё не наблюдали — заявлять его журнал не имеет права")
+
+        // Следующий проход: процессы всё ещё стоят. Это ответ, а не ожидание.
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume, .resume])
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200], "следующий проход шлёт SIGCONT снова")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "пока цель стоит, учёт её держит — иначе SIGCONT не пошлёт уже никто")
+        XCTAssertEqual(
+            h.log.events.first?.resolutionText,
+            "не возобновлено: процессы [200, 201] остались остановленными — "
+                + "задание ушло в фон, продолжите его в терминале командой fg",
+            "журнал говорит, что случилось на самом деле"
+        )
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200],
+                       "цель не имеет права выглядеть возобновлённой: подсказка про fg остаётся")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true)
+        XCTAssertEqual(h.notifier.backgrounded, ["nano"], "уведомление про fg — одно на стояние")
+
+        // Пользователь ввёл `fg`: цель пошла, и вот теперь обязательство снято.
+        locator.processes = backgroundJobTree(stopped: false)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(ledgerStorage.load(), .entries([]), "обязательство снимает наблюдение")
+        XCTAssertTrue(h.vm.pausedProcesses.isEmpty)
+        h.vm.stop()
+    }
+
+    /// Дерево переднего задания: терминал держит группа цели, шелл — её родитель
+    /// в своей группе. Ровно та форма, ради которой шелл входит в план паузы.
+    private func foregroundJobTree(stopped: Bool = false) -> [ProcessSnapshot] {
+        [
+            ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                            processGroup: 100, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                            processGroup: 200, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                            processGroup: 200, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+    }
+
+    private func makeForegroundJobHarness(
+        stopped: Bool = false,
+        ledgerStorage: InMemoryStoppedLedger = InMemoryStoppedLedger()
+    ) -> (h: DelayedHarness, locator: MutableLocator, ledgerStorage: InMemoryStoppedLedger) {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: foregroundJobTree(stopped: stopped)
+        )
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+        return (h, locator, ledgerStorage)
+    }
+
+    /// Инвариант: всё, чему weto послал SIGSTOP, объяснено журналом завершений.
+    /// Шелл цели — не цель, но встал он по нашей воле, и без записи заморозка
+    /// прослеживалась только по `stopped.json`, который вычёркивает запись при первом
+    /// же наблюдении. Проверяется не список pid из плана, а сами отправленные сигналы:
+    /// путь, замораживающий что-то мимо журнала, обязан валиться здесь.
+    func test_every_process_sent_sigstop_has_a_record_in_the_episode() async {
+        let (h, _, _) = makeForegroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+
+        let stopped = h.signaler.batches.filter { $0.signal == .stop }.flatMap(\.pids)
+        XCTAssertEqual(stopped, [100, 200, 201], "шелл раньше цели — порядок сигналов прежний")
+        let episode = h.log.events.first?.episodeID
+        XCTAssertNotNil(episode)
+        let episodeEvents = h.log.events.filter { $0.episodeID == episode }
+        XCTAssertEqual(Set(episodeEvents.map(\.pid)), Set(stopped),
+                       "каждый SIGSTOP объяснён записью того же эпизода")
+        XCTAssertEqual(episodeEvents.count, stopped.count, "и ровно одной записью на pid")
+        XCTAssertEqual(Set(episodeEvents.map(\.kind)), [.paused])
+        XCTAssertEqual(Set(episodeEvents.map(\.reasonText)),
+                       ["Не удалось определить внешний адрес: таймаут запроса"],
+                       "причина у эпизода одна на всех")
+
+        let shell = episodeEvents.first { $0.pid == 100 }
+        XCTAssertEqual(shell?.matchedBy, .shell, "шелл — не цель, и запись говорит это прямо")
+        XCTAssertEqual(shell?.targetName, "nano", "ради чьего терминала он встал")
+        XCTAssertEqual(shell?.executablePath, "/bin/zsh")
+        XCTAssertEqual(shell?.parentPID, 1)
+        XCTAssertEqual(h.log.events.first { $0.pid == 201 }?.matchedBy, .descendant)
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200],
+                       "пилюля остаётся у цели: шелл целью не становится")
+        XCTAssertTrue(h.notifier.backgrounded.isEmpty, "переднее задание в фон не уходило")
+        h.vm.stop()
+    }
+
+    /// Исход эпизода дописывается и шеллу: один эпизод объясняет заморозку целиком —
+    /// кто встал, почему и чем это кончилось.
+    func test_the_shell_record_gets_the_same_resolution_as_its_target() async {
+        let (h, locator, _) = makeForegroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertNil(h.log.events.first?.resolutionText, "стояние ещё не кончилось")
+
+        // Цели и шелл стоят, проверка сказала «безопасно» — SIGCONT ушёл.
+        locator.processes = foregroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200, 100],
+                       "продолжение — в обратном порядке, шелл последним")
+
+        // Ядро показало их идущими: возобновление наблюдалось, эпизод закрыт.
+        locator.processes = foregroundJobTree(stopped: false)
+        h.vm.handle(.tick)
+
+        let resolutions = Set(h.log.events.map(\.resolutionText))
+        XCTAssertEqual(resolutions,
+                       ["возобновлено: проверка подтвердила безопасный выход: 203.0.113.28, KZ"],
+                       "исход один на весь эпизод, включая шелл")
+
+        let events = h.log.events.count
+        h.vm.handle(.tick)
+        XCTAssertEqual(h.log.events.count, events, "второй записи про те же pid не бывает")
+        h.vm.stop()
+    }
+
+    /// На пути завершения `ProcessEnforcer.terminate` шлёт SIGKILL только совпавшим
+    /// под правило и их потомкам — шелл, вошедший в план ради терминала цели,
+    /// под правило не подходит и получает SIGCONT. Запись шелла обязана говорить
+    /// это прямо: «завершено» на живой, продолженный процесс — та же ложь,
+    /// которую этот файл проверяет для пути возобновления чуть выше.
+    func test_the_shell_record_is_released_not_terminated_on_the_kill_path() async {
+        let (h, locator, _) = makeForegroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertNil(h.log.events.first?.resolutionText, "стояние ещё не кончилось")
+
+        // Цели и шелл стоят, проверка называет заблокированную страну — доказательство.
+        locator.processes = foregroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome(primary: "RU"))
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.signaler.killedBatches, [[200, 201]],
+                       "SIGKILL — цели и её потомку, шелл не под правилом")
+        XCTAssertEqual(h.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(h.signaler.batches.last?.pids, [100],
+                       "шелл жив: под доказательство он не попадает")
+
+        let byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        XCTAssertEqual(
+            byPID[200]?.resolutionText,
+            "завершено по доказательству: Обнаружена страна RU по данным ipinfo"
+        )
+        XCTAssertEqual(
+            byPID[201]?.resolutionText,
+            "завершено по доказательству: Обнаружена страна RU по данным ipinfo"
+        )
+        XCTAssertEqual(
+            byPID[100]?.resolutionText,
+            "продолжен: цель завершена по доказательству: Обнаружена страна RU по данным ipinfo",
+            "шелл — не цель: он продолжен, а не завершён, и запись обязана сказать это прямо"
+        )
+        h.vm.stop()
+    }
+
+    /// Две цели под одной паузой: терминальная `nano` со своим шеллом переднего задания
+    /// и приложение, стоящее само по себе. Ровно та форма, в которой одну цель снимают
+    /// с охраны, а вторая обязана остаться стоять.
+    private func twoTargetsTree(stopped: Bool, appStopped: Bool? = nil) -> [ProcessSnapshot] {
+        [
+            ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                            processGroup: 100, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                            processGroup: 200, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                            processGroup: 200, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target",
+                            isStopped: appStopped ?? stopped),
+            ProcessSnapshot(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+    }
+
+    /// Цель, снятую с охраны под паузой, weto обязан отпустить тем же проходом.
+    /// Пилюля у неё исчезала сразу, а SIGCONT не уходил вовсе: процесс стоял до исхода
+    /// эпизода — то есть до минуты потолка, — уже после того, как пользователь сказал
+    /// «это больше не моё». Держать не своё weto права не имеет.
+    func test_a_target_removed_from_the_guard_while_standing_is_released_at_once() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: twoTargetsTree(stopped: false)
+        )
+        let ledgerStorage = InMemoryStoppedLedger()
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+
+        await pauseWithABadResult(h, after: 0)
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop])
+        XCTAssertEqual(h.signaler.batches.first?.pids, [100, 500, 200, 201],
+                       "шелл раньше цели, родитель раньше потомка")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 500, 200, 201])
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid).sorted(), [200, 500])
+        let episode = h.log.events.first?.episodeID
+
+        // Ядро показывает всех стоящими, и пользователь снимает с охраны приложение.
+        locator.processes = twoTargetsTree(stopped: true)
+        h.settings.targets = ["nano"]
+        h.vm.handle(.tick)
+
+        let resumed = h.signaler.batches.filter { $0.signal == .resume }
+        XCTAssertFalse(resumed.isEmpty, "снятая с охраны цель обязана получить SIGCONT")
+        XCTAssertEqual(Set(resumed.flatMap(\.pids)), [500],
+                       "продолжение — только снятой цели: чужой терминал не трогаем")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 500, 200, 201],
+                       "отправка сигнала обязательства не снимает: снимает наблюдение")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "пилюля снятой цели исчезла")
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён", "эпизод продолжается")
+
+        var byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        XCTAssertEqual(byPID[500]?.resolutionText,
+                       "не подтверждено: цель снята с охраны, продолжение отправлено — "
+                           + "результат ещё не наблюдался",
+                       "сигнал ушёл, а результата ещё никто не видел")
+        XCTAssertNil(byPID[200]?.resolutionText, "у оставшейся цели стояние не кончилось")
+        XCTAssertNil(byPID[100]?.resolutionText)
+
+        // Ядро показало снятую цель идущей: вот теперь обязательство исполнено.
+        locator.processes = twoTargetsTree(stopped: true, appStopped: false)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200, 201],
+                       "из учёта запись уходит по наблюдению")
+        byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        XCTAssertEqual(byPID[500]?.resolutionText, "продолжен: цель снята с охраны",
+                       "журнал говорит, почему процесс отпущен, а не выдаёт чужой исход")
+        XCTAssertEqual(byPID[500]?.kind, .paused, "запись та же самая, второй про тот же pid нет")
+        XCTAssertEqual(h.log.events.filter { $0.pid == 500 }.count, 1)
+        XCTAssertEqual(h.log.events.filter { $0.episodeID == episode }.count, 4,
+                       "эпизод остался один на всю заморозку")
+        XCTAssertNil(byPID[200]?.resolutionText, "оставшаяся цель по-прежнему стоит")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200])
+
+        // Эпизод кончился безопасным выходом: исход достался оставшимся записям,
+        // а отпущенной — нет, её стояние кончилось раньше и по другой причине.
+        locator.processes = twoTargetsTree(stopped: false)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        h.vm.handle(.tick)
+
+        byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        XCTAssertEqual(byPID[500]?.resolutionText, "продолжен: цель снята с охраны",
+                       "общий исход эпизода чужую запись не переписывает")
+        XCTAssertEqual(byPID[200]?.resolutionText,
+                       "возобновлено: проверка подтвердила безопасный выход: 203.0.113.28, KZ")
+        h.vm.stop()
+    }
+
+    /// Шелл — не цель: он стоит ради терминала цели, с которой его взяли, и отпустить
+    /// его раньше неё значит отдать ей терминал обратно и получить `SIGTTIN`. Поэтому
+    /// он освобождается только тогда, когда держать ему больше некого, — и последним
+    /// в партии, как того требует порядок сигналов.
+    func test_the_shell_is_released_only_when_the_last_guarded_entry_is_gone() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: foregroundJobTree(stopped: false)
+        )
+        let ledgerStorage = InMemoryStoppedLedger()
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertEqual(h.signaler.batches.first?.pids, [100, 200, 201])
+
+        // Снимаем с охраны единственную стоящую цель. Приложение в целях остаётся,
+        // но его процесса в системе нет — охране больше некого держать.
+        locator.processes = foregroundJobTree(stopped: true)
+        h.settings.targets = [targetBundleID]
+        h.vm.handle(.tick)
+
+        let resumed = h.signaler.batches.filter { $0.signal == .resume }
+        XCTAssertEqual(resumed.first?.pids, [201, 200, 100],
+                       "обратный стоп-порядок: потомок, цель, и шелл последним")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200, 201],
+                       "обязательство держится до наблюдения")
+
+        var byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        for pid in [100, 200, 201] as [Int32] {
+            XCTAssertEqual(byPID[pid]?.resolutionText,
+                           "не подтверждено: цель снята с охраны, продолжение отправлено — "
+                               + "результат ещё не наблюдался",
+                           "заморозку объясняет журнал, включая шелл: pid \(pid)")
+        }
+
+        // Ядро показало их идущими.
+        locator.processes = foregroundJobTree(stopped: false)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(ledgerStorage.load(), .entries([]), "учёт опустел по наблюдению")
+        byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        for pid in [100, 200, 201] as [Int32] {
+            XCTAssertEqual(byPID[pid]?.resolutionText, "продолжен: цель снята с охраны",
+                           "исход честный у всех записей эпизода: pid \(pid)")
+        }
+        XCTAssertTrue(h.vm.pausedProcesses.isEmpty, "стоящих целей больше нет")
+        h.vm.stop()
+    }
+
+    /// Тот же сеанс с фоновым заданием, но собранный один раз: локатор меняет состояние
+    /// процессов по ходу теста, учёт живёт своим хранилищем.
+    private func makeBackgroundJobHarness(
+        stopped: Bool = false,
+        checkLog: CheckLogStore = CheckLogStore(storage: InMemoryCheckLog()),
+        ledgerStorage: InMemoryStoppedLedger = InMemoryStoppedLedger(),
+        now: @escaping () -> Date = Date.init
+    ) -> (h: DelayedHarness, locator: MutableLocator, ledgerStorage: InMemoryStoppedLedger) {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: backgroundJobTree(stopped: stopped)
+        )
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), checkLog: checkLog, now: now,
+                                   executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+        return (h, locator, ledgerStorage)
+    }
+
+    /// Штатный выход при стоящих целях — самый частый способ закончить паузу, и заявлять
+    /// в нём отказ нельзя: стоящими записи показал обход, снятый ДО SIGCONT, а такта,
+    /// который увидел бы ответ, больше не будет. Журнал говорит ровно установленное:
+    /// сигнал отправлен, результат не наблюдался, проверка — при следующем запуске.
+    func test_stopping_the_guard_while_targets_stand_reports_an_unconfirmed_signal() async {
+        let (h, locator, ledgerStorage) = makeBackgroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop])
+        locator.processes = backgroundJobTree(stopped: true)
+
+        h.vm.stop()
+
+        XCTAssertEqual(h.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200],
+                       "обязательство исполняется и на выходе: продолжение в обратном порядке")
+        XCTAssertEqual(
+            h.log.events.first?.resolutionText,
+            "не подтверждено: сигнал продолжения отправлен процессам [200, 201], "
+                + "а охрана остановлена — результат наблюдать нечем, weto проверит их "
+                + "при следующем запуске",
+            "ни «возобновлено», ни «не возобновлено»: наблюдения не было вовсе"
+        )
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "записи достаются следующему запуску — восстановление настоящее")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200],
+                       "цель по-прежнему стоит: пилюля не имеет права исчезнуть")
+    }
+
+    /// Учёт, доживший до нового запуска, обязан быть видимым: и пилюлей, и следом
+    /// в обоих журналах. Без этого пользователь после падения weto получал SIGCONT
+    /// раз в секунду и ни слова: ни пилюли, ни подсказки про `fg`, ни записи.
+    func test_a_standing_orphan_is_visible_after_a_restart() async {
+        let ledgerStorage = InMemoryStoppedLedger()
+        let moment = Date(timeIntervalSince1970: 1_000)
+        ledgerStorage.save([
+            StoppedProcess(pid: 200, executablePath: "/usr/bin/pico", stoppedAt: moment, isShell: false),
+            StoppedProcess(pid: 201, executablePath: "/usr/bin/node", stoppedAt: moment, isShell: false)
+        ])
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        let (h, _, _) = makeBackgroundJobHarness(stopped: true, checkLog: checks,
+                                                 ledgerStorage: ledgerStorage)
+
+        h.vm.start()
+
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "стоящая цель обязана быть в попапе")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true,
+                       "цель ответила стопом на свой SIGCONT — подсказка про fg и «Показать терминал»")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.since, moment, "стоит она с прошлой жизни weto")
+        XCTAssertEqual(h.notifier.backgrounded, ["nano"], "уведомление одно")
+
+        let traces = checks.all.filter { $0.trigger == .startupRecovery }
+        XCTAssertEqual(traces.count, 1, "одна запись на восстановление, а не на такт")
+        XCTAssertEqual(traces.first?.outcome, .standingProcessesRemain)
+        XCTAssertEqual(traces.first?.detail,
+                       "учёт остановленных: процессы [200, 201] стояли на старте — "
+                           + "продолжение отправлено, дальше их ведёт такт охраны")
+        XCTAssertEqual(h.log.events.map(\.pid), [200, 201],
+                       "журнал завершений объясняет каждое стояние, а не только своё")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "обязательство держится до наблюдения и после перезапуска")
+        h.vm.stop()
+    }
+
+    /// «Почему этот процесс стоял» спрашивают у журнала завершений, а не у `stopped.json`:
+    /// учёт вычёркивает запись в тот миг, когда процесс увиден идущим, и заморозка
+    /// становилась непрослеживаемой. Стоящие с прошлого запуска заводят свой эпизод —
+    /// пробы за ними нет, и причина обязана говорить это прямо.
+    func test_processes_found_standing_at_startup_get_their_own_journal_episode() async {
+        let ledgerStorage = InMemoryStoppedLedger()
+        let moment = Date(timeIntervalSince1970: 1_000)
+        ledgerStorage.save([
+            StoppedProcess(pid: 100, executablePath: "/bin/zsh", stoppedAt: moment, isShell: true),
+            StoppedProcess(pid: 200, executablePath: "/usr/bin/pico", stoppedAt: moment, isShell: false),
+            StoppedProcess(pid: 201, executablePath: "/usr/bin/node", stoppedAt: moment, isShell: false)
+        ])
+        let (h, locator, _) = makeForegroundJobHarness(stopped: true, ledgerStorage: ledgerStorage)
+
+        h.vm.start()
+
+        XCTAssertEqual(Set(h.log.events.map(\.pid)), [100, 200, 201],
+                       "объяснён каждый, кого weto застал стоящим")
+        XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1, "это один эпизод")
+        XCTAssertEqual(Set(h.log.events.map(\.kind)), [.paused])
+        XCTAssertEqual(Set(h.log.events.map(\.reasonText)), [GuardVM.recoveryReasonText])
+        XCTAssertEqual(Set(h.log.events.map(\.date)), [moment],
+                       "стоят они с прошлой жизни weto, а не с момента, когда мы это заметили")
+        XCTAssertEqual(h.log.events.first { $0.pid == 100 }?.matchedBy, .shell,
+                       "шелл остался шеллом и через перезапуск: это знает учёт")
+        XCTAssertEqual(h.log.events.first { $0.pid == 100 }?.targetName, "zsh",
+                       "цели у него нет — именем служит сам бинарник")
+        XCTAssertEqual(h.log.events.first { $0.pid == 200 }?.targetName, "nano")
+        XCTAssertEqual(h.log.events.first { $0.pid == 200 }?.matchedBy, .rule,
+                       "цель совпала сама, а не как чей-то потомок")
+        XCTAssertEqual(h.log.events.first { $0.pid == 201 }?.matchedBy, .descendant,
+                       "201 — потомок 200, и это знает обход, а не только учёт: "
+                           + "иначе карточка теряла бы «потомок 200»")
+        // Исход дописывается по тому же правилу, что и эпизоду паузы: SIGCONT ушёл
+        // на старте, а первый же такт увидел их всё ещё стоящими — это ответ, и журнал
+        // называет его, не выдавая отправку сигнала за возобновление.
+        XCTAssertEqual(
+            Set(h.log.events.map(\.resolutionText)),
+            ["не возобновлено: процессы [100, 200, 201] остались остановленными — "
+                + "задание ушло в фон, продолжите его в терминале командой fg"],
+            "исход один на весь эпизод, включая шелл"
+        )
+
+        // Пользователь ввёл `fg`: процессы пошли, обязательство снято наблюдением —
+        // и второго эпизода про то же стояние журнал не заводит.
+        let events = h.log.events.count
+        locator.processes = foregroundJobTree(stopped: false)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(h.log.events.count, events, "эпизод восстановления один на запуск")
+        XCTAssertEqual(ledgerStorage.load(), .entries([]), "обязательство снимает наблюдение")
+        h.vm.stop()
+    }
+
+    /// Плохой результат внутри окна наблюдения: SIGCONT ушёл, цель ожила, эпизод уже
+    /// закрыт исходом — и вердикт снова стал плохим. Цель честно останавливается заново,
+    /// и это событие: прежде запись в учёте, дожившая с прошлой паузы, глушила его совсем
+    /// (ни записи, ни пилюли, ни уведомления про стоящий процесс).
+    func test_a_target_stopped_again_after_the_episode_closed_is_recorded_anew() async {
+        let (h, locator, _) = makeBackgroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        let firstEpisode = h.log.events.first?.episodeID
+        XCTAssertEqual(h.log.events.map(\.pid), [200, 201])
+
+        // Цели стоят, проверка сказала «безопасно» — SIGCONT ушёл, ответ ещё не наблюдался.
+        locator.processes = backgroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+
+        // Следующий проход видит их стоящими: это ответ, и эпизод получает исход.
+        h.vm.handle(.tick)
+        XCTAssertNotNil(h.log.events.first?.resolutionText)
+
+        // Пользователь ввёл `fg`, цели пошли — а вердикт тем же проходом стал плохим.
+        locator.processes = backgroundJobTree(stopped: false)
+        await pauseWithABadResult(h, after: 2)
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume, .resume, .stop])
+        XCTAssertEqual(h.signaler.batches.last?.pids, [200, 201], "ожившая цель встаёт заново")
+        XCTAssertEqual(h.log.events.count, 4, "новое стояние — новые записи")
+        XCTAssertEqual(h.log.events.prefix(2).map(\.pid), [200, 201], "свежие записи первыми")
+        XCTAssertNotEqual(h.log.events.first?.episodeID, firstEpisode, "эпизод другой")
+        XCTAssertNil(h.log.events.first?.resolutionText, "новое стояние ещё не кончилось")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200])
+
+        // Внутри одного эпизода повтора нет: цель, ожившая под паузой, получает SIGSTOP
+        // снова, но второй записи о том же pid журнал не заводит.
+        locator.processes = backgroundJobTree(stopped: false)
+        h.vm.handle(.appLaunched(bundleID: targetBundleID))
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .resume, .resume, .stop, .stop])
+        XCTAssertEqual(h.log.events.count, 4, "повторной записи о том же pid эпизод не допускает")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "и второй пилюли тоже")
+    }
+
+    /// Пилюля, дожившая до нового эпизода, обязана взять его момент: отсчёт на ней идёт
+    /// до потолка паузы, а потолок считается от начала ЭТОЙ паузы. Со старым `since`
+    /// пилюля показывала стояние тем более давнее, чем дольше цель простояла в прошлый
+    /// раз, — то есть отсчёт, который у охраны не значит ничего.
+    func test_a_pill_surviving_into_a_new_episode_adopts_the_new_moment() async {
+        let clock = TestClock()
+        let (h, locator, _) = makeBackgroundJobHarness(now: { clock.now })
+
+        await pauseWithABadResult(h, after: 0)
+        let firstMoment = h.vm.pausedProcesses.first?.since
+        XCTAssertEqual(firstMoment, clock.now, "первая пауза началась сейчас")
+
+        // Проверка сказала «безопасно»: SIGCONT ушёл, следующий проход увидел цели
+        // идущими — эпизод закрыт исходом. Пилюля при этом уходит вместе с эпизодом.
+        locator.processes = backgroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        h.vm.handle(.tick)
+
+        // Цель всё ещё стоит по своему SIGTTIN, поэтому пилюля с прошлого эпизода жива —
+        // и именно она доживает до нового стояния.
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "пилюля дожила до нового эпизода")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.since, firstMoment, "пока эпизод один — момент прежний")
+
+        clock.advance(by: 120)
+        locator.processes = backgroundJobTree(stopped: false)
+        await pauseWithABadResult(h, after: 2)
+
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200])
+        XCTAssertEqual(h.vm.pausedProcesses.first?.since, clock.now,
+                       "новый эпизод — новый момент: отсчёт идёт от начала этой паузы")
+        XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true,
+                       "признак «вернулось в фон» остаётся от наблюдения, а не от догадки плана")
+    }
+
+    /// Настоящее фоновое задание отвечает стопом на каждый SIGCONT, и досылать ему
+    /// сигнал вечно нельзя: свои запись и уведомление weto не повторяет, а `notify`
+    /// у zsh включён по умолчанию — терминал печатал `suspended (tty input)` раз
+    /// в секунду до самого `fg`. Обязательство при этом остаётся: его исполняет
+    /// штатный выход.
+    func test_a_job_that_keeps_answering_with_a_stop_is_no_longer_poked() async {
+        let (h, locator, ledgerStorage) = makeBackgroundJobHarness()
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = backgroundJobTree(stopped: true)
+
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        for _ in 0..<10 { h.vm.handle(.tick) }
+
+        let resumes = h.signaler.batches.filter { $0.signal == .resume }
+        XCTAssertEqual(resumes.count, Constants.resumeRetryLimit + 1,
+                       "первый сигнал плюс попытки — и ни одной сверх лимита")
+        XCTAssertTrue(resumes.allSatisfy { $0.pids == [201, 200] }, "порядок продолжения не меняется")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
+                       "перестали трогать — не значит забыли: обязательство держит учёт")
+        XCTAssertEqual(h.notifier.backgrounded, ["nano"], "уведомление одно на стояние")
+
+        h.vm.stop()
+
+        XCTAssertEqual(h.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200],
+                       "штатный выход исполняет обязательство несмотря на остановленные попытки")
+    }
+
+    /// Потолок паузы виден интерфейсу только пока цели стоят — то есть с плохого
+    /// результата пробы и до его отмены. У «Проверки» отсчёта нет вовсе.
+    func test_pause_deadline_exists_only_while_the_targets_stand() async {
+        let harness = makeDelayedHarness(snapshot: utun5Snapshot())
+        harness.vm.start()
+
+        XCTAssertNil(harness.vm.pauseDeadline, "в проверке цели работают — считать нечего")
+
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await harness.vm.awaitPendingProbe()
+
+        XCTAssertEqual(
+            harness.vm.pauseDeadline?.timeIntervalSince(harness.vm.phase.pausedSince ?? Date()),
+            Constants.pauseCeilingSeconds
+        )
+
+        harness.vm.handle(.geoSchedule)
+        await harness.probe.waitUntilStarted(atLeast: 2)
+        await harness.probe.resumeFirst(with: geoOutcome())
+        await harness.vm.awaitPendingProbe()
+
+        XCTAssertNil(harness.vm.pauseDeadline, "цели работают — отсчёта нет")
+        harness.vm.stop()
+    }
+
+    /// Учёт остановленных, не прочитавшийся с диска, обязан оставить след: обязательство
+    /// «вернуть остановленным SIGCONT» в этот запуск выполнено не было, и молчаливое
+    /// пустое чтение неотличимо от «нечего возобновлять».
+    func test_a_corrupted_stopped_ledger_leaves_a_trace_in_the_check_log() async {
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        let harness = makeDelayedHarness(
+            snapshot: utun5Snapshot(),
+            checkLog: checks,
+            ledger: StoppedLedger(storage: CorruptedStoppedLedger())
+        )
+
+        harness.vm.start()
+
+        let trace = checks.all.first { $0.trigger == .startupRecovery }
+        XCTAssertNotNil(trace, "старт с испорченным учётом обязан попасть в журнал проверок")
+        XCTAssertEqual(trace?.outcome, .ledgerUnreadable)
+        XCTAssertEqual(trace?.detail, "учёт остановленных процессов не прочитан: возобновлять нечего")
+        harness.vm.stop()
+    }
+
+    /// Пилюля «Показать терминал» спрашивает границу про тот самый pid.
+    func test_show_terminal_asks_the_locator_about_that_pid() {
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let terminals = SpyTerminalLocator()
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
+            snapshotReader: StubSnapshotReader(snapshotValue: utun5Snapshot()),
+            geoProbe: StubGeoProbe(geoOutcome()),
+            locator: StubLocator(
+                bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+                processes: defaultProcesses
+            ),
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
+            signaler: SpySignaler(),
+            terminalLocator: terminals,
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 10
+        )
+
+        vm.showTerminal(for: 500)
+
+        XCTAssertEqual(terminals.asked, [500])
+    }
+
+    // MARK: - Честность журнала: ревью задачи 15
+
+    /// Завершение после «Помех» — первое завершение своего эпизода, а не «запуск запрещён».
+    ///
+    /// Дедупликация записей и причин снималась только на «На страже», а «Помехи» — путь
+    /// рабочий: 429 от ipinfo приходит регулярно, и адрес называет резервный сервис.
+    /// Доказательство после них получало `kind: .launchBlocked`, а при совпавшем pid
+    /// не давало ни записи, ни уведомления — ровно в тот момент, когда цели умирают.
+    func test_a_kill_after_interference_is_a_first_kill_again() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: defaultProcesses
+        )
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let notifier = SpyNotifier()
+        let log = EventLogStore(storage: InMemoryEventLog())
+        let probe = DelayedGeoProbe()
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: log,
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: probe,
+            locator: locator,
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
+            signaler: SpySignaler(),
+            notifier: notifier,
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        vm.handle(.networkPath)
+        await probe.waitUntilStarted()
+        await probe.resumeFirst(with: geoOutcome())
+        await vm.awaitPendingProbe()
+        XCTAssertEqual(vm.phase.title, "На страже")
+
+        // Клиент закрылся: доказательство и завершение.
+        locator.processes = processesWithoutVPNApp
+        vm.handle(.appTerminated(bundleID: vpnAppID))
+
+        XCTAssertEqual(vm.phase, .danger(.vpnAppNotRunning))
+        XCTAssertEqual(log.events.first?.kind, .terminated)
+        XCTAssertEqual(notifier.terminated.count, 1)
+        let firstEpisode = log.events.first?.episodeID
+        let eventsAfterFirstKill = log.events.count
+
+        // ipinfo молчит с 429, адрес называет резервный сервис — доказанная неизменность
+        // выхода: цели работают, и клиент к этому времени снова поднят.
+        vm.handle(.geoSchedule)
+        await probe.waitUntilStarted(atLeast: 2)
+        locator.processes = defaultProcesses
+        await probe.resumeFirst(with: .degraded(
+            previous: GeoReading(ip: "203.0.113.28", primaryCountry: "KZ",
+                                 confirmedCountry: "KZ", confirmSource: .freeipapi),
+            detail: "HTTP 429"
+        ))
+        await vm.awaitPendingProbe()
+        XCTAssertEqual(vm.phase.title, "На страже")
+        XCTAssertEqual(vm.statusColor, .yellow, "адрес доказанно тот же, а не свежий safe — зелёный тут врал бы")
+        XCTAssertEqual(vm.phase.action, .run, "цели снова работают")
+
+        // Клиент закрылся снова: те же pid и та же улика, но эпизод новый.
+        locator.processes = processesWithoutVPNApp
+        vm.handle(.appTerminated(bundleID: vpnAppID))
+
+        XCTAssertEqual(vm.phase, .danger(.vpnAppNotRunning))
+        XCTAssertEqual(log.events.first?.kind, .terminated,
+                       "первое завершение эпизода — не «запуск запрещён»")
+        XCTAssertNotEqual(log.events.first?.episodeID, firstEpisode, "и эпизод у него свой")
+        XCTAssertEqual(log.events.count, eventsAfterFirstKill + 2,
+                       "две записи на проход: обе цели описаны заново")
+        XCTAssertEqual(notifier.terminated.count, 2, "пользователь узнаёт и о втором завершении")
+    }
+
+    /// Смена пути под паузой ничего не меняет — ни фазу, ни причину, ни отсчёт.
+    ///
+    /// Потолок считается от начала паузы, а «вердикта нет» результатом не является:
+    /// иначе минуту стояния можно было бы продлевать сменами пути без конца, и цели
+    /// висели бы замороженными сколько угодно долго. Записи эпизода остаются при своей
+    /// причине, вторых записей про те же pid не появляется.
+    func test_a_path_change_under_the_pause_changes_neither_the_episode_nor_the_ceiling() async {
+        let clock = TestClock()
+        let h = makeDelayedHarness(snapshot: healthySnapshot(), now: { clock.now })
+        h.vm.start()
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+
+        await pauseWithABadResult(h, after: 1)
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(h.log.events.first?.reasonText,
+                       "Не удалось определить внешний адрес: таймаут запроса")
+        let episode = h.log.events.first?.episodeID
+        let recordsBefore = h.log.events.count
+        let deadline = h.vm.pauseDeadline
+
+        // Туннель переподключился: выход другой, а цели те же и стоят.
+        clock.advance(by: 20)
+        h.network.snapshotValue = directSnapshot()
+        h.vm.handle(.networkPath)
+
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён", "стоящую фазу смена пути не отменяет")
+        XCTAssertEqual(h.vm.pauseDeadline, deadline, "и отсчёт не перезапускает")
+        XCTAssertEqual(h.log.events.count, recordsBefore, "вторых записей про те же pid нет")
+        let kept = h.log.events.filter { $0.episodeID == episode }
+        XCTAssertEqual(kept.count, 2, "эпизод тот же, и записи в нём те же")
+        XCTAssertEqual(
+            Set(kept.map(\.reasonText)),
+            ["Не удалось определить внешний адрес: таймаут запроса"],
+            "весь эпизод говорит то, что цели и остановило"
+        )
+
+        // Потолок доедает минуту, начатую плохим результатом, а не смену пути.
+        clock.advance(by: Constants.pauseCeilingSeconds - 20 + 1)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(h.vm.phase, .danger(.pauseExpired))
+        let closed = h.log.events.filter { $0.episodeID == episode }
+        XCTAssertEqual(
+            Set(closed.map(\.resolutionText)),
+            ["завершено по потолку: Подтверждение не получено за 60 с"]
+        )
+        XCTAssertEqual(
+            Set(closed.map(\.reasonText)),
+            ["Не удалось определить внешний адрес: таймаут запроса"],
+            "исход дописан к причине, которая действительно стояла"
+        )
+        h.vm.stop()
+    }
+
+    /// Цель, умершая под паузой сама, уходит из списка стоящих: отсчёт и кнопка
+    /// «Показать терминал» у процесса, которого нет, — обещание, которое интерфейс
+    /// не выполнит.
+    func test_a_target_that_died_under_the_pause_leaves_the_standing_list() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: defaultProcesses
+        )
+        let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
+        settings.isEnabled = true
+        settings.vpnAppRule = vpnAppID
+        settings.targets = [targetBundleID]
+
+        let probe = DelayedGeoProbe()
+        let vm = GuardVM(
+            settings: settings,
+            eventLog: EventLogStore(storage: InMemoryEventLog()),
+            snapshotReader: StubSnapshotReader(snapshotValue: healthySnapshot()),
+            geoProbe: probe,
+            locator: locator,
+            resolver: StubResolver(mapping: [targetBundleID: targetPath, vpnAppID: vpnAppPath]),
+            signaler: SpySignaler(),
+            notifier: SpyNotifier(),
+            events: ManualEventSource(),
+            debounceInterval: 0
+        )
+
+        // Стоять цели начинают с плохого результата; следующие пробы теста висят
+        // неотвеченными, поэтому «Пауза» за время проверки не снимается.
+        vm.handle(.networkPath)
+        await probe.waitUntilStarted()
+        await probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await vm.awaitPendingProbe()
+        XCTAssertEqual(vm.phase.title, "Выход не подтверждён")
+        XCTAssertTrue(vm.pausedProcesses.contains { $0.pid == 500 }, "цель стоит и видна интерфейсу")
+
+        // Цель ушла сама — под SIGSTOP это делает не она, а тот, кто её послал сигналом,
+        // но для weto это просто исчезнувший pid.
+        locator.processes = [.init(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ")]
+        try? await Task.sleep(for: .seconds(Constants.watchdogIntervalSeconds + 0.15))
+
+        XCTAssertTrue(vm.pausedProcesses.isEmpty, "стоять больше некому")
+        XCTAssertEqual(vm.phase.title, "Выход не подтверждён", "смерть цели фазу не меняет")
+        vm.stop()
     }
 }

@@ -18,11 +18,17 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `macos/Sources/WetoSystem/NetworkPathReporter.swift` (also `NetworkPathReporting`)
 - `macos/Sources/WetoSystem/HTTPFetching.swift`
 - `macos/Sources/WetoSystem/ProcessRegistry.swift`
-- `macos/Sources/WetoSystem/ProcessKiller.swift`
+- `macos/Sources/WetoSystem/ProcessSignaler.swift` — `ProcessSignaling` (was `ProcessKilling`):
+  `send(_:to:)` delivers `.kill`/`.stop`/`.resume` strictly in list order — pause's
+  shell-then-target-then-descendants contract lives on this boundary, not in the caller
+- `macos/Sources/WetoSystem/TerminalLocator.swift` — `TerminalLocating`: finds the `.app` that
+  hosts a backgrounded terminal target's pid, to bring it back to the user's attention. Never
+  types `fg` for them — only Terminal.app/iTerm2 support that via AppleScript, and not every
+  emulator does
 - `macos/Sources/WetoSystem/TargetResolver.swift`
 - `macos/Sources/WetoSystem/KeychainStore.swift` (also `SecretStoring`, `SecretStoreError`, `TokenBox`)
 - `macos/Sources/WetoSystem/FlagImageStore.swift`
-- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests}.swift`
+- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests,ProcessSignalerTests,TerminalLocatorTests,HTTPFetcherPhasesTests}.swift`
 
 ## Entry points
 - `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; kernel route probe.
@@ -38,7 +44,10 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `HTTPFetchError` carries the response for the same reason: the body of a 429 is what explains it.
 - `ProcessLocating.allProcesses(includeArguments:) → [ProcessSnapshot]`,
   `.allProcesses()` (convenience, argv off), `.bundlePath(forBundleID:) → String?`
-- `ProcessKilling.kill(pids: [Int32]) → [KillResult]` (`KillResult.isTerminated`)
+- `ProcessSignaling.send(_ signal: ProcessSignal, to: [Int32]) → [SignalResult]` —
+  `.kill`/`.stop`/`.resume` (`SignalResult.isDelivered`, true for `nil` and `ESRCH` alike)
+- `TerminalLocating.activateTerminal(owning pid:in processes:) → Bool` — brings the hosting
+  `.app` to the front; `TerminalLocator.hostApplicationPID(of:in:)` is the pure lookup half
 - `TargetResolving.resolve(_ entry: String) → TargetRule?`
 - `SecretStoring.read(account:) → String?`,
   `.write(_:account:) → Result<Void, SecretStoreError>`
@@ -62,7 +71,10 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 
 ## Side effects
 <!-- generated, verify -->
-- Sends SIGKILL (no SIGTERM stage) to arbitrary pids via `ProcessKiller`.
+- Sends `SIGKILL`, `SIGSTOP` or `SIGCONT` (no `SIGTERM` stage) to arbitrary pids via
+  `ProcessSignaler`, strictly in the order the caller lists them.
+- `TerminalLocator.activateTerminal` calls `NSRunningApplication.activate()` — brings a window
+  to the front, the only UI-adjacent side effect below `WetoShared`.
 - Network calls per `GeoProbe.probe()`: one ipinfo request, plus a confirmation request only when
   the address is new or the soft ceiling (60 s) has passed. When ipinfo refuses, one request to the
   geojs "who am I" endpoint instead — the address is what proves the verdict may be reused.
@@ -78,9 +90,10 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - **«Is there a network at all» costs nothing.** `NetworkPathReporter` answers from a running
   `NWPathMonitor`, never with a probe request of its own. The popup shows that line only when
   something failed — it is the answer to "is my VPN to blame, or the service?".
-- **A refused confirmation keeps its reason.** When both confirmers fail, the report carries
-  the failure of the primary one (`free.freeipapi.com`), so an exhausted quota does not read
-  as a generic outage.
+- **A refused confirmation keeps its reason.** When every confirmer fails, the report carries
+  the failure of the one asked first, so an exhausted quota does not read as a generic outage.
+  A confirmer skipped because it is cooling is not a refusal at all: its trace says
+  `GeoServiceTrace.coolingDown` and carries no status, because no request was made.
 <!-- generated, verify -->
 - **Read-only core boundary.** Nothing here may be imported by `WetoCore`; the arrow points
   one way. Everything is exposed as a protocol so `WetoShared` tests can substitute it.
@@ -118,8 +131,12 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   substring matching killed look-alike wrappers and processes that merely mentioned the path.
 - **argv buffer size is asked from the kernel** (`sysctl` with `nil` buffer) and capped at
   `ARG_MAX`, not preallocated — a fixed 256 KiB per process cost tens of MB on the hot path.
-- **`ESRCH` counts as terminated.** `KillResult.isTerminated` is true for `nil` and `ESRCH`:
-  a process that vanished between enumeration and kill is a success, not a failure.
+- **`ESRCH` counts as delivered.** `SignalResult.isDelivered` is true for `nil` and `ESRCH` alike,
+  for every signal (`kill`, `stop`, `resume`): a process that vanished between enumeration and
+  the signal is a success, not a failure.
+- **A pid is not an identity across a pause.** The stopped-process ledger (`weto-shared.md`)
+  pairs pid with `executablePath` before trusting "already stopped" or resuming on a crash
+  restart — pid reuse would otherwise SIGCONT a stranger.
 - **`TargetResolver` resolves symlinks into `path` and keeps the original candidate in
   `launchPaths`.** `TargetRule.init` merges `path` into `launchPaths`, so both spellings match.
   This is what makes `/usr/bin/nano` work when `proc_pidpath` reports `pico`.
@@ -191,8 +208,14 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   cannot be faked, so they compare the probe against `/sbin/route -n get` and check that the
   outgoing address belongs to the named interface. They skip — never fail — when the machine has
   no route out; asserting a specific interface would make the suite machine-dependent.
-- **`GeoProbe` confirmation order** (freeipapi first, geojs as fallback) is a measured choice,
-  not an arbitrary one — see the rate-limit reasoning in `ARCHITECTURE.md`.
+- **The two confirmers are substitutes, and the choice is adaptive.** There is no "primary and
+  fallback": a refusal or a 429 puts that service on a 300 s cooldown
+  (`Constants.confirmationCooldownSeconds`) and the other one is asked, with the last service
+  that answered asked first. Cooldown is a preference, not a ban — when all of them are cooling
+  they are all asked anyway. Which services and why:
+  `.claude/docs/decisions/geo-confirmation-services.md`; how to re-measure which exit the
+  provider releases each of them through:
+  `.claude/docs/runbooks/verify-geo-services.md`.
 - **The flag set must cover every two-letter code a geo service can name.** A gap shows up as a
   blank menu bar icon, not as a red test — `FlagImageStoreTests` walks the system's region list for
   exactly that reason. The set is regenerated by `shared/tools/sync-flags.sh`; the copy under
@@ -204,3 +227,4 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `bugs/tunnel-without-network-service.md` — why the route owner is asked of the kernel
 - `decisions/vpn-app-instead-of-tunnel.md` — why there is no tunnel picker any more
 - `decisions/geo-confirmation-services.md` — the request budget this module spends
+- `decisions/pause-instead-of-kill.md` — the signal-order contract `ProcessSignaling` enforces
