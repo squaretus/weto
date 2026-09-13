@@ -168,6 +168,10 @@ pub struct World(Arc<Mutex<WorldInner>>);
 #[derive(Default)]
 struct WorldInner {
     processes: Vec<ProcessSnapshot>,
+    /// Сколько раз у мира спросили список процессов. Обход `/proc` — самое
+    /// дорогое, что делает такт, и канон обещает его один на применение:
+    /// считать это можно только на границе реестра.
+    walks: usize,
     /// Порядок фактических вызовов `kill(2)`.
     signals: Vec<(ProcessSignal, i32)>,
     /// Кому ядро отказывает (EPERM).
@@ -196,6 +200,18 @@ impl World {
     /// Пользователь закрыл VPN-клиент.
     pub fn vpn_app_closes(&self) {
         self.remove(77);
+    }
+
+    /// И открыл его снова: вердикт при этом никуда не делся, и охрана обязана
+    /// переоценить его без пробы.
+    pub fn vpn_app_returns(&self) {
+        self.add(ProcessSnapshot {
+            pid: 77,
+            parent_pid: 1,
+            executable_path: "/usr/bin/happ".to_string(),
+            arguments: Some(vec!["happ".to_string()]),
+            ..ProcessSnapshot::default()
+        });
     }
 
     pub fn refuses(&self, pid: i32) {
@@ -256,11 +272,18 @@ impl World {
     pub fn forget_signals(&self) {
         self.0.lock().unwrap().signals.clear();
     }
+
+    /// Сколько обходов процессов случилось с начала жизни мира.
+    pub fn walks(&self) -> usize {
+        self.0.lock().unwrap().walks
+    }
 }
 
 impl ProcessRegistryReading for World {
     fn snapshot(&self) -> Vec<ProcessSnapshot> {
-        self.0.lock().unwrap().processes.clone()
+        let mut world = self.0.lock().unwrap();
+        world.walks += 1;
+        world.processes.clone()
     }
 }
 
