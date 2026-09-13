@@ -73,11 +73,6 @@ run on every PR now (`pr-checks.yml` → "Packaging contracts"), not only when y
   A failure here means the installed app would lose autostart or get put to sleep by the
   system right after install — the guard silently disappears.
 
-- **Bundle size budget.** `APP_BASELINE_KB=2000`, hard limit +10% (2200 KB). Failure:
-  `✗ бандл вырос больше чем на 10% от базового размера`. Something leaked into the payload
-  (docs, images, a stray resource) — or the app genuinely grew, in which case bump
-  `APP_BASELINE_KB` in `macos/scripts/build.sh` deliberately, do not raise the tolerance.
-
 - **`<relocate>` in the expanded `PackageInfo`** → `✗ Weto.app помечен relocatable`.
   The component plist (`BundleIsRelocatable=false`, `BundleHasStrictIdentifier=true`,
   `RootRelativeBundlePath=Applications/Weto.app`) was lost or ignored. Without it Installer
@@ -108,10 +103,7 @@ no QEMU and no cross-compilation anywhere. Each job produces
 name would let the second job overwrite the first and ship one archive instead of two.
 
 Locally the same script does it: `linux/scripts/build.sh <X.Y.Z>`, which names the archive
-from `uname -m`. It also guards the binary size, with **a separate baseline per
-architecture** — the same code weighs noticeably differently on x86_64 and aarch64, and one
-shared number would check one of them by accident. An unknown architecture fails the build
-rather than skipping the check silently.
+from `uname -m`.
 
 **Publication waits for all three jobs.** A half release would mean auto-update on the
 other platform sees a release with no asset for it — and by contract such a release is not

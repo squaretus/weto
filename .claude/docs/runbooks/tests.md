@@ -104,8 +104,7 @@ Every invariant above lives in artifacts that XCTest never sees: shell installer
 - **`DesignResourcesTests` failing after moving resources** — resources must resolve through `DesignResources`, never `Bundle.module`; the generated `Bundle.module` only looks at the bundle root and the build machine's absolute path, and a resource bundle in the `.app` root makes `codesign` refuse to seal.
 - **`build-artifact-contract.sh` reporting "сборка изменила отслеживаемые файлы версии"** — something in the release path is writing the version into tracked sources instead of the staging copy.
 - **`launch-agent-contract.sh` failing with no payload** — the argument is mandatory; the script exits immediately if the payload root is not passed.
-- **Size budget failure during `macos/scripts/build.sh`** — not part of the contracts: `build.sh` itself rejects a `Weto.app` more than 10% above `APP_BASELINE_KB`. Usually means docs or assets leaked into the bundle.
-- **A PR red on "Packaging contracts" but green on `swift test`** — the break is in the release path, not in Swift behaviour: every `build.sh` guard (resource bundle, ad-hoc signing, size budget, `<relocate>`) and the whole launch-agent contract now gate PRs. `runbooks/release.md` lists what each failure message means.
+- **A PR red on "Packaging contracts" but green on `swift test`** — the break is in the release path, not in Swift behaviour: every `build.sh` guard (resource bundle, ad-hoc signing, `<relocate>`) and the whole launch-agent contract now gate PRs. `runbooks/release.md` lists what each failure message means.
 
 ## Where logs / metrics
 
