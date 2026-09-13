@@ -2884,6 +2884,150 @@ final class GuardVMTests: XCTestCase {
         h.vm.stop()
     }
 
+    /// Две цели под одной паузой: терминальная `nano` со своим шеллом переднего задания
+    /// и приложение, стоящее само по себе. Ровно та форма, в которой одну цель снимают
+    /// с охраны, а вторая обязана остаться стоять.
+    private func twoTargetsTree(stopped: Bool, appStopped: Bool? = nil) -> [ProcessSnapshot] {
+        [
+            ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                            processGroup: 100, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                            processGroup: 200, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                            processGroup: 200, terminalForegroundGroup: 200, isStopped: stopped),
+            ProcessSnapshot(pid: 500, executablePath: "\(targetPath)/Contents/MacOS/Target",
+                            isStopped: appStopped ?? stopped),
+            ProcessSnapshot(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+    }
+
+    /// Цель, снятую с охраны под паузой, weto обязан отпустить тем же проходом.
+    /// Пилюля у неё исчезала сразу, а SIGCONT не уходил вовсе: процесс стоял до исхода
+    /// эпизода — то есть до минуты потолка, — уже после того, как пользователь сказал
+    /// «это больше не моё». Держать не своё weto права не имеет.
+    func test_a_target_removed_from_the_guard_while_standing_is_released_at_once() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: twoTargetsTree(stopped: false)
+        )
+        let ledgerStorage = InMemoryStoppedLedger()
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+
+        await pauseWithABadResult(h, after: 0)
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop])
+        XCTAssertEqual(h.signaler.batches.first?.pids, [100, 500, 200, 201],
+                       "шелл раньше цели, родитель раньше потомка")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 500, 200, 201])
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid).sorted(), [200, 500])
+        let episode = h.log.events.first?.episodeID
+
+        // Ядро показывает всех стоящими, и пользователь снимает с охраны приложение.
+        locator.processes = twoTargetsTree(stopped: true)
+        h.settings.targets = ["nano"]
+        h.vm.handle(.tick)
+
+        let resumed = h.signaler.batches.filter { $0.signal == .resume }
+        XCTAssertFalse(resumed.isEmpty, "снятая с охраны цель обязана получить SIGCONT")
+        XCTAssertEqual(Set(resumed.flatMap(\.pids)), [500],
+                       "продолжение — только снятой цели: чужой терминал не трогаем")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 500, 200, 201],
+                       "отправка сигнала обязательства не снимает: снимает наблюдение")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "пилюля снятой цели исчезла")
+        XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён", "эпизод продолжается")
+
+        var byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        XCTAssertEqual(byPID[500]?.resolutionText,
+                       "не подтверждено: цель снята с охраны, продолжение отправлено — "
+                           + "результат ещё не наблюдался",
+                       "сигнал ушёл, а результата ещё никто не видел")
+        XCTAssertNil(byPID[200]?.resolutionText, "у оставшейся цели стояние не кончилось")
+        XCTAssertNil(byPID[100]?.resolutionText)
+
+        // Ядро показало снятую цель идущей: вот теперь обязательство исполнено.
+        locator.processes = twoTargetsTree(stopped: true, appStopped: false)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200, 201],
+                       "из учёта запись уходит по наблюдению")
+        byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        XCTAssertEqual(byPID[500]?.resolutionText, "продолжен: цель снята с охраны",
+                       "журнал говорит, почему процесс отпущен, а не выдаёт чужой исход")
+        XCTAssertEqual(byPID[500]?.kind, .paused, "запись та же самая, второй про тот же pid нет")
+        XCTAssertEqual(h.log.events.filter { $0.pid == 500 }.count, 1)
+        XCTAssertEqual(h.log.events.filter { $0.episodeID == episode }.count, 4,
+                       "эпизод остался один на всю заморозку")
+        XCTAssertNil(byPID[200]?.resolutionText, "оставшаяся цель по-прежнему стоит")
+        XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200])
+
+        // Эпизод кончился безопасным выходом: исход достался оставшимся записям,
+        // а отпущенной — нет, её стояние кончилось раньше и по другой причине.
+        locator.processes = twoTargetsTree(stopped: false)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        h.vm.handle(.tick)
+
+        byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        XCTAssertEqual(byPID[500]?.resolutionText, "продолжен: цель снята с охраны",
+                       "общий исход эпизода чужую запись не переписывает")
+        XCTAssertEqual(byPID[200]?.resolutionText,
+                       "возобновлено: проверка подтвердила безопасный выход: 203.0.113.28, KZ")
+        h.vm.stop()
+    }
+
+    /// Шелл — не цель: он стоит ради терминала цели, с которой его взяли, и отпустить
+    /// его раньше неё значит отдать ей терминал обратно и получить `SIGTTIN`. Поэтому
+    /// он освобождается только тогда, когда держать ему больше некого, — и последним
+    /// в партии, как того требует порядок сигналов.
+    func test_the_shell_is_released_only_when_the_last_guarded_entry_is_gone() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: foregroundJobTree(stopped: false)
+        )
+        let ledgerStorage = InMemoryStoppedLedger()
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertEqual(h.signaler.batches.first?.pids, [100, 200, 201])
+
+        // Снимаем с охраны единственную стоящую цель. Приложение в целях остаётся,
+        // но его процесса в системе нет — охране больше некого держать.
+        locator.processes = foregroundJobTree(stopped: true)
+        h.settings.targets = [targetBundleID]
+        h.vm.handle(.tick)
+
+        let resumed = h.signaler.batches.filter { $0.signal == .resume }
+        XCTAssertEqual(resumed.first?.pids, [201, 200, 100],
+                       "обратный стоп-порядок: потомок, цель, и шелл последним")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200, 201],
+                       "обязательство держится до наблюдения")
+
+        var byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        for pid in [100, 200, 201] as [Int32] {
+            XCTAssertEqual(byPID[pid]?.resolutionText,
+                           "не подтверждено: цель снята с охраны, продолжение отправлено — "
+                               + "результат ещё не наблюдался",
+                           "заморозку объясняет журнал, включая шелл: pid \(pid)")
+        }
+
+        // Ядро показало их идущими.
+        locator.processes = foregroundJobTree(stopped: false)
+        h.vm.handle(.tick)
+
+        XCTAssertEqual(ledgerStorage.load(), .entries([]), "учёт опустел по наблюдению")
+        byPID = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0) })
+        for pid in [100, 200, 201] as [Int32] {
+            XCTAssertEqual(byPID[pid]?.resolutionText, "продолжен: цель снята с охраны",
+                           "исход честный у всех записей эпизода: pid \(pid)")
+        }
+        XCTAssertTrue(h.vm.pausedProcesses.isEmpty, "стоящих целей больше нет")
+        h.vm.stop()
+    }
+
     /// Тот же сеанс с фоновым заданием, но собранный один раз: локатор меняет состояние
     /// процессов по ходу теста, учёт живёт своим хранилищем.
     private func makeBackgroundJobHarness(
