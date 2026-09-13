@@ -50,7 +50,15 @@ this layer decides *when* to ask and *what to do* with the answer.
   (`(outcome:, observed:)`), and `GuardVM.surfaceRecovered` names the standing targets from that
   scan rather than walking every process a second time. Neither one clears the ledger: an entry is
   struck off only when the process is gone or the kernel showed it running, so a target that
-  falls back to `T` via `SIGTTIN` keeps its entry and gets SIGCONT again next pass
+  falls back to `T` via `SIGTTIN` keeps its entry and gets SIGCONT again next pass.
+  `release(guarded:observing:)` is the third caller of that same settle: a live ledger entry that
+  matches nothing in the current scan lost its only reason to stand — the user removed its rule —
+  and it gets `SIGCONT` on that very pass instead of waiting for the episode's outcome, i.e. up to
+  the 60 s ceiling after the user said «this is no longer mine». A shell is the exception, for the
+  same reason it joins the plan at all: it is released only when no non-shell entry is still
+  guarded, otherwise it takes the terminal back and its target lands on `SIGTTIN`. Signals go in
+  the same reverse stop order, and the obligation is still discharged by observation —
+  `freed` is who got the signal, `released` is who was observed and left the ledger
 - `macos/Sources/WetoShared/StoppedLedger.swift` — `StoppedProcess` (pid + path + `isShell`),
   `StoppedLedgerPersisting` (`StoppedFile` at `stopped.json`, atomic temp+rename, next to the
   journals; `InMemoryStoppedLedger` for tests), `StoppedLedgerReadout` (`.entries`/`.corrupted` —
@@ -142,6 +150,12 @@ this layer decides *when* to ask and *what to do* with the answer.
   (`phase.action`: `.pause`/`.terminate`) and from the 250 ms watchdog while paused or unsafe;
   the resume side is driven by `GuardVM.settleResume()` from `apply`'s `.run` branch and from
   every `handle(_:)` (a newsless tick never reaches `apply` — `GuardController.emit` swallows it).
+  `.release(guarded:observing:)` → `.send(.resume, …)` for ledger entries the guard no longer
+  holds, driven from `GuardVM.pauseTargets` (watchdog) and from `handle(_:)` while `phase.action`
+  is `.pause`, once per pass (`releasedPass`). The record gets its own outcome —
+  «не подтверждено: цель снята с охраны …» when the signal went out, «продолжен: цель снята
+  с охраны» once observed — and the episode-wide refine leaves it alone
+  (`EventLogStore.refine(skipping:)`), because its standing ended earlier and for another reason.
 - Writes `stopped.json` on every ledger `add`/`remove`/`clear` — atomic temp+rename, same pattern
   as the journals. `add` dedupes by the same identity the rest of the code uses — pid **and**
   path — and an entry whose pid matches but whose path differs is provably dead (one pid, one live

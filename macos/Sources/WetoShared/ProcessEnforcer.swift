@@ -46,6 +46,24 @@ final class ProcessEnforcer {
         static let none = ResumeOutcome(results: [], released: [], unresolved: [])
     }
 
+    /// Итог освобождения: записи, держать которые больше нечем, получили SIGCONT.
+    ///
+    /// Цель, снятая пользователем с охраны, — уже не наше дело, и держать её
+    /// до исхода эпизода weto права не имеет. Обязательство при этом снимается,
+    /// как и везде, наблюдением: `freed` — кому сигнал ушёл, `released` — кого
+    /// обход показал идущим или исчезнувшим, и только они ушли из учёта.
+    struct ReleaseOutcome {
+        let results: [SignalResult]
+        /// Записи, которым этот проход послал SIGCONT: под охраной их больше нет.
+        let freed: [StoppedProcess]
+        /// Из учёта ушли по наблюдению, а не по факту отправки сигнала.
+        let released: [Int32]
+
+        var isEmpty: Bool { freed.isEmpty }
+
+        static let none = ReleaseOutcome(results: [], freed: [], released: [])
+    }
+
     struct PauseOutcome {
         let plan: PausePlan
         /// Цели, остановленные этим проходом: без шеллов и без уже стоявших. Ожившая
@@ -316,6 +334,18 @@ final class ProcessEnforcer {
 
         var alive: [Int32: ProcessSnapshot] = [:]
         for process in observedProcesses(scan) { alive[process.pid] = process }
+        return settleAndSignal(entries, against: alive, skipping: skipping)
+    }
+
+    /// Общий разбор для всех, кто продолжает записи учёта: наблюдение снимает
+    /// обязательство, сигнал уходит в обратном стоп-порядке, из учёта уходят
+    /// только наблюдённые. Второй такой дороги в файле нет намеренно — обязательство
+    /// обязано сниматься одним и тем же способом, кто бы ни продолжал запись.
+    private func settleAndSignal(
+        _ entries: [StoppedProcess],
+        against alive: [Int32: ProcessSnapshot],
+        skipping: Set<Int32>
+    ) -> ResumeOutcome {
         let (living, standing, released) = settle(entries, against: alive)
 
         // Сигнал уходит всем живым записям, а не только стоящим: наблюдение снимает
@@ -325,6 +355,44 @@ final class ProcessEnforcer {
         let results = order.isEmpty ? [] : signaler.send(.resume, to: order)
         if !released.isEmpty { ledger.remove(released) }
         return ResumeOutcome(results: results, released: released, unresolved: standing)
+    }
+
+    /// Цель, снятая с охраны, освобождается тем же проходом, а не исходом эпизода.
+    ///
+    /// Пользователь сказал «это больше не моё» — держать процесс weto не за чем,
+    /// и ждать до потолка паузы нельзя: до тех пор он стоял бы уже ничьим.
+    /// `guarded` — всё, что под правилами прямо сейчас; запись учёта, которой там
+    /// нет, своё основание потеряла.
+    ///
+    /// Шелл считается иначе, и это не послабление, а тот же контракт порядка сигналов:
+    /// целью он не был никогда, стоит он ради терминала цели, с которой его взяли.
+    /// Отпустить его, пока хоть одна не-шелловая запись остаётся под охраной, значит
+    /// отдать ему терминал раньше цели — и цель встанет по `SIGTTIN`. Поэтому шелл
+    /// освобождается только тогда, когда держать ему больше некого: все живые записи
+    /// учёта, кроме шеллов, уходят этим же проходом (или их не осталось вовсе).
+    /// Внутри прохода порядок обратный стоп-порядку, так что шелл получает сигнал
+    /// последним — после своей цели, как и на пути снятия паузы.
+    func release(guarded: [MatchedProcess], observing scan: Scan? = nil) -> ReleaseOutcome {
+        let entries = ledger.entries
+        guard !entries.isEmpty else { return .none }
+
+        var alive: [Int32: ProcessSnapshot] = [:]
+        for process in observedProcesses(scan) { alive[process.pid] = process }
+
+        // Мёртвая запись не держит ничего и не отпускает ничего: её вычеркнет
+        // наблюдение на своём месте — здесь она не в счёт ни как основание
+        // для шелла, ни как кандидат на сигнал.
+        let living = entries.filter { alive[$0.pid]?.executablePath == $0.executablePath }
+        let guardedPIDs = Set(guarded.map(\.pid))
+        let targets = living.filter { !$0.isShell }
+        let unguarded = targets.filter { !guardedPIDs.contains($0.pid) }
+        let freesShells = unguarded.count == targets.count
+
+        let freed = living.filter { $0.isShell ? freesShells : !guardedPIDs.contains($0.pid) }
+        guard !freed.isEmpty else { return .none }
+
+        let outcome = settleAndSignal(freed, against: alive, skipping: [])
+        return ReleaseOutcome(results: outcome.results, freed: freed, released: outcome.released)
     }
 
     /// После падения weto: продолжить только тех, кто всё ещё стоит и остался тем же процессом.

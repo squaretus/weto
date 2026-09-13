@@ -111,6 +111,11 @@ public final class GuardVM {
     // но журналу пора сказать, что возобновления не было.
     @ObservationIgnored private var signalledForResume: Set<Int32> = []
 
+    // pid, освобождённые снятием цели с охраны. Их стояние кончилось раньше эпизода
+    // и по своей причине, поэтому исход у них свой — а общий исход эпизода их записи
+    // не трогает: «возобновлено проверкой» и «завершено по доказательству» не про них.
+    @ObservationIgnored private var releasedFromGuard: Set<Int32> = []
+
     // Сколько раз запись ответила стопом на свой же SIGCONT. Настоящее фоновое задание
     // отвечает так каждый такт, и досылать ему сигнал бесконечно нельзя: `notify` у zsh
     // включён по умолчанию, и терминал печатает `suspended (tty input)` на каждый ответ.
@@ -118,10 +123,12 @@ public final class GuardVM {
     // завершение и штатный выход.
     @ObservationIgnored private var stopAnswers: [Int32: Int] = [:]
 
-    // Проход охраны: свой у такта и свой у пришедшего ответа пробы. Разбор снятия
-    // паузы зовут оба, и второй SIGCONT в тот же проход был бы лишним шумом.
+    // Проход охраны: свой у такта, свой у пришедшего ответа пробы и свой у сторожа.
+    // Разбор снятия паузы зовут оба, и второй SIGCONT в тот же проход был бы лишним
+    // шумом. По той же причине свой проход считает и освобождение снятых с охраны.
     @ObservationIgnored private var passID = 0
     @ObservationIgnored private var settledResumePass = -1
+    @ObservationIgnored private var releasedPass = -1
 
     private struct RecordedKill: Hashable {
         let pid: Int32
@@ -421,6 +428,10 @@ public final class GuardVM {
         // его, пока цели работают и фаза не менялась. А обязательство «вернуть из паузы»
         // держится до наблюдения, и цель, вернувшуюся в стоп по SIGTTIN, догоняет
         // именно этот вызов — раз в секунду, пока учёт не опустеет.
+        //
+        // Освобождение снятых с охраны идёт тем же порядком и по той же причине:
+        // повод стоять исчезает правкой настроек, а не фазой охраны.
+        releaseUnguarded()
         settleResume()
     }
 
@@ -521,7 +532,12 @@ public final class GuardVM {
     /// и создаётся, — на новорождённой цели.
     private func applyCurrentAction() {
         let ownsScan = currentScan == nil
-        if ownsScan { currentScan = enforcer.scan(includingVPNApp: true) }
+        // Свой обход — свой проход охраны: под паузой сторож и есть тот, кто идёт
+        // по процессам, и считать его продолжением чужого прохода нельзя.
+        if ownsScan {
+            currentScan = enforcer.scan(includingVPNApp: true)
+            passID += 1
+        }
         defer { if ownsScan { currentScan = nil } }
 
         switch phase.action {
@@ -572,6 +588,10 @@ public final class GuardVM {
         // «Показать терминал», которой нечего показывать.
         let standing = Set(outcome.matched.map(\.pid))
         pausedProcesses.removeAll { !standing.contains($0.pid) }
+
+        // Пилюли мало: цель, снятую с охраны, надо ещё и отпустить. Этим же проходом,
+        // а не исходом эпизода — до него процесс стоял бы уже ничьим.
+        releaseUnguarded(outcome.matched)
 
         // Про pid, уже описанный этим эпизодом, второй записи не бывает: остановлен он
         // один раз, и повтора журнал не допускает. А вот эпизод, закрытый исходом,
@@ -644,6 +664,95 @@ public final class GuardVM {
             pausedProcesses.append(PausedProcess(pid: root.pid, targetName: root.targetName,
                                                  since: moment, isBackgrounded: backgrounded))
             if backgrounded { notifier.notifyBackgrounded(targetName: root.targetName) }
+        }
+    }
+
+    /// Цель, снятую с охраны, отпускаем немедленно: weto не держит того, кого больше
+    /// не сторожит.
+    ///
+    /// Повод стоять у записи учёта ровно один — правило, под которое она попала.
+    /// Правило убрали — повода нет, и ждать исхода эпизода (до минуты потолка)
+    /// значит держать замороженным процесс, про который пользователь уже сказал
+    /// «это не моё». Отпускает `ProcessEnforcer.release`: он же решает, можно ли
+    /// отпустить шелл, и шлёт сигналы в обратном стоп-порядке.
+    ///
+    /// Журналу дописывается свой исход, а не эпизодный: стояние этой записи кончилось
+    /// раньше эпизода и по другой причине. Исходов два, потому что установлено бывает
+    /// разное: сигнал отправлен — это одно, наблюдение показало процесс идущим — другое.
+    /// Пока наблюдения нет, запись из учёта не уходит, и обязательство исполняет
+    /// следующий проход.
+    ///
+    /// Проход считается один раз: под паузой по процессам идут и такт, и сторож,
+    /// и применение вердикта — второй SIGCONT в тот же проход был бы лишним шумом.
+    private func releaseUnguarded(_ guarded: [MatchedProcess]) {
+        guard releasedPass != passID else { return }
+        releasedPass = passID
+
+        let outcome = enforcer.release(guarded: guarded, observing: currentScan)
+        guard !outcome.isEmpty else { return }
+
+        let refused = outcome.results.filter { !$0.isDelivered }.map(\.pid)
+        if !refused.isEmpty {
+            permissionFailure = "Не удалось возобновить процессы \(refused) — недостаточно прав"
+        }
+
+        let observed = Set(outcome.released)
+        for pid in observed {
+            stopAnswers[pid] = nil
+            signalledForResume.remove(pid)
+        }
+        // Пилюля уходит с сигналом, а не с наблюдением: она про стоящую **цель**,
+        // а целью этот процесс уже не является — кнопке «Показать терминал» под ним
+        // нечего показывать, и отсчёт до потолка считается не про него.
+        let freed = Set(outcome.freed.map(\.pid))
+        pausedProcesses.removeAll { freed.contains($0.pid) }
+
+        // Запись про отправленный сигнал пишется один раз: проход идёт раз в четверть
+        // секунды, и повторять в журнале одно и то же — значит писать файл впустую.
+        let pending = outcome.freed
+            .filter { !observed.contains($0.pid) && !releasedFromGuard.contains($0.pid) }
+            .map(\.pid)
+        refineReleased(Set(pending), outcome: Self.releaseSignalledText)
+        refineReleased(observed, outcome: Self.releasedText)
+        releasedFromGuard.formUnion(outcome.freed.map(\.pid))
+    }
+
+    /// Тот же разбор, но проходом, который цели не трогает: правку настроек приносит
+    /// такт, а сигналы под паузой шлёт сторож раз в четверть секунды. Ждать его,
+    /// когда пользователь уже снял цель с охраны, незачем — обход у такта свой,
+    /// и правила в нём уже новые.
+    private func releaseUnguarded() {
+        guard phase.action == .pause, !ledger.entries.isEmpty else { return }
+        let scan = currentScan ?? enforcer.scan()
+        releaseUnguarded(ProcessMatcher.matches(in: scan.processes, rules: scan.rules))
+    }
+
+    /// Сигнал ушёл, а результат ещё не наблюдался. Ровно то же различие, что у штатного
+    /// выхода: `kill(SIGCONT)` возвращает 0 и фоновому заданию, которое тут же встанет
+    /// обратно, — и «продолжен» тут было бы заявлением о ненаблюдённом.
+    static let releaseSignalledText =
+        "не подтверждено: цель снята с охраны, продолжение отправлено — "
+        + "результат ещё не наблюдался"
+
+    /// Обязательство исполнено и наблюдено: процесс идёт (или его больше нет),
+    /// и запись ушла из учёта.
+    static let releasedText = "продолжен: цель снята с охраны"
+
+    /// Свой исход записи, а не эпизоду: уточняются перечисленные pid в обоих эпизодах —
+    /// снять с охраны можно и то, что нашлось стоящим от прошлого запуска weto.
+    private func refineReleased(_ pids: Set<Int32>, outcome: String) {
+        guard !pids.isEmpty else { return }
+        for episodeID in [pauseEpisodeID, recoveryEpisodeID].compactMap({ $0 }) {
+            eventLog.refine(
+                episodeID: episodeID,
+                pids: pids,
+                resolutionText: outcome,
+                ip: lastReading?.ip,
+                country: lastReading?.primaryCountry,
+                confirmedCountry: lastReading?.confirmedCountry,
+                confirmSource: lastReading?.confirmSource?.rawValue,
+                diagnostics: currentDiagnostics(staleness: pauseStaleness)
+            )
         }
     }
 
@@ -865,6 +974,9 @@ public final class GuardVM {
         for episodeID in episodes {
             eventLog.refine(
                 episodeID: episodeID,
+                // Запись, отпущенная снятием цели с охраны, свой исход уже получила
+                // и чужого не принимает: её стояние кончилось раньше эпизода.
+                skipping: releasedFromGuard,
                 resolutionText: outcome,
                 ip: lastReading?.ip,
                 country: lastReading?.primaryCountry,
@@ -876,6 +988,7 @@ public final class GuardVM {
                 eventLog.refine(
                     episodeID: episodeID,
                     matchedBy: .shell,
+                    skipping: releasedFromGuard,
                     resolutionText: shellOutcome,
                     ip: lastReading?.ip,
                     country: lastReading?.primaryCountry,
@@ -890,6 +1003,7 @@ public final class GuardVM {
         pauseStaleness = nil
         pauseEpisodeReason = nil
         recoveryEpisodeID = nil
+        releasedFromGuard.removeAll()
     }
 
     private func terminateTargets(_ evidence: UnsafeEvidence) {

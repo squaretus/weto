@@ -72,9 +72,17 @@ public final class EventLogStore {
     /// `matchedBy` сужает уточнение до одного основания записи: шелл в плане паузы
     /// не завершается вместе с целью — его SIGCONT продолжает, — и исход у него честнее
     /// сказать отдельным вызовом, не трогая записи с другим основанием того же эпизода.
+    ///
+    /// `pids` сужает до перечисленных процессов, `skipping` — наоборот, оставляет их
+    /// в покое. Оба нужны одному и тому же: процесс, снятый пользователем с охраны,
+    /// продолжается своим проходом и получает свой исход, а общий исход эпизода,
+    /// пришедший позже, не имеет права переписать его чужим — стояние у этой записи
+    /// кончилось раньше и по другой причине.
     public func refine(
         episodeID: UUID,
         matchedBy: MatchBasis? = nil,
+        pids: Set<Int32>? = nil,
+        skipping: Set<Int32> = [],
         reasonText: String? = nil,
         resolutionText: String? = nil,
         ip: String? = nil,
@@ -86,7 +94,9 @@ public final class EventLogStore {
         var touched = false
         for index in events.indices
         where events[index].episodeID == episodeID
-            && (matchedBy == nil || events[index].matchedBy == matchedBy) {
+            && (matchedBy == nil || events[index].matchedBy == matchedBy)
+            && (pids == nil || pids?.contains(events[index].pid) == true)
+            && !skipping.contains(events[index].pid) {
             let event = events[index]
             events[index] = KillEvent(
                 id: event.id,
