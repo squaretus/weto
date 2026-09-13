@@ -12,18 +12,20 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::SystemTime;
 
 use weto_config::settings::{Settings, Target};
 use weto_core::check::CheckEvent;
 use weto_core::diagnostics::KillContext;
 use weto_core::geo::{ConfirmSource, GeoFailure, GeoProbeReport, SourceOutcome};
+use weto_core::guard_machine::GuardPhase;
 use weto_core::network::{NetworkSnapshot, OutgoingRoute};
 use weto_core::pause_plan::RecoveredProcess;
 use weto_core::process::{MatchedProcess, ProcessSnapshot, TargetKind};
 use weto_guard::controller::{CheckReporting, GuardController, KillReporting, SettingsProviding};
 use weto_guard::enforcer::ProcessEnforcer;
+use weto_sys::background::BackgroundDispatching;
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::process_registry::ProcessRegistryReading;
@@ -77,6 +79,11 @@ pub struct FakeGeo {
     silent_ipinfo: Arc<Mutex<Option<String>>>,
     /// Молчат оба: ни адреса, ни страны.
     silent_everything: Arc<Mutex<bool>>,
+    /// Запрос, который тест держит: ушёл и не вернулся, пока его не отпустят.
+    /// Так выглядит ipinfo на мёртвом канале — пять секунд до таймаута.
+    held: Arc<(Mutex<bool>, Condvar)>,
+    /// Запрос дошёл до сервисов: тест дожидается этого, а не спит на случай.
+    asked: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl FakeGeo {
@@ -86,7 +93,35 @@ impl FakeGeo {
             calls: Arc::new(AtomicUsize::new(0)),
             silent_ipinfo: Arc::new(Mutex::new(None)),
             silent_everything: Arc::new(Mutex::new(false)),
+            held: Arc::new((Mutex::new(false), Condvar::new())),
+            asked: Arc::new((Mutex::new(false), Condvar::new())),
         }
+    }
+
+    /// Следующий запрос повиснет внутри границы — как ipinfo на мёртвом канале.
+    pub fn holds_the_request(&self) {
+        *self.held.0.lock().unwrap() = true;
+        *self.asked.0.lock().unwrap() = false;
+    }
+
+    /// Дождаться, пока запрос дойдёт до сервисов.
+    pub fn wait_until_asked(&self) {
+        let (lock, cv) = &*self.asked;
+        let mut asked = lock.lock().unwrap();
+        while !*asked {
+            let (guard, timeout) = cv
+                .wait_timeout(asked, std::time::Duration::from_secs(10))
+                .expect("ожидание запроса");
+            assert!(!timeout.timed_out(), "запрос так и не ушёл");
+            asked = guard;
+        }
+    }
+
+    /// Сервисы ответили: висевший запрос возвращается.
+    pub fn answers(&self) {
+        let (lock, cv) = &*self.held;
+        *lock.lock().unwrap() = false;
+        cv.notify_all();
     }
 
     pub fn now_reports(&self, country: &str) {
@@ -117,6 +152,22 @@ impl FakeGeo {
 impl GeoProbing for FakeGeo {
     fn probe(&self, _token: Option<&str>) -> GeoProbeReport {
         self.calls.fetch_add(1, Ordering::SeqCst);
+
+        // Запрос ушёл и висит: ровно то состояние, в котором проверяется, что
+        // проход его не ждёт.
+        {
+            let (lock, cv) = &*self.asked;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        {
+            let (lock, cv) = &*self.held;
+            let mut held = lock.lock().unwrap();
+            while *held {
+                held = cv.wait(held).unwrap();
+            }
+        }
+
         let country = self.country.lock().unwrap().clone();
 
         if *self.silent_everything.lock().unwrap() {
@@ -325,6 +376,48 @@ impl ProcessSignaling for World {
             });
         }
         results
+    }
+}
+
+// --- дорожка пробы ----------------------------------------------------------
+
+/// Фоновая дорожка, которой управляет тест.
+///
+/// Проба уходит с прохода и возвращается своим — но «возвращается» обязано быть
+/// местом в тексте теста, а не гонкой с планировщиком потоков. Работа копится
+/// здесь, пока тест не скажет `settle`.
+/// Работа, ждущая ответа.
+type Pending = Box<dyn FnOnce() + Send + 'static>;
+
+#[derive(Clone, Default)]
+pub struct QueuedProbes(Arc<Mutex<Vec<Pending>>>);
+
+impl QueuedProbes {
+    /// Ответить всем пробам, ожидающим ответа, в порядке их отправки.
+    pub fn settle(&self) {
+        loop {
+            let next = {
+                let mut queue = self.0.lock().unwrap();
+                if queue.is_empty() {
+                    return;
+                }
+                queue.remove(0)
+            };
+            // Работа выполняется без захваченной очереди: проход ответа ходит
+            // и в охрану, и в мир процессов.
+            next();
+        }
+    }
+
+    /// Сколько проб дожидаются ответа.
+    pub fn pending(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
+impl BackgroundDispatching for QueuedProbes {
+    fn dispatch(&self, job: Pending) {
+        self.0.lock().unwrap().push(job);
     }
 }
 
@@ -538,7 +631,9 @@ impl KillReporting for RecordingReporter {
 // --- сборка -----------------------------------------------------------------
 
 pub struct Harness {
-    pub controller: GuardController,
+    pub controller: Arc<GuardController>,
+    /// Пробы, ожидающие ответа: тест сам решает, когда он приходит.
+    pub probes: QueuedProbes,
     pub network: FakeNetwork,
     pub geo: FakeGeo,
     pub settings: FakeSettings,
@@ -552,6 +647,28 @@ pub struct Harness {
 }
 
 impl Harness {
+    /// Такт вместе с ответом пробы, которую он запустил.
+    ///
+    /// Проходов тут два: сперва такт — он применяет к целям известное сейчас
+    /// и отпускает пробу, — а следом проход ответа. В приложении между ними
+    /// проходит время запроса; тесту нужен только порядок, и он здесь явный.
+    pub fn tick(&self) -> GuardPhase {
+        self.controller.tick();
+        self.settle()
+    }
+
+    /// То же для кнопки.
+    pub fn probe_now(&self) -> GuardPhase {
+        self.controller.probe_now();
+        self.settle()
+    }
+
+    /// Ответ пришёл: фаза после того, как проход ответа применил его к целям.
+    pub fn settle(&self) -> GuardPhase {
+        self.probes.settle();
+        self.controller.phase()
+    }
+
     /// Процессы по умолчанию: цель `nano` и живой VPN-клиент. Без клиента
     /// локальное основание — «приложение не запущено», и до гео дело не дойдёт.
     pub fn default_world() -> Vec<ProcessSnapshot> {
@@ -665,19 +782,25 @@ fn build_over(
     let reporter = RecordingReporter::default();
     let checks = RecordingChecks::default();
 
-    let controller = GuardController::new(
-        Box::new(network.clone()),
-        Box::new(geo.clone()),
-        Box::new(NoSecret),
-        Box::new(settings.clone()),
-        ProcessEnforcer::new(Box::new(world.clone()), signaler, ledger_path.clone()),
-        Box::new(reporter.clone()),
-        Box::new(checks.clone()),
-    )
-    .with_coalesce_window(window);
+    let probes = QueuedProbes::default();
+
+    let controller = Arc::new(
+        GuardController::new(
+            Box::new(network.clone()),
+            Box::new(geo.clone()),
+            Box::new(NoSecret),
+            Box::new(settings.clone()),
+            ProcessEnforcer::new(Box::new(world.clone()), signaler, ledger_path.clone()),
+            Box::new(reporter.clone()),
+            Box::new(checks.clone()),
+        )
+        .with_coalesce_window(window)
+        .with_probes(Box::new(probes.clone())),
+    );
 
     Harness {
         controller,
+        probes,
         network,
         geo,
         settings,

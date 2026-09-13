@@ -18,6 +18,16 @@
 //!    сигнала.** `kill(SIGCONT)` возвращает 0 и фоновому заданию, которое тут же
 //!    получит SIGTTIN и встанет обратно.
 //!
+//! # Проба идёт своей дорожкой
+//!
+//! Проход, решивший спросить сеть, запроса не ждёт: он применяет к процессам то,
+//! что известно сейчас, и отпускает пробу на фоновую дорожку. Ответ возвращается
+//! своим проходом — вход редьюсеру и своё применение. Иначе цель, запущенная под
+//! паузой или под запретом, жила бы всё время ожидания ipinfo: такт идёт раз
+//! в секунду против пятисекундного таймаута, а под красным статусом — раз
+//! в 250 мс ровно ради новорождённых. Порт macOS, где проба — `Task`,
+//! а `applyLatestNetworkOutcome` и есть этот второй проход.
+//!
 //! # Свежесть вердикта
 //!
 //! Сетевой вердикт годен, пока не изменились две вещи: ревизия настроек
@@ -26,8 +36,8 @@
 //! пользователю целей. Потеря свежести целей больше не трогает — она просит пробу.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use weto_config::settings::Settings;
@@ -41,6 +51,7 @@ use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
 use weto_core::policy::GuardSignals;
 use weto_core::policy::{decide, decide_local, GuardDecision, UnsafeEvidence};
 use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget};
+use weto_sys::background::{BackgroundDispatching, ThreadDispatcher};
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::secret_store::SecretStoring;
@@ -235,6 +246,58 @@ struct Inner {
     snapshot: GuardSnapshot,
 }
 
+/// Одна проба за раз — и способ дождаться её ответа.
+///
+/// Отменять летящую пробу нельзя: пока вердикт несвеж, такт заново просит её
+/// каждую секунду, а таймаут ipinfo — пять. На медленном канале снятие
+/// не оставило бы вердикту ни одного шанса. Поэтому вторая проба не начинается,
+/// а пропускается, и пропуск — не ошибка, а рабочее состояние.
+#[derive(Default)]
+struct ProbeGate {
+    in_flight: Mutex<bool>,
+    answered: Condvar,
+}
+
+impl ProbeGate {
+    /// Занять дорожку. `false` — она уже занята, и второго запроса не будет.
+    fn take(&self) -> bool {
+        let mut in_flight = self.in_flight.lock().expect("дорожка пробы");
+        if *in_flight {
+            return false;
+        }
+        *in_flight = true;
+        true
+    }
+
+    fn release(&self) {
+        *self.in_flight.lock().expect("дорожка пробы") = false;
+        self.answered.notify_all();
+    }
+
+    fn is_busy(&self) -> bool {
+        *self.in_flight.lock().expect("дорожка пробы")
+    }
+
+    /// Дождаться ответа летящей пробы. Нужно ровно тем, кому без ответа нечего
+    /// показать: `wetod --check` печатает страну, а не обещание спросить.
+    fn wait(&self) {
+        let mut in_flight = self.in_flight.lock().expect("дорожка пробы");
+        while *in_flight {
+            in_flight = self.answered.wait(in_flight).expect("ожидание пробы");
+        }
+    }
+}
+
+/// Дорожка занята, пока живёт этот сторож: ответ, отказ и паника отпускают её
+/// одинаково.
+struct InFlight<'a>(&'a ProbeGate);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 struct Established {
     reading: GeoReading,
     fingerprint: String,
@@ -251,8 +314,11 @@ pub struct GuardController {
     enforcer: ProcessEnforcer,
     reporter: Box<dyn KillReporting>,
     checks: Box<dyn CheckReporting>,
+    /// Куда уходит проба, чтобы такт её не ждал. Граница, а не деталь: тесту
+    /// нужен детерминированный порядок «проход прошёл — ответ пришёл».
+    probes: Box<dyn BackgroundDispatching>,
     inner: Mutex<Inner>,
-    probe_in_flight: Arc<AtomicBool>,
+    probe: ProbeGate,
     /// Ворота применения решения к процессам — и признак штатного выхода под
     /// теми же воротами.
     ///
@@ -295,6 +361,7 @@ impl GuardController {
             enforcer,
             reporter,
             checks,
+            probes: Box::new(ThreadDispatcher::named("weto-probe")),
             inner: Mutex::new(Inner {
                 machine: GuardMachine::default(),
                 verdict: None,
@@ -308,11 +375,24 @@ impl GuardController {
                 pause: PauseBook::default(),
                 snapshot: GuardSnapshot::default(),
             }),
-            probe_in_flight: Arc::new(AtomicBool::new(false)),
+            probe: ProbeGate::default(),
             enforcement: Mutex::new(false),
             coalesce_window: COALESCE_WINDOW,
             now: Box::new(SystemTime::now),
         }
+    }
+
+    /// Дорожка пробы задаётся снаружи только ради тестов: им нужен
+    /// детерминированный порядок «проход прошёл — ответ пришёл», а не гонка
+    /// с планировщиком потоков.
+    pub fn with_probes(mut self, probes: Box<dyn BackgroundDispatching>) -> GuardController {
+        self.set_probes(probes);
+        self
+    }
+
+    /// То же самое для стенда, собравшего охрану раньше, чем он выбрал дорожку.
+    pub fn set_probes(&mut self, probes: Box<dyn BackgroundDispatching>) {
+        self.probes = probes;
     }
 
     /// Окно коалесценции задаётся снаружи только ради тестов: им нужно
@@ -326,8 +406,13 @@ impl GuardController {
     /// Часы задаются снаружи только ради тестов: минута до потолка паузы
     /// проверяется переводом стрелок, а не минутой ожидания.
     pub fn with_clock(mut self, now: Clock) -> GuardController {
-        self.now = now;
+        self.set_clock(now);
         self
+    }
+
+    /// То же самое для стенда, который собрал охрану раньше, чем узнал про часы.
+    pub fn set_clock(&mut self, now: Clock) {
+        self.now = now;
     }
 
     pub fn snapshot(&self) -> GuardSnapshot {
@@ -363,8 +448,22 @@ impl GuardController {
             .remaining_pause((self.now)())
     }
 
+    /// Идёт ли прямо сейчас запрос к сервисам. Спрашивает интерфейс: на месте
+    /// кнопки проверки крутится индикатор, пока ответа нет.
+    pub fn is_probing(&self) -> bool {
+        self.probe.is_busy()
+    }
+
+    /// Дождаться ответа летящей пробы.
+    ///
+    /// Охране это не нужно никогда — она живёт тактами, — но разовому вопросу
+    /// вроде `wetod --check` без ответа нечего напечатать.
+    pub fn await_probe(&self) {
+        self.probe.wait();
+    }
+
     /// Штатный такт охраны.
-    pub fn tick(&self) -> GuardPhase {
+    pub fn tick(self: &Arc<Self>) -> GuardPhase {
         self.run(ProbeTrigger::Scheduled)
     }
 
@@ -374,7 +473,7 @@ impl GuardController {
     /// уходит и тогда, когда судьба целей решена локально. Экономия запросов —
     /// свойство штатного тика; на кнопке она означала бы молчание экрана ровно
     /// в тот момент, когда пользователь хочет увидеть свою страну.
-    pub fn probe_now(&self) -> GuardPhase {
+    pub fn probe_now(self: &Arc<Self>) -> GuardPhase {
         self.run(ProbeTrigger::Manual)
     }
 
@@ -383,13 +482,17 @@ impl GuardController {
     /// Один проход охраны: сколько угодно входов редьюсеру — и ровно одно
     /// применение к процессам, после последнего входа.
     ///
-    /// Входов у такта бывает несколько (`Reassessment` перед `Tick`, `Verdict`
-    /// после него), и это дело редьюсера: он описывает знание о выходе, а знание
-    /// за такт меняется не один раз. Применение — дело процессов, и оно одно:
-    /// обход `/proc` стоит миллисекунды, а второй проход посылал бы сигналы
-    /// по данным, которые первый уже изменил, — цель, отпущенную первым,
-    /// второй вычёркивал из учёта тем же тактом, послав ей SIGCONT по второму разу.
-    fn run(&self, trigger: ProbeTrigger) -> GuardPhase {
+    /// Входов у такта бывает несколько (`Reassessment` перед `Tick`), и это дело
+    /// редьюсера: он описывает знание о выходе, а знание за такт меняется не один
+    /// раз. Применение — дело процессов, и оно одно: обход `/proc` стоит
+    /// миллисекунды, а второй проход посылал бы сигналы по данным, которые первый
+    /// уже изменил, — цель, отпущенную первым, второй вычёркивал из учёта тем же
+    /// тактом, послав ей SIGCONT по второму разу.
+    ///
+    /// Проба уходит последней, уже после применения: ответ — это вход `Verdict`,
+    /// и приносит его свой проход, а не этот. Ждать его здесь значило бы держать
+    /// цели, запущенные под паузой или под запретом, пять секунд таймаута ipinfo.
+    fn run(self: &Arc<Self>, trigger: ProbeTrigger) -> GuardPhase {
         // Такт, начавшийся после штатного выхода, не делает ничего: цели уже
         // продолжены, а тронуть он их может только в одну сторону — обратно
         // в стояние, из которого их никто не выведет.
@@ -423,7 +526,7 @@ impl GuardController {
             if trigger == ProbeTrigger::Manual || (!has_verdict && self.coalescing_window_passed())
             {
                 let reason = self.probe_trigger(trigger, settings.revision);
-                self.probe_and_store(&settings, &fingerprint, reason);
+                self.start_probe(&settings, &fingerprint, reason);
             }
             return phase;
         }
@@ -434,13 +537,12 @@ impl GuardController {
             // считает лишь `Tick`, поэтому он идёт тем же тактом: пауза, начатая
             // до смены пути, иначе не доехала бы до завершения.
             self.announce_loss(&settings, &fingerprint);
+            let phase = self.enforce(&settings);
             if trigger == ProbeTrigger::Manual || self.coalescing_window_passed() {
                 let reason = self.probe_trigger(trigger, settings.revision);
-                if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
-                    self.feed_verdict(&settings, outcome, vpn, &fingerprint);
-                }
+                self.start_probe(&settings, &fingerprint, reason);
             }
-            return self.enforce(&settings);
+            return phase;
         }
 
         // Вердикт про этот путь есть — прошлая потеря закрыта.
@@ -460,6 +562,7 @@ impl GuardController {
         }
 
         self.feed(GuardInput::Tick);
+        let phase = self.enforce(&settings);
 
         // Расписание гео: страна выхода меняется и на неизменном пути. Пока цели
         // стоят, ритм тот же — проба и есть путь из паузы.
@@ -469,11 +572,9 @@ impl GuardController {
             } else {
                 CheckTrigger::Schedule
             };
-            if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
-                self.feed_verdict(&settings, outcome, vpn, &fingerprint);
-            }
+            self.start_probe(&settings, &fingerprint, reason);
         }
-        self.enforce(&settings)
+        phase
     }
 
     /// Объявление потери вердикта: цели не трогаем, потолок паузы считается тем же
@@ -507,10 +608,9 @@ impl GuardController {
 
     /// Ответ пробы, пропущенный через политику, — редьюсеру.
     ///
-    /// Применяет его не этот шаг, а `enforce` в конце прохода: ответ пробы
-    /// приходит посреди такта, у которого уже был `Tick`, и вторым применением
-    /// он повторил бы весь обход. Разбор свежести поэтому гасит тоже `enforce`:
-    /// достаться он обязан эпизоду, который этот результат заведёт.
+    /// Применяет его не этот шаг, а `enforce` в конце прохода ответа: вход
+    /// и применение разделены так же, как у такта. Разбор свежести поэтому гасит
+    /// тоже `enforce`: достаться он обязан эпизоду, который этот результат заведёт.
     fn feed_verdict(
         &self,
         settings: &Settings,
@@ -1290,9 +1390,14 @@ impl GuardController {
     // --- проба --------------------------------------------------------------
 
     /// Запись о состоявшейся пробе: показания и трассы сервисов как есть.
+    ///
+    /// Исход приходит параметром, а не выводится из ответа: ответ бывает годным
+    /// сам по себе и всё равно отброшенным — путь сменился или настройки успели
+    /// измениться, пока проба летела.
     fn note_check(
         &self,
         trigger: CheckTrigger,
+        result: CheckOutcome,
         outcome: &GeoOutcome,
         report: &GeoProbeReport,
         fingerprint: &str,
@@ -1316,11 +1421,7 @@ impl GuardController {
             id: new_check_id(),
             at: SystemTime::now(),
             trigger,
-            outcome: if reading.is_some() {
-                CheckOutcome::Answered
-            } else {
-                CheckOutcome::Failed
-            },
+            outcome: result,
             fingerprint: Some(fingerprint.to_string()),
             duration_milliseconds: Some(milliseconds),
             ip: report.ip.clone(),
@@ -1427,38 +1528,136 @@ impl GuardController {
         }
     }
 
-    /// Запрос к сервисам. Повторное нажатие в полёте запроса второго не порождает.
-    fn probe_and_store(
-        &self,
+    /// Отпустить пробу на её дорожку. Проход не ждёт ни запроса, ни ответа.
+    ///
+    /// Ревизия настроек и отпечаток выхода снимаются здесь, на старте пробы:
+    /// ответ, вернувшийся в изменившийся мир, описывает уже не нас, и применять
+    /// его нельзя — ни как доказательство, ни как safe.
+    fn start_probe(
+        self: &Arc<Self>,
         settings: &Settings,
         fingerprint: &str,
         trigger: CheckTrigger,
-    ) -> Option<GeoOutcome> {
-        if self.probe_in_flight.swap(true, Ordering::SeqCst) {
+    ) {
+        if !self.probe.take() {
             // Ровно этот случай и означает «нажал пять раз, а запрос так и не ушёл».
-            self.record_check(
-                trigger,
-                CheckOutcome::SkippedProbeInFlight,
-                fingerprint,
-                None,
-            );
-            return None;
+            // Записывается только нажатие: автоматические поводы приходят каждый
+            // такт, и их пропуски вытеснили бы из полусотни записей ровно ту, ради
+            // которой журнал и ведётся.
+            if trigger == CheckTrigger::Manual {
+                self.record_check(
+                    trigger,
+                    CheckOutcome::SkippedProbeInFlight,
+                    fingerprint,
+                    None,
+                );
+            }
+            return;
         }
+
+        let controller = Arc::clone(self);
+        let revision = settings.revision;
+        let fingerprint = fingerprint.to_string();
+        self.probes.dispatch(Box::new(move || {
+            controller.probe_and_apply(revision, fingerprint, trigger);
+        }));
+    }
+
+    /// Запрос к сервисам и его ответ — на фоновой дорожке.
+    ///
+    /// Дорожка освобождается вместе со сторожем: и ответом, и отказом, и паникой.
+    /// Пока она занята, второй запрос не уходит — у подтверждающего сервиса лимит,
+    /// а снимать летящую пробу нельзя.
+    fn probe_and_apply(&self, revision: u64, fingerprint: String, trigger: CheckTrigger) {
+        let _in_flight = InFlight(&self.probe);
 
         let token = self.secrets.load().ok().flatten();
         let started = Instant::now();
         let report = self.geo.probe(token.as_deref());
         let elapsed = started.elapsed().as_millis() as u64;
-        let outcome = self.admissible_outcome(&report, fingerprint);
 
-        self.note_check(trigger, &outcome, &report, fingerprint, elapsed);
+        // Ход расписания меряет ответ, а не отправка: частота запросов считается
+        // от того момента, когда сервисы освободились.
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .last_probe_finished = Some(Instant::now());
+
+        self.apply_probe(report, revision, fingerprint, trigger, elapsed);
+    }
+
+    /// Ответ пробы — своим проходом: вход редьюсеру и своё применение.
+    ///
+    /// Барьеров два, и оба сняты на старте пробы. Ревизия настроек: ответ,
+    /// начатый при прежних настройках, не применяется вовсе — сузить его можно,
+    /// но он держит «устаревший результат не возвращает safe» структурно,
+    /// а не рассуждением, и он же единственный источник
+    /// `discardedSettingsChanged` в общей схеме выгрузки. Отпечаток выхода: путь
+    /// сменился, пока проба летела, — её ответ описывает уже не нас. Оба
+    /// отброшенных ответа остаются в журнале проверок: запрос состоялся,
+    /// и молчать о нём нельзя.
+    fn apply_probe(
+        &self,
+        report: GeoProbeReport,
+        expected_revision: u64,
+        expected_fingerprint: String,
+        trigger: CheckTrigger,
+        milliseconds: u64,
+    ) {
+        // Охрана остановлена: применять ответ некуда и незачем — цели уже
+        // продолжены, а такта, который разобрал бы последствия, больше не будет.
+        if self.is_shut_down() {
+            return;
+        }
+
+        let settings = self.settings.settings();
+        if settings.revision != expected_revision {
+            self.note_check(
+                trigger,
+                CheckOutcome::DiscardedSettingsChanged,
+                &report.outcome(),
+                &report,
+                &expected_fingerprint,
+                milliseconds,
+            );
+            return;
+        }
+
+        let network = self.network.snapshot();
+        let fingerprint = network.verdict_fingerprint();
+        if fingerprint != expected_fingerprint {
+            self.note_check(
+                trigger,
+                CheckOutcome::DiscardedPathChanged,
+                &report.outcome(),
+                &report,
+                &expected_fingerprint,
+                milliseconds,
+            );
+            return;
+        }
+
+        let outcome = self.admissible_outcome(&report, &fingerprint);
+        let result = if matches!(outcome, GeoOutcome::Resolved(_)) {
+            CheckOutcome::Answered
+        } else {
+            CheckOutcome::Failed
+        };
+        self.note_check(
+            trigger,
+            result,
+            &outcome,
+            &report,
+            &fingerprint,
+            milliseconds,
+        );
 
         {
             let mut inner = self.inner.lock().expect("состояние охраны");
             if let GeoOutcome::Resolved(reading) = &outcome {
                 inner.established = Some(Established {
                     reading: reading.clone(),
-                    fingerprint: fingerprint.to_string(),
+                    fingerprint: fingerprint.clone(),
                     revision: settings.revision,
                 });
                 inner.last_reading = Some(reading.clone());
@@ -1467,15 +1666,25 @@ impl GuardController {
             if let GeoOutcome::Degraded { previous, .. } = &outcome {
                 inner.last_reading = Some(previous.clone());
             }
-            inner.verdict = Some((settings.revision, fingerprint.to_string()));
-            inner.last_probe_finished = Some(Instant::now());
+            inner.verdict = Some((settings.revision, fingerprint.clone()));
             inner.last_report = Some(report.clone());
+            inner.last_network = network;
             // Отчёт отдаётся и при отказе: экран обязан показать, кто именно молчал.
             inner.snapshot.report = Some(report);
         }
 
-        self.probe_in_flight.store(false, Ordering::SeqCst);
-        Some(outcome)
+        // Пока проба летела, целей могло не остаться вовсе: настройки читаются
+        // непосредственно перед применением, а не на старте запроса.
+        let config = settings.guard_config();
+        if !settings.is_enabled || !config.has_targets() {
+            self.inner.lock().expect("состояние охраны").announced_loss = None;
+            self.dispatch(GuardInput::Disarmed, &settings);
+            return;
+        }
+
+        let vpn = self.vpn_app_status(&settings);
+        self.feed_verdict(&settings, outcome, vpn, &fingerprint);
+        self.enforce(&settings);
     }
 
     /// Запущено ли выбранное VPN-приложение.

@@ -20,6 +20,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, `T` state |
 | `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order |
 | `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq |
+| `weto-sys` | `background.rs` | the background track: one thread per probe, so a pass never waits for a request |
 | `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
 | `weto-sys` | `desktop_entries.rs` | the `.desktop` index over the XDG application directories |
 | `weto-sys` | `terminal.rs` | raises it: `org.freedesktop.Application.Activate` over the session bus |
@@ -283,16 +284,31 @@ and `linux/docs/manual-ui-check.md`.
 them, so the rules stay under test.
 
 Feeding the reducer and applying its decision are two different steps, and they happen a different
-number of times. `feed()` hands the reducer one input and touches nothing else; a tick may feed
-three (`Reassessment` when the VPN app came back, then `Tick`, then `Verdict` when the geo schedule
-came due and the probe answered), because knowledge about the exit changes more than once in a
-second. `enforce()` runs **once**, after the last input of that pass, against one scan. `dispatch()`
-is just the two together, for the paths whose input arrives outside the tick loop — local evidence
-of a closed VPN client, which has to reach the targets before the network rather than after five
-seconds of ipinfo timeout. A second enforcement inside one tick would signal from data the first one
-had already changed: a target released by the first pass was declared observed-running by the
-second, in the same tick that sent it its `SIGCONT`, although the obligation is supposed to outlive
-the pass that signals it.
+number of times. `feed()` hands the reducer one input and touches nothing else; a tick may feed two
+(`Reassessment` when the VPN app came back, then `Tick`), because knowledge about the exit changes
+more than once in a second. `enforce()` runs **once**, after the last input of that pass, against
+one scan. `dispatch()` is just the two together, for the paths whose input arrives outside the tick
+loop — local evidence of a closed VPN client, which has to reach the targets before the network
+rather than after five seconds of ipinfo timeout. A second enforcement inside one tick would signal
+from data the first one had already changed: a target released by the first pass was declared
+observed-running by the second, in the same tick that sent it its `SIGCONT`, although the obligation
+is supposed to outlive the pass that signals it.
+
+**The probe runs on its own track, and its answer is its own pass.** `start_probe` takes the
+one-at-a-time gate (`ProbeGate`), records the revision and the fingerprint of that moment, and hands
+the request to `BackgroundDispatching` — a thread in the app, a queue the test drains in the
+harness. The pass returns without waiting; the request is the last thing it starts, after
+`enforce()`. When the answer lands, `apply_probe` checks both barriers (a stale revision is
+`discardedSettingsChanged`, a changed path `discardedPathChanged`, and both leave a record in the
+checks journal), stores the reading, feeds `Verdict` and enforces — one input, one application,
+exactly like a tick. Until this, the request ran inside the tick: the guard thread is the only
+thing that ticks, so a target launched under a pause or under the ban lived for the whole ipinfo
+timeout — five seconds on a dead channel — because nobody was left to apply anything. macOS never
+had that gap (the probe is a `Task`, `applyLatestNetworkOutcome` is the second pass); this is the
+port of it. The flying probe is never cancelled and never duplicated: while the verdict is stale
+every tick asks again, and cancelling would mean the verdict never arrives on a slow channel. A skip
+is recorded only for the button — automatic reasons ask every tick, and their skips would push the
+one record the journal is kept for out of its fifty.
 
 1. A probe answers *unproven* → the phase becomes `Paused`, whose action is `Pause`.
    `ProcessEnforcer::pause` builds the plan (`pause_plan::plan`) and sends `SIGSTOP` in order —

@@ -75,9 +75,10 @@ fn stand_guarding(paths: &[&str], world: World, ledger: &[StoppedProcess]) -> St
     let hands = Hands::new();
     let moving = hands.clone();
     let mut h = build(Duration::ZERO, FakeSettings::guarding(paths), world, ledger);
-    h.controller = h
-        .controller
-        .with_clock(Box::new(move || *moving.0.lock().unwrap()));
+    // Часы ставятся до первого прохода, пока охрану не держит никто, кроме стенда.
+    Arc::get_mut(&mut h.controller)
+        .expect("часы ставятся до охраны")
+        .set_clock(Box::new(move || *moving.0.lock().unwrap()));
     Stand { h, hands }
 }
 
@@ -87,7 +88,7 @@ fn stand() -> Stand {
 
 /// Довести охрану до «На страже»: первый такт спрашивает и получает ответ.
 fn guarded(stand: &Stand) {
-    let phase = stand.controller.tick();
+    let phase = stand.tick();
     assert!(matches!(phase, GuardPhase::Protected(_)), "{phase:?}");
     assert!(stand.world.signals().is_empty());
 }
@@ -95,7 +96,7 @@ fn guarded(stand: &Stand) {
 /// Сервисы замолчали, и охрана это узнала: первый же такой ответ — пауза.
 fn services_go_silent(stand: &Stand) -> GuardPhase {
     stand.geo.everything_goes_silent();
-    stand.controller.probe_now()
+    stand.probe_now()
 }
 
 fn ledger_pids(stand: &Stand) -> Vec<i32> {
@@ -118,7 +119,7 @@ fn a_bad_result_pauses_and_a_good_one_resumes() {
     assert!(s.world.signalled(Kill).is_empty(), "пауза — не завершение");
 
     s.geo.everything_answers_again();
-    let running = s.controller.probe_now();
+    let running = s.probe_now();
     assert!(matches!(running, GuardPhase::Protected(_)), "{running:?}");
     assert_eq!(s.world.signalled(Resume), vec![201, 200, 100]);
     assert!(!s.world.is_stopped(200));
@@ -126,7 +127,7 @@ fn a_bad_result_pauses_and_a_good_one_resumes() {
     // Обязательство снимает наблюдение: проход, отправивший сигнал, видел цели
     // ещё стоящими, и закрывает эпизод следующий.
     assert!(s.reporter.resolutions().is_empty());
-    s.controller.tick();
+    s.tick();
     assert_eq!(
         s.reporter.resolutions(),
         vec!["возобновлено: проверка подтвердила безопасный выход: 203.0.113.7, NL".to_string()]
@@ -151,7 +152,7 @@ fn the_signal_order_is_shell_then_target_then_descendants() {
 
     s.world.forget_signals();
     s.geo.everything_answers_again();
-    s.controller.probe_now();
+    s.probe_now();
 
     assert_eq!(
         s.world.signals(),
@@ -182,8 +183,8 @@ fn a_process_the_user_stopped_is_touched_by_neither_plan() {
     assert!(!ledger_pids(&s).contains(&300), "и в учёт он не попадает");
 
     s.geo.everything_answers_again();
-    s.controller.probe_now();
-    s.controller.tick();
+    s.probe_now();
+    s.tick();
     assert!(
         !s.world.signals().iter().any(|(_, pid)| *pid == 300),
         "и на продолжении тоже: {:?}",
@@ -202,12 +203,12 @@ fn the_ceiling_terminates_what_the_pause_could_not_confirm() {
     services_go_silent(&s);
 
     s.hands.advance(59);
-    let still_paused = s.controller.tick();
+    let still_paused = s.tick();
     assert_eq!(still_paused.action(), GuardAction::Pause);
     assert!(s.world.signalled(Kill).is_empty());
 
     s.hands.advance(2);
-    let expired = s.controller.tick();
+    let expired = s.tick();
 
     assert_eq!(
         expired,
@@ -239,7 +240,7 @@ fn a_repeated_staleness_announcement_does_not_restart_the_ceiling() {
         // Каждый раз новый путь наружу: вердикта про него нет, и такт объявляет
         // потерю заново.
         s.network.route_moves_to(&format!("wg{step}"));
-        s.controller.tick();
+        s.tick();
     }
 
     assert_eq!(
@@ -271,9 +272,9 @@ fn the_obligation_is_held_until_the_kernel_shows_the_process_running() {
     // Задание фоновое: SIGCONT его будит, а tty тут же возвращает в стоп.
     s.world.is_background_job(200);
     s.geo.everything_answers_again();
-    s.controller.probe_now();
+    s.probe_now();
     for _ in 0..10 {
-        s.controller.tick();
+        s.tick();
     }
 
     assert_eq!(
@@ -308,7 +309,7 @@ fn the_obligation_is_held_until_the_kernel_shows_the_process_running() {
     // Пользователь ввёл `fg` — и обязательство исполнено наблюдением,
     // а не нашей отправкой.
     s.world.brought_to_foreground(200);
-    s.controller.tick();
+    s.tick();
     assert!(ledger_pids(&s).is_empty());
 }
 
@@ -330,9 +331,9 @@ fn a_target_that_loses_its_terminal_is_announced_once() {
     // Задание фоновое: SIGCONT его будит, а tty тут же возвращает в стоп.
     s.world.is_background_job(200);
     s.geo.everything_answers_again();
-    s.controller.probe_now();
+    s.probe_now();
     for _ in 0..5 {
-        s.controller.tick();
+        s.tick();
     }
 
     assert_eq!(
@@ -372,8 +373,8 @@ fn a_refused_resume_is_named_as_a_refusal() {
 
     s.world.refuses(200);
     s.geo.everything_answers_again();
-    s.controller.probe_now();
-    s.controller.tick();
+    s.probe_now();
+    s.tick();
 
     assert!(
         s.reporter
@@ -428,7 +429,7 @@ fn a_standing_target_is_recorded_once_per_episode() {
     let after_first = s.reporter.paused_pids();
 
     for _ in 0..5 {
-        s.controller.tick();
+        s.tick();
     }
 
     assert_eq!(s.reporter.paused_pids(), after_first);
@@ -454,7 +455,7 @@ fn one_pass_sends_one_batch_of_resumes() {
     // ещё живо, а проба к тому времени успевает ответить.
     s.world.is_background_job(200);
     s.geo.everything_answers_again();
-    s.controller.probe_now();
+    s.probe_now();
 
     s.world.forget_signals();
     s.controller.probe_now();
@@ -463,6 +464,18 @@ fn one_pass_sends_one_batch_of_resumes() {
         s.world.signalled(Resume),
         vec![201, 200, 100],
         "входов у прохода бывает несколько, применение — одно: {:?}",
+        s.world.signals()
+    );
+
+    // Ответ пробы — свой проход, и партия у него своя: обязательство ещё живо
+    // ровно у фонового задания, шелл и потомок ушли из учёта по наблюдению.
+    // Досылка одна, а не две.
+    s.world.forget_signals();
+    s.settle();
+    assert_eq!(
+        s.world.signalled(Resume),
+        vec![200],
+        "проход ответа — тоже проход: одна досылка, а не две: {:?}",
         s.world.signals()
     );
 }
@@ -487,7 +500,7 @@ fn a_target_born_under_the_pause_is_stopped_by_the_next_tick() {
     s.world.add(process(300, 1, "/usr/bin/zsh", 300, 400));
     s.world.add(process(400, 300, CLAUDE, 400, 400));
 
-    let phase = s.controller.tick();
+    let phase = s.tick();
 
     assert_eq!(phase.action(), GuardAction::Pause, "{phase:?}");
     assert_eq!(
@@ -536,7 +549,7 @@ fn a_target_born_under_the_pause_is_stopped_by_the_next_tick() {
     // И снятие паузы у неё общее с остальными: обратный порядок внутри
     // собственного плана — цель, потом её шелл.
     s.geo.everything_answers_again();
-    s.controller.probe_now();
+    s.probe_now();
     assert_eq!(s.world.signalled(Resume), vec![400, 300, 201, 200, 100]);
 }
 
@@ -549,14 +562,14 @@ fn a_target_relaunched_under_danger_is_killed_by_the_next_tick() {
     guarded(&s);
 
     s.geo.now_reports("RU");
-    let danger = s.controller.probe_now();
+    let danger = s.probe_now();
     assert!(matches!(danger, GuardPhase::Danger(_)), "{danger:?}");
     assert_eq!(s.world.signalled(Kill), vec![200, 201]);
 
     // Пользователь запустил claude заново, пока статус красный.
     s.world.add(process(400, 100, CLAUDE, 400, 400));
 
-    let phase = s.controller.tick();
+    let phase = s.tick();
 
     assert_eq!(phase.action(), GuardAction::Terminate, "{phase:?}");
     assert_eq!(s.world.signalled(Kill), vec![200, 201, 400]);
@@ -588,7 +601,7 @@ fn a_shell_released_while_its_target_is_killed_gets_an_honest_outcome() {
     services_go_silent(&s);
 
     s.world.vpn_app_closes();
-    let phase = s.controller.tick();
+    let phase = s.tick();
 
     assert_eq!(phase, GuardPhase::Danger(UnsafeEvidence::VpnAppNotRunning));
     assert_eq!(s.world.signalled(Kill), vec![200, 201]);
@@ -726,8 +739,8 @@ fn a_target_removed_from_the_guard_while_standing_is_released_at_once() {
 
     // Эпизод кончился безопасным выходом: исход достаётся оставшимся записям.
     s.geo.everything_answers_again();
-    s.controller.probe_now();
-    s.controller.tick();
+    s.probe_now();
+    s.tick();
     assert_eq!(
         s.reporter.resolutions(),
         vec!["возобновлено: проверка подтвердила безопасный выход: 203.0.113.7, NL".to_string()]
@@ -1028,13 +1041,13 @@ impl ProcessSignaling for Trap {
     }
 }
 
-/// Такт и штатный выход идут в разных потоках, и без общих ворот такт успевал
+/// Проход и штатный выход идут в разных потоках, и без общих ворот проход успевал
 /// послать SIGSTOP **после** последнего SIGCONT: цель оставалась стоять, а вывести
 /// её из стояния было уже некому — такта после выхода не будет.
 ///
-/// Такт здесь пойман ровно на отправке SIGSTOP, и выход зовётся, пока такт ещё
-/// идёт. Правильный исход один: выход дожидается такта и продолжает всё,
-/// что тот успел остановить.
+/// Проход здесь — тот, что принёс ответ пробы: пойман он ровно на отправке
+/// SIGSTOP, и выход зовётся, пока проход ещё идёт. Правильный исход один: выход
+/// дожидается прохода и продолжает всё, что тот успел остановить.
 #[test]
 fn a_tick_in_flight_cannot_leave_anything_stopped_after_shutdown() {
     let world = World::of(terminal_session());
@@ -1045,14 +1058,14 @@ fn a_tick_in_flight_cannot_leave_anything_stopped_after_shutdown() {
         Box::new(trap.clone()),
     );
 
-    let phase = s.controller.tick();
+    let phase = s.tick();
     assert!(matches!(phase, GuardPhase::Protected(_)), "{phase:?}");
 
     s.geo.everything_goes_silent();
     trap.arm();
 
     std::thread::scope(|scope| {
-        let ticking = scope.spawn(|| s.controller.probe_now());
+        let ticking = scope.spawn(|| s.probe_now());
         trap.wait_until_entered();
         let exiting = scope.spawn(|| s.controller.shutdown());
         // Выход обязан упереться в ворота, а не проскочить мимо такта. Ждать
@@ -1090,6 +1103,30 @@ fn a_tick_in_flight_cannot_leave_anything_stopped_after_shutdown() {
     }
 }
 
+/// Ответ пробы, начатой до выхода, приходит уже после него — и не применяется:
+/// ворота у него те же, что у такта. Иначе SIGSTOP уходил бы вслед за последним
+/// SIGCONT, и цель оставалась стоять до следующего запуска weto.
+#[test]
+fn an_answer_that_lands_after_shutdown_touches_nothing() {
+    let s = stand();
+    guarded(&s);
+
+    // Проба ушла и ещё не ответила.
+    s.geo.everything_goes_silent();
+    s.controller.probe_now();
+    assert_eq!(s.probes.pending(), 1);
+
+    s.controller.shutdown();
+    let signals = s.world.signals();
+    let ledger = ledger_pids(&s);
+
+    s.settle();
+
+    assert_eq!(s.world.signals(), signals, "ни одного нового сигнала");
+    assert_eq!(ledger_pids(&s), ledger, "учёт не переписан");
+    assert_eq!(s.controller.phase(), GuardPhase::Disabled);
+}
+
 /// Вторая половина того же: такт, начавшийся после выхода, не делает ничего.
 /// Флага у вершины такта для этого мало — но и ворот без флага мало: событие сети
 /// будит поток охраны, и он пошёл бы ставить цели на паузу уже после выхода.
@@ -1103,7 +1140,7 @@ fn a_tick_after_shutdown_touches_nothing() {
     let signals = s.world.signals();
     let ledger = ledger_pids(&s);
 
-    let phase = s.controller.tick();
+    let phase = s.tick();
     assert_eq!(phase, GuardPhase::Disabled);
 
     assert_eq!(s.world.signals(), signals, "ни одного нового сигнала");

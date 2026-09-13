@@ -10,7 +10,6 @@
 //! сессии. Ровно как на macOS, где охрана живёт в процессе приложения.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -467,9 +466,6 @@ pub struct AppState {
     journal: Arc<Mutex<Journal>>,
     /// Журнал проверок — рядом с журналом завершений и отдельным файлом.
     checks: Arc<Mutex<CheckLog>>,
-    /// Проба в полёте. На месте кнопки проверки крутится индикатор, а повторное
-    /// нажатие запроса не порождает: у подтверждающего сервиса лимит.
-    probing: Arc<AtomicBool>,
     /// Кто поднимет терминал цели, ушедшей в фон под паузой, и чем.
     terminal: Box<dyn TerminalActivating>,
     /// Свой обход `/proc` для интерфейса: охрана свой снимок наружу не отдаёт,
@@ -532,7 +528,6 @@ impl AppState {
             controller,
             journal,
             checks,
-            probing: Arc::new(AtomicBool::new(false)),
             terminal: Box::new(DesktopTerminalActivator::new()),
             registry: Box::new(ProcRegistry::new()),
             open_requests: Mutex::new(open_requests),
@@ -641,23 +636,18 @@ impl AppState {
         self.settings.current().theme
     }
 
+    /// Крутится ли индикатор на месте кнопки проверки: спрашиваем у охраны —
+    /// дорожка пробы у неё одна, и второго признака «в полёте» заводить незачем.
     pub fn is_probing(&self) -> bool {
-        self.probing.load(Ordering::Relaxed)
+        self.controller.is_probing()
     }
 
-    /// Проверка по кнопке уходит на рабочий поток: HTTP блокирующий,
-    /// а главный поток занят отрисовкой. Повторное нажатие в полёте запроса
-    /// не порождает — у подтверждающего сервиса лимит.
+    /// Проверка по кнопке. Главный поток она не держит: HTTP уходит на дорожку
+    /// пробы, а здесь остаётся то же, что делает такт, — обход `/proc` в пару
+    /// миллисекунд. Повторное нажатие в полёте запроса второго не порождает:
+    /// у подтверждающего сервиса лимит.
     pub fn probe_now(&self) {
-        if self.probing.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let controller = self.controller.clone();
-        let probing = self.probing.clone();
-        std::thread::spawn(move || {
-            controller.probe_now();
-            probing.store(false, Ordering::SeqCst);
-        });
+        self.controller.probe_now();
     }
 
     /// Штатный выход: замороженных целей не оставляем.
