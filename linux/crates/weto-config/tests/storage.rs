@@ -1,5 +1,6 @@
 //! Настройки, журнал и пути XDG.
 
+use std::collections::HashSet;
 use std::time::SystemTime;
 
 use weto_config::journal::{Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY};
@@ -199,7 +200,8 @@ fn journal_refines_every_record_of_the_episode() {
         Some("Адрес 185.228.113.231 в чёрном списке"),
         None,
         None,
-        None
+        None,
+        &HashSet::new()
     ));
 
     let ours: Vec<&str> = journal
@@ -242,7 +244,8 @@ fn journal_records_how_a_pending_episode_ended() {
         None,
         Some("проверка завершилась безопасным выходом: 1.2.3.4, KZ"),
         None,
-        None
+        None,
+        &HashSet::new()
     ));
 
     assert_eq!(
@@ -259,7 +262,14 @@ fn journal_records_how_a_pending_episode_ended() {
 #[test]
 fn refining_an_unknown_episode_changes_nothing() {
     let mut journal = Journal::default();
-    assert!(!journal.refine_episode("нет такого", Some("причина"), None, None, None));
+    assert!(!journal.refine_episode(
+        "нет такого",
+        Some("причина"),
+        None,
+        None,
+        None,
+        &HashSet::new()
+    ));
     assert!(journal.entries().is_empty());
 }
 
@@ -630,11 +640,13 @@ fn a_shell_record_can_carry_its_own_outcome() {
         Some("завершено по доказательству: VPN-приложение не запущено"),
         None,
         None,
+        &HashSet::new(),
     );
     assert!(journal.refine_basis(
         "стояние",
         MatchBasis::Shell,
-        "продолжен: цель завершена по доказательству: VPN-приложение не запущено"
+        "продолжен: цель завершена по доказательству: VPN-приложение не запущено",
+        &HashSet::new()
     ));
 
     let by_pid = |pid: i32| {
@@ -661,5 +673,5 @@ fn a_narrow_refinement_says_when_it_found_nothing() {
     let mut journal = Journal::default();
     journal.append(vec![episode_event(200, "Сервисы не ответили", "стояние")]);
 
-    assert!(!journal.refine_basis("стояние", MatchBasis::Shell, "продолжен"));
+    assert!(!journal.refine_basis("стояние", MatchBasis::Shell, "продолжен", &HashSet::new()));
 }
