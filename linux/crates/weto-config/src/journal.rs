@@ -11,6 +11,7 @@
 //! безопасным выходом, дописывает исход: без него запись навсегда оставалась
 //! с отговоркой, и завершение выглядело беспричинным.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -185,12 +186,36 @@ impl Journal {
         episode_id: &str,
         matched_by: MatchBasis,
         resolution_text: &str,
+        skip: &HashSet<i32>,
+    ) -> bool {
+        let mut touched = false;
+        for event in self.entries.iter_mut().filter(|event| {
+            event.episode_id == episode_id
+                && event.matched_by == matched_by
+                && !skip.contains(&event.pid)
+        }) {
+            event.resolution_text = Some(resolution_text.to_string());
+            touched = true;
+        }
+        touched
+    }
+
+    /// Исход записи, чьё стояние кончилось раньше эпизода: цель сняли с охраны,
+    /// и держать процесс стало не за чем. Исход у неё свой, поэтому и проход свой —
+    /// по перечисленным pid, а не по всему эпизоду.
+    ///
+    /// `false` — записей с такими pid у эпизода нет.
+    pub fn refine_released(
+        &mut self,
+        episode_id: &str,
+        pids: &HashSet<i32>,
+        resolution_text: &str,
     ) -> bool {
         let mut touched = false;
         for event in self
             .entries
             .iter_mut()
-            .filter(|event| event.episode_id == episode_id && event.matched_by == matched_by)
+            .filter(|event| event.episode_id == episode_id && pids.contains(&event.pid))
         {
             event.resolution_text = Some(resolution_text.to_string());
             touched = true;
@@ -200,6 +225,10 @@ impl Journal {
 
     /// Причина эпизода, ставшая известной, дописывается всем его записям.
     ///
+    /// `skip` — записи, получившие свой исход раньше: процесс, снятый пользователем
+    /// с охраны, продолжен своим проходом, и общий исход эпизода — «возобновлено
+    /// проверкой» или «завершено по доказательству» — не про него.
+    ///
     /// `false` — уточнять нечего, эпизод записи не оставил.
     pub fn refine_episode(
         &mut self,
@@ -208,12 +237,13 @@ impl Journal {
         resolution_text: Option<&str>,
         reading: Option<&GeoReadingPatch>,
         diagnostics: Option<&KillDiagnostics>,
+        skip: &HashSet<i32>,
     ) -> bool {
         let mut touched = false;
         for event in self
             .entries
             .iter_mut()
-            .filter(|event| event.episode_id == episode_id)
+            .filter(|event| event.episode_id == episode_id && !skip.contains(&event.pid))
         {
             if let Some(reason) = reason_text {
                 event.reason_text = reason.to_string();

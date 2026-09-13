@@ -68,14 +68,13 @@ impl std::ops::Deref for Stand {
 }
 
 fn stand_with(world: World, ledger: &[StoppedProcess]) -> Stand {
+    stand_guarding(&[CLAUDE], world, ledger)
+}
+
+fn stand_guarding(paths: &[&str], world: World, ledger: &[StoppedProcess]) -> Stand {
     let hands = Hands::new();
     let moving = hands.clone();
-    let mut h = build(
-        Duration::ZERO,
-        FakeSettings::guarding(&[CLAUDE]),
-        world,
-        ledger,
-    );
+    let mut h = build(Duration::ZERO, FakeSettings::guarding(paths), world, ledger);
     h.controller = h
         .controller
         .with_clock(Box::new(move || *moving.0.lock().unwrap()));
@@ -585,6 +584,145 @@ fn a_shell_released_while_its_target_is_killed_gets_an_honest_outcome() {
     assert!(
         recorded.recordable.is_empty(),
         "но записи про те же pid второй раз не бывает: эпизод паузы их уже описал"
+    );
+}
+
+// --- снятие цели с охраны под паузой -----------------------------------------
+
+const NANO: &str = "/usr/bin/nano";
+
+/// Цель, снятую с охраны под паузой, weto обязан отпустить тем же тактом.
+/// Пилюля у неё исчезала сразу, а SIGCONT не уходил вовсе: процесс стоял
+/// до исхода эпизода — то есть до минуты потолка, — уже после того, как
+/// пользователь сказал «это больше не моё».
+#[test]
+fn a_target_removed_from_the_guard_while_standing_is_released_at_once() {
+    let mut world = terminal_session();
+    world.push(detached(300, 1, NANO));
+    let s = stand_guarding(&[CLAUDE, NANO], World::of(world), &[]);
+    guarded(&s);
+    services_go_silent(&s);
+
+    assert_eq!(s.world.signalled(Stop), vec![100, 300, 200, 201]);
+    assert_eq!(ledger_pids(&s), vec![100, 300, 200, 201]);
+    let mut standing: Vec<i32> = s
+        .controller
+        .snapshot()
+        .paused
+        .iter()
+        .map(|p| p.pid)
+        .collect();
+    standing.sort_unstable();
+    assert_eq!(standing, vec![200, 300], "стоят обе цели");
+
+    // Пользователь снимает с охраны одну цель. Такт идёт двумя проходами —
+    // объявление потери и ответ пробы, — и учёт разбирает каждый: первый шлёт
+    // сигнал, второй видит процесс идущим.
+    s.world.forget_signals();
+    s.settings
+        .edit(|settings| settings.targets.retain(|target| target.entry != NANO));
+    s.controller.tick();
+
+    assert_eq!(
+        s.world.signalled(Resume),
+        vec![300, 300],
+        "продолжение — только снятой цели: чужой терминал не трогаем. Сигналов два, \
+         потому что проходов два: первый шлёт его стоящей записи, второй — той же, \
+         уже наблюдённой идущей, ровно как штатное снятие паузы"
+    );
+    assert!(!s.world.is_stopped(300), "снятая с охраны цель пошла");
+    assert!(s.world.is_stopped(200), "оставшаяся цель по-прежнему стоит");
+    assert!(s.world.is_stopped(100), "и её шелл тоже");
+    assert_eq!(
+        ledger_pids(&s),
+        vec![100, 200, 201],
+        "запись уходит из учёта по наблюдению, а не по отправке сигнала"
+    );
+    assert_eq!(
+        s.controller
+            .snapshot()
+            .paused
+            .iter()
+            .map(|p| p.pid)
+            .collect::<Vec<i32>>(),
+        vec![200],
+        "пилюля снятой цели исчезла, а чужая осталась"
+    );
+    assert_eq!(
+        s.controller.phase().action(),
+        GuardAction::Pause,
+        "эпизод продолжается"
+    );
+    assert!(
+        s.reporter.resolutions().is_empty(),
+        "исход эпизода ещё не наступил"
+    );
+
+    assert_eq!(
+        s.reporter.recorded().released,
+        vec![
+            (
+                vec![300],
+                "не подтверждено: цель снята с охраны, продолжение отправлено — \
+                 результат ещё не наблюдался"
+                    .to_string()
+            ),
+            (vec![300], "продолжен: цель снята с охраны".to_string()),
+        ],
+        "журнал говорит установленное: сперва отправку сигнала, потом наблюдение"
+    );
+
+    // Эпизод кончился безопасным выходом: исход достаётся оставшимся записям.
+    s.geo.everything_answers_again();
+    s.controller.probe_now();
+    s.controller.tick();
+    assert_eq!(
+        s.reporter.resolutions(),
+        vec!["возобновлено: проверка подтвердила безопасный выход: 203.0.113.7, NL".to_string()]
+    );
+}
+
+/// Шелл — не цель: он стоит ради терминала цели, с которой его взяли, и отпустить
+/// его раньше неё значит отдать ей терминал обратно и получить SIGTTIN. Поэтому
+/// он освобождается только тогда, когда держать ему больше некого, — и последним
+/// в партии, как того требует порядок сигналов.
+#[test]
+fn the_shell_is_released_only_when_the_last_guarded_entry_is_gone() {
+    // Вторая цель есть в настройках, но её процесса в системе нет: охрана
+    // остаётся включённой, а держать ей после снятия первой цели некого.
+    let s = stand_guarding(&[CLAUDE, NANO], World::of(terminal_session()), &[]);
+    guarded(&s);
+    services_go_silent(&s);
+    assert_eq!(s.world.signalled(Stop), vec![100, 200, 201]);
+
+    s.world.forget_signals();
+    s.settings
+        .edit(|settings| settings.targets.retain(|target| target.entry != CLAUDE));
+    s.controller.tick();
+
+    assert_eq!(
+        s.world.signalled(Resume)[..3],
+        [201, 200, 100],
+        "обратный стоп-порядок: потомок, цель, и шелл последним"
+    );
+    assert!(
+        !s.world.is_stopped(100),
+        "держать терминал больше не за чем"
+    );
+    assert!(ledger_pids(&s).is_empty(), "учёт опустел по наблюдению");
+    assert!(s.controller.snapshot().paused.is_empty());
+
+    let released = s.reporter.recorded().released.clone();
+    assert_eq!(
+        released.first().map(|(pids, _)| pids.clone()),
+        Some(vec![100, 200, 201]),
+        "отпущены все три записи, включая шелл: журналу они едут в порядке учёта, \
+         а сигналы ушли в обратном — он проверен выше"
+    );
+    assert_eq!(
+        released.last().map(|(_, outcome)| outcome.clone()),
+        Some("продолжен: цель снята с охраны".to_string()),
+        "исход честный: процесс продолжен, потому что цель ушла из-под охраны"
     );
 }
 

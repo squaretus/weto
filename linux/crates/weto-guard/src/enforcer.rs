@@ -78,6 +78,27 @@ impl ResumeOutcome {
     }
 }
 
+/// Итог освобождения: записи, держать которые больше нечем, получили SIGCONT.
+///
+/// Цель, снятая пользователем с охраны, — уже не наше дело, и держать её до исхода
+/// эпизода weto права не имеет. Обязательство при этом снимается, как и везде,
+/// наблюдением: `freed` — кому сигнал ушёл, `released` — кого обход показал идущим
+/// или исчезнувшим, и только они ушли из учёта.
+#[derive(Default)]
+pub struct ReleaseOutcome {
+    pub results: Vec<SignalResult>,
+    /// Записи, которым этот проход послал SIGCONT: под охраной их больше нет.
+    pub freed: Vec<StoppedProcess>,
+    /// Из учёта ушли по наблюдению, а не по факту отправки сигнала.
+    pub released: Vec<i32>,
+}
+
+impl ReleaseOutcome {
+    pub fn is_empty(&self) -> bool {
+        self.freed.is_empty()
+    }
+}
+
 pub struct ProcessEnforcer {
     registry: Box<dyn ProcessRegistryReading>,
     signaler: Box<dyn ProcessSignaling>,
@@ -279,7 +300,20 @@ impl ProcessEnforcer {
         }
 
         let processes = self.observed_processes(scan);
-        let (living, standing, released) = settle(&entries, &processes);
+        self.settle_and_signal(&entries, &processes, skipping)
+    }
+
+    /// Общий разбор для всех, кто продолжает записи учёта: наблюдение снимает
+    /// обязательство, сигнал уходит в обратном стоп-порядке, из учёта уходят
+    /// только наблюдённые. Второй такой дороги в файле нет намеренно — обязательство
+    /// обязано сниматься одним и тем же способом, кто бы ни продолжал запись.
+    fn settle_and_signal(
+        &self,
+        entries: &[StoppedProcess],
+        processes: &[ProcessSnapshot],
+        skipping: &HashSet<i32>,
+    ) -> ResumeOutcome {
+        let (living, standing, released) = settle(entries, processes);
 
         // Сигнал уходит всем живым записям, а не только стоящим: наблюдение
         // снимает обязательство, но порядок «потомки, цели, шеллы» — часть
@@ -301,6 +335,71 @@ impl ProcessEnforcer {
             results,
             released,
             unresolved: standing,
+        }
+    }
+
+    /// Цель, снятая с охраны, освобождается тем же проходом, а не исходом эпизода.
+    ///
+    /// Пользователь сказал «это больше не моё» — держать процесс weto не за чем,
+    /// и ждать до потолка паузы нельзя: до тех пор он стоял бы уже ничьим.
+    /// `guarded` — всё, что под правилами прямо сейчас; запись учёта, которой там
+    /// нет, своё основание потеряла.
+    ///
+    /// Шелл считается иначе, и это не послабление, а тот же контракт порядка
+    /// сигналов: целью он не был никогда, стоит он ради терминала цели, с которой
+    /// его взяли. Отпустить его, пока хоть одна не-шелловая запись остаётся под
+    /// охраной, значит отдать ему терминал раньше цели — и цель встанет по SIGTTIN.
+    /// Поэтому шелл освобождается только тогда, когда держать ему больше некого:
+    /// все живые записи учёта, кроме шеллов, уходят этим же проходом (или их
+    /// не осталось вовсе). Внутри прохода порядок обратный стоп-порядку, так что
+    /// шелл получает сигнал последним — после своей цели, как и на пути снятия паузы.
+    pub fn release(&self, guarded: &[MatchedProcess], scan: Option<&Scan>) -> ReleaseOutcome {
+        let entries = self.entries();
+        if entries.is_empty() {
+            return ReleaseOutcome::default();
+        }
+
+        let processes = self.observed_processes(scan);
+        let alive: HashMap<i32, &ProcessSnapshot> = processes.iter().map(|p| (p.pid, p)).collect();
+
+        // Мёртвая запись не держит ничего и не отпускает ничего: её вычеркнет
+        // наблюдение на своём месте — здесь она не в счёт ни как основание
+        // для шелла, ни как кандидат на сигнал.
+        let living: Vec<StoppedProcess> = entries
+            .into_iter()
+            .filter(|entry| {
+                alive
+                    .get(&entry.pid)
+                    .is_some_and(|process| process.executable_path == entry.executable_path)
+            })
+            .collect();
+        let guarded_pids: HashSet<i32> = guarded.iter().map(|process| process.pid).collect();
+        let targets = living.iter().filter(|entry| !entry.is_shell).count();
+        let unguarded = living
+            .iter()
+            .filter(|entry| !entry.is_shell && !guarded_pids.contains(&entry.pid))
+            .count();
+        let frees_shells = unguarded == targets;
+
+        let freed: Vec<StoppedProcess> = living
+            .into_iter()
+            .filter(|entry| {
+                if entry.is_shell {
+                    frees_shells
+                } else {
+                    !guarded_pids.contains(&entry.pid)
+                }
+            })
+            .collect();
+        if freed.is_empty() {
+            return ReleaseOutcome::default();
+        }
+
+        let outcome = self.settle_and_signal(&freed, &processes, &HashSet::new());
+        ReleaseOutcome {
+            results: outcome.results,
+            freed,
+            released: outcome.released,
         }
     }
 

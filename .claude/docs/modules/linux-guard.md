@@ -299,6 +299,15 @@ them, so the rules stay under test.
    descendants order, and its ledger entry lands at the tail in stop order. Under `Danger` the same
    re-application **is** the launch ban: `terminate_targets` runs each pass and kills whatever now
    matches, with the episode's evidence as the reason.
+   Each such pass also asks whether the ledger still has a reason to hold what it holds:
+   `ProcessEnforcer::release` frees every live entry that matches nothing under the current rules —
+   the user removed its target, and weto has no business holding a process it no longer guards, let
+   alone until the ceiling. A shell is released only when no non-shell entry is still guarded (it
+   stands for its target's terminal; freeing it first hands the terminal back and the target lands
+   on `SIGTTIN`), signals go in the same reverse stop order, and the entry leaves the ledger by
+   observation like any other. The record gets its own outcome — `RELEASE_SIGNALLED_TEXT` when the
+   signal went out, `RELEASED_TEXT` once observed, both word for word with macOS — and
+   `pause_resolved` skips those pids so the episode's outcome cannot overwrite them.
 2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the bad
    result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
    restart it. At 60 s the phase becomes `Danger(PauseExpired)` and the targets are killed.

@@ -69,6 +69,18 @@ const RESUME_RETRY_LIMIT: u32 = 3;
 pub const RECOVERY_REASON_TEXT: &str =
     "Найдены остановленными от прошлого запуска weto: пробы за этим стоянием нет";
 
+/// Сигнал снятой с охраны цели ушёл, а результат ещё не наблюдался. Ровно то же
+/// различие, что у штатного выхода: `kill(SIGCONT)` возвращает 0 и фоновому заданию,
+/// которое тут же встанет обратно, — «продолжен» тут было бы заявлением
+/// о ненаблюдённом. Дословно как на macOS.
+pub const RELEASE_SIGNALLED_TEXT: &str =
+    "не подтверждено: цель снята с охраны, продолжение отправлено — \
+     результат ещё не наблюдался";
+
+/// Обязательство исполнено и наблюдено: процесс идёт (или его больше нет),
+/// и запись ушла из учёта. Дословно как на macOS.
+pub const RELEASED_TEXT: &str = "продолжен: цель снята с охраны";
+
 /// Откуда пришёл запрос пробы. Кнопка ведёт себя иначе, чем таймер, и это
 /// не оптимизация, а поведение продукта.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +141,11 @@ pub trait KillReporting: Send + Sync {
     /// weto это заметил.
     fn recovered(&self, _standing: &[RecoveredProcess], _context: &KillContext) {}
 
+    /// Записи, чьё стояние кончилось раньше эпизода: цель сняли с охраны, и держать
+    /// процесс стало не за чем. Исход у них свой — общий исход эпизода их не касается
+    /// и переписать его не имеет права.
+    fn released(&self, _pids: &[i32], _outcome: &str, _context: &KillContext) {}
+
     /// Чем стояние кончилось: возобновлено, завершено по доказательству,
     /// завершено по потолку, остановлена охрана.
     ///
@@ -181,6 +198,10 @@ struct PauseBook {
     signalled_for_resume: HashSet<i32>,
     /// Сколько раз запись ответила стопом на собственный SIGCONT.
     stop_answers: HashMap<i32, u32>,
+    /// pid, освобождённые снятием цели с охраны. Их стояние кончилось раньше эпизода
+    /// и по своей причине, поэтому исход у них свой — а общий исход эпизода их записи
+    /// не трогает: «возобновлено проверкой» и «завершено по доказательству» не про них.
+    released_from_guard: HashSet<i32>,
     /// Стоящие цели для экрана.
     paused: Vec<PausedProcess>,
 }
@@ -600,6 +621,10 @@ impl GuardController {
         // отсчётом и кнопкой, которой нечего показывать.
         let standing: HashSet<i32> = outcome.matched.iter().map(|m| m.pid).collect();
 
+        // Пилюли мало: цель, снятую с охраны, надо ещё и отпустить. Этим же проходом,
+        // а не исходом эпизода — до него процесс стоял бы уже ничьим.
+        self.release_unguarded(&outcome.matched, scan, settings);
+
         // Про pid, уже описанный этим эпизодом, второй записи не бывает.
         // Шеллы идут тем же списком: объяснён обязан быть каждый SIGSTOP,
         // а не только посланный цели.
@@ -677,6 +702,75 @@ impl GuardController {
         }
         for target_name in &newly_backgrounded {
             self.reporter.backgrounded(target_name);
+        }
+    }
+
+    /// Цель, снятую с охраны, отпускаем немедленно: weto не держит того, кого больше
+    /// не сторожит.
+    ///
+    /// Повод стоять у записи учёта ровно один — правило, под которое она попала.
+    /// Правило убрали — повода нет, и ждать исхода эпизода (до минуты потолка)
+    /// значит держать замороженным процесс, про который пользователь уже сказал
+    /// «это не моё». Отпускает `ProcessEnforcer::release`: он же решает, можно ли
+    /// отпустить шелл, и шлёт сигналы в обратном стоп-порядке.
+    ///
+    /// Журналу дописывается свой исход, а не эпизодный: стояние этой записи кончилось
+    /// раньше эпизода и по другой причине. Исходов два, потому что установлено бывает
+    /// разное: сигнал отправлен — это одно, наблюдение показало процесс идущим —
+    /// другое. Пока наблюдения нет, запись из учёта не уходит, и обязательство
+    /// исполняет следующий проход.
+    fn release_unguarded(&self, guarded: &[MatchedProcess], scan: &Scan, settings: &Settings) {
+        let outcome = self.enforcer.release(guarded, Some(scan));
+        if outcome.is_empty() {
+            return;
+        }
+
+        let observed: HashSet<i32> = outcome.released.iter().copied().collect();
+        let (pending, reason, staleness) = {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            for pid in &observed {
+                inner.pause.stop_answers.remove(pid);
+                inner.pause.signalled_for_resume.remove(pid);
+            }
+            // Пилюля уходит с сигналом, а не с наблюдением: она про стоящую **цель**,
+            // а целью этот процесс уже не является — кнопке «Показать терминал» под ним
+            // нечего показывать, и отсчёт до потолка считается не про него.
+            let freed: HashSet<i32> = outcome.freed.iter().map(|entry| entry.pid).collect();
+            inner
+                .pause
+                .paused
+                .retain(|paused| !freed.contains(&paused.pid));
+
+            // Запись про отправленный сигнал пишется один раз: проход идёт раз
+            // в четверть секунды, и повторять в журнале одно и то же — значит
+            // писать файл впустую.
+            let pending: Vec<i32> = outcome
+                .freed
+                .iter()
+                .map(|entry| entry.pid)
+                .filter(|pid| {
+                    !observed.contains(pid) && !inner.pause.released_from_guard.contains(pid)
+                })
+                .collect();
+            inner.pause.released_from_guard.extend(freed);
+
+            let reason = inner
+                .pause
+                .episode_reason
+                .clone()
+                .unwrap_or_else(|| RECOVERY_REASON_TEXT.to_string());
+            let staleness = inner.pause.staleness.clone();
+            (pending, reason, staleness)
+        };
+
+        let context = self.kill_context(settings, reason, staleness);
+        if !pending.is_empty() {
+            self.reporter
+                .released(&pending, RELEASE_SIGNALLED_TEXT, &context);
+        }
+        if !outcome.released.is_empty() {
+            self.reporter
+                .released(&outcome.released, RELEASED_TEXT, &context);
         }
     }
 
@@ -834,6 +928,7 @@ impl GuardController {
                 inner.pause.episode_pids.clear();
                 inner.pause.episode_reason = None;
                 inner.pause.staleness = None;
+                inner.pause.released_from_guard.clear();
             }
             (open, reason, staleness)
         };

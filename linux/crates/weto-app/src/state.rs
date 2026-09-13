@@ -9,7 +9,7 @@
 //! (их не требуется нигде), ни для резидентности — её обеспечивает автозапуск
 //! сессии. Ровно как на macOS, где охрана живёт в процессе приложения.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -118,6 +118,9 @@ struct JournalWriter {
 struct PauseEpisodes {
     pause: Option<StandingEpisode>,
     recovery: Option<StandingEpisode>,
+    /// pid, получившие свой исход раньше эпизода: цель сняли с охраны, и процесс
+    /// продолжен своим проходом. Общий исход эпизода их записи не переписывает.
+    released: HashSet<i32>,
 }
 
 impl PauseEpisodes {
@@ -281,15 +284,43 @@ impl KillReporting for JournalWriter {
         self.save(&journal);
     }
 
+    /// Записи, отпущенные снятием цели с охраны: исход у них свой и приходит он
+    /// раньше эпизодного. Запоминаются здесь же — общий исход эпизода их не трогает.
+    fn released(&self, pids: &[i32], outcome: &str, _context: &KillContext) {
+        if pids.is_empty() {
+            return;
+        }
+        let (episodes, freed) = {
+            let mut episodes = self.pause_episodes.lock().expect("эпизоды стояния");
+            episodes.released.extend(pids.iter().copied());
+            (
+                episodes.open(),
+                pids.iter().copied().collect::<HashSet<i32>>(),
+            )
+        };
+        if episodes.is_empty() {
+            return;
+        }
+
+        let mut journal = self.journal.lock().expect("журнал");
+        let mut touched = false;
+        for episode_id in episodes {
+            touched |= journal.refine_released(&episode_id, &freed, outcome);
+        }
+        if touched {
+            self.save(&journal);
+        }
+    }
+
     /// Чем стояние кончилось. Дописывается обоим эпизодам сразу, а запись шелла
     /// получает свой исход, если он расходится с исходом цели.
     fn pause_resolved(&self, outcome: &str, shell_outcome: Option<&str>, context: &KillContext) {
-        let episodes = {
+        let (episodes, released) = {
             let mut episodes = self.pause_episodes.lock().expect("эпизоды стояния");
             let open = episodes.open();
             episodes.pause = None;
             episodes.recovery = None;
-            open
+            (open, std::mem::take(&mut episodes.released))
         };
         if episodes.is_empty() {
             return;
@@ -304,9 +335,10 @@ impl KillReporting for JournalWriter {
                 Some(outcome),
                 Some(&Self::patch(context)),
                 Some(&context.diagnostics),
+                &released,
             );
             if let Some(shell_outcome) = shell_outcome {
-                journal.refine_basis(&episode_id, MatchBasis::Shell, shell_outcome);
+                journal.refine_basis(&episode_id, MatchBasis::Shell, shell_outcome, &released);
             }
         }
         if touched {

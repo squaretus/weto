@@ -412,6 +412,9 @@ pub struct Recorded {
     pub recovered: Vec<Entry>,
     /// Исходы стояния: (общий, исход записей шелла).
     pub resolutions: Vec<(String, Option<String>)>,
+    /// Записи, отпущенные снятием цели с охраны: (pid, свой исход) в порядке
+    /// поступления. Исход у них приходит раньше эпизодного и своим проходом.
+    pub released: Vec<(Vec<i32>, String)>,
     /// Контексты записей паузы: разбор свежести живёт здесь.
     pub pause_contexts: Vec<KillContext>,
     /// Цели, о потере терминала которых уведомили: порт `notifyBackgrounded`.
@@ -482,6 +485,14 @@ impl KillReporting for RecordingReporter {
             .recovered
             .extend(entries(&processes, &context.reason));
         recorded.pause_contexts.push(context.clone());
+    }
+
+    fn released(&self, pids: &[i32], outcome: &str, _context: &KillContext) {
+        self.0
+            .lock()
+            .unwrap()
+            .released
+            .push((pids.to_vec(), outcome.to_string()));
     }
 
     fn pause_resolved(&self, outcome: &str, shell_outcome: Option<&str>, _context: &KillContext) {
