@@ -505,19 +505,26 @@ impl GuardController {
         let fingerprint = network.verdict_fingerprint();
         self.inner.lock().expect("состояние охраны").last_network = network.clone();
 
+        // Единственный обход процессов этого прохода. Дальше он расходится всем,
+        // кому нужен: статусу VPN-приложения, сигналам, списку живых целей,
+        // наблюдению за учётом и показаниям журнала. Между ним и сигналами лежит
+        // только работа редьюсера — в память и без единого syscall; запрос к сети
+        // ушёл бы после применения, а не до.
+        let scan = self.enforcer.scan(&settings.target_rules());
+
         if !settings.is_enabled || !config.has_targets() {
             self.inner.lock().expect("состояние охраны").announced_loss = None;
-            return self.dispatch(GuardInput::Disarmed, &settings);
+            return self.dispatch(GuardInput::Disarmed, &settings, &scan);
         }
 
-        let vpn = self.vpn_app_status(&settings);
+        let vpn = self.vpn_app_status(&settings, &scan);
         let has_verdict = self.has_verdict(settings.revision, &fingerprint);
 
         // Локальное доказательство применяется сразу, до сети: закрытый клиент —
         // завершение. Жизни целям сетевой запрос не продлевает.
         if let Some(GuardDecision::Kill(evidence)) = decide_local(settings.is_enabled, vpn, &config)
         {
-            let phase = self.dispatch(GuardInput::Evidence(evidence), &settings);
+            let phase = self.dispatch(GuardInput::Evidence(evidence), &settings, &scan);
             if !has_verdict {
                 // Экран не должен показывать защиту, которой нет; проба нужна
                 // ради показаний.
@@ -537,7 +544,7 @@ impl GuardController {
             // считает лишь `Tick`, поэтому он идёт тем же тактом: пауза, начатая
             // до смены пути, иначе не доехала бы до завершения.
             self.announce_loss(&settings, &fingerprint);
-            let phase = self.enforce(&settings);
+            let phase = self.enforce(&settings, &scan);
             if trigger == ProbeTrigger::Manual || self.coalescing_window_passed() {
                 let reason = self.probe_trigger(trigger, settings.revision);
                 self.start_probe(&settings, &fingerprint, reason);
@@ -562,7 +569,7 @@ impl GuardController {
         }
 
         self.feed(GuardInput::Tick);
-        let phase = self.enforce(&settings);
+        let phase = self.enforce(&settings, &scan);
 
         // Расписание гео: страна выхода меняется и на неизменном пути. Пока цели
         // стоят, ритм тот же — проба и есть путь из паузы.
@@ -674,13 +681,14 @@ impl GuardController {
     /// Решение редьюсера — процессам, а происшедшее — журналу. Один раз на проход,
     /// после последнего входа.
     ///
-    /// Обход процессов на всё применение один: и сигналы, и список живых целей,
-    /// и наблюдение за учётом обязаны описывать один и тот же момент. Такт кормит
-    /// редьюсер сколько нужно (`Reassessment`, `Tick`, `Verdict`) и зовёт это
-    /// в самом конце — второй проход по тому же такту посылал бы сигналы по данным,
-    /// которые первый уже изменил.
-    fn enforce(&self, settings: &Settings) -> GuardPhase {
-        // Ворота на всё применение: обход, сигналы и учёт — один шаг относительно
+    /// Обход процессов на весь проход один, и приезжает он сюда готовым: и статус
+    /// VPN-приложения, и сигналы, и список живых целей, и наблюдение за учётом,
+    /// и показания журнала обязаны описывать один и тот же момент. Второе чтение
+    /// `/proc` — не только лишние миллисекунды: оно описывает другой момент,
+    /// и «приложение запущено» в записи журнала могло бы противоречить улике,
+    /// по которой цели встали.
+    fn enforce(&self, settings: &Settings, scan: &Scan) -> GuardPhase {
+        // Ворота на всё применение: сигналы и учёт — один шаг относительно
         // штатного выхода. Такт, вошедший сюда раньше выхода, выход дожидается;
         // такт, подошедший после, разворачивается здесь — проба, начатая
         // до выхода, иначе ставила бы цели на паузу уже после последнего SIGCONT.
@@ -690,8 +698,6 @@ impl GuardController {
         }
 
         let phase = self.phase();
-        let rules = settings.target_rules();
-        let scan = self.enforcer.scan(&rules);
 
         // Применяется действие фазы, а не эффект перехода: цель, родившаяся
         // под паузой или под запретом, перехода не вызывает, и поймать её больше
@@ -700,10 +706,10 @@ impl GuardController {
         // и идёт учащённо ровно ради этого. Порт `GuardVM.applyCurrentAction`
         // с macOS, где то же делает сторож.
         match phase.action() {
-            GuardAction::Pause => self.pause_targets(&scan, settings, &phase),
+            GuardAction::Pause => self.pause_targets(scan, settings, &phase),
             GuardAction::Terminate => {
                 if let GuardPhase::Danger(evidence) = &phase {
-                    self.terminate_targets(&scan, settings, evidence);
+                    self.terminate_targets(scan, settings, evidence);
                 }
             }
             // Снятие паузы разбирается ниже, в ветке работающих целей:
@@ -715,9 +721,9 @@ impl GuardController {
         if phase.action() == GuardAction::Run {
             // Цели снова работают — эпизод закрыт, и следующее завершение будет
             // первым, а не «запуском запрещён».
-            let context = self.kill_context(settings, self.safe_outcome_text(&phase), None);
+            let context = self.kill_context(settings, self.safe_outcome_text(&phase), None, scan);
             self.reporter.episode_finished(&context);
-            self.settle_resume(&scan, settings, &phase);
+            self.settle_resume(scan, settings, &phase);
         }
 
         // Разбор свежести жил ровно до применения: эпизод, ради которого его
@@ -728,7 +734,7 @@ impl GuardController {
             .expect("состояние охраны")
             .pending_staleness = None;
 
-        self.publish(&phase, &scan);
+        self.publish(&phase, scan);
         phase
     }
 
@@ -737,9 +743,9 @@ impl GuardController {
     /// Вход у такого прохода ровно один, и применение у него своё: локальное
     /// доказательство закрытого клиента обязано дойти до целей **до** сети,
     /// а не после пяти секунд таймаута ipinfo.
-    fn dispatch(&self, input: GuardInput, settings: &Settings) -> GuardPhase {
+    fn dispatch(&self, input: GuardInput, settings: &Settings, scan: &Scan) -> GuardPhase {
         self.feed(input);
-        self.enforce(settings)
+        self.enforce(settings, scan)
     }
 
     /// Причина эпизода паузы человеческим текстом: она же уходит в журнал.
@@ -806,7 +812,7 @@ impl GuardController {
             (newcomers, reason, staleness)
         };
 
-        let context = self.kill_context(settings, reason, staleness);
+        let context = self.kill_context(settings, reason, staleness, scan);
         self.reporter.paused(&newcomers, &context);
 
         let moment = (self.now)();
@@ -904,7 +910,7 @@ impl GuardController {
             (pending, reason, staleness)
         };
 
-        let context = self.kill_context(settings, reason, staleness);
+        let context = self.kill_context(settings, reason, staleness, scan);
         if !pending.is_empty() {
             self.reporter
                 .released(&pending, RELEASE_SIGNALLED_TEXT, &context);
@@ -969,7 +975,7 @@ impl GuardController {
         }
 
         if outcome.is_complete() {
-            self.resolve_pause_episode(settings, &self.resumed_episode_text(phase), None);
+            self.resolve_pause_episode(settings, &self.resumed_episode_text(phase), None, scan);
             let mut inner = self.inner.lock().expect("состояние охраны");
             inner.pause.signalled_for_resume.clear();
             inner.pause.stop_answers.clear();
@@ -1000,7 +1006,7 @@ impl GuardController {
             return;
         }
         let text = Self::unresolved_episode_text(&standing_pids(&outcome.unresolved), &refused);
-        self.resolve_pause_episode(settings, &text, None);
+        self.resolve_pause_episode(settings, &text, None, scan);
     }
 
     /// Исход эпизода, у которого возобновление наблюдалось.
@@ -1053,6 +1059,7 @@ impl GuardController {
         settings: &Settings,
         outcome: &str,
         shell_outcome: Option<&str>,
+        scan: &Scan,
     ) {
         let (open, reason, staleness) = {
             let mut inner = self.inner.lock().expect("состояние охраны");
@@ -1076,7 +1083,7 @@ impl GuardController {
         if !open {
             return;
         }
-        let context = self.kill_context(settings, reason, staleness);
+        let context = self.kill_context(settings, reason, staleness, scan);
         self.reporter
             .pause_resolved(outcome, shell_outcome, &context);
     }
@@ -1105,6 +1112,7 @@ impl GuardController {
             settings,
             &format!("завершено {cause}: {reason}"),
             Some(&format!("продолжен: цель завершена {cause}: {reason}")),
+            scan,
         );
         self.inner
             .lock()
@@ -1126,7 +1134,7 @@ impl GuardController {
             .cloned()
             .collect();
 
-        let context = self.kill_context(settings, reason, None);
+        let context = self.kill_context(settings, reason, None, scan);
         self.reporter.report(&killed, &fresh, &context);
     }
 
@@ -1241,7 +1249,7 @@ impl GuardController {
             inner.snapshot.paused = inner.pause.paused.clone();
         }
 
-        let context = self.kill_context(&settings, RECOVERY_REASON_TEXT.to_string(), None);
+        let context = self.kill_context(&settings, RECOVERY_REASON_TEXT.to_string(), None, &scan);
         self.reporter.recovered(&standing, &context);
 
         let pids: Vec<i32> = standing.iter().map(|r| r.process.pid).collect();
@@ -1280,7 +1288,10 @@ impl GuardController {
         }
         *gate = true;
         let settings = self.settings.settings();
-        let outcome = self.enforcer.resume(None, &HashSet::new());
+        // Обход тот же самый, что уедет показаниям журнала: стоящими записи
+        // показывает снимок, снятый ДО сигнала.
+        let scan = self.enforcer.scan(&settings.target_rules());
+        let outcome = self.enforcer.resume(Some(&scan), &HashSet::new());
         let refused: Vec<i32> = outcome
             .results
             .iter()
@@ -1300,7 +1311,7 @@ impl GuardController {
                  при следующем запуске"
             )
         };
-        self.resolve_pause_episode(&settings, &text, None);
+        self.resolve_pause_episode(&settings, &text, None, &scan);
 
         let mut inner = self.inner.lock().expect("состояние охраны");
         let alive: HashSet<i32> = standing.iter().copied().collect();
@@ -1340,12 +1351,18 @@ impl GuardController {
     }
 
     /// Показания эпизода: они не показываются пользователю и нужны только выгрузке.
+    ///
+    /// Обход берётся у прохода: статус VPN-приложения в записи обязан описывать
+    /// тот же момент, что и сигналы, — иначе журнал объяснял бы завершение уликой
+    /// из одного мгновения и статусом из другого.
     fn kill_context(
         &self,
         settings: &Settings,
         reason: String,
         staleness: Option<VerdictStaleness>,
+        scan: &Scan,
     ) -> KillContext {
+        let vpn = self.vpn_app_status(settings, scan);
         let inner = self.inner.lock().expect("состояние охраны");
         let reading = match &inner.last_reading {
             Some(reading) => GeoReadingPatch {
@@ -1369,7 +1386,7 @@ impl GuardController {
                 outgoing_address: network.outgoing.as_ref().map(|o| o.address.clone()),
                 has_network_path: report.as_ref().map(|r| r.has_network_path),
                 vpn_app_entry: settings.vpn_app.as_ref().map(|app| app.entry.clone()),
-                vpn_app_status: Some(format!("{:?}", self.vpn_app_status(settings))),
+                vpn_app_status: Some(format!("{:?}", vpn)),
                 verdict_origin: report.as_ref().map(|r| {
                     match r.outcome() {
                         GeoOutcome::Resolved(_) => "current",
@@ -1675,28 +1692,31 @@ impl GuardController {
 
         // Пока проба летела, целей могло не остаться вовсе: настройки читаются
         // непосредственно перед применением, а не на старте запроса.
+        // Проход ответа — такой же проход: обход у него свой и один.
+        let scan = self.enforcer.scan(&settings.target_rules());
+
         let config = settings.guard_config();
         if !settings.is_enabled || !config.has_targets() {
             self.inner.lock().expect("состояние охраны").announced_loss = None;
-            self.dispatch(GuardInput::Disarmed, &settings);
+            self.dispatch(GuardInput::Disarmed, &settings, &scan);
             return;
         }
 
-        let vpn = self.vpn_app_status(&settings);
+        let vpn = self.vpn_app_status(&settings, &scan);
         self.feed_verdict(&settings, outcome, vpn, &fingerprint);
-        self.enforce(&settings);
+        self.enforce(&settings, &scan);
     }
 
     /// Запущено ли выбранное VPN-приложение.
     ///
-    /// Обход `/proc` тот же, что у целей: правило приложения приходит из настроек
-    /// уже разрешённым, а в список целей не попадает никогда — завершать свой
-    /// источник защиты охрана не имеет права.
-    fn vpn_app_status(&self, settings: &Settings) -> VpnAppStatus {
+    /// Обход `/proc` буквально тот же, что у целей: правило приложения приходит
+    /// из настроек уже разрешённым, а в список целей не попадает никогда —
+    /// завершать свой источник защиты охрана не имеет права.
+    fn vpn_app_status(&self, settings: &Settings, scan: &Scan) -> VpnAppStatus {
         let Some(rule) = settings.vpn_app_rule() else {
             return VpnAppStatus::NotChosen;
         };
-        if self.enforcer.is_running(&rule) {
+        if self.enforcer.is_running_in(&rule, scan) {
             VpnAppStatus::Running
         } else {
             VpnAppStatus::NotRunning

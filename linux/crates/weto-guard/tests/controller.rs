@@ -527,6 +527,57 @@ fn a_tick_that_probes_walks_the_processes_once() {
     );
 }
 
+/// Обход процессов у прохода ровно один — и у такта, и у прохода ответа.
+///
+/// Считается он на границе реестра, а не по намерению: пока статус
+/// VPN-приложения и показания журнала ходили в `/proc` сами, такт стоил трёх
+/// обходов. Дело не только в миллисекундах — второе чтение описывает другой
+/// момент, и запись журнала объясняла бы завершение уликой из одного мгновения
+/// и статусом приложения из другого.
+#[test]
+fn every_pass_reads_the_processes_exactly_once() {
+    let h = harness();
+
+    let cold = walks_in(&h, || {
+        h.controller.tick();
+    });
+    assert_eq!(cold, 1, "холодный такт: один обход");
+
+    let answering = walks_in(&h, || {
+        let phase = h.settle();
+        assert!(is_protected(&phase), "{phase:?}");
+    });
+    assert_eq!(answering, 1, "проход ответа: один обход");
+
+    let quiet = walks_in(&h, || {
+        h.controller.tick();
+    });
+    assert_eq!(quiet, 1, "молчаливый такт: один обход");
+
+    // Закрытый VPN-клиент: локальное доказательство, завершение и запись журнала —
+    // всё по одному и тому же снимку.
+    h.world.vpn_app_closes();
+    let killing = walks_in(&h, || {
+        let phase = h.controller.tick();
+        assert_eq!(evidence(&phase), Some(&UnsafeEvidence::VpnAppNotRunning));
+    });
+    assert_eq!(killing, 1, "такт с завершением: один обход");
+    assert_eq!(h.world.signalled(ProcessSignal::Kill), vec![42]);
+
+    // И под паузой, где обход самый горячий: план, сигналы, учёт и пилюли.
+    h.world.vpn_app_returns();
+    h.tick();
+    h.geo.everything_goes_silent();
+    let pausing = walks_in(&h, || {
+        let phase = h.probe_now();
+        assert_eq!(phase.action(), GuardAction::Pause, "{phase:?}");
+    });
+    assert_eq!(
+        pausing, 2,
+        "два прохода — два обхода: такт кнопки и проход её ответа"
+    );
+}
+
 /// Возвращение VPN-приложения — тоже лишний вход, а не лишний обход.
 ///
 /// Переоценка по установленному чтению идёт перед `Tick` тем же тактом,

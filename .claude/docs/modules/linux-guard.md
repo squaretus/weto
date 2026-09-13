@@ -30,7 +30,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings, ring-buffer journal, XDG paths |
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping |
-| `weto-guard` | `enforcer.rs` | one `/proc` pass per tick: pause, resume, terminate, the ledger |
+| `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger |
 | `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
 
 ## Boundary invariant
@@ -287,7 +287,15 @@ Feeding the reducer and applying its decision are two different steps, and they 
 number of times. `feed()` hands the reducer one input and touches nothing else; a tick may feed two
 (`Reassessment` when the VPN app came back, then `Tick`), because knowledge about the exit changes
 more than once in a second. `enforce()` runs **once**, after the last input of that pass, against
-one scan. `dispatch()` is just the two together, for the paths whose input arrives outside the tick
+one scan — and that scan is the pass's only read of `/proc`. `run()` takes it before anything
+else and hands it down: `vpn_app_status` (`is_running_in`), the pause plan and its signals, the
+ledger observation, the running list on screen and `kill_context` all answer from the same
+snapshot. They used to read for themselves, which cost a tick about three walks; the cost is the
+smaller half of it, because a second read describes a second moment and a journal record would then
+explain a kill with evidence from one instant and a VPN-app status from another. The only walk that
+still happens on its own is the fallback inside the enforcer for a pass with no rules at all, where
+`scan()` deliberately walks nothing: the ledger obligation does not depend on targets existing, and
+a live VPN app must not look closed because the list it was matched against was empty. `dispatch()` is just the two together, for the paths whose input arrives outside the tick
 loop — local evidence of a closed VPN client, which has to reach the targets before the network
 rather than after five seconds of ipinfo timeout. A second enforcement inside one tick would signal
 from data the first one had already changed: a target released by the first pass was declared
