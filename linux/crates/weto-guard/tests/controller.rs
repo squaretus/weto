@@ -8,7 +8,7 @@ mod harness;
 
 use std::time::Duration;
 
-use harness::{harness, harness_with_window};
+use harness::{harness, harness_with_window, Harness};
 use weto_core::check::{CheckOutcome, CheckTrigger};
 use weto_core::guard_machine::{GuardAction, GuardPhase};
 use weto_core::policy::{UnprovenReason, UnsafeEvidence};
@@ -23,6 +23,13 @@ fn evidence(phase: &GuardPhase) -> Option<&UnsafeEvidence> {
 
 fn is_protected(phase: &GuardPhase) -> bool {
     matches!(phase, GuardPhase::Protected(_))
+}
+
+/// Сколько обходов процессов стоил один проход охраны.
+fn walks_in(h: &Harness, pass: impl FnOnce()) -> usize {
+    let before = h.world.walks();
+    pass();
+    h.world.walks() - before
 }
 
 // --- тесты -----------------------------------------------------------------
@@ -467,6 +474,77 @@ fn silent_ipinfo_with_a_new_address_pauses() {
     );
     assert_eq!(h.world.signalled(ProcessSignal::Stop), vec![42]);
     assert!(h.world.signalled(ProcessSignal::Kill).is_empty());
+}
+
+// --- один обход на такт ------------------------------------------------------
+
+/// Такт, у которого сошлись расписание гео и ответ пробы, обходит процессы
+/// столько же раз, сколько молчаливый.
+///
+/// Входов редьюсеру у него два (`Tick`, а следом `Verdict`), и так и должно быть:
+/// знание о выходе за такт меняется не один раз. Применение — другое дело, оно
+/// одно: обход `/proc` проект считает в миллисекундах, а второй проход посылал бы
+/// сигналы по данным, которые первый уже изменил.
+#[test]
+fn a_tick_that_probes_walks_the_processes_once() {
+    let h = harness();
+
+    // Холодный старт: расписания гео ещё не было, значит проба уйдёт и ответит
+    // этим же тактом.
+    let probing = walks_in(&h, || {
+        let phase = h.controller.tick();
+        assert!(is_protected(&phase), "{phase:?}");
+    });
+    assert_eq!(h.geo.call_count(), 1, "проба обязана уйти этим тактом");
+
+    // Молчаливый такт: вердикт свеж, расписание не подошло — вход ровно один.
+    let quiet = walks_in(&h, || {
+        h.controller.tick();
+    });
+    assert_eq!(h.geo.call_count(), 1, "второго запроса тут быть не должно");
+
+    assert_eq!(
+        probing, quiet,
+        "ответ пробы — ещё один вход редьюсеру, а не ещё один обход процессов"
+    );
+    assert_eq!(
+        h.reporter.recorded().finished,
+        2,
+        "по одному применению на такт, а не по два"
+    );
+}
+
+/// Возвращение VPN-приложения — тоже лишний вход, а не лишний обход.
+///
+/// Переоценка по установленному чтению идёт перед `Tick` тем же тактом,
+/// и применение у них общее.
+#[test]
+fn a_reassessment_tick_walks_the_processes_once() {
+    let h = harness();
+    h.controller.tick();
+
+    h.world.vpn_app_closes();
+    let closed = h.controller.tick();
+    assert_eq!(evidence(&closed), Some(&UnsafeEvidence::VpnAppNotRunning));
+
+    h.world.vpn_app_returns();
+    let reassessing = walks_in(&h, || {
+        let phase = h.controller.tick();
+        assert!(is_protected(&phase), "{phase:?}");
+    });
+    let quiet = walks_in(&h, || {
+        h.controller.tick();
+    });
+
+    assert_eq!(
+        h.geo.call_count(),
+        1,
+        "переоценка идёт по установленному чтению, без пробы"
+    );
+    assert_eq!(
+        reassessing, quiet,
+        "переоценка и такт — два входа редьюсеру и одно применение"
+    );
 }
 
 /// Расписание гео: страна выхода меняется и на неизменном пути, поэтому запрос

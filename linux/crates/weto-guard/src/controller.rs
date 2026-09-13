@@ -380,6 +380,15 @@ impl GuardController {
 
     // --- такт ---------------------------------------------------------------
 
+    /// Один проход охраны: сколько угодно входов редьюсеру — и ровно одно
+    /// применение к процессам, после последнего входа.
+    ///
+    /// Входов у такта бывает несколько (`Reassessment` перед `Tick`, `Verdict`
+    /// после него), и это дело редьюсера: он описывает знание о выходе, а знание
+    /// за такт меняется не один раз. Применение — дело процессов, и оно одно:
+    /// обход `/proc` стоит миллисекунды, а второй проход посылал бы сигналы
+    /// по данным, которые первый уже изменил, — цель, отпущенную первым,
+    /// второй вычёркивал из учёта тем же тактом, послав ей SIGCONT по второму разу.
     fn run(&self, trigger: ProbeTrigger) -> GuardPhase {
         // Такт, начавшийся после штатного выхода, не делает ничего: цели уже
         // продолжены, а тронуть он их может только в одну сторону — обратно
@@ -428,10 +437,10 @@ impl GuardController {
             if trigger == ProbeTrigger::Manual || self.coalescing_window_passed() {
                 let reason = self.probe_trigger(trigger, settings.revision);
                 if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
-                    return self.apply_verdict(&settings, outcome, vpn, &fingerprint);
+                    self.feed_verdict(&settings, outcome, vpn, &fingerprint);
                 }
             }
-            return self.phase();
+            return self.enforce(&settings);
         }
 
         // Вердикт про этот путь есть — прошлая потеря закрыта.
@@ -447,10 +456,10 @@ impl GuardController {
                 geo: GeoOutcome::Resolved(reading.clone()),
                 config: config.clone(),
             });
-            self.dispatch(GuardInput::Reassessment { decision, reading }, &settings);
+            self.feed(GuardInput::Reassessment { decision, reading });
         }
 
-        let phase = self.dispatch(GuardInput::Tick, &settings);
+        self.feed(GuardInput::Tick);
 
         // Расписание гео: страна выхода меняется и на неизменном пути. Пока цели
         // стоят, ритм тот же — проба и есть путь из паузы.
@@ -461,14 +470,15 @@ impl GuardController {
                 CheckTrigger::Schedule
             };
             if let Some(outcome) = self.probe_and_store(&settings, &fingerprint, reason) {
-                return self.apply_verdict(&settings, outcome, vpn, &fingerprint);
+                self.feed_verdict(&settings, outcome, vpn, &fingerprint);
             }
         }
-        phase
+        self.enforce(&settings)
     }
 
     /// Объявление потери вердикта: цели не трогаем, потолок паузы считается тем же
-    /// тактом, наружу уходит один эффект.
+    /// тактом — `Tick` уезжает редьюсеру здесь, а применяет его решение
+    /// единственное на такт `enforce`.
     ///
     /// Разбор свежести здесь не взводится: записи журнала эта потеря не заводит —
     /// заводит её плохой результат пробы, и разбор считается там, где применяется.
@@ -492,17 +502,22 @@ impl GuardController {
             self.forget_report();
         }
         let _ = cause;
-        self.dispatch(GuardInput::Tick, settings);
+        self.feed(GuardInput::Tick);
     }
 
-    /// Ответ пробы, пропущенный через политику.
-    fn apply_verdict(
+    /// Ответ пробы, пропущенный через политику, — редьюсеру.
+    ///
+    /// Применяет его не этот шаг, а `enforce` в конце прохода: ответ пробы
+    /// приходит посреди такта, у которого уже был `Tick`, и вторым применением
+    /// он повторил бы весь обход. Разбор свежести поэтому гасит тоже `enforce`:
+    /// достаться он обязан эпизоду, который этот результат заведёт.
+    fn feed_verdict(
         &self,
         settings: &Settings,
         outcome: GeoOutcome,
         vpn: VpnAppStatus,
         fingerprint: &str,
-    ) -> GuardPhase {
+    ) {
         let config = settings.guard_config();
         let decision = decide(&GuardSignals {
             is_enabled: settings.is_enabled,
@@ -526,47 +541,55 @@ impl GuardController {
                 .pending_staleness = Some(staleness);
         }
 
-        let phase = self.dispatch(
-            GuardInput::Verdict {
-                decision,
-                geo: outcome,
-            },
-            settings,
-        );
-        self.inner
-            .lock()
-            .expect("состояние охраны")
-            .pending_staleness = None;
-        phase
+        self.feed(GuardInput::Verdict {
+            decision,
+            geo: outcome,
+        });
     }
 
     // --- применение фазы ----------------------------------------------------
 
-    /// Вход уезжает редьюсеру, его решение — процессам, а происшедшее — журналу.
+    /// Вход уезжает редьюсеру — и только ему: процессов этот шаг не касается.
+    ///
+    /// Входов за такт бывает несколько, и каждый обязан быть применён редьюсером:
+    /// знание о выходе за такт меняется не один раз. А вот сигналы, учёт и журнал
+    /// за такт случаются единожды — их делает `enforce`.
+    ///
+    /// Ворота берутся и здесь: после штатного выхода редьюсеру не место двигаться
+    /// вовсе — фаза у остановленной охраны обнулена, и такт, доехавший сюда следом
+    /// за выходом, вернул бы на экран «Пауза» с отсчётом, которого никто не считает.
+    fn feed(&self, input: GuardInput) {
+        let gate = self.enforcement.lock().expect("ворота применения");
+        if *gate {
+            return;
+        }
+        let moment = (self.now)();
+        let mut inner = self.inner.lock().expect("состояние охраны");
+        // Эффект перехода здесь не нужен: применяется действие текущей фазы,
+        // и на переходе оно даёт ровно то же самое. Редьюсеру важно, что
+        // вход применён, — фаза после этого и есть решение.
+        inner.machine.apply(input, moment);
+    }
+
+    /// Решение редьюсера — процессам, а происшедшее — журналу. Один раз на проход,
+    /// после последнего входа.
     ///
     /// Обход процессов на всё применение один: и сигналы, и список живых целей,
-    /// и наблюдение за учётом обязаны описывать один и тот же момент.
-    fn dispatch(&self, input: GuardInput, settings: &Settings) -> GuardPhase {
-        // Ворота на всё применение: редьюсер, обход, сигналы и учёт — один шаг
-        // относительно штатного выхода. Такт, вошедший сюда раньше выхода,
-        // выход дожидается; такт, подошедший после, разворачивается здесь —
-        // проба, начатая до выхода, иначе ставила бы цели на паузу уже после
-        // последнего SIGCONT.
+    /// и наблюдение за учётом обязаны описывать один и тот же момент. Такт кормит
+    /// редьюсер сколько нужно (`Reassessment`, `Tick`, `Verdict`) и зовёт это
+    /// в самом конце — второй проход по тому же такту посылал бы сигналы по данным,
+    /// которые первый уже изменил.
+    fn enforce(&self, settings: &Settings) -> GuardPhase {
+        // Ворота на всё применение: обход, сигналы и учёт — один шаг относительно
+        // штатного выхода. Такт, вошедший сюда раньше выхода, выход дожидается;
+        // такт, подошедший после, разворачивается здесь — проба, начатая
+        // до выхода, иначе ставила бы цели на паузу уже после последнего SIGCONT.
         let gate = self.enforcement.lock().expect("ворота применения");
         if *gate {
             return self.phase();
         }
 
-        let moment = (self.now)();
-        let phase = {
-            let mut inner = self.inner.lock().expect("состояние охраны");
-            // Эффект перехода здесь не нужен: применяется действие текущей фазы,
-            // и на переходе оно даёт ровно то же самое. Редьюсеру важно, что
-            // вход применён, — фаза после этого и есть решение.
-            inner.machine.apply(input, moment);
-            inner.machine.phase().clone()
-        };
-
+        let phase = self.phase();
         let rules = settings.target_rules();
         let scan = self.enforcer.scan(&rules);
 
@@ -597,8 +620,26 @@ impl GuardController {
             self.settle_resume(&scan, settings, &phase);
         }
 
+        // Разбор свежести жил ровно до применения: эпизод, ради которого его
+        // считали, уже заведён, а следующему проходу он рассказал бы про чужой
+        // момент.
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .pending_staleness = None;
+
         self.publish(&phase, &scan);
         phase
+    }
+
+    /// Вход и немедленное применение — для того, кто приходит не тактом.
+    ///
+    /// Вход у такого прохода ровно один, и применение у него своё: локальное
+    /// доказательство закрытого клиента обязано дойти до целей **до** сети,
+    /// а не после пяти секунд таймаута ipinfo.
+    fn dispatch(&self, input: GuardInput, settings: &Settings) -> GuardPhase {
+        self.feed(input);
+        self.enforce(settings)
     }
 
     /// Причина эпизода паузы человеческим текстом: она же уходит в журнал.

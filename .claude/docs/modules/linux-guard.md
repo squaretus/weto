@@ -282,6 +282,18 @@ and `linux/docs/manual-ui-check.md`.
 `GuardController` owns the reducer and does what it decides; there is no VM layer between
 them, so the rules stay under test.
 
+Feeding the reducer and applying its decision are two different steps, and they happen a different
+number of times. `feed()` hands the reducer one input and touches nothing else; a tick may feed
+three (`Reassessment` when the VPN app came back, then `Tick`, then `Verdict` when the geo schedule
+came due and the probe answered), because knowledge about the exit changes more than once in a
+second. `enforce()` runs **once**, after the last input of that pass, against one scan. `dispatch()`
+is just the two together, for the paths whose input arrives outside the tick loop — local evidence
+of a closed VPN client, which has to reach the targets before the network rather than after five
+seconds of ipinfo timeout. A second enforcement inside one tick would signal from data the first one
+had already changed: a target released by the first pass was declared observed-running by the
+second, in the same tick that sent it its `SIGCONT`, although the obligation is supposed to outlive
+the pass that signals it.
+
 1. A probe answers *unproven* → the phase becomes `Paused`, whose action is `Pause`.
    `ProcessEnforcer::pause` builds the plan (`pause_plan::plan`) and sends `SIGSTOP` in order —
    shell, target, descendants — writing every delivered pid into `stopped.json`. Processes the user
@@ -290,7 +302,7 @@ them, so the rules stay under test.
    another path is a dead owner of a recycled number, so the fresh record replaces it at the tail
    (the ledger is the stop order).
 
-   `dispatch()` applies **the current phase's action on every pass**, not the transition effect the
+   `enforce()` applies **the current phase's action on every pass**, not the transition effect the
    reducer returned. A target launched while the guard already stands causes no transition, and
    nothing else can catch it — a launch event would need `CAP_NET_ADMIN` — which is exactly what the
    250 ms tick under a red status is for. Same shape as macOS `GuardVM.applyCurrentAction`, driven
@@ -329,8 +341,10 @@ them, so the rules stay under test.
    too. The one hand-written call left is the uninstall button, where the order is load-bearing
    (resume before the ledger file is deleted); `shutdown()` is idempotent, and the second call at
    exit finds an empty ledger and does nothing. Idempotence and the exit flag live under one
-   mutex — `GuardController::enforcement` — which every pass through `dispatch()` (and
-   `recover_stopped()`) holds while it applies a decision to processes. The guard runs in its own
+   mutex — `GuardController::enforcement` — which every pass through `enforce()` (and
+   `recover_stopped()`) holds while it applies a decision to processes. `feed()` takes it too: after
+   the exit the reducer has no business moving either, or a tick arriving behind the exit would put
+   `Пауза` back on a screen whose countdown nobody is counting any more. The guard runs in its own
    thread and `shutdown()` arrives from the GTK one: without those gates a tick already in flight
    sent its `SIGSTOP` **after** the final `SIGCONT`, and nothing was left to thaw the target — the
    ticks are over. A tick that arrives after the exit turns back at the gate, and the guard thread
