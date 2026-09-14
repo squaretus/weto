@@ -977,6 +977,98 @@ fn shutdown_twice_changes_nothing_the_second_time() {
     assert_eq!(s.controller.phase(), GuardPhase::Disabled);
 }
 
+/// Удаление — единственный выход, после которого следующего запуска не будет:
+/// учёт сносится вместе с приложением. Поэтому здесь обязательство исполняет
+/// наблюдение, а не отправка: повторный SIGCONT уходит, пока ядро не покажет
+/// процесс идущим.
+#[test]
+fn confirming_resumption_releases_what_the_first_signal_did_not() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+    assert_eq!(s.world.signalled(Stop), vec![100, 200, 201]);
+
+    s.controller.shutdown();
+    assert_eq!(
+        ledger_pids(&s),
+        vec![100, 200, 201],
+        "выход наблюдать результат не мог: стоящими записи показал обход до сигнала"
+    );
+
+    s.world.forget_signals();
+    let standing = s.controller.confirm_resumed();
+
+    assert!(
+        standing.is_empty(),
+        "обход показал процессы идущими — стоять некому: {:?}",
+        standing.iter().map(|e| e.pid).collect::<Vec<i32>>()
+    );
+    assert_eq!(
+        s.world.signalled(Resume),
+        vec![201, 200, 100],
+        "порядок тот же обратный стоп-порядку: подтверждение — не отдельная дорога"
+    );
+    assert!(
+        ledger_pids(&s).is_empty(),
+        "учёт опустел по наблюдению — и только теперь его можно сносить"
+    );
+    assert_eq!(
+        s.reporter.resolutions().len(),
+        1,
+        "исход эпизода записал выход, и второй раз его не переписывают: {:?}",
+        s.reporter.resolutions()
+    );
+    assert_eq!(
+        s.controller.phase(),
+        GuardPhase::Disabled,
+        "ворота применения подтверждение не снимает"
+    );
+}
+
+/// Тот, кто отвечает стопом на каждый сигнал, остаётся названным: удалять
+/// молча поверх него нельзя — это чужой замороженный процесс навсегда.
+#[test]
+fn a_process_that_keeps_standing_is_reported_by_name() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+
+    // Настоящее фоновое задание: SIGCONT его будит, а tty тут же возвращает
+    // в стоп по SIGTTIN.
+    s.world.is_background_job(200);
+    s.controller.shutdown();
+
+    let standing = s.controller.confirm_resumed();
+
+    assert_eq!(
+        standing.iter().map(|e| e.pid).collect::<Vec<i32>>(),
+        vec![200],
+        "шелл и потомок пошли, а цель стоит"
+    );
+    assert_eq!(
+        standing[0].executable_path, CLAUDE,
+        "имя показать пользователю есть чем: путь едет из учёта"
+    );
+    assert_eq!(
+        ledger_pids(&s),
+        vec![200],
+        "наблюдённые ушли, а неподтверждённая запись держится"
+    );
+
+    // Досылка не кончается: пока ядро не показало процесс идущим, каждое
+    // подтверждение шлёт ему SIGCONT заново.
+    s.world.forget_signals();
+    let again = s.controller.confirm_resumed();
+
+    assert_eq!(s.world.signalled(Resume), vec![200]);
+    assert_eq!(again.iter().map(|e| e.pid).collect::<Vec<i32>>(), vec![200]);
+
+    // Пользователь ввёл `fg` — и обязательство исполнено наблюдением.
+    s.world.brought_to_foreground(200);
+    assert!(s.controller.confirm_resumed().is_empty());
+    assert!(ledger_pids(&s).is_empty());
+}
+
 /// Граница сигналов, умеющая замереть на первом SIGSTOP.
 ///
 /// Подменяется та же граница, что и всегда, — просто она умеет придержать такт

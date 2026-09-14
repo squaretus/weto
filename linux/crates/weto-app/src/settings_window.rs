@@ -18,11 +18,19 @@ use weto_config::settings::{GeoListKind, Theme};
 use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
-use weto_sys::target_resolver::{applications_dirs, resolve_launch_target};
+use weto_sys::target_resolver::{
+    applications_dirs, display_name_for, resolve_launch_entry, resolve_launch_target, Resolution,
+};
 use weto_ui::components as ui;
 use weto_ui::theme;
 
+use crate::lifecycle::window_tick;
 use crate::state::AppState;
+
+/// Минимальная высота окна. Ниже неё сегменты навигации и первая карточка
+/// начинают резаться, а прокрутке нечего показывать. Это не `WINDOW_HEIGHT`:
+/// то — рост по умолчанию, этот — пол, ниже которого окно не сужается.
+const MIN_WINDOW_HEIGHT: i32 = 480;
 
 /// Перерисовка, которую могут позвать и виджеты, ею же созданные: кнопка
 /// удаления живёт внутри строки, а строки пересобираются целиком.
@@ -53,6 +61,12 @@ fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
         .default_width(ui::WINDOW_WIDTH)
         .default_height(ui::WINDOW_HEIGHT)
         .build();
+    // «Размер по умолчанию» — просьба, а не размер: тайловый композитор
+    // (Hyprland и прочие) выдаёт окну всю ячейку и `default_width`
+    // не спрашивает, а `resizable(false)` там тоже ничего не гарантирует.
+    // Поэтому ширину держит само содержимое — `ui::content_column` ниже, —
+    // а окну остаётся минимум, ниже которого карточки начали бы резаться.
+    window.set_size_request(ui::WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
     theme::mark_root(&window);
 
     window.connect_close_request(|_| {
@@ -61,7 +75,10 @@ fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     });
 
     let panel = ui::panel();
-    window.set_child(Some(&panel));
+    // Панель едет в колонку фиксированной ширины: растянули окно — колонка
+    // осталась своей ширины и встала по центру, а не разъехалась подписями
+    // к одному краю и контролами к другому.
+    window.set_child(Some(&ui::content_column(&panel)));
 
     // Роль заголовка окна в каноне исполняют сегменты навигации.
     let (segments, buttons) = ui::segments(&["Настройки", "Журнал"], 0);
@@ -94,7 +111,7 @@ fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWi
     let page = GtkBox::new(Orientation::Vertical, ui::SPACE3);
 
     page.append(&targets_card(window, state.clone()));
-    page.append(&network_card(state.clone()));
+    page.append(&network_card(window, state.clone()));
     page.append(&geo_list_card(
         state.clone(),
         GeoListKind::Blocked,
@@ -107,7 +124,7 @@ fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWi
     ));
     page.append(&appearance_card(state.clone()));
     page.append(&maintenance_card(state.clone()));
-    page.append(&footer(state.clone()));
+    page.append(&footer(window, state.clone()));
 
     scroll(&page)
 }
@@ -209,13 +226,28 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         let state = state.clone();
         let entry = entry.clone();
         let redraw = redraw.clone();
+        let window = window.downgrade();
         move || {
             let text = entry.text().to_string();
             let text = text.trim().to_string();
             if text.is_empty() {
                 return;
             }
-            add_target(&state, &text);
+            // Ярлык, вписанный руками, ничем не отличается от выбранного
+            // в диалоге: Steam и flatpak одинаково не называют программу,
+            // и путь спрашивается на обеих дорогах. Перерисовка едет
+            // в счётчике ссылок — запрос пути отвечает уже после конца
+            // обработчика.
+            let redraw: Rc<dyn Fn()> = Rc::new(redraw.clone());
+            // Окно захвачено слабо: обработчик живёт внутри самого окна,
+            // и сильная ссылка отсюда замкнула бы цикл окно → кнопка →
+            // замыкание → окно. Сборщика циклов у GObject нет, `dispose`
+            // не наступал бы никогда, и дерево виджетов утекало бы
+            // при каждом открытии настроек.
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            commit_entry(&window, &state, &redraw, &text, Destination::Target);
             entry.set_text("");
             redraw();
         }
@@ -233,8 +265,16 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     {
         let state = state.clone();
         let redraw = redraw.clone();
-        let window = window.clone();
+        let window = window.downgrade();
         pick.connect_clicked(move |_| {
+            // Окно захвачено слабо: обработчик живёт внутри самого окна,
+            // и сильная ссылка отсюда замкнула бы цикл окно → кнопка →
+            // замыкание → окно. Сборщика циклов у GObject нет, `dispose`
+            // не наступал бы никогда, и дерево виджетов утекало бы
+            // при каждом открытии настроек.
+            let Some(window) = window.upgrade() else {
+                return;
+            };
             let dialog = gtk4::FileDialog::builder().title("Выбрать цель").build();
 
             // Аналог `/Applications`: на macOS панель открывается там, и выбирать
@@ -248,19 +288,33 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
             }
 
             let state = state.clone();
-            let redraw = redraw.clone();
-            dialog.open_multiple(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
+            // Запрос пути живёт дольше самого обработчика — второй диалог
+            // отвечает уже после его конца, — поэтому перерисовка едет
+            // в счётчике ссылок, а не копией замыкания.
+            let redraw: Rc<dyn Fn()> = Rc::new(redraw.clone());
+            // Одно окно уходит в родители диалога, второе — внутрь ответа:
+            // запрос пути открывает свой диалог и тоже просит родителя.
+            let parent = window.clone();
+            let window = window.clone();
+            dialog.open_multiple(Some(&parent), gtk4::gio::Cancellable::NONE, move |result| {
                 // Отмена — не ошибка: пользователь передумал, и говорить
                 // ему об этом нечего.
                 let Ok(files) = result else { return };
                 for index in 0..files.n_items() {
-                    if let Some(path) = files
+                    let Some(path) = files
                         .item(index)
                         .and_downcast::<gtk4::gio::File>()
                         .and_then(|file| file.path())
-                    {
-                        add_target(&state, &path.to_string_lossy());
-                    }
+                    else {
+                        continue;
+                    };
+                    let chosen = path.to_string_lossy().into_owned();
+
+                    // До настоящей программы не всегда можно добраться честно:
+                    // Steam и flatpak заводят её у себя. Догадка означала бы
+                    // охрану самого Steam — и падение VPN закрывало бы все игры
+                    // разом, — поэтому путь спрашивается у пользователя.
+                    commit_entry(&window, &state, &redraw, &chosen, Destination::Target);
                 }
                 redraw();
             });
@@ -271,7 +325,7 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // открытых настройках. Перерисовка раз в секунду — дешевле, чем рассылка.
     {
         let redraw = redraw.clone();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
+        window_tick(window, std::time::Duration::from_millis(1000), move || {
             redraw();
             gtk4::glib::ControlFlow::Continue
         });
@@ -290,7 +344,12 @@ fn resolved_description(target: &weto_config::settings::Target) -> String {
     format!("{kind}: {}", target.path)
 }
 
-fn add_target(state: &Arc<AppState>, text: &str) {
+/// Добавление цели с готовым именем.
+///
+/// Имя приходит снаружи, когда запись и ярлык разошлись: файл программы указал
+/// пользователь, а подписана цель обязана быть тем именем, которое он видел
+/// в диалоге выбора.
+fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<String>) {
     let text = text.trim();
     if text.is_empty()
         || state
@@ -304,7 +363,9 @@ fn add_target(state: &Arc<AppState>, text: &str) {
     }
 
     let resolved = resolve_launch_target(text);
-    let name = resolved.rsplit('/').next().unwrap_or(&resolved).to_string();
+    let name = display_name
+        .or_else(|| display_name_for(text))
+        .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
 
     state.settings.edit(|s| {
         s.targets.push(weto_config::settings::Target {
@@ -319,7 +380,7 @@ fn add_target(state: &Arc<AppState>, text: &str) {
 
 // --- Сеть и гео -----------------------------------------------------------
 
-fn network_card(state: Arc<AppState>) -> GtkBox {
+fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let card = ui::card("Сеть и гео");
 
     // VPN-приложение: та же форма, что цель, — команда или путь. Список туннелей
@@ -350,7 +411,7 @@ fn network_card(state: Arc<AppState>) -> GtkBox {
         };
         show();
 
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        window_tick(window, std::time::Duration::from_millis(500), move || {
             show();
             gtk4::glib::ControlFlow::Continue
         });
@@ -359,8 +420,31 @@ fn network_card(state: Arc<AppState>) -> GtkBox {
     {
         let state = state.clone();
         let vpn_entry = vpn_entry.clone();
+        let window = window.downgrade();
         vpn_set.connect_clicked(move |_| {
-            set_vpn_app(&state, &vpn_entry.text());
+            // Окно захвачено слабо: обработчик живёт внутри самого окна,
+            // и сильная ссылка отсюда замкнула бы цикл окно → кнопка →
+            // замыкание → окно. Сборщика циклов у GObject нет, `dispose`
+            // не наступал бы никогда, и дерево виджетов утекало бы
+            // при каждом открытии настроек.
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+
+            // Дорога сюда ровно одна и ручная, а цена промаха выше, чем у цели:
+            // невыбранное VPN-приложение не значит ничего, а выбранное
+            // и не запущенное — доказательство, то есть завершение всех целей.
+            // Ярлык flatpak, принятый молча, устроил бы это на ровном месте.
+            // Строку статуса обновляет свой таймер, поэтому перерисовывать
+            // отсюда нечего.
+            let redraw: Rc<dyn Fn()> = Rc::new(|| {});
+            commit_entry(
+                &window,
+                &state,
+                &redraw,
+                &vpn_entry.text(),
+                Destination::VpnApp,
+            );
             vpn_entry.set_text("");
         });
     }
@@ -670,8 +754,12 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
         confirm(
             button,
             "Закрыть weto?",
-            "Приложение завершится и перестанет охранять цели до следующего входа \
-             в систему. Настройки, журнал и автозапуск сохранятся.",
+            // Про «до следующего входа в систему» текст обещать не имеет права:
+            // автозапуск по умолчанию выключен, и без него weto не вернётся
+            // никогда. Дословно как на macOS.
+            "Приложение завершится и перестанет охранять цели. Настройки, журнал \
+             и автозапуск сохранятся: если автозапуск включён, weto вернётся \
+             при следующем входе в систему.",
             "Закрыть",
             || {
                 // Замороженных целей выход не оставляет: SIGCONT шлёт воронка
@@ -697,26 +785,55 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
                 "Будут удалены приложение, автозапуск, настройки, журнал и токен ipinfo. \
                  Действие необратимо.",
                 "Удалить",
-                move || {
-                    // Единственное место, где выход зовут руками: порядок
-                    // важен. Стоящие цели продолжаются раньше удаления —
-                    // вместе с учётом исчезает и последний, кто помнит, кому
-                    // должен SIGCONT, а воронка отработала бы уже после него.
-                    // Повтор безвреден: вызов идемпотентен, и второй раз
-                    // на выходе не находит в учёте ничего.
-                    state.shutdown();
-                    // Приложение не закрывается молча, если что-то не удалилось:
-                    // иначе пользователь считал бы систему чистой.
-                    match crate::uninstall::run() {
-                        Ok(()) => {
-                            if let Some(app) = gtk4::gio::Application::default() {
-                                app.quit();
+                {
+                    let anchor = button.clone();
+                    move || {
+                        // Единственное место, где выход зовут руками: порядок
+                        // важен. Стоящие цели продолжаются раньше удаления —
+                        // вместе с учётом исчезает и последний, кто помнит, кому
+                        // должен SIGCONT, а воронка отработала бы уже после него.
+                        // Повтор безвреден: вызов идемпотентен, и второй раз
+                        // на выходе не находит в учёте ничего.
+                        state.shutdown();
+
+                        // И только здесь обязательство исполняет наблюдение,
+                        // а не отправка: всюду ещё запись, которую выход
+                        // не разрешил, достаётся следующему запуску, а после
+                        // удаления его не будет вовсе. Не поднявшихся удаление
+                        // называет пользователю, а не сносит поверх них молча:
+                        // вернуть их будет уже некому.
+                        let anchor = anchor.clone();
+                        let error = error.clone();
+                        confirm_resumed(state.clone(), move |standing| {
+                            if standing.is_empty() {
+                                remove_weto(&error);
+                                return;
                             }
-                        }
-                        Err(failure) => {
-                            error.set_text(&failure);
-                            error.set_visible(true);
-                        }
+
+                            let error = error.clone();
+                            ask_two_ways(
+                                &anchor,
+                                "Эти программы weto поставил на паузу, и они ещё не продолжились:",
+                                &standing_detail(&standing),
+                                "Удалить всё равно",
+                                "Не удалять и закрыть weto",
+                                move || remove_weto(&error),
+                                || {
+                                    // Второй исход — выход, а не «ничего
+                                    // не делать». Охрана к этому моменту
+                                    // остановлена необратимо: ворота применения
+                                    // закрыты, фаза сброшена, а тумблера охраны
+                                    // в продукте нет. Прежняя «Отмена»
+                                    // оставляла в трее weto, который ничего
+                                    // не охраняет и молчит об этом, —
+                                    // на Linux ещё и надолго, потому что
+                                    // приложение держит себя само.
+                                    if let Some(app) = gtk4::gio::Application::default() {
+                                        app.quit();
+                                    }
+                                },
+                            );
+                        });
                     }
                 },
             );
@@ -724,6 +841,147 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
     }
 
     card
+}
+
+/// Сколько раз удаление переспрашивает ядро про оставшиеся записи учёта и с каким
+/// шагом. Потолок — около двух секунд: SIGCONT, которому суждено дойти, доходит
+/// с первой же досылки, а держать пользователя на кнопке дольше незачем. Те же
+/// числа на macOS (`MaintenanceCard`).
+const RESUME_CONFIRMATIONS: u32 = 6;
+const RESUME_CONFIRMATION_STEP: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Досылает SIGCONT оставшимся записям учёта, пока обход не покажет их идущими,
+/// и отдаёт тех, кто так и остался стоять.
+///
+/// Главный поток при этом не стоит: отсчёт идёт тем же `timeout_add_local`, что
+/// и остальные отложенные дела окна. Ждать циклом здесь значило бы заморозить
+/// интерфейс ровно на то время, за которое цели и должны подняться.
+fn confirm_resumed(
+    state: Arc<AppState>,
+    finish: impl Fn(Vec<weto_config::stopped::StoppedProcess>) + 'static,
+) {
+    let left = Rc::new(RefCell::new(RESUME_CONFIRMATIONS));
+    gtk4::glib::timeout_add_local(RESUME_CONFIRMATION_STEP, move || {
+        let standing = state.confirm_resumed();
+        let mut left = left.borrow_mut();
+        *left -= 1;
+        if standing.is_empty() || *left == 0 {
+            finish(standing);
+            return gtk4::glib::ControlFlow::Break;
+        }
+        gtk4::glib::ControlFlow::Continue
+    });
+}
+
+/// Пояснение к диалогу об оставшихся стоять. Дословно совпадает с macOS
+/// (`MaintenanceCard.askToUninstallAnyway`) — тексты и набор кнопок у диалогов
+/// общие для платформ.
+///
+/// Про остановленную охрану сказано прямо, и это не вежливость: к этому моменту
+/// выход уже случился, обратно охрана не включится, а тумблера у неё нет. Молчи
+/// диалог об этом, «не удалять» означало бы weto в трее, который ничего
+/// не сторожит, — и пользователь узнал бы об этом только по погибшей цели.
+fn standing_detail(standing: &[weto_config::stopped::StoppedProcess]) -> String {
+    format!(
+        "{}\n\nОхрана уже остановлена и обратно не включится: weto придётся \
+         запустить заново.\n\nЕсли удалить weto сейчас, вернуть эти программы \
+         будет некому — только командой fg в их терминале. Если не удалять, \
+         их разберёт следующий запуск: учёт остановленных цел.",
+        standing_list(standing)
+    )
+}
+
+/// Имена и pid тех, кто остался стоять, — одной строкой на диалог. Имя берётся
+/// из пути учёта: цель, снятая с охраны между делом, по имени не находится,
+/// а бинарник честнее пустой строки.
+fn standing_list(standing: &[weto_config::stopped::StoppedProcess]) -> String {
+    standing
+        .iter()
+        .map(|entry| {
+            let name = entry
+                .executable_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&entry.executable_path);
+            format!("{name} (pid {})", entry.pid)
+        })
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// Собственно снос: тот же `uninstall.sh`, что и из терминала. Приложение
+/// не закрывается молча, если что-то не удалилось, — иначе пользователь
+/// считал бы систему чистой.
+fn remove_weto(error: &gtk4::Label) {
+    match crate::uninstall::run() {
+        Ok(()) => quit(),
+        Err(failure) => {
+            // Исход у неудачи тоже один, и это выход. Охрана к этому моменту
+            // остановлена необратимо: ворота применения закрыты, фаза сброшена,
+            // а тумблера охраны в продукте нет. Оставить окно с текстом ошибки
+            // значило бы оставить иконку в трее у приложения, которое уже
+            // ничего не охраняет и молчит об этом.
+            error.set_text(&failure);
+            error.set_visible(true);
+
+            let dialog = gtk4::AlertDialog::builder()
+                .message("Удаление прошло не полностью")
+                .detail(format!(
+                    "{failure}\n\nweto закроется: охрана уже остановлена, и продолжать \
+                     он не может. Оставшееся удалите вручную."
+                ))
+                .buttons(["Закрыть"])
+                .default_button(0)
+                .modal(true)
+                .build();
+            let parent = error.root().and_downcast::<gtk4::Window>();
+            dialog.choose(parent.as_ref(), gtk4::gio::Cancellable::NONE, move |_| {
+                quit()
+            });
+        }
+    }
+}
+
+/// Выход одной воронкой: `connect_shutdown` вернёт цели из паузы сам.
+fn quit() {
+    if let Some(app) = gtk4::gio::Application::default() {
+        app.quit();
+    }
+}
+
+/// Диалог, у которого определены оба исхода, а не «сделать» и «ничего
+/// не делать»: обе кнопки что-то делают, и уйти из него в неопределённость
+/// нельзя. Esc уводит во второй исход — он для того и назван вслух.
+fn ask_two_ways(
+    anchor: &gtk4::Button,
+    title: &str,
+    detail: &str,
+    confirm_title: &str,
+    alternative_title: &str,
+    confirm_action: impl Fn() + 'static,
+    alternative_action: impl Fn() + 'static,
+) {
+    let dialog = gtk4::AlertDialog::builder()
+        .message(title)
+        .detail(detail)
+        .buttons([confirm_title, alternative_title])
+        .cancel_button(1)
+        .default_button(1)
+        .modal(true)
+        .build();
+
+    let window = anchor.root().and_downcast::<gtk4::Window>();
+    dialog.choose(
+        window.as_ref(),
+        gtk4::gio::Cancellable::NONE,
+        move |answer| {
+            if answer == Ok(0) {
+                confirm_action();
+            } else {
+                alternative_action();
+            }
+        },
+    );
 }
 
 /// Подтверждение необратимого действия. На macOS это `NSAlert`, здесь —
@@ -757,9 +1015,126 @@ fn confirm(
     );
 }
 
+/// Куда уедет запись, когда путь наконец известен.
+#[derive(Clone, Copy)]
+enum Destination {
+    /// Цель под охраной.
+    Target,
+    /// VPN-приложение.
+    VpnApp,
+}
+
+impl Destination {
+    fn commit(self, state: &Arc<AppState>, entry: &str, display_name: Option<String>) {
+        match self {
+            Destination::Target => add_target_named(state, entry, display_name),
+            Destination::VpnApp => set_vpn_app_named(state, entry, display_name),
+        }
+    }
+}
+
+/// Запись, добавленная любой из дорог: с запросом пути там, где честно
+/// разрешить её нечем.
+///
+/// Дорог три — ручной ввод цели, файловый выбор цели и поле VPN-приложения, —
+/// и вопрос обязан звучать на каждой. Проглоченный молча `NeedsPath` оставляет
+/// запись, не совпадающую ни с одним процессом: цель в списке выглядит живой
+/// и при падении VPN не завершается. У VPN-приложения цена выше: невыбранное
+/// не значит ничего, а **выбранное и не запущенное — это доказательство**,
+/// то есть завершение всех целей разом. Ярлык flatpak у VPN-клиента —
+/// не экзотика.
+fn commit_entry(
+    window: &ApplicationWindow,
+    state: &Arc<AppState>,
+    redraw: &Rc<dyn Fn()>,
+    entry: &str,
+    destination: Destination,
+) {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return;
+    }
+
+    match resolve_launch_entry(entry) {
+        Resolution::Resolved(_) => {
+            destination.commit(state, entry, None);
+            redraw();
+        }
+        Resolution::NeedsPath { launcher } => {
+            ask_for_program_path(window, state, redraw, entry, &launcher, destination)
+        }
+    }
+}
+
+/// Запрос файла программы, когда ярлык ведёт к чужому запускатору.
+///
+/// Отказаться добавить запись нельзя — пользователь её выбрал, — а угадать
+/// нечем: программу заводит Steam или flatpak, и её файл в ярлыке не назван.
+/// Поэтому спрашиваем прямо, а имя остаётся тем, которое стояло в ярлыке: иначе
+/// в списке появилась бы строка, в которой пользователь свой выбор не узнает.
+fn ask_for_program_path(
+    window: &ApplicationWindow,
+    state: &Arc<AppState>,
+    redraw: &Rc<dyn Fn()>,
+    entry: &str,
+    launcher: &str,
+    destination: Destination,
+) {
+    let name = display_name_for(entry);
+    let title = name
+        .clone()
+        .unwrap_or_else(|| entry.rsplit('/').next().unwrap_or(entry).to_string());
+
+    // Что weto сделает с файлом, у цели и у VPN-приложения разное: одну он
+    // охраняет, за вторым следит. Общая часть — что без файла не выйдет ни то,
+    // ни другое.
+    let purpose = match destination {
+        Destination::Target => "weto будет охранять именно его",
+        Destination::VpnApp => "по нему weto и поймёт, запущен ли VPN-клиент",
+    };
+    let dialog = gtk4::AlertDialog::builder()
+        .message("Нужен файл программы")
+        .detail(format!(
+            "«{title}» запускается через {launcher}, и какой процесс окажется \
+             программой, из ярлыка не следует. Укажите файл программы — {purpose}."
+        ))
+        .buttons(["Указать файл", "Отмена"])
+        .cancel_button(1)
+        .default_button(0)
+        .modal(true)
+        .build();
+
+    let parent = window.clone();
+    let window = window.clone();
+    let state = state.clone();
+    let redraw = redraw.clone();
+    dialog.choose(Some(&parent), gtk4::gio::Cancellable::NONE, move |answer| {
+        // Отмена — не ошибка: цель просто не добавлена, и говорить об этом
+        // пользователю нечего.
+        if answer != Ok(0) {
+            return;
+        }
+
+        let picker = gtk4::FileDialog::builder().title("Файл программы").build();
+        // Ярлыки тут не помогут — за ними мы и пришли, — а программы живут
+        // где угодно, чаще всего в домашнем каталоге.
+        if let Some(home) = std::env::var_os("HOME") {
+            picker.set_initial_folder(Some(&gtk4::gio::File::for_path(home)));
+        }
+
+        picker.open(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
+            let Some(path) = result.ok().and_then(|file| file.path()) else {
+                return;
+            };
+            destination.commit(&state, &path.to_string_lossy(), name);
+            redraw();
+        });
+    });
+}
+
 // --- Подвал ---------------------------------------------------------------
 
-fn footer(state: Arc<AppState>) -> GtkBox {
+fn footer(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let footer = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
     footer.set_margin_top(ui::SPACE2);
 
@@ -800,7 +1175,7 @@ fn footer(state: Arc<AppState>) -> GtkBox {
     // находка есть: тогда она открывает окно обновления, а не проверяет заново.
     {
         let check = check.clone();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        window_tick(window, std::time::Duration::from_millis(500), move || {
             let updates = crate::update::shared();
             let pending = updates.as_ref().and_then(|u| u.pending());
             check.set_sensitive(true);
@@ -881,8 +1256,16 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     // а сотня записей с сырыми ответами сервисов в буфере нечитаема.
     {
         let state = state.clone();
-        let window = window.clone();
+        let window = window.downgrade();
         export_button.connect_clicked(move |_| {
+            // Окно захвачено слабо: обработчик живёт внутри самого окна,
+            // и сильная ссылка отсюда замкнула бы цикл окно → кнопка →
+            // замыкание → окно. Сборщика циклов у GObject нет, `dispose`
+            // не наступал бы никогда, и дерево виджетов утекало бы
+            // при каждом открытии настроек.
+            let Some(window) = window.upgrade() else {
+                return;
+            };
             let Some(text) = state.export_journal() else {
                 return;
             };
@@ -904,7 +1287,7 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     }
 
     page.append(&card);
-    page.append(&footer(state));
+    page.append(&footer(window, state));
     scroll(&page)
 }
 
@@ -946,16 +1329,22 @@ fn clear(container: &GtkBox) {
     }
 }
 
-/// Выбор VPN-приложения. Разрешается тем же путём, что цель: через симлинки
-/// и `PATH`, — иначе правило, записанное «как введено», не совпало бы с процессом.
-fn set_vpn_app(state: &Arc<AppState>, text: &str) {
+/// Выбор VPN-приложения с готовым именем.
+///
+/// Разрешается тем же путём, что цель: через симлинки и `PATH`, — иначе
+/// правило, записанное «как введено», не совпало бы с процессом. Имя приходит
+/// снаружи, когда запись и ярлык разошлись: файл программы указал пользователь,
+/// а подписано приложение обязано быть тем именем, которое он видел в ярлыке.
+fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<String>) {
     let text = text.trim();
     if text.is_empty() {
         return;
     }
 
     let resolved = resolve_launch_target(text);
-    let name = resolved.rsplit('/').next().unwrap_or(&resolved).to_string();
+    let name = display_name
+        .or_else(|| display_name_for(text))
+        .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
 
     state.settings.edit(|s| {
         s.set_vpn_app(Some(weto_config::settings::Target {

@@ -85,6 +85,14 @@ start or path change asks for a probe and changes nothing while it is in flight;
 `unproven` result pauses immediately, with no count and no window. `GuardPhase.verifying` carries
 only a cause, no moment — nothing is timed from it. Wording landed in commit `80be667`.
 
+### Amendment: uninstall discharges the obligation by observation
+Every other exit hands an unresolved ledger entry to the next launch. Uninstall has none — the
+ledger is deleted with the app — so the button now runs `stop()`/`shutdown()`, then
+`confirmResumed()` / `confirm_resumed()`: `SIGCONT` re-sent and the scan re-read, six attempts
+300 ms apart on both platforms, with whoever is still standing named by name and pid behind
+«Удалить всё равно» / «Отмена». `MaintenanceCard.swift` and `settings_window.rs` drive it; the
+episode outcome is not rewritten, `stop()`'s «не подтверждено» stands as the record.
+
 ## Risks
 - **The pause window is real and accepted, not a bug.** Between a path change (or cold start) and
   the probe's answer, targets run for up to ~5 s with no verdict. This was traded deliberately
@@ -118,6 +126,8 @@ only a cause, no moment — nothing is timed from it. Wording landed in commit `
       the popup shows its badge with the `fg` hint and one
       `startupRecovery`/`standingProcessesRemain` entry appears in the check-journal;
       the terminal does not keep printing `suspended (tty input)` forever.
+- [ ] Uninstall while a target is paused → it is resumed first; a target that answers `SIGCONT`
+      with another stop is listed by name and pid, and «Отмена» leaves both weto and the ledger.
 - [ ] A paused terminal target loses its foreground job (backgrounded) → notification with
       "Показать терминал" fires; the button activates the hosting terminal app.
 - [ ] `linux/scripts/dev.sh cargo test -p weto-sys --test notifications --test terminal` — the

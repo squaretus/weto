@@ -5,47 +5,25 @@
 //! трея — он обязателен, потому что окружение может быть без трея вовсе
 //! (ванильный GNOME без расширений).
 
-mod settings_window;
-mod state;
-mod status_window;
-mod tray;
-mod uninstall;
-mod update;
-mod update_window;
-
 use std::cell::RefCell;
 
 use gtk4::gio::ApplicationFlags;
 use gtk4::prelude::*;
-use gtk4::{Application, CssProvider};
+use gtk4::Application;
 
+use weto_app::lifecycle::hold_if_tray;
+use weto_app::{apply_theme, state, status_window, tray, update};
 use weto_config::paths::Paths;
-use weto_config::settings::Theme as SettingsTheme;
-use weto_ui::theme::{self, Theme};
 
 const APP_ID: &str = "com.weto.app";
 
 thread_local! {
-    static STYLES: RefCell<Option<CssProvider>> = const { RefCell::new(None) };
     static TRAY_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static NOTIFICATIONS_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Смена темы — подмена таблицы стилей целиком: CSS-переменных на GTK 4.14 нет,
-/// поэтому цвета вкомпилированы в две отдельные таблицы.
-pub fn apply_theme(theme: SettingsTheme) {
-    let theme = match theme {
-        SettingsTheme::Dark => Theme::Dark,
-        SettingsTheme::Light => Theme::Light,
-    };
-    STYLES.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let provider = match slot.as_ref() {
-            Some(previous) => theme::switch_theme(previous, theme),
-            None => theme::install_styles(theme),
-        };
-        *slot = Some(provider);
-    });
+    // Удержание живёт, пока жив этот слот: `hold` отдаёт расписку, и на её
+    // уничтожении GApplication отпускает себя обратно. Брошенная тут же,
+    // она не удержала бы ничего.
+    static HOLD: RefCell<Option<gtk4::gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
 }
 
 fn main() -> gtk4::glib::ExitCode {
@@ -107,7 +85,22 @@ fn main() -> gtk4::glib::ExitCode {
             // Трей поднимается один раз, при первой активации: раньше главного
             // цикла подписываться не на что.
             if !TRAY_UP.with(|up| up.replace(true)) {
-                tray::install(app, state.clone());
+                let tray_installed = tray::install(app, state.clone());
+                // Держим приложение живым после закрытия последнего окна:
+                // иначе крестик на окне — самый обычный жест в интерфейсе —
+                // снимал охрану молча. Решает `lifecycle::hold_if_tray`: там
+                // и условие, и цена отказа от удержания, и само взятие
+                // расписки. Здесь остаётся только сохранить её — брошенная,
+                // она не удержала бы ничего — и однократность, которую уже
+                // обеспечивает флаг трея.
+                //
+                // Воронку выхода это не трогает: `app.quit()` из пункта трея
+                // и из кнопки «Закрыть приложение» проходит через
+                // `connect_shutdown` и при удержании, так что цели
+                // возвращаются из паузы там же, где и раньше.
+                if let Some(guard) = hold_if_tray(app, tray_installed) {
+                    HOLD.with(|slot| *slot.borrow_mut() = Some(guard));
+                }
             }
             // Нажатие на уведомление приходит с шины, из чужого потока, а окна
             // открывают только из главного цикла — поэтому просьбу забирает

@@ -22,6 +22,8 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq |
 | `weto-sys` | `background.rs` | the background track: one thread per probe, so a pass never waits for a request |
 | `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
+| `weto-core` | `launcher.rs` | `.desktop` text: `DesktopCommand`, `name_from_desktop_entry`, wrapper stripping |
+| `weto-sys` | `target_resolver.rs` | the same chain on disk: `Resolution`, `display_name_for` |
 | `weto-sys` | `desktop_entries.rs` | the `.desktop` index over the XDG application directories |
 | `weto-sys` | `terminal.rs` | raises it: `org.freedesktop.Application.Activate` over the session bus |
 | `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
@@ -31,6 +33,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping |
 | `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger |
+| `weto-app` | `lifecycle.rs` | whether the process outlives its windows (`holds_application`) |
 | `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
 
 ## Boundary invariant
@@ -65,6 +68,7 @@ the whole of what the Linux side is allowed to differ in:
 | app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
 | the "Показать терминал" button raises any terminal | the button is there only for an emulator that comes out on the session bus | raising a window means asking the application itself (`org.freedesktop.Application.Activate`); an emulator that owns no bus name — xterm, alacritty, kitty, foot, xfce4-terminal, mate-terminal, terminator — cannot be asked, and nothing short of `wmctrl`/`xdotool` would change that. The `(i)` hint stays: it is the answer the user needs. See "Raising the terminal" below |
 | tapping the notification always opens the popup | tapping opens the status window when the notification server announces `actions` | the capability is the server's, not ours (`GetCapabilities`); without it the notification is still delivered, just not clickable |
+| — | a second dialog asks for the program file when the picked entry launches through Steam or flatpak | a `.app` always *is* the program; a `.desktop` entry need not name one at all, and guessing would guard the launcher — see the `appBundle` row under "Contracts that differ from macOS" |
 
 Everything else matches, including every wording that does not depend on the unported screen: the
 settings window is the same six cards in the same order
@@ -147,7 +151,41 @@ Everything the policy decides is shared. What the system dictates is not:
   already-resolved path, so the `nano`→`pico` symlink never appears; argv arrives as a
   ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is needed.
 - **`appBundle` targets do not exist here.** A `.desktop` entry points at an ordinary
-  binary, so it is a `Binary` target.
+  binary, so it is a `Binary` target — but getting from the entry to that binary is a chain, not
+  a field. `weto_core::launcher::command_from_desktop_entry` walks the `Exec` line and answers
+  with a `DesktopCommand`: wrappers are dropped (a leading `env` with its assignments, one level
+  of `sh -c "…"` — taking the first word would have guarded `/usr/bin/env` or `/bin/sh`, i.e. half
+  the machine), and `steam` / `flatpak` come back as `Indirect { launcher }` because they start the
+  program themselves and the entry does not say what the process will be. Guessing there would
+  have made `/usr/bin/steam` the target, so a VPN drop closed every game at once.
+  `target_resolver::resolve_launch_entry` carries that verdict to disk as a `Resolution`:
+  `NeedsPath { launcher }` is the honest answer, and the settings window asks the user for the
+  program file with a second dialog (`ask_for_program_path`). `resolve_launch_target` stays as the
+  string façade for callers that only want a path — a foreign launcher looks the same there as a
+  target that is not installed: the entry is kept as typed.
+- **A target's name comes from the entry's `Name=`, not from the last path segment.**
+  `name_from_desktop_entry` prefers `Name[<locale>]` (locale being the first two letters of
+  `LC_MESSAGES`/`LANG` — `ru_RU.UTF-8` matches no key as-is) and reads the `[Desktop Entry]`
+  section only, so a `[Desktop Action …]` cannot sign the target «Новое окно». Tools living in a
+  versioned directory made the old rule produce «2.1.241» instead of «Claude», and the journal then
+  could not say what had been closed. The name the user picked survives the second dialog too: when
+  the file comes from `ask_for_program_path`, `add_target_named` keeps the entry's name.
+- **The app outlives its windows when, and only when, the tray icon came up.** GApplication quits
+  once the last window closes, so the window's close button silently dropped the guard: the icon
+  disappeared, the targets were left unwatched and the user had merely closed a window. `main.rs`
+  therefore takes `app.hold()` when `tray::install` reports success (`lifecycle::holds_application`),
+  and the hold guard is kept in a thread-local — dropped on the spot it would hold nothing. Without
+  a tray (vanilla GNOME) the old behaviour stays, because a held windowless app could only be closed
+  with `kill`. The exit funnel is untouched: `app.quit()` from the tray item and from «Закрыть
+  приложение» still goes through `connect_shutdown`. The cost of holding is that per-window timers
+  now have to end with their window — `status_window.rs` breaks its 500 ms refresh on
+  `connect_destroy`, or every reopen would leave another one running.
+- **The settings window holds its own width.** A tiling compositor hands the window the whole cell
+  and ignores `default_width`, so card rows (label, `spacer()` with `hexpand`, control) spread to
+  its edges. `ui::content_column` wraps the panel at `WINDOW_WIDTH`, centred, with an explicit
+  `hexpand(false)` — GTK4 derives a container's expand flag from its children, and one `spacer()`
+  deep inside would stretch the column again. The window itself only keeps a floor
+  (`MIN_WINDOW_HEIGHT`, 480), below which the segments and the first card start to clip.
 - **CSS variables are not used:** `var()` arrived in GTK 4.16 and the project floor is 4.14
   (Ubuntu 24.04 LTS), where such rules are silently dropped. Values are substituted by the
   generator instead — one stylesheet per theme, and `css.rs` fails if a `var(--` survives.
@@ -239,6 +277,16 @@ points at the new version.
   there the system installer validates the package.
 - **A manual check ignores skip and deferral** — the only and sufficient way to bring back
   a skipped version, which is why there is no "unskip" button.
+- **The stable path is the launch symlink, `~/.local/bin/weto`** (`Paths::launcher`, written
+  literally the way `install.sh` writes it). Anything outside the running process that has to name
+  the binary means that symlink, never the versioned directory: the autostart entry writes
+  `paths.launcher` rather than `current_exe()` (on Linux that resolves through `/proc/self/exe` and
+  is therefore versioned, so after two updates it pointed at a pruned directory and the session
+  started nothing), and `uninstall.sh` finds the running copy with `pgrep -x weto` plus a
+  `/proc/<pid>/exe` check under the data directory, because the process is launched through the
+  symlink and a `pkill -f` on the `current` path matched nothing. Both are covered by
+  `scripts/tests/install-contract.sh` and `weto-sys/tests/autostart.rs`; see
+  `bugs/launch-path-is-the-symlink-not-the-version.md`.
 - **No root anywhere:** not for installing, updating, killing targets or reading routes.
   There is no privileged helper in the Linux build at all. Download protection is the same
   as on macOS — https plus the GitHub delivery host list; neither platform has a signature,
@@ -259,7 +307,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-363 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+404 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
@@ -268,6 +316,13 @@ the action and the choice of ancestor (`weto-sys/tests/notifications.rs`, `tests
 Everything that cannot be faked — a real WireGuard tunnel, the look of the tray icon, a window
 actually coming to the front — is covered by the checklists in `linux/docs/manual-check.md`
 and `linux/docs/manual-ui-check.md`.
+
+The hold is tested in two files on purpose: the rule itself is pure (`weto-app/tests/lifecycle.rs`,
+no display), while `tests/held_window.rs` runs a real `Application` and asserts all three halves at
+once — the app outlives its last window, `active_window` is then empty so a tray click takes the
+"build a new one" branch, and `quit` still arrives at `connect_shutdown`, where the resume lives.
+It is a separate file because it is a separate process: GTK initialises once, from one thread, and
+the runner is parallel.
 
 ## Sibling crates
 
@@ -375,6 +430,19 @@ one record the journal is kept for out of its fifty.
    leaves its loop on `is_shut_down()` instead of spinning as a no-op. The gates cover the
    application only, not the probe: waiting behind a five-second ipinfo timeout would hang the
    exit. Lock order is always `enforcement` → `inner`.
+6. **Uninstall is the one exit that has to observe the result.** Everywhere else an entry the exit
+   could not resolve is handed to the next launch — the ledger file survives and
+   `recover_stopped()` reads it — but after uninstall there is no next launch: the ledger goes with
+   the app, and a process that never came back up from the last `SIGCONT` stays frozen forever. So
+   the button calls `shutdown()` and then `GuardController::confirm_resumed`, which re-runs the
+   same scan-and-resume road (`resume_from_ledger`, `skipping` deliberately empty, so entries the
+   tick gave up on under `RESUME_RETRY_LIMIT` get one more signal) and returns whoever the kernel
+   still shows standing. `settings_window.rs` drives it from `timeout_add_local`, six attempts
+   300 ms apart — the same numbers as macOS `MaintenanceCard`, a `SIGCONT` that will land lands on
+   the first one — and names the survivors by name and pid before offering «Удалить всё равно» /
+   «Отмена». It takes no enforcement gate (a tick after the exit has nothing to do) and does **not**
+   rewrite the episode outcome a second time: `shutdown()`'s «не подтверждено» is the record of
+   that standing.
 
 ## Not here yet
 

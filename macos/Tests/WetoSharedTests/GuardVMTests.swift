@@ -3075,6 +3075,77 @@ final class GuardVMTests: XCTestCase {
                        "цель по-прежнему стоит: пилюля не имеет права исчезнуть")
     }
 
+    /// Удаление — единственный выход, после которого следующего запуска не будет:
+    /// учёт сносится вместе с приложением. Поэтому здесь обязательство исполняет
+    /// наблюдение, а не отправка: повторный SIGCONT уходит, пока ядро не покажет
+    /// процесс идущим.
+    func test_confirming_resumption_releases_what_the_first_signal_did_not() async {
+        let ledgerStorage = InMemoryStoppedLedger()
+        let (h, locator, _) = makeForegroundJobHarness(ledgerStorage: ledgerStorage)
+
+        await pauseWithABadResult(h, after: 0)
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop])
+        locator.processes = foregroundJobTree(stopped: true)
+
+        h.vm.stop()
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [100, 200, 201],
+                       "выход наблюдать результат не мог: стоящими записи показал обход до сигнала")
+        let resolution = h.log.events.first?.resolutionText
+
+        // Процессы поднялись — и только теперь обязательство снято.
+        locator.processes = foregroundJobTree(stopped: false)
+        let standing = h.vm.confirmResumed()
+
+        XCTAssertTrue(standing.isEmpty, "обход показал процессы идущими — стоять некому")
+        XCTAssertEqual(h.signaler.batches.last?.signal, .resume)
+        XCTAssertEqual(h.signaler.batches.last?.pids, [201, 200, 100],
+                       "порядок тот же обратный стоп-порядку: подтверждение — не отдельная дорога")
+        XCTAssertEqual(ledgerStorage.load(), .entries([]),
+                       "учёт опустел по наблюдению — и только теперь его можно сносить")
+        XCTAssertEqual(h.log.events.first?.resolutionText, resolution,
+                       "исход эпизода записал выход, и второй раз его не переписывают")
+    }
+
+    /// Тот, кто отвечает стопом на каждый сигнал, остаётся названным: удалять
+    /// молча поверх него нельзя — это чужой замороженный процесс навсегда.
+    func test_a_process_that_keeps_standing_is_reported_by_name() async {
+        let ledgerStorage = InMemoryStoppedLedger()
+        let (h, locator, _) = makeForegroundJobHarness(ledgerStorage: ledgerStorage)
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = foregroundJobTree(stopped: true)
+        h.vm.stop()
+
+        // Настоящее фоновое задание: шелл и потомок пошли, а цель тут же тронула
+        // tty, получила SIGTTIN и встала обратно.
+        locator.processes = foregroundJobTree(stopped: false).map {
+            $0.pid == 200
+                ? ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                                  processGroup: 200, terminalForegroundGroup: 200, isStopped: true)
+                : $0
+        }
+        let standing = h.vm.confirmResumed()
+
+        XCTAssertEqual(standing.map(\.pid), [200], "шелл и потомок пошли, а цель стоит")
+        XCTAssertEqual(standing.first?.executablePath, "/usr/bin/pico",
+                       "имя показать пользователю есть чем: путь едет из учёта")
+        XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200],
+                       "наблюдённые ушли, а неподтверждённая запись держится")
+
+        // Досылка не кончается: пока ядро не показало процесс идущим, каждое
+        // подтверждение шлёт ему SIGCONT заново.
+        let again = h.vm.confirmResumed()
+
+        XCTAssertEqual(again.map(\.pid), [200])
+        XCTAssertEqual(h.signaler.batches.last?.pids, [200])
+
+        // Пользователь ввёл `fg` — и обязательство исполнено наблюдением.
+        locator.processes = foregroundJobTree(stopped: false)
+
+        XCTAssertTrue(h.vm.confirmResumed().isEmpty)
+        XCTAssertEqual(ledgerStorage.load(), .entries([]))
+    }
+
     /// Учёт, доживший до нового запуска, обязан быть видимым: и пилюлей, и следом
     /// в обоих журналах. Без этого пользователь после падения weto получал SIGCONT
     /// раз в секунду и ни слова: ни пилюли, ни подсказки про `fg`, ни записи.

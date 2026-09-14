@@ -11,6 +11,11 @@ pub struct Paths {
     pub state_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub data_dir: PathBuf,
+    /// Стабильный путь запуска — симлинк, который установщик переставляет
+    /// на текущую версию. Каталог `~/.local/bin` берётся буквально, без
+    /// XDG-переменной: ровно так его пишет `install.sh` (`BIN="$HOME/.local/bin"`),
+    /// и расходиться им нельзя — иначе ярлык и автозапуск ведут в разные места.
+    pub launcher: PathBuf,
 }
 
 impl Paths {
@@ -25,6 +30,7 @@ impl Paths {
             state_dir: xdg("XDG_STATE_HOME", &home, ".local/state").join("weto"),
             cache_dir: xdg("XDG_CACHE_HOME", &home, ".cache").join("weto"),
             data_dir: xdg("XDG_DATA_HOME", &home, ".local/share").join("weto"),
+            launcher: home.join(".local/bin/weto"),
         }
     }
 
@@ -34,6 +40,7 @@ impl Paths {
             state_dir: home.join(".local/state/weto"),
             cache_dir: home.join(".cache/weto"),
             data_dir: home.join(".local/share/weto"),
+            launcher: home.join(".local/bin/weto"),
         }
     }
 

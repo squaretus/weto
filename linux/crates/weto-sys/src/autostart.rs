@@ -7,6 +7,15 @@
 //! Автозапуск живёт ровно одним файлом — правило перенесено с macOS дословно.
 //! Там его нарушение приводило к паре расходящихся заданий, которые
 //! перезапускали друг друга.
+//!
+//! В ярлык едет стабильный путь запуска (`paths.launcher`), а не `current_exe`:
+//! на Linux он уже разрешён через `/proc/self/exe` и потому версионный —
+//! `~/.local/share/weto/<версия>/bin/weto`. Установщик держит на диске текущую
+//! версию и одну предыдущую, так что после первого обновления сессия поднимала
+//! бы старую копию, а после второго — ничего вовсе: каталог версии удалён,
+//! и защиты после перезагрузки нет. Переписывать ярлык при обновлении некому.
+//! Тот же путь пишет в свой ярлык установщик (`Exec=$HOME/.local/bin/weto`),
+//! и расходиться этим двум местам нельзя.
 
 use std::path::PathBuf;
 
@@ -22,6 +31,7 @@ pub enum AutostartError {
 
 pub struct Autostart {
     file: PathBuf,
+    executable: PathBuf,
 }
 
 impl Autostart {
@@ -31,11 +41,13 @@ impl Autostart {
                 || PathBuf::from("autostart/weto.desktop"),
                 |config| config.join("autostart/weto.desktop"),
             ),
+            executable: paths.launcher.clone(),
         }
     }
 
-    pub fn rooted(file: PathBuf) -> Autostart {
-        Autostart { file }
+    /// Для тестов: и файл ярлыка, и путь запуска задаются напрямую.
+    pub fn rooted(file: PathBuf, executable: PathBuf) -> Autostart {
+        Autostart { file, executable }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -43,10 +55,7 @@ impl Autostart {
     }
 
     pub fn enable(&self) -> Result<(), AutostartError> {
-        let executable = std::env::current_exe()
-            .map_err(|e| AutostartError::Enable(e.to_string()))?
-            .to_string_lossy()
-            .into_owned();
+        let executable = self.executable.to_string_lossy().into_owned();
 
         if let Some(parent) = self.file.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AutostartError::Enable(e.to_string()))?;

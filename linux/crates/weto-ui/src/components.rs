@@ -420,6 +420,23 @@ pub fn panel() -> GtkBox {
     panel
 }
 
+/// Колонка содержимого: держит ширину окна настроек и стоит по центру,
+/// как бы широко ни растянул окно композитор.
+///
+/// Дизайн нарисован на `WINDOW_WIDTH`, но размер окна решает не приложение:
+/// тайловый композитор выдаёт ячейку целиком, и строки карточек — подпись,
+/// `spacer()` с `hexpand`, контрол — расползались на всю её ширину. Явный
+/// `hexpand(false)` тут обязателен: GTK4 выводит `expand` контейнера из детей,
+/// и одна `spacer()` в глубине снова растянула бы колонку.
+pub fn content_column(child: &impl IsA<gtk4::Widget>) -> GtkBox {
+    let column = GtkBox::new(Orientation::Vertical, 0);
+    column.set_halign(Align::Center);
+    column.set_size_request(WINDOW_WIDTH, -1);
+    column.set_hexpand(false);
+    column.append(child);
+    column
+}
+
 #[cfg(test)]
 mod countdown_tests {
     use super::pause_countdown_text;
