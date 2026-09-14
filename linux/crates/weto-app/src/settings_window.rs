@@ -226,7 +226,7 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         let state = state.clone();
         let entry = entry.clone();
         let redraw = redraw.clone();
-        let window = window.clone();
+        let window = window.downgrade();
         move || {
             let text = entry.text().to_string();
             let text = text.trim().to_string();
@@ -239,6 +239,14 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
             // в счётчике ссылок — запрос пути отвечает уже после конца
             // обработчика.
             let redraw: Rc<dyn Fn()> = Rc::new(redraw.clone());
+            // Окно захвачено слабо: обработчик живёт внутри самого окна,
+            // и сильная ссылка отсюда замкнула бы цикл окно → кнопка →
+            // замыкание → окно. Сборщика циклов у GObject нет, `dispose`
+            // не наступал бы никогда, и дерево виджетов утекало бы
+            // при каждом открытии настроек.
+            let Some(window) = window.upgrade() else {
+                return;
+            };
             commit_entry(&window, &state, &redraw, &text, Destination::Target);
             entry.set_text("");
             redraw();
@@ -257,8 +265,16 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     {
         let state = state.clone();
         let redraw = redraw.clone();
-        let window = window.clone();
+        let window = window.downgrade();
         pick.connect_clicked(move |_| {
+            // Окно захвачено слабо: обработчик живёт внутри самого окна,
+            // и сильная ссылка отсюда замкнула бы цикл окно → кнопка →
+            // замыкание → окно. Сборщика циклов у GObject нет, `dispose`
+            // не наступал бы никогда, и дерево виджетов утекало бы
+            // при каждом открытии настроек.
+            let Some(window) = window.upgrade() else {
+                return;
+            };
             let dialog = gtk4::FileDialog::builder().title("Выбрать цель").build();
 
             // Аналог `/Applications`: на macOS панель открывается там, и выбирать
@@ -404,8 +420,17 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     {
         let state = state.clone();
         let vpn_entry = vpn_entry.clone();
-        let window = window.clone();
+        let window = window.downgrade();
         vpn_set.connect_clicked(move |_| {
+            // Окно захвачено слабо: обработчик живёт внутри самого окна,
+            // и сильная ссылка отсюда замкнула бы цикл окно → кнопка →
+            // замыкание → окно. Сборщика циклов у GObject нет, `dispose`
+            // не наступал бы никогда, и дерево виджетов утекало бы
+            // при каждом открытии настроек.
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+
             // Дорога сюда ровно одна и ручная, а цена промаха выше, чем у цели:
             // невыбранное VPN-приложение не значит ничего, а выбранное
             // и не запущенное — доказательство, то есть завершение всех целей.
@@ -1208,8 +1233,16 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     // а сотня записей с сырыми ответами сервисов в буфере нечитаема.
     {
         let state = state.clone();
-        let window = window.clone();
+        let window = window.downgrade();
         export_button.connect_clicked(move |_| {
+            // Окно захвачено слабо: обработчик живёт внутри самого окна,
+            // и сильная ссылка отсюда замкнула бы цикл окно → кнопка →
+            // замыкание → окно. Сборщика циклов у GObject нет, `dispose`
+            // не наступал бы никогда, и дерево виджетов утекало бы
+            // при каждом открытии настроек.
+            let Some(window) = window.upgrade() else {
+                return;
+            };
             let Some(text) = state.export_journal() else {
                 return;
             };
