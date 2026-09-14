@@ -19,6 +19,7 @@ use gtk4::gio::ApplicationFlags;
 use gtk4::prelude::*;
 use gtk4::{Application, CssProvider};
 
+use weto_app::lifecycle::holds_application;
 use weto_config::paths::Paths;
 use weto_config::settings::Theme as SettingsTheme;
 use weto_ui::theme::{self, Theme};
@@ -29,6 +30,10 @@ thread_local! {
     static STYLES: RefCell<Option<CssProvider>> = const { RefCell::new(None) };
     static TRAY_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static NOTIFICATIONS_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Удержание живёт, пока жив этот слот: `hold` отдаёт расписку, и на её
+    // уничтожении GApplication отпускает себя обратно. Брошенная тут же,
+    // она не удержала бы ничего.
+    static HOLD: RefCell<Option<gtk4::gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
 }
 
 /// Смена темы — подмена таблицы стилей целиком: CSS-переменных на GTK 4.14 нет,
@@ -107,7 +112,21 @@ fn main() -> gtk4::glib::ExitCode {
             // Трей поднимается один раз, при первой активации: раньше главного
             // цикла подписываться не на что.
             if !TRAY_UP.with(|up| up.replace(true)) {
-                tray::install(app, state.clone());
+                let tray_installed = tray::install(app, state.clone());
+                // Держим приложение живым после закрытия последнего окна:
+                // иначе крестик на окне — самый обычный жест в интерфейсе —
+                // снимал охрану молча. Условие удержания и цена отказа
+                // от него — в `lifecycle::holds_application`; здесь только
+                // однократность, её уже обеспечивает флаг трея.
+                //
+                // Воронку выхода это не трогает: `app.quit()` из пункта трея
+                // и из кнопки «Закрыть приложение» проходит через
+                // `connect_shutdown` и при удержании, так что цели
+                // возвращаются из паузы там же, где и раньше.
+                if holds_application(tray_installed) {
+                    let guard = app.hold();
+                    HOLD.with(|slot| *slot.borrow_mut() = Some(guard));
+                }
             }
             // Нажатие на уведомление приходит с шины, из чужого потока, а окна
             // открывают только из главного цикла — поэтому просьбу забирает
