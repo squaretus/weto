@@ -226,17 +226,23 @@ struct MaintenanceCard: View {
             return
         }
 
+        // Исход у неудачи тоже один, и это выход. Охрана к этому моменту
+        // остановлена необратимо: цикл охраны снят, а тумблера охраны
+        // в продукте нет. «Оставить открытым» оставляло в строке меню Weto,
+        // который уже ничего не охраняет и молчит об этом.
+        maintenanceError = failureText
+
         let report = NSAlert()
         report.messageText = "Удаление прошло не полностью"
-        report.informativeText = failureText
-        report.alertStyle = .critical
-        report.addButton(withTitle: "Всё равно закрыть")
-        report.addButton(withTitle: "Оставить открытым")
+        report.informativeText = """
+            \(failureText)
 
-        if report.runModal() == .alertFirstButtonReturn {
-            NSApplication.shared.terminate(nil)
-        } else {
-            maintenanceError = failureText
-        }
+            weto закроется: охрана уже остановлена, и продолжать он не может. \
+            Оставшееся удалите вручную.
+            """
+        report.alertStyle = .critical
+        report.addButton(withTitle: "Закрыть")
+        report.runModal()
+        NSApplication.shared.terminate(nil)
     }
 }

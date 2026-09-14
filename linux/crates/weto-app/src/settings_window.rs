@@ -24,8 +24,8 @@ use weto_sys::target_resolver::{
 use weto_ui::components as ui;
 use weto_ui::theme;
 
+use crate::lifecycle::window_tick;
 use crate::state::AppState;
-use weto_app::lifecycle::window_tick;
 
 /// Минимальная высота окна. Ниже неё сегменты навигации и первая карточка
 /// начинают резаться, а прокрутке нечего показывать. Это не `WINDOW_HEIGHT`:
@@ -914,15 +914,38 @@ fn standing_list(standing: &[weto_config::stopped::StoppedProcess]) -> String {
 /// считал бы систему чистой.
 fn remove_weto(error: &gtk4::Label) {
     match crate::uninstall::run() {
-        Ok(()) => {
-            if let Some(app) = gtk4::gio::Application::default() {
-                app.quit();
-            }
-        }
+        Ok(()) => quit(),
         Err(failure) => {
+            // Исход у неудачи тоже один, и это выход. Охрана к этому моменту
+            // остановлена необратимо: ворота применения закрыты, фаза сброшена,
+            // а тумблера охраны в продукте нет. Оставить окно с текстом ошибки
+            // значило бы оставить иконку в трее у приложения, которое уже
+            // ничего не охраняет и молчит об этом.
             error.set_text(&failure);
             error.set_visible(true);
+
+            let dialog = gtk4::AlertDialog::builder()
+                .message("Удаление прошло не полностью")
+                .detail(format!(
+                    "{failure}\n\nweto закроется: охрана уже остановлена, и продолжать \
+                     он не может. Оставшееся удалите вручную."
+                ))
+                .buttons(["Закрыть"])
+                .default_button(0)
+                .modal(true)
+                .build();
+            let parent = error.root().and_downcast::<gtk4::Window>();
+            dialog.choose(parent.as_ref(), gtk4::gio::Cancellable::NONE, move |_| {
+                quit()
+            });
         }
+    }
+}
+
+/// Выход одной воронкой: `connect_shutdown` вернёт цели из паузы сам.
+fn quit() {
+    if let Some(app) = gtk4::gio::Application::default() {
+        app.quit();
     }
 }
 

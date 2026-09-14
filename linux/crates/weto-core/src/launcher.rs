@@ -114,7 +114,7 @@ fn command_from_exec(exec: &str) -> Option<DesktopCommand> {
     // ровно один раз — про вложенные оболочки гадать нельзя, а неверная догадка
     // означала бы цель, совпадающую не с тем процессом.
     if SHELL_NAMES.contains(&basename(first)) {
-        if let Some(script) = shell_script(&words) {
+        if let Some(script) = shell_script(&words).filter(|script| is_simple_command(script)) {
             let inner = drop_wrappers(split_words(script));
             if !inner.is_empty() {
                 return verdict(&inner);
@@ -136,6 +136,19 @@ fn shell_script(words: &[String]) -> Option<&String> {
         .get(1)
         .filter(|flag| is_command_flag(flag))
         .and(words.get(2))
+}
+
+/// Простая ли команда в строке-скрипте: одна программа с аргументами и ничего больше.
+///
+/// Первое слово составной команды программой не является: у `sh -c "sleep 1; exec /opt/app/app"`
+/// им окажется `sleep`, у `sh -c "cd /opt/app && exec ./app"` — `cd`. Под охрану попала бы
+/// чужая программа, а настоящая осталась бы без неё вовсе; для VPN-приложения это ещё и вечное
+/// «не запущено», то есть завершение всех целей. Разбирать такие строки weto не берётся —
+/// ответ `Indirect`, а путь спросят у пользователя.
+fn is_simple_command(script: &str) -> bool {
+    // Подстановки и перенаправления сюда же: что окажется процессом, из текста
+    // ярлыка уже не следует.
+    !script.contains([';', '&', '|', '<', '>', '(', ')', '`', '$', '\n'])
 }
 
 /// Флаг оболочки, за которым идёт строка-скрипт.
@@ -539,6 +552,45 @@ Exec=claude --new-window
             sibling_binary_from_launcher(script).as_deref(),
             Some("ChatGPT")
         );
+    }
+
+    /// Первое слово составной команды — не программа. `sh -c "sleep 1; exec /opt/app/app"`
+    /// дал бы цель `sleep`, а `sh -c "cd /opt/app && exec ./app"` — `cd`: под охраной
+    /// оказалась бы чужая программа, а выбранная осталась бы без защиты. У VPN-приложения
+    /// цена выше — оно считалось бы незапущенным всегда, то есть цели завершались бы сразу.
+    #[test]
+    fn a_compound_script_is_not_a_command() {
+        for exec in [
+            "sh -c \"sleep 1; exec /opt/app/app\"",
+            "sh -c \"cd /opt/app && exec ./app\"",
+            "bash -lc \"/opt/app/app | tee /tmp/log\"",
+            "sh -c \"exec $APP\"",
+        ] {
+            let entry = format!("[Desktop Entry]\nExec={exec}\n");
+            assert_eq!(
+                command_from_desktop_entry(&entry),
+                Some(DesktopCommand::Indirect {
+                    launcher: basename_of(exec).to_string()
+                }),
+                "{exec}"
+            );
+        }
+    }
+
+    /// Простая команда внутри оболочки по-прежнему разбирается: отказ обязан касаться
+    /// составных строк, а не всего подряд.
+    #[test]
+    fn a_simple_script_still_resolves() {
+        let entry = "[Desktop Entry]\nExec=sh -c \"exec /opt/app/app --flag\"\n";
+        assert_eq!(
+            command_from_desktop_entry(entry),
+            Some(DesktopCommand::Command("/opt/app/app".to_string()))
+        );
+    }
+
+    /// Имя оболочки из строки `Exec` — для ожидания в тесте выше.
+    fn basename_of(exec: &str) -> &str {
+        exec.split_whitespace().next().unwrap_or(exec)
     }
 
     #[test]

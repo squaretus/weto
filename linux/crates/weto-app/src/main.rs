@@ -5,52 +5,25 @@
 //! трея — он обязателен, потому что окружение может быть без трея вовсе
 //! (ванильный GNOME без расширений).
 
-mod settings_window;
-mod state;
-mod status_window;
-mod tray;
-mod uninstall;
-mod update;
-mod update_window;
-
 use std::cell::RefCell;
 
 use gtk4::gio::ApplicationFlags;
 use gtk4::prelude::*;
-use gtk4::{Application, CssProvider};
+use gtk4::Application;
 
 use weto_app::lifecycle::hold_if_tray;
+use weto_app::{apply_theme, state, status_window, tray, update};
 use weto_config::paths::Paths;
-use weto_config::settings::Theme as SettingsTheme;
-use weto_ui::theme::{self, Theme};
 
 const APP_ID: &str = "com.weto.app";
 
 thread_local! {
-    static STYLES: RefCell<Option<CssProvider>> = const { RefCell::new(None) };
     static TRAY_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static NOTIFICATIONS_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     // Удержание живёт, пока жив этот слот: `hold` отдаёт расписку, и на её
     // уничтожении GApplication отпускает себя обратно. Брошенная тут же,
     // она не удержала бы ничего.
     static HOLD: RefCell<Option<gtk4::gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
-}
-
-/// Смена темы — подмена таблицы стилей целиком: CSS-переменных на GTK 4.14 нет,
-/// поэтому цвета вкомпилированы в две отдельные таблицы.
-pub fn apply_theme(theme: SettingsTheme) {
-    let theme = match theme {
-        SettingsTheme::Dark => Theme::Dark,
-        SettingsTheme::Light => Theme::Light,
-    };
-    STYLES.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let provider = match slot.as_ref() {
-            Some(previous) => theme::switch_theme(previous, theme),
-            None => theme::install_styles(theme),
-        };
-        *slot = Some(provider);
-    });
 }
 
 fn main() -> gtk4::glib::ExitCode {

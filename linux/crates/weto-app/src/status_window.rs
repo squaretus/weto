@@ -21,8 +21,8 @@ use weto_core::presentation::{self, GuardStatusColor};
 use weto_ui::components as ui;
 use weto_ui::theme;
 
+use crate::lifecycle::window_tick;
 use crate::state::AppState;
-use weto_app::lifecycle::window_tick;
 
 pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     let window = ApplicationWindow::builder()

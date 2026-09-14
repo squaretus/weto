@@ -1,33 +1,36 @@
-//! Окно настроек освобождается после закрытия.
+//! Настоящее окно настроек освобождается после закрытия.
 //!
 //! Отдельным файлом, потому что отдельным процессом: GTK инициализируется один
 //! раз и ровно из одного потока, а раннер пускает тесты параллельно. Рядом
 //! с другим GTK-тестом этот упал бы не по делу — «Attempted to initialize GTK
 //! from two different threads».
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gtk4::glib::MainContext;
 use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow, Button};
+use gtk4::Application;
+
+use weto_app::settings_window;
+use weto_app::state::AppState;
+use weto_config::paths::Paths;
 
 /// Сколько крутить цикл после закрытия. С запасом: освобождение случается
-/// не в момент `destroy`, а когда упадёт последняя ссылка и отработает очередь.
+/// не в момент закрытия, а когда упадёт последняя ссылка и отработает очередь.
 const WATCH: Duration = Duration::from_millis(200);
 
 /// Что держит этот тест: приложение живёт в трее и переживает свои окна,
-/// а окно настроек пересоздаётся при каждом открытии. Обработчик виджета,
+/// а окно настроек строится заново при каждом открытии. Обработчик виджета,
 /// захвативший окно сильной ссылкой, замыкает цикл окно → кнопка → замыкание
 /// → окно; сборщика циклов у GObject нет, `dispose` не наступает никогда,
 /// и всё дерево виджетов оставалось в памяти после каждого закрытия настроек.
 ///
-/// Форма здесь — форма настоящего окна настроек: у него четыре обработчика,
-/// которым нужно окно (родитель диалога выбора цели, выбор VPN-приложения,
-/// ручной ввод и выгрузка журнала). Утверждение одно: после закрытия окна
-/// слабая ссылка на него обязана перестать подниматься. Замените
-/// `downgrade()` на `clone()` — тест обязан упасть.
+/// Окно здесь — настоящее, построенное тем же кодом, что и в продукте: своя
+/// форма проверяла бы правило вообще, а не наше окно, и вернувшиеся в него
+/// сильные ссылки прошли бы мимо теста.
 #[test]
-fn a_closed_window_is_released() {
+fn the_settings_window_is_released_after_closing() {
     gtk4::init().expect("тесту нужен дисплей: Xvfb не поднят");
 
     let application = Application::builder()
@@ -41,39 +44,33 @@ fn a_closed_window_is_released() {
         .register(gtk4::gio::Cancellable::NONE)
         .expect("приложение не зарегистрировалось");
 
+    let home = std::env::temp_dir().join(format!("weto-window-release-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("временный дом не создался");
+    let state: Arc<AppState> = AppState::new(Paths::rooted(home.clone()));
+
     let weak = {
-        let window = ApplicationWindow::new(&application);
-        let button = Button::new();
-        window.set_child(Some(&button));
+        settings_window::present(&application, state);
+        let window = application
+            .active_window()
+            .expect("окно настроек не открылось");
+        let weak = window.downgrade();
 
-        {
-            // Так теперь устроены обработчики окна настроек: окно захвачено
-            // слабо и поднимается в момент нажатия. Окна уже нет — обработчику
-            // нечего делать, и он честно ничего не делает.
-            let window = window.downgrade();
-            button.connect_clicked(move |_| {
-                let Some(window) = window.upgrade() else {
-                    return;
-                };
-                let _ = window.title();
-            });
-        }
-
-        window.present();
+        // Дать окну построиться целиком: карточки заводят свои такты, и часть
+        // работы доезжает следующим оборотом цикла.
         pump(WATCH);
 
-        let weak = window.downgrade();
-        // Так закрывает окно пользователь: `close-request` без обработчика
-        // ведёт у GTK ровно сюда.
-        window.destroy();
+        // Так его закрывает пользователь: крестик приходит сюда же.
+        window.close();
         weak
     };
 
     pump(WATCH);
 
+    let _ = std::fs::remove_dir_all(&home);
+
     assert!(
         weak.upgrade().is_none(),
-        "закрытое окно осталось в памяти: каждое открытие настроек \
+        "закрытое окно настроек осталось в памяти: каждое открытие настроек \
          оставляет дерево виджетов навсегда"
     );
 }
