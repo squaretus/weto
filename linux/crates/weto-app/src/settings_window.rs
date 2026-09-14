@@ -25,6 +25,7 @@ use weto_ui::components as ui;
 use weto_ui::theme;
 
 use crate::state::AppState;
+use weto_app::lifecycle::window_tick;
 
 /// Минимальная высота окна. Ниже неё сегменты навигации и первая карточка
 /// начинают резаться, а прокрутке нечего показывать. Это не `WINDOW_HEIGHT`:
@@ -123,7 +124,7 @@ fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWi
     ));
     page.append(&appearance_card(state.clone()));
     page.append(&maintenance_card(state.clone()));
-    page.append(&footer(state.clone()));
+    page.append(&footer(window, state.clone()));
 
     scroll(&page)
 }
@@ -308,7 +309,7 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // открытых настройках. Перерисовка раз в секунду — дешевле, чем рассылка.
     {
         let redraw = redraw.clone();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
+        window_tick(window, std::time::Duration::from_millis(1000), move || {
             redraw();
             gtk4::glib::ControlFlow::Continue
         });
@@ -394,7 +395,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         };
         show();
 
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        window_tick(window, std::time::Duration::from_millis(500), move || {
             show();
             gtk4::glib::ControlFlow::Continue
         });
@@ -1023,7 +1024,7 @@ fn ask_for_program_path(
 
 // --- Подвал ---------------------------------------------------------------
 
-fn footer(state: Arc<AppState>) -> GtkBox {
+fn footer(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let footer = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
     footer.set_margin_top(ui::SPACE2);
 
@@ -1064,7 +1065,7 @@ fn footer(state: Arc<AppState>) -> GtkBox {
     // находка есть: тогда она открывает окно обновления, а не проверяет заново.
     {
         let check = check.clone();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        window_tick(window, std::time::Duration::from_millis(500), move || {
             let updates = crate::update::shared();
             let pending = updates.as_ref().and_then(|u| u.pending());
             check.set_sensitive(true);
@@ -1168,7 +1169,7 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     }
 
     page.append(&card);
-    page.append(&footer(state));
+    page.append(&footer(window, state));
     scroll(&page)
 }
 

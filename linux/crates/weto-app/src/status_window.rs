@@ -10,9 +10,7 @@
 //! показания гео, баннер обновления и живые цели с бейджем паузы. Карточек
 //! и крупных кнопок в попапе нет — управление живёт в окне настроек.
 
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -24,6 +22,7 @@ use weto_ui::components as ui;
 use weto_ui::theme;
 
 use crate::state::AppState;
+use weto_app::lifecycle::window_tick;
 
 pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     let window = ApplicationWindow::builder()
@@ -175,19 +174,9 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
     // на бейджах паузы: секундного таймера внутри значка нет, `now` берётся
     // здесь же и одним значением на весь попап.
     //
-    // Такт снимается вместе с окном. Раньше его некому было пережить —
-    // закрытие последнего окна завершало процесс, — а теперь приложение живёт
-    // в трее, окно открывается заново, и вечный такт над закрытым окном
-    // копился бы с каждым открытием.
-    let alive = Rc::new(Cell::new(true));
-    {
-        let alive = alive.clone();
-        window.connect_destroy(move |_| alive.set(false));
-    }
-    gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-        if !alive.get() {
-            return gtk4::glib::ControlFlow::Break;
-        }
+    // Такт снимается вместе с окном — общим помощником, а не руками: правило
+    // одно на все окна, и второй его копии быть не должно (`lifecycle`).
+    window_tick(&window, std::time::Duration::from_millis(500), move || {
         refresh();
         gtk4::glib::ControlFlow::Continue
     });
