@@ -10,7 +10,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use weto_sys::target_resolver::resolve_launch_target;
+use weto_sys::target_resolver::{resolve_launch_entry, resolve_launch_target, Resolution};
 
 /// Пакет из четырёх звеньев. Возвращает корень раскладки и путь настоящего
 /// бинарника — того, что покажет `/proc/<pid>/exe`.
@@ -117,4 +117,63 @@ fn a_missing_target_is_kept_verbatim() {
         resolve_launch_target("/opt/такого/нет/never-installed"),
         "/opt/такого/нет/never-installed"
     );
+}
+
+/// Ярлык игры Steam: до настоящей программы из него не добраться ничем —
+/// процесс заводит сам Steam, и какой это будет файл, в тексте не написано.
+/// Догадка стоила бы дорого: целью стал бы `/usr/bin/steam`, и падение VPN
+/// закрывало бы Steam целиком со всеми играми. Граница обязана ответить
+/// «нужен путь», а не путём.
+#[test]
+fn a_steam_entry_asks_for_the_program_path() {
+    let root = temp_dir("steam");
+    let entry = root.join("game.desktop");
+    fs::write(
+        &entry,
+        "[Desktop Entry]\nName=Factorio\nExec=steam steam://rungameid/367520\nType=Application\n",
+    )
+    .unwrap();
+
+    let resolution = resolve_launch_entry(&entry.to_string_lossy());
+
+    assert_eq!(
+        resolution,
+        Resolution::NeedsPath {
+            launcher: "steam".to_string()
+        }
+    );
+    // Строковый фасад в этом случае оставляет запись как есть — как и всякую
+    // другую нерешаемую цель: выдумывать за пользователя путь тут нечем.
+    assert_eq!(
+        resolve_launch_target(&entry.to_string_lossy()),
+        entry.to_string_lossy()
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Обычный ярлык «нужен путь» не просит: программа названа прямо, и цепочка
+/// доходит до файла на диске. Иначе запрос пути выскакивал бы на каждом
+/// добавлении и обесценивал бы сам себя.
+#[test]
+fn an_ordinary_entry_resolves_without_asking() {
+    let root = temp_dir("ordinary");
+    let entry = root.join("shell.desktop");
+    fs::write(
+        &entry,
+        "[Desktop Entry]\nName=Shell\nExec=/bin/sh --login\nType=Application\n",
+    )
+    .unwrap();
+
+    let resolution = resolve_launch_entry(&entry.to_string_lossy());
+
+    assert_eq!(
+        resolution,
+        Resolution::Resolved(
+            fs::canonicalize("/bin/sh")
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+    let _ = fs::remove_dir_all(&root);
 }
