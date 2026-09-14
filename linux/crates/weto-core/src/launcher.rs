@@ -13,6 +13,10 @@
 //! Здесь только разбор текста: файловой системы ядро не касается.
 
 /// Оболочки, за `-c` у которых прячется настоящая команда.
+///
+/// Развернуть её удаётся не всегда, и тогда оболочка отвечает `Indirect`
+/// наравне со Steam: раз скрипт при ней есть, целью она не бывает. Иначе
+/// под охрану попадал бы `/bin/bash` — то есть половина машины разом.
 const SHELL_NAMES: [&str; 3] = ["sh", "bash", "zsh"];
 
 /// Запускаторы, которые заводят программу у себя: что окажется процессом,
@@ -24,7 +28,8 @@ const FOREIGN_LAUNCHERS: [&str; 2] = ["steam", "flatpak"];
 pub enum DesktopCommand {
     /// Команда или путь — цепочку можно продолжать.
     Command(String),
-    /// Запускает чужой запускатор: что именно запустится, из текста не следует.
+    /// Запускает что-то за себя: чужой запускатор или неразвёрнутая оболочка.
+    /// Что именно запустится, из текста не следует.
     Indirect { launcher: String },
 }
 
@@ -102,51 +107,102 @@ pub fn name_from_desktop_entry(text: &str, locale: Option<&str>) -> Option<Strin
 /// Порядок шагов важен: `env` может стоять перед `sh`, а `sh -c` — перед
 /// `flatpak`.
 fn command_from_exec(exec: &str) -> Option<DesktopCommand> {
-    let words = drop_environment(split_words(exec));
+    let words = drop_wrappers(split_words(exec));
     let first = words.first()?;
 
     // `sh -c "…"`: настоящая команда спрятана в строку-аргумент. Разворачиваем
     // ровно один раз — про вложенные оболочки гадать нельзя, а неверная догадка
     // означала бы цель, совпадающую не с тем процессом.
-    if SHELL_NAMES.contains(&basename(first)) && words.get(1).map(String::as_str) == Some("-c") {
-        if let Some(script) = words.get(2) {
-            if let Some(inner) = drop_environment(split_words(script)).first() {
-                return Some(verdict(inner));
+    if SHELL_NAMES.contains(&basename(first)) {
+        if let Some(script) = shell_script(&words) {
+            let inner = drop_wrappers(split_words(script));
+            if !inner.is_empty() {
+                return verdict(&inner);
             }
         }
     }
 
-    Some(verdict(first))
+    // Развернуть не вышло — и `verdict` отвечает за оболочку сам.
+    verdict(&words)
 }
 
-/// Команда это или чужой запускатор.
-fn verdict(word: &str) -> DesktopCommand {
-    let name = basename(word);
-    if FOREIGN_LAUNCHERS.contains(&name) {
-        DesktopCommand::Indirect {
+/// Строка-скрипт при оболочке, если форма разбирается честно.
+///
+/// Флаг ищется ровно вторым словом: `bash --norc -c "…"` разбору не поддаётся,
+/// и гадать про такую форму нельзя — ответом станет `Indirect`, а путь спросят
+/// у пользователя.
+fn shell_script(words: &[String]) -> Option<&String> {
+    words
+        .get(1)
+        .filter(|flag| is_command_flag(flag))
+        .and(words.get(2))
+}
+
+/// Флаг оболочки, за которым идёт строка-скрипт.
+///
+/// Это не только `-c`: односимвольные флаги оболочка склеивает в кластер,
+/// и `bash -lc "app"`, `sh -ec "app"`, `bash -lic "app"` встречаются в ярлыках
+/// не реже. Сравнение с одним `-c` пропускало такую форму мимо разбора,
+/// и целью становился сам `/bin/bash`.
+fn is_command_flag(word: &str) -> bool {
+    let Some(letters) = word.strip_prefix('-') else {
+        return false;
+    };
+    // Длинный `--login` кластером не является: у него буквы не значат ничего
+    // по отдельности, — и второй дефис сюда как раз не проходит.
+    !letters.is_empty() && letters.chars().all(|c| c.is_ascii_alphabetic()) && letters.contains('c')
+}
+
+/// Команда это или что-то, что заводит программу за себя.
+///
+/// Оболочка отвечает по тому, что при ней написано. Голая (`Exec=/bin/sh
+/// --login` у ярлыка терминала) — обычная цель: программа названа прямо,
+/// и процессом окажется она сама. А вот оболочка, при которой стоит флаг
+/// со скриптом, целью не бывает никогда: настоящая команда спрятана в строку,
+/// и если вынуть её не вышло, ответ — `Indirect`. Иначе под охрану попадал бы
+/// `/bin/bash` и с ним половина машины.
+fn verdict(words: &[String]) -> Option<DesktopCommand> {
+    let first = words.first()?;
+    let name = basename(first);
+
+    let hides_a_script =
+        SHELL_NAMES.contains(&name) && words[1..].iter().any(|word| is_command_flag(word));
+    if FOREIGN_LAUNCHERS.contains(&name) || hides_a_script {
+        return Some(DesktopCommand::Indirect {
             launcher: name.to_string(),
-        }
-    } else {
-        DesktopCommand::Command(word.to_string())
+        });
     }
+    Some(DesktopCommand::Command(first.to_string()))
 }
 
-/// Отбрасывает ведущий `env` вместе с назначениями переменных.
+/// Отбрасывает ведущие обёртки: `exec` оболочки и `env` с назначениями
+/// переменных.
 ///
 /// Без этого шага целью становился бы `/usr/bin/env` — то есть половина
-/// системы разом.
-fn drop_environment(words: Vec<String>) -> Vec<String> {
-    let Some(first) = words.first() else {
-        return words;
-    };
-    if basename(first) != "env" {
+/// системы разом, — а у частой формы `sh -c "exec /opt/app/app"` целью
+/// становилось бы слово `exec`: такой команды на машине нет, и цель молча
+/// не совпадала бы ни с одним процессом.
+fn drop_wrappers(mut words: Vec<String>) -> Vec<String> {
+    loop {
+        let Some(first) = words.first() else {
+            return words;
+        };
+        // `exec` — встроенная команда оболочки, путём она не бывает никогда,
+        // поэтому сравнивается слово целиком, а не его последний сегмент.
+        if first == "exec" {
+            words.remove(0);
+            continue;
+        }
+        if basename(first) == "env" {
+            words = words
+                .into_iter()
+                .skip(1)
+                .skip_while(|word| is_assignment(word))
+                .collect();
+            continue;
+        }
         return words;
     }
-    words
-        .into_iter()
-        .skip(1)
-        .skip_while(|word| is_assignment(word))
-        .collect()
 }
 
 /// `КЛЮЧ=значение`, а не путь и не флаг.
@@ -314,6 +370,83 @@ Exec=/opt/app/app --new-window
         assert_eq!(
             command_from_desktop_entry(shell_entry),
             Some(DesktopCommand::Command("/opt/app/app".to_string()))
+        );
+    }
+
+    /// Односимвольные флаги оболочка склеивает, и `-lc` с `-ec` в ярлыках
+    /// не экзотика. Сравнение с одним `-c` такую строку мимо разбора пропускало,
+    /// и целью становился `/bin/bash` — то есть половина машины разом, и без
+    /// единого предупреждения.
+    #[test]
+    fn a_cluster_of_shell_flags_still_hides_the_command() {
+        for exec in [
+            "bash -lc \"/opt/app/app --flag\"",
+            "sh -ec \"/opt/app/app --flag\"",
+            "bash -lic \"/opt/app/app --flag\"",
+            "/bin/zsh -c \"/opt/app/app --flag\"",
+        ] {
+            assert_eq!(
+                command_from_desktop_entry(&format!("[Desktop Entry]\nExec={exec}\n")),
+                Some(DesktopCommand::Command("/opt/app/app".to_string())),
+                "разбор {exec}"
+            );
+        }
+    }
+
+    /// `sh -c "exec /opt/app/app"` — самая частая форма из всех: `exec` там стоит
+    /// ровно затем, чтобы процессом осталась программа, а не оболочка. Целью
+    /// становилось слово `exec` — команды с таким именем на машине нет,
+    /// и цель молча не совпадала ни с чем.
+    #[test]
+    fn an_exec_inside_the_script_is_not_the_target() {
+        let entry = "[Desktop Entry]\nExec=sh -c \"exec /opt/app/app --flag\"\n";
+        assert_eq!(
+            command_from_desktop_entry(entry),
+            Some(DesktopCommand::Command("/opt/app/app".to_string()))
+        );
+
+        // `exec` и `env` складываются в любом порядке — обёртки снимаются
+        // до последней.
+        let with_env = "[Desktop Entry]\nExec=sh -c \"exec env LANG=C /opt/app/app\"\n";
+        assert_eq!(
+            command_from_desktop_entry(with_env),
+            Some(DesktopCommand::Command("/opt/app/app".to_string()))
+        );
+    }
+
+    /// Форму, которую честно разобрать нечем, гадать нельзя: оболочка отвечает
+    /// «не знаю» наравне со Steam, и путь спрашивают у пользователя. Ответ
+    /// `Command("/bin/bash")` означал бы охрану половины машины.
+    #[test]
+    fn an_unparsed_shell_refuses_to_become_the_target() {
+        for (exec, launcher) in [
+            // Флаг не вторым словом: какое из оставшихся слов строка-скрипт,
+            // из текста не следует.
+            ("bash --norc -c \"/opt/app/app\"", "bash"),
+            // Флаг есть, строки при нём нет.
+            ("/bin/zsh -c", "zsh"),
+            // Вложенная оболочка: разворачиваем ровно один раз.
+            ("sh -c \"bash -c /opt/app/app\"", "bash"),
+        ] {
+            assert_eq!(
+                command_from_desktop_entry(&format!("[Desktop Entry]\nExec={exec}\n")),
+                Some(DesktopCommand::Indirect {
+                    launcher: launcher.to_string()
+                }),
+                "разбор {exec}"
+            );
+        }
+    }
+
+    /// Обратная сторона того же правила: оболочка без флага со скриптом названа
+    /// прямо и целью быть вправе — ярлык терминала выглядит ровно так. Ответить
+    /// на него «нужен путь» значило бы спрашивать путь там, где он уже написан.
+    #[test]
+    fn a_bare_shell_is_a_target_like_any_other() {
+        let entry = "[Desktop Entry]\nName=Shell\nExec=/bin/sh --login\n";
+        assert_eq!(
+            command_from_desktop_entry(entry),
+            Some(DesktopCommand::Command("/bin/sh".to_string()))
         );
     }
 
