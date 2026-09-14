@@ -56,7 +56,7 @@ use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::secret_store::SecretStoring;
 
-use crate::enforcer::{ProcessEnforcer, Scan};
+use crate::enforcer::{ProcessEnforcer, ResumeOutcome, Scan};
 
 /// Окно коалесценции: несколько событий сети подряд не должны порождать
 /// несколько запросов. У подтверждающего сервиса лимит 60 запросов в минуту.
@@ -1288,29 +1288,9 @@ impl GuardController {
         }
         *gate = true;
         let settings = self.settings.settings();
-        // Обход тот же самый, что уедет показаниям журнала: стоящими записи
-        // показывает снимок, снятый ДО сигнала.
-        let scan = self.enforcer.scan(&settings.target_rules());
-        let outcome = self.enforcer.resume(Some(&scan), &HashSet::new());
-        let refused: Vec<i32> = outcome
-            .results
-            .iter()
-            .filter(|result| !result.is_delivered())
-            .map(|result| result.pid)
-            .collect();
+        let (scan, outcome) = self.resume_from_ledger(&settings);
         let standing = standing_pids(&outcome.unresolved);
-
-        let text = if outcome.is_complete() {
-            "возобновлено: охрана остановлена".to_string()
-        } else if !refused.is_empty() {
-            Self::unresolved_episode_text(&standing, &refused)
-        } else {
-            format!(
-                "не подтверждено: сигнал продолжения отправлен процессам {standing:?}, \
-                 а охрана остановлена — результат наблюдать нечем, weto проверит их \
-                 при следующем запуске"
-            )
-        };
+        let text = Self::shutdown_episode_text(&outcome, &standing);
         self.resolve_pause_episode(&settings, &text, None, &scan);
 
         let mut inner = self.inner.lock().expect("состояние охраны");
@@ -1322,6 +1302,65 @@ impl GuardController {
         inner.snapshot.phase = GuardPhase::Disabled;
         inner.snapshot.pause_deadline = None;
         inner.snapshot.paused = inner.pause.paused.clone();
+    }
+
+    /// Обход и продолжение всех записей учёта — общая дорога у штатного выхода
+    /// и у подтверждения возобновления.
+    ///
+    /// Обход тот же самый, что уедет показаниям журнала: стоящими записи
+    /// показывает снимок, снятый ДО сигнала. `skipping` пуст намеренно —
+    /// последний сигнал получают и те записи, которым такт досылать перестал
+    /// (`RESUME_RETRY_LIMIT`): обязательство исполняют завершение и выход.
+    fn resume_from_ledger(&self, settings: &Settings) -> (Scan, ResumeOutcome) {
+        let scan = self.enforcer.scan(&settings.target_rules());
+        let outcome = self.enforcer.resume(Some(&scan), &HashSet::new());
+        (scan, outcome)
+    }
+
+    /// Чем кончился последний SIGCONT штатного выхода. Журнал говорит ровно то,
+    /// что установлено: наблюдать результат нечем, и «не возобновлено» было бы
+    /// такой же неправдой, как «возобновлено».
+    fn shutdown_episode_text(outcome: &ResumeOutcome, standing: &[i32]) -> String {
+        let refused: Vec<i32> = outcome
+            .results
+            .iter()
+            .filter(|result| !result.is_delivered())
+            .map(|result| result.pid)
+            .collect();
+
+        if outcome.is_complete() {
+            "возобновлено: охрана остановлена".to_string()
+        } else if !refused.is_empty() {
+            Self::unresolved_episode_text(standing, &refused)
+        } else {
+            format!(
+                "не подтверждено: сигнал продолжения отправлен процессам {standing:?}, \
+                 а охрана остановлена — результат наблюдать нечем, weto проверит их \
+                 при следующем запуске"
+            )
+        }
+    }
+
+    /// Досылает SIGCONT оставшимся записям учёта и возвращает тех, кого обход
+    /// всё ещё показывает стоящими.
+    ///
+    /// Зовётся после `shutdown()` — и только удалением. Всюду ещё обязательство,
+    /// которое выход исполнить не смог, достаётся следующему запуску: учёт цел,
+    /// и `recover_stopped()` разберёт его как обычно. Удаление — единственный
+    /// выход, после которого следующего запуска не будет вовсе: вместе
+    /// с приложением исчезает и учёт, и процесс, не поднявшийся с последнего
+    /// сигнала, остаётся замороженным навсегда. Поэтому здесь обязательство
+    /// исполняет наблюдение: сигнал уходит снова, пока ядро не покажет процесс
+    /// идущим, а не поднявшихся вызывающий обязан назвать пользователю.
+    ///
+    /// Ворота применения не снимает — такту после выхода делать нечего, — и исход
+    /// эпизода повторно не переписывает: одной записи от `shutdown()` довольно,
+    /// а второй она превратилась бы из «не подтверждено» в другой ответ про то же
+    /// самое стояние.
+    pub fn confirm_resumed(&self) -> Vec<weto_config::stopped::StoppedProcess> {
+        let settings = self.settings.settings();
+        let (_, outcome) = self.resume_from_ledger(&settings);
+        outcome.unresolved
     }
 
     // --- показания ----------------------------------------------------------
