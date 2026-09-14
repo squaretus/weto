@@ -20,7 +20,10 @@ this layer decides *when* to ask and *what to do* with the answer.
   print `suspended (tty input)` to the user once a second) — it stays on the books, and
   `terminate`/`stop` still signal it. `stop()` cannot observe anything after its own SIGCONT,
   so its outcome is «не подтверждено: … weto проверит их при следующем запуске» — neither the
-  optimistic nor the pessimistic lie. A pill whose target worked between episodes and was stopped
+  optimistic nor the pessimistic lie. `confirmResumed()` is the one exception to that promise and
+  belongs to uninstall alone: there is no next launch to keep it, so the obligation is discharged by
+  observation instead (see invariants). Both it and `stop()` go through `resumeFromLedger()` with an
+  empty `skipping`, so entries the tick gave up on get that last signal too. A pill whose target worked between episodes and was stopped
   again adopts the new moment — that standing did start now, and `pause` only reports as `fresh`
   what it actually signalled, so a target that never came back up keeps its original `since`,
   which is the truth about it. `PausedProcess.since` records when weto stopped that pid; the
@@ -93,8 +96,11 @@ this layer decides *when* to ask and *what to do* with the answer.
   `GuardNotifyingTests`, `CheckLogStoreTests` cover the additions above
 
 ## Entry points
-- `AppCoordinator.init()` → wires real system adapters; `start()`, `stopForTermination()`
+- `AppCoordinator.init()` → wires real system adapters; `start()`, `stopForTermination()`,
+  `confirmResumed() → [StoppedProcess]`
 - `GuardVM.start()` / `stop()` / `handle(_ trigger: GuardTrigger)` / `awaitPendingProbe() async`
+- `GuardVM.confirmResumed() → [StoppedProcess]` — re-sends `SIGCONT` to what the ledger still holds
+  and returns whoever the scan still shows standing. Called after `stop()`, by uninstall only
 - `GuardVM.recheckNow()` — user-driven probe from the popup; `isProbing`, `lastReport` back it
 - `GuardVM.refreshVPNCandidates()`, `refreshRunningTargets()`, `runningProcessCount(forTarget:)`,
   `displayName(forTarget:)`, `resolvedDescription(forTarget:)`, `unloadCompletely() → Result<Void, LaunchAgentError>`
@@ -334,6 +340,14 @@ this layer decides *when* to ask and *what to do* with the answer.
   checks one answers "what did weto do at startup", the kill journal "why was this process
   standing" — and the ledger cannot answer the latter, it drops an entry the moment the process
   is observed running.
+- **Uninstall is the only exit where the obligation cannot be handed on, so it is observed.**
+  Every other exit leaves `stopped.json` on disk for `resumeOrphans` to read next launch;
+  uninstall deletes the ledger together with the app, and a process that never came back up from
+  the last `SIGCONT` would stay frozen with nobody left to thaw it. `GuardVM.confirmResumed()`
+  therefore re-signals and re-reads the scan, and the caller (`MaintenanceCard`) repeats it up to
+  six times 300 ms apart before naming the survivors to the user. It deliberately does **not**
+  refine the episode a second time: `stop()`'s «не подтверждено» is the journal's record of that
+  standing, and a second write would turn it into a different answer about the same event.
 - **Two notifications, two purposes, one delegate.** `notifyTerminated` is the pre-existing "your
   targets died" banner; `notifyBackgrounded` exists because a paused terminal target that loses its
   foreground job otherwise just vanishes from its terminal with no explanation — the notification

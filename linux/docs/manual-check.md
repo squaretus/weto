@@ -4,7 +4,7 @@ Netlink и таблицу маршрутов подделать нечем, по
 руками на настоящем ядре. Автоматика покрывает всё остальное:
 
 ```bash
-linux/scripts/dev.sh cargo test --workspace          # 390 тестов
+linux/scripts/dev.sh cargo test --workspace          # 397 тестов
 linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh
 ```
 

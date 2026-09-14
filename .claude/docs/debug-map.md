@@ -67,6 +67,12 @@ nothing ever un-froze them because the process that owns the countdown is gone.
   `standingProcessesRemain` entry with the same trigger and shows up as a badge with the `fg`
   hint in the popup — if a target is stopped after a relaunch and neither is there, the seeding
   in `GuardVM.surfaceRecovered` is the suspect.
+- If weto was **uninstalled** while targets stood, nothing will ever resume them: the ledger was
+  deleted with the app. That path is supposed to prevent exactly this — `GuardVM.confirmResumed()`
+  / `GuardController::confirm_resumed` re-signal and re-read before the files go, and anything
+  still standing is put in front of the user. A frozen target after an uninstall therefore means
+  either «Удалить всё равно» was chosen (only `fg` in its own terminal will bring it back) or that
+  confirmation step was skipped — see `MaintenanceCard.swift` / `settings_window.rs`.
 - A target stuck stopped *while weto is running* is a different bug: check `GuardVM.phase.action`
   — if it is not `.pause`, `applyCurrentAction`/`pauseTargets` should not be touching it at all, and
   the suspect is `ProcessEnforcer.pause`'s "already stopped" de-dup (`StoppedIdentity`, keyed on
@@ -78,6 +84,24 @@ nothing ever un-froze them because the process that owns the countdown is gone.
 The process sweep is the first suspect, not the policy: `ProcessRegistry.allProcesses` must return
 every pid the kernel has (`launchd` is the cheap check), and only then does `ProcessMatcher`
 matter. See `bugs/a-quarter-of-the-process-list.md`.
+
+## If a Linux target never matches, or is signed with a version number
+
+The chain from a `.desktop` entry to the process is where this goes wrong, not the matcher.
+`weto_core::launcher::command_from_desktop_entry` on the entry's `Exec` line is the first check: a
+leading `env` or `sh -c` must have been dropped, and `steam`/`flatpak` must come back as
+`Indirect` — a target resolved to `/usr/bin/steam` or `/usr/bin/env` matches far too much, one
+that silently resolved to the launcher matches nothing at all. `NeedsPath` reaching the settings
+window is not a failure: it is the second dialog asking the user for the program file. A target
+labelled «2.1.241» instead of its application name means the name did not come from `Name=` —
+`target_resolver::display_name_for` and the locale it derives from `LC_MESSAGES`/`LANG`.
+
+## If Linux weto does not come back after a reboot, or survives its own uninstall
+
+Both are the same class: something named the binary by a path that is not stable. The only stable
+one is `~/.local/bin/weto` (`Paths::launcher`) — `bugs/launch-path-is-the-symlink-not-the-version.md`.
+Check `~/.config/autostart/weto.desktop`'s `Exec=` (a versioned path there is the bug) and the kill
+loop in `linux/scripts/uninstall.sh` (it must match on the process name plus `/proc/<pid>/exe`).
 
 Past failures worth reading before guessing: `bugs/tunnel-without-network-service.md`
 (a healthy tunnel reported as bypassed, and third-party 429s killing targets),

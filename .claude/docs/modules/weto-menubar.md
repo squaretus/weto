@@ -67,7 +67,9 @@ parsing, validation and persistence happen in the stores.
   (Keychain write), `eventLog.clear()`
 - `MaintenanceCard` writes/removes `~/Library/LaunchAgents/com.weto.app.plist` via
   `launchAgent.enable()`/`disable()`, runs `maintenance.closeApp()` / `uninstall()` and
-  calls `NSApplication.shared.terminate` on success
+  calls `NSApplication.shared.terminate` on success. Uninstall first awaits
+  `coordinator.confirmResumed()` in a `Task` (up to `resumeConfirmations` = 6 polls,
+  `resumeConfirmationStep` = 300 ms) — re-sent `SIGCONT`s plus a re-read of the scan
 - `SettingsFooter` / status popup banner trigger `update.primaryAction()` and
   `update.installUpdate()` — network check and privileged install via the helper daemon
 - `SettingsFooter` opens `Constants.githubRepoURL` in the default browser
@@ -109,6 +111,15 @@ parsing, validation and persistence happen in the stores.
   the blacklist one exactly the way the store's parsing path would.
 - The ipinfo token is never displayed in full unless the field is focused; `maskedToken`
   is compared against the draft to avoid saving the mask itself.
+- **Uninstall never deletes over a standing target silently.** It is the one exit with no next
+  launch to finish the resume (the ledger goes with the app), so the card waits out
+  `confirmResumed()` and, if anything is still stopped, lists it by name and pid in a `.critical`
+  alert with «Удалить всё равно» / «Отмена». The wait is `await`ed, not looped: a busy loop would
+  freeze the UI for exactly the two seconds the targets need to come back up. The name is the last
+  path component of the ledger entry — a target removed from the guard meanwhile has no display
+  name left, and the binary is honester than an empty string. Same numbers and same wording on
+  Linux (`settings_window.rs`); the «Закрыть приложение» text was aligned with it too — it no
+  longer promises «до следующего входа в систему», which is false when autostart is off.
 
 - **One clock drives every countdown in the popup.** `StatusPopupView` wraps its content in
   `TimelineView(.periodic(from: .now, by: 1))` only while `guardVM.pauseDeadline != nil`, and
