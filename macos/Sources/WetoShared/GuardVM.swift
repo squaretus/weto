@@ -266,25 +266,57 @@ public final class GuardVM {
         // и штатный выход при стоящих целях (самый частый случай) заявлял бы отказ
         // там, где SIGCONT почти всегда срабатывает. Отказ ядра — единственное, что
         // наблюдается и здесь, и он называется как обычно.
-        let outcome = enforcer.resume()
-        let refused = outcome.results.filter { !$0.isDelivered }.map(\.pid)
-        if outcome.isComplete {
-            resolvePauseEpisode("возобновлено: охрана остановлена")
-        } else if !refused.isEmpty {
-            resolvePauseEpisode(unresolvedEpisodeText(standing: outcome.unresolved.map(\.pid),
-                                                      refused: refused))
-        } else {
-            resolvePauseEpisode("не подтверждено: сигнал продолжения отправлен процессам "
-                                + "\(outcome.unresolved.map(\.pid)), а охрана остановлена — "
-                                + "результат наблюдать нечем, weto проверит их "
-                                + "при следующем запуске")
-        }
+        let outcome = resumeFromLedger()
+        resolvePauseEpisode(shutdownEpisodeText(outcome))
         let stillStanding = Set(outcome.unresolved.map(\.pid))
         pausedProcesses.removeAll { !stillStanding.contains($0.pid) }
         // Фаза обязана уйти вместе с целями: «Пауза», оставленная после остановки,
         // тикала бы отсчётом до потолка, которого никто больше не считает,
         // и `pauseDeadline` показывал бы интерфейсу стояние без стоящих.
         phase = .disabled
+    }
+
+    /// Обход и продолжение всех записей учёта — общая дорога у штатного выхода
+    /// и у подтверждения возобновления.
+    ///
+    /// `skipping` пуст намеренно: последний сигнал получают и те записи, которым
+    /// такт досылать перестал (`Constants.resumeRetryLimit`), — обязательство
+    /// исполняют завершение и выход, а не счётчик попыток.
+    private func resumeFromLedger() -> ProcessEnforcer.ResumeOutcome {
+        enforcer.resume()
+    }
+
+    /// Чем кончился последний SIGCONT штатного выхода. Журнал говорит ровно то,
+    /// что установлено: наблюдать результат нечем, и «не возобновлено» было бы
+    /// такой же неправдой, как «возобновлено».
+    private func shutdownEpisodeText(_ outcome: ProcessEnforcer.ResumeOutcome) -> String {
+        let refused = outcome.results.filter { !$0.isDelivered }.map(\.pid)
+        if outcome.isComplete {
+            return "возобновлено: охрана остановлена"
+        }
+        if !refused.isEmpty {
+            return unresolvedEpisodeText(standing: outcome.unresolved.map(\.pid), refused: refused)
+        }
+        return "не подтверждено: сигнал продолжения отправлен процессам "
+            + "\(outcome.unresolved.map(\.pid)), а охрана остановлена — "
+            + "результат наблюдать нечем, weto проверит их при следующем запуске"
+    }
+
+    /// Досылает SIGCONT оставшимся записям учёта и возвращает тех, кого обход всё
+    /// ещё показывает стоящими.
+    ///
+    /// Зовётся после `stop()` — и только удалением. Всюду ещё обязательство,
+    /// которое выход исполнить не смог, достаётся следующему запуску: учёт цел,
+    /// и `resumeOrphans()` разберёт его как обычно. Удаление — единственный выход,
+    /// после которого следующего запуска не будет вовсе: вместе с приложением
+    /// исчезает и учёт, и процесс, не поднявшийся с последнего сигнала, остаётся
+    /// замороженным навсегда. Поэтому здесь обязательство исполняет наблюдение:
+    /// сигнал уходит снова, пока ядро не покажет процесс идущим, а не поднявшихся
+    /// вызывающий обязан назвать пользователю.
+    ///
+    /// Исход эпизода повторно не переписывает: одной записи от `stop()` довольно.
+    public func confirmResumed() -> [StoppedProcess] {
+        resumeFromLedger().unresolved
     }
 
     /// Цвет статуса для глаза. Решается по действию над целями (`GuardPhase.action`),

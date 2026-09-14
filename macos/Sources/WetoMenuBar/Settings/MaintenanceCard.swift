@@ -99,9 +99,12 @@ struct MaintenanceCard: View {
     private func confirmClose() {
         let alert = NSAlert()
         alert.messageText = "Закрыть Weto?"
+        // Про «до следующего входа в систему» текст обещать не имеет права:
+        // автозапуск по умолчанию выключен, и без него weto не вернётся никогда.
+        // Дословно как на Linux.
         alert.informativeText = """
-            Приложение завершится и перестанет охранять цели до следующего входа в систему. \
-            Настройки, журнал и автозапуск сохранятся.
+            Приложение завершится и перестанет охранять цели. Настройки, журнал и автозапуск \
+            сохранятся: если автозапуск включён, weto вернётся при следующем входе в систему.
             """
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Закрыть")
@@ -133,6 +136,65 @@ struct MaintenanceCard: View {
 
         coordinator.stopForTermination()
 
+        // И только здесь обязательство «вернуть цели из паузы» исполняет наблюдение,
+        // а не отправка: всюду ещё запись, которую выход не разрешил, достаётся
+        // следующему запуску, а после удаления его не будет вовсе — вместе
+        // с приложением исчезает и учёт. Не поднявшихся удаление называет
+        // пользователю, а не сносит поверх них молча: вернуть их будет уже некому.
+        Task { @MainActor in
+            let standing = await confirmResumed()
+            guard standing.isEmpty || askToUninstallAnyway(standing) else { return }
+            removeWeto()
+        }
+    }
+
+    /// Сколько раз удаление переспрашивает ядро про оставшиеся записи учёта и с каким
+    /// шагом. Потолок — около двух секунд: SIGCONT, которому суждено дойти, доходит
+    /// с первой же досылки, а держать пользователя на кнопке дольше незачем.
+    /// Те же числа на Linux (`settings_window.rs`).
+    private static let resumeConfirmations = 6
+    private static let resumeConfirmationStep = Duration.milliseconds(300)
+
+    /// Досылает SIGCONT оставшимся записям учёта, пока обход не покажет их идущими,
+    /// и отдаёт тех, кто так и остался стоять. Главный поток при этом не стоит:
+    /// ждать циклом значило бы заморозить интерфейс ровно на то время, за которое
+    /// цели и должны подняться.
+    private func confirmResumed() async -> [StoppedProcess] {
+        var standing: [StoppedProcess] = []
+        for _ in 0..<Self.resumeConfirmations {
+            try? await Task.sleep(for: Self.resumeConfirmationStep)
+            standing = coordinator.confirmResumed()
+            if standing.isEmpty { return standing }
+        }
+        return standing
+    }
+
+    private func askToUninstallAnyway(_ standing: [StoppedProcess]) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Эти программы weto поставил на паузу, и они ещё не продолжились:"
+        alert.informativeText = """
+            \(standingList(standing))
+
+            Если удалить weto сейчас, вернуть их будет некому — только командой fg в их \
+            терминале. Удалить всё равно?
+            """
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Удалить всё равно")
+        alert.addButton(withTitle: "Отмена")
+
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Имена и pid тех, кто остался стоять, — одной строкой на диалог. Имя берётся
+    /// из пути учёта: цель, снятая с охраны между делом, по имени не находится,
+    /// а бинарник честнее пустой строки.
+    private func standingList(_ standing: [StoppedProcess]) -> String {
+        standing
+            .map { "\(($0.executablePath as NSString).lastPathComponent) (pid \($0.pid))" }
+            .joined(separator: ", ")
+    }
+
+    private func removeWeto() {
         // Приложение не закрывается молча, если что-то не удалилось: иначе
         // пользователь считал бы систему чистой, а следы остались бы на диске.
         let result = coordinator.maintenance.uninstall()

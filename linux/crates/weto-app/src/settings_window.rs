@@ -702,8 +702,12 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
         confirm(
             button,
             "Закрыть weto?",
-            "Приложение завершится и перестанет охранять цели до следующего входа \
-             в систему. Настройки, журнал и автозапуск сохранятся.",
+            // Про «до следующего входа в систему» текст обещать не имеет права:
+            // автозапуск по умолчанию выключен, и без него weto не вернётся
+            // никогда. Дословно как на macOS.
+            "Приложение завершится и перестанет охранять цели. Настройки, журнал \
+             и автозапуск сохранятся: если автозапуск включён, weto вернётся \
+             при следующем входе в систему.",
             "Закрыть",
             || {
                 // Замороженных целей выход не оставляет: SIGCONT шлёт воронка
@@ -729,26 +733,46 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
                 "Будут удалены приложение, автозапуск, настройки, журнал и токен ipinfo. \
                  Действие необратимо.",
                 "Удалить",
-                move || {
-                    // Единственное место, где выход зовут руками: порядок
-                    // важен. Стоящие цели продолжаются раньше удаления —
-                    // вместе с учётом исчезает и последний, кто помнит, кому
-                    // должен SIGCONT, а воронка отработала бы уже после него.
-                    // Повтор безвреден: вызов идемпотентен, и второй раз
-                    // на выходе не находит в учёте ничего.
-                    state.shutdown();
-                    // Приложение не закрывается молча, если что-то не удалилось:
-                    // иначе пользователь считал бы систему чистой.
-                    match crate::uninstall::run() {
-                        Ok(()) => {
-                            if let Some(app) = gtk4::gio::Application::default() {
-                                app.quit();
+                {
+                    let anchor = button.clone();
+                    move || {
+                        // Единственное место, где выход зовут руками: порядок
+                        // важен. Стоящие цели продолжаются раньше удаления —
+                        // вместе с учётом исчезает и последний, кто помнит, кому
+                        // должен SIGCONT, а воронка отработала бы уже после него.
+                        // Повтор безвреден: вызов идемпотентен, и второй раз
+                        // на выходе не находит в учёте ничего.
+                        state.shutdown();
+
+                        // И только здесь обязательство исполняет наблюдение,
+                        // а не отправка: всюду ещё запись, которую выход
+                        // не разрешил, достаётся следующему запуску, а после
+                        // удаления его не будет вовсе. Не поднявшихся удаление
+                        // называет пользователю, а не сносит поверх них молча:
+                        // вернуть их будет уже некому.
+                        let anchor = anchor.clone();
+                        let error = error.clone();
+                        confirm_resumed(state.clone(), move |standing| {
+                            if standing.is_empty() {
+                                remove_weto(&error);
+                                return;
                             }
-                        }
-                        Err(failure) => {
-                            error.set_text(&failure);
-                            error.set_visible(true);
-                        }
+
+                            let error = error.clone();
+                            confirm(
+                                &anchor,
+                                "Эти программы weto поставил на паузу, и они ещё \
+                                 не продолжились:",
+                                &format!(
+                                    "{}\n\nЕсли удалить weto сейчас, вернуть их будет \
+                                     некому — только командой fg в их терминале. \
+                                     Удалить всё равно?",
+                                    standing_list(&standing)
+                                ),
+                                "Удалить всё равно",
+                                move || remove_weto(&error),
+                            );
+                        });
                     }
                 },
             );
@@ -756,6 +780,71 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
     }
 
     card
+}
+
+/// Сколько раз удаление переспрашивает ядро про оставшиеся записи учёта и с каким
+/// шагом. Потолок — около двух секунд: SIGCONT, которому суждено дойти, доходит
+/// с первой же досылки, а держать пользователя на кнопке дольше незачем. Те же
+/// числа на macOS (`MaintenanceCard`).
+const RESUME_CONFIRMATIONS: u32 = 6;
+const RESUME_CONFIRMATION_STEP: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Досылает SIGCONT оставшимся записям учёта, пока обход не покажет их идущими,
+/// и отдаёт тех, кто так и остался стоять.
+///
+/// Главный поток при этом не стоит: отсчёт идёт тем же `timeout_add_local`, что
+/// и остальные отложенные дела окна. Ждать циклом здесь значило бы заморозить
+/// интерфейс ровно на то время, за которое цели и должны подняться.
+fn confirm_resumed(
+    state: Arc<AppState>,
+    finish: impl Fn(Vec<weto_config::stopped::StoppedProcess>) + 'static,
+) {
+    let left = Rc::new(RefCell::new(RESUME_CONFIRMATIONS));
+    gtk4::glib::timeout_add_local(RESUME_CONFIRMATION_STEP, move || {
+        let standing = state.confirm_resumed();
+        let mut left = left.borrow_mut();
+        *left -= 1;
+        if standing.is_empty() || *left == 0 {
+            finish(standing);
+            return gtk4::glib::ControlFlow::Break;
+        }
+        gtk4::glib::ControlFlow::Continue
+    });
+}
+
+/// Имена и pid тех, кто остался стоять, — одной строкой на диалог. Имя берётся
+/// из пути учёта: цель, снятая с охраны между делом, по имени не находится,
+/// а бинарник честнее пустой строки.
+fn standing_list(standing: &[weto_config::stopped::StoppedProcess]) -> String {
+    standing
+        .iter()
+        .map(|entry| {
+            let name = entry
+                .executable_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&entry.executable_path);
+            format!("{name} (pid {})", entry.pid)
+        })
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// Собственно снос: тот же `uninstall.sh`, что и из терминала. Приложение
+/// не закрывается молча, если что-то не удалилось, — иначе пользователь
+/// считал бы систему чистой.
+fn remove_weto(error: &gtk4::Label) {
+    match crate::uninstall::run() {
+        Ok(()) => {
+            if let Some(app) = gtk4::gio::Application::default() {
+                app.quit();
+            }
+        }
+        Err(failure) => {
+            error.set_text(&failure);
+            error.set_visible(true);
+        }
+    }
 }
 
 /// Подтверждение необратимого действия. На macOS это `NSAlert`, здесь —
