@@ -13,6 +13,8 @@ use std::time::Duration;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow};
 
+use weto_app::lifecycle::hold_if_tray;
+
 /// Три вещи разом, потому что поодиночке они ничего не стоят: удержанное
 /// приложение переживает своё последнее окно (ради этого всё и затеяно),
 /// открывать после закрытия нечего — `active_window` пуст, и клик по иконке
@@ -45,9 +47,14 @@ fn a_held_application_outlives_its_last_window_and_still_exits_through_the_funne
         let reopened = reopened.clone();
         // Расписка удержания живёт столько же, сколько обработчик: брошенная
         // сразу, она отпустила бы приложение обратно.
+        //
+        // Берёт её `hold_if_tray`, а не сам тест: удержание — это то, что
+        // решает судьбу процесса, и проверять здесь надо weto, а не GTK.
+        // Верни она `None` при живом трее — приложение умрёт от закрытия
+        // последнего окна, и до `survived` дело не дойдёт.
         let hold = RefCell::new(None);
         application.connect_activate(move |app| {
-            *hold.borrow_mut() = Some(app.hold());
+            *hold.borrow_mut() = hold_if_tray(app, true);
 
             let window = ApplicationWindow::new(app);
             window.present();

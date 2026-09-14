@@ -19,7 +19,7 @@ use gtk4::gio::ApplicationFlags;
 use gtk4::prelude::*;
 use gtk4::{Application, CssProvider};
 
-use weto_app::lifecycle::holds_application;
+use weto_app::lifecycle::hold_if_tray;
 use weto_config::paths::Paths;
 use weto_config::settings::Theme as SettingsTheme;
 use weto_ui::theme::{self, Theme};
@@ -115,16 +115,17 @@ fn main() -> gtk4::glib::ExitCode {
                 let tray_installed = tray::install(app, state.clone());
                 // Держим приложение живым после закрытия последнего окна:
                 // иначе крестик на окне — самый обычный жест в интерфейсе —
-                // снимал охрану молча. Условие удержания и цена отказа
-                // от него — в `lifecycle::holds_application`; здесь только
-                // однократность, её уже обеспечивает флаг трея.
+                // снимал охрану молча. Решает `lifecycle::hold_if_tray`: там
+                // и условие, и цена отказа от удержания, и само взятие
+                // расписки. Здесь остаётся только сохранить её — брошенная,
+                // она не удержала бы ничего — и однократность, которую уже
+                // обеспечивает флаг трея.
                 //
                 // Воронку выхода это не трогает: `app.quit()` из пункта трея
                 // и из кнопки «Закрыть приложение» проходит через
                 // `connect_shutdown` и при удержании, так что цели
                 // возвращаются из паузы там же, где и раньше.
-                if holds_application(tray_installed) {
-                    let guard = app.hold();
+                if let Some(guard) = hold_if_tray(app, tray_installed) {
                     HOLD.with(|slot| *slot.borrow_mut() = Some(guard));
                 }
             }
