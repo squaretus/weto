@@ -18,7 +18,9 @@ use weto_config::settings::{GeoListKind, Theme};
 use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
-use weto_sys::target_resolver::{applications_dirs, resolve_launch_target};
+use weto_sys::target_resolver::{
+    applications_dirs, display_name_for, resolve_launch_entry, resolve_launch_target, Resolution,
+};
 use weto_ui::components as ui;
 use weto_ui::theme;
 
@@ -248,18 +250,37 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
             }
 
             let state = state.clone();
-            let redraw = redraw.clone();
-            dialog.open_multiple(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
+            // Запрос пути живёт дольше самого обработчика — второй диалог
+            // отвечает уже после его конца, — поэтому перерисовка едет
+            // в счётчике ссылок, а не копией замыкания.
+            let redraw: Rc<dyn Fn()> = Rc::new(redraw.clone());
+            // Одно окно уходит в родители диалога, второе — внутрь ответа:
+            // запрос пути открывает свой диалог и тоже просит родителя.
+            let parent = window.clone();
+            let window = window.clone();
+            dialog.open_multiple(Some(&parent), gtk4::gio::Cancellable::NONE, move |result| {
                 // Отмена — не ошибка: пользователь передумал, и говорить
                 // ему об этом нечего.
                 let Ok(files) = result else { return };
                 for index in 0..files.n_items() {
-                    if let Some(path) = files
+                    let Some(path) = files
                         .item(index)
                         .and_downcast::<gtk4::gio::File>()
                         .and_then(|file| file.path())
-                    {
-                        add_target(&state, &path.to_string_lossy());
+                    else {
+                        continue;
+                    };
+                    let chosen = path.to_string_lossy().into_owned();
+
+                    // До настоящей программы не всегда можно добраться честно:
+                    // Steam и flatpak заводят её у себя. Догадка означала бы
+                    // охрану самого Steam — и падение VPN закрывало бы все игры
+                    // разом, — поэтому путь спрашивается у пользователя.
+                    match resolve_launch_entry(&chosen) {
+                        Resolution::Resolved(_) => add_target(&state, &chosen),
+                        Resolution::NeedsPath { launcher } => {
+                            ask_for_program_path(&window, &state, &redraw, &chosen, &launcher)
+                        }
                     }
                 }
                 redraw();
@@ -291,6 +312,15 @@ fn resolved_description(target: &weto_config::settings::Target) -> String {
 }
 
 fn add_target(state: &Arc<AppState>, text: &str) {
+    add_target_named(state, text, None);
+}
+
+/// Добавление цели с готовым именем.
+///
+/// Имя приходит снаружи, когда запись и ярлык разошлись: файл программы указал
+/// пользователь, а подписана цель обязана быть тем именем, которое он видел
+/// в диалоге выбора.
+fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<String>) {
     let text = text.trim();
     if text.is_empty()
         || state
@@ -304,7 +334,9 @@ fn add_target(state: &Arc<AppState>, text: &str) {
     }
 
     let resolved = resolve_launch_target(text);
-    let name = resolved.rsplit('/').next().unwrap_or(&resolved).to_string();
+    let name = display_name
+        .or_else(|| display_name_for(text))
+        .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
 
     state.settings.edit(|s| {
         s.targets.push(weto_config::settings::Target {
@@ -757,6 +789,65 @@ fn confirm(
     );
 }
 
+/// Запрос файла программы, когда ярлык ведёт к чужому запускатору.
+///
+/// Отказаться добавить цель нельзя — пользователь её выбрал, — а угадать нечем:
+/// программу заводит Steam или flatpak, и её файл в ярлыке не назван. Поэтому
+/// спрашиваем прямо, а имя цели остаётся тем, которое стояло в ярлыке: иначе
+/// в списке появилась бы строка, в которой пользователь свой выбор не узнает.
+fn ask_for_program_path(
+    window: &ApplicationWindow,
+    state: &Arc<AppState>,
+    redraw: &Rc<dyn Fn()>,
+    entry: &str,
+    launcher: &str,
+) {
+    let name = display_name_for(entry);
+    let title = name
+        .clone()
+        .unwrap_or_else(|| entry.rsplit('/').next().unwrap_or(entry).to_string());
+
+    let dialog = gtk4::AlertDialog::builder()
+        .message("Нужен файл программы")
+        .detail(format!(
+            "«{title}» запускается через {launcher}, и какой процесс окажется \
+             программой, из ярлыка не следует. Укажите файл программы — weto будет \
+             охранять именно его."
+        ))
+        .buttons(["Указать файл", "Отмена"])
+        .cancel_button(1)
+        .default_button(0)
+        .modal(true)
+        .build();
+
+    let parent = window.clone();
+    let window = window.clone();
+    let state = state.clone();
+    let redraw = redraw.clone();
+    dialog.choose(Some(&parent), gtk4::gio::Cancellable::NONE, move |answer| {
+        // Отмена — не ошибка: цель просто не добавлена, и говорить об этом
+        // пользователю нечего.
+        if answer != Ok(0) {
+            return;
+        }
+
+        let picker = gtk4::FileDialog::builder().title("Файл программы").build();
+        // Ярлыки тут не помогут — за ними мы и пришли, — а программы живут
+        // где угодно, чаще всего в домашнем каталоге.
+        if let Some(home) = std::env::var_os("HOME") {
+            picker.set_initial_folder(Some(&gtk4::gio::File::for_path(home)));
+        }
+
+        picker.open(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
+            let Some(path) = result.ok().and_then(|file| file.path()) else {
+                return;
+            };
+            add_target_named(&state, &path.to_string_lossy(), name);
+            redraw();
+        });
+    });
+}
+
 // --- Подвал ---------------------------------------------------------------
 
 fn footer(state: Arc<AppState>) -> GtkBox {
@@ -955,7 +1046,8 @@ fn set_vpn_app(state: &Arc<AppState>, text: &str) {
     }
 
     let resolved = resolve_launch_target(text);
-    let name = resolved.rsplit('/').next().unwrap_or(&resolved).to_string();
+    let name = display_name_for(text)
+        .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
 
     state.settings.edit(|s| {
         s.set_vpn_app(Some(weto_config::settings::Target {
