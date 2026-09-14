@@ -151,6 +151,53 @@ fn a_steam_entry_asks_for_the_program_path() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Ярлык VPN-клиента из flatpak. Спросить путь здесь дороже, чем у цели:
+/// невыбранное VPN-приложение не значит ничего, а выбранное и не запущенное —
+/// доказательство, то есть завершение всех целей разом. Запись, принятая
+/// молча, не совпала бы ни с одним процессом, и падение целей случилось бы
+/// на ровном месте. Дорога к этому ответу одна на все поля ввода: и цель,
+/// и VPN-приложение спрашивают одну и ту же границу.
+#[test]
+fn a_flatpak_vpn_client_asks_for_the_program_path() {
+    let root = temp_dir("flatpak");
+    let entry = root.join("vpn.desktop");
+    fs::write(
+        &entry,
+        "[Desktop Entry]\nName=VPN Client\nExec=/usr/bin/flatpak run --branch=stable com.example.Vpn %U\nType=Application\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        resolve_launch_entry(&entry.to_string_lossy()),
+        Resolution::NeedsPath {
+            launcher: "flatpak".to_string()
+        }
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Ярлык, у которого команда спрятана за оболочкой так, что вынуть её нечем,
+/// тоже просит путь — вместо того чтобы объявить целью `/bin/bash` и увести
+/// под охрану половину машины.
+#[test]
+fn an_unparsed_shell_entry_asks_for_the_program_path() {
+    let root = temp_dir("shell-wrapper");
+    let entry = root.join("wrapped.desktop");
+    fs::write(
+        &entry,
+        "[Desktop Entry]\nName=Wrapped\nExec=bash --norc -c \"/opt/app/app\"\nType=Application\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        resolve_launch_entry(&entry.to_string_lossy()),
+        Resolution::NeedsPath {
+            launcher: "bash".to_string()
+        }
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// Обычный ярлык «нужен путь» не просит: программа названа прямо, и цепочка
 /// доходит до файла на диске. Иначе запрос пути выскакивал бы на каждом
 /// добавлении и обесценивал бы сам себя.

@@ -110,7 +110,7 @@ fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWi
     let page = GtkBox::new(Orientation::Vertical, ui::SPACE3);
 
     page.append(&targets_card(window, state.clone()));
-    page.append(&network_card(state.clone()));
+    page.append(&network_card(window, state.clone()));
     page.append(&geo_list_card(
         state.clone(),
         GeoListKind::Blocked,
@@ -225,13 +225,20 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         let state = state.clone();
         let entry = entry.clone();
         let redraw = redraw.clone();
+        let window = window.clone();
         move || {
             let text = entry.text().to_string();
             let text = text.trim().to_string();
             if text.is_empty() {
                 return;
             }
-            add_target(&state, &text);
+            // Ярлык, вписанный руками, ничем не отличается от выбранного
+            // в диалоге: Steam и flatpak одинаково не называют программу,
+            // и путь спрашивается на обеих дорогах. Перерисовка едет
+            // в счётчике ссылок — запрос пути отвечает уже после конца
+            // обработчика.
+            let redraw: Rc<dyn Fn()> = Rc::new(redraw.clone());
+            commit_entry(&window, &state, &redraw, &text, Destination::Target);
             entry.set_text("");
             redraw();
         }
@@ -290,12 +297,7 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
                     // Steam и flatpak заводят её у себя. Догадка означала бы
                     // охрану самого Steam — и падение VPN закрывало бы все игры
                     // разом, — поэтому путь спрашивается у пользователя.
-                    match resolve_launch_entry(&chosen) {
-                        Resolution::Resolved(_) => add_target(&state, &chosen),
-                        Resolution::NeedsPath { launcher } => {
-                            ask_for_program_path(&window, &state, &redraw, &chosen, &launcher)
-                        }
-                    }
+                    commit_entry(&window, &state, &redraw, &chosen, Destination::Target);
                 }
                 redraw();
             });
@@ -323,10 +325,6 @@ fn resolved_description(target: &weto_config::settings::Target) -> String {
         TargetKind::Script => "скрипт",
     };
     format!("{kind}: {}", target.path)
-}
-
-fn add_target(state: &Arc<AppState>, text: &str) {
-    add_target_named(state, text, None);
 }
 
 /// Добавление цели с готовым именем.
@@ -365,7 +363,7 @@ fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<Stri
 
 // --- Сеть и гео -----------------------------------------------------------
 
-fn network_card(state: Arc<AppState>) -> GtkBox {
+fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let card = ui::card("Сеть и гео");
 
     // VPN-приложение: та же форма, что цель, — команда или путь. Список туннелей
@@ -405,8 +403,22 @@ fn network_card(state: Arc<AppState>) -> GtkBox {
     {
         let state = state.clone();
         let vpn_entry = vpn_entry.clone();
+        let window = window.clone();
         vpn_set.connect_clicked(move |_| {
-            set_vpn_app(&state, &vpn_entry.text());
+            // Дорога сюда ровно одна и ручная, а цена промаха выше, чем у цели:
+            // невыбранное VPN-приложение не значит ничего, а выбранное
+            // и не запущенное — доказательство, то есть завершение всех целей.
+            // Ярлык flatpak, принятый молча, устроил бы это на ровном месте.
+            // Строку статуса обновляет свой таймер, поэтому перерисовывать
+            // отсюда нечего.
+            let redraw: Rc<dyn Fn()> = Rc::new(|| {});
+            commit_entry(
+                &window,
+                &state,
+                &redraw,
+                &vpn_entry.text(),
+                Destination::VpnApp,
+            );
             vpn_entry.set_text("");
         });
     }
@@ -892,11 +904,62 @@ fn confirm(
     );
 }
 
+/// Куда уедет запись, когда путь наконец известен.
+#[derive(Clone, Copy)]
+enum Destination {
+    /// Цель под охраной.
+    Target,
+    /// VPN-приложение.
+    VpnApp,
+}
+
+impl Destination {
+    fn commit(self, state: &Arc<AppState>, entry: &str, display_name: Option<String>) {
+        match self {
+            Destination::Target => add_target_named(state, entry, display_name),
+            Destination::VpnApp => set_vpn_app_named(state, entry, display_name),
+        }
+    }
+}
+
+/// Запись, добавленная любой из дорог: с запросом пути там, где честно
+/// разрешить её нечем.
+///
+/// Дорог три — ручной ввод цели, файловый выбор цели и поле VPN-приложения, —
+/// и вопрос обязан звучать на каждой. Проглоченный молча `NeedsPath` оставляет
+/// запись, не совпадающую ни с одним процессом: цель в списке выглядит живой
+/// и при падении VPN не завершается. У VPN-приложения цена выше: невыбранное
+/// не значит ничего, а **выбранное и не запущенное — это доказательство**,
+/// то есть завершение всех целей разом. Ярлык flatpak у VPN-клиента —
+/// не экзотика.
+fn commit_entry(
+    window: &ApplicationWindow,
+    state: &Arc<AppState>,
+    redraw: &Rc<dyn Fn()>,
+    entry: &str,
+    destination: Destination,
+) {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return;
+    }
+
+    match resolve_launch_entry(entry) {
+        Resolution::Resolved(_) => {
+            destination.commit(state, entry, None);
+            redraw();
+        }
+        Resolution::NeedsPath { launcher } => {
+            ask_for_program_path(window, state, redraw, entry, &launcher, destination)
+        }
+    }
+}
+
 /// Запрос файла программы, когда ярлык ведёт к чужому запускатору.
 ///
-/// Отказаться добавить цель нельзя — пользователь её выбрал, — а угадать нечем:
-/// программу заводит Steam или flatpak, и её файл в ярлыке не назван. Поэтому
-/// спрашиваем прямо, а имя цели остаётся тем, которое стояло в ярлыке: иначе
+/// Отказаться добавить запись нельзя — пользователь её выбрал, — а угадать
+/// нечем: программу заводит Steam или flatpak, и её файл в ярлыке не назван.
+/// Поэтому спрашиваем прямо, а имя остаётся тем, которое стояло в ярлыке: иначе
 /// в списке появилась бы строка, в которой пользователь свой выбор не узнает.
 fn ask_for_program_path(
     window: &ApplicationWindow,
@@ -904,18 +967,25 @@ fn ask_for_program_path(
     redraw: &Rc<dyn Fn()>,
     entry: &str,
     launcher: &str,
+    destination: Destination,
 ) {
     let name = display_name_for(entry);
     let title = name
         .clone()
         .unwrap_or_else(|| entry.rsplit('/').next().unwrap_or(entry).to_string());
 
+    // Что weto сделает с файлом, у цели и у VPN-приложения разное: одну он
+    // охраняет, за вторым следит. Общая часть — что без файла не выйдет ни то,
+    // ни другое.
+    let purpose = match destination {
+        Destination::Target => "weto будет охранять именно его",
+        Destination::VpnApp => "по нему weto и поймёт, запущен ли VPN-клиент",
+    };
     let dialog = gtk4::AlertDialog::builder()
         .message("Нужен файл программы")
         .detail(format!(
             "«{title}» запускается через {launcher}, и какой процесс окажется \
-             программой, из ярлыка не следует. Укажите файл программы — weto будет \
-             охранять именно его."
+             программой, из ярлыка не следует. Укажите файл программы — {purpose}."
         ))
         .buttons(["Указать файл", "Отмена"])
         .cancel_button(1)
@@ -945,7 +1015,7 @@ fn ask_for_program_path(
             let Some(path) = result.ok().and_then(|file| file.path()) else {
                 return;
             };
-            add_target_named(&state, &path.to_string_lossy(), name);
+            destination.commit(&state, &path.to_string_lossy(), name);
             redraw();
         });
     });
@@ -1140,16 +1210,21 @@ fn clear(container: &GtkBox) {
     }
 }
 
-/// Выбор VPN-приложения. Разрешается тем же путём, что цель: через симлинки
-/// и `PATH`, — иначе правило, записанное «как введено», не совпало бы с процессом.
-fn set_vpn_app(state: &Arc<AppState>, text: &str) {
+/// Выбор VPN-приложения с готовым именем.
+///
+/// Разрешается тем же путём, что цель: через симлинки и `PATH`, — иначе
+/// правило, записанное «как введено», не совпало бы с процессом. Имя приходит
+/// снаружи, когда запись и ярлык разошлись: файл программы указал пользователь,
+/// а подписано приложение обязано быть тем именем, которое он видел в ярлыке.
+fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<String>) {
     let text = text.trim();
     if text.is_empty() {
         return;
     }
 
     let resolved = resolve_launch_target(text);
-    let name = display_name_for(text)
+    let name = display_name
+        .or_else(|| display_name_for(text))
         .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
 
     state.settings.edit(|s| {
