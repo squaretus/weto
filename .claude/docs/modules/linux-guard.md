@@ -307,7 +307,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-397 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+404 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
