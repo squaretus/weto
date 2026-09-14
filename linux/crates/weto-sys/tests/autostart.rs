@@ -1,5 +1,6 @@
 //! Автозапуск: один файл, честная ошибка, идемпотентность.
 
+use weto_config::paths::Paths;
 use weto_sys::autostart::Autostart;
 
 /// Правило перенесено с macOS дословно. Там его нарушение дало пару
@@ -8,7 +9,7 @@ use weto_sys::autostart::Autostart;
 fn autostart_lives_in_exactly_one_file() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("autostart/weto.desktop");
-    let autostart = Autostart::rooted(file.clone());
+    let autostart = Autostart::rooted(file.clone(), "/дом/.local/bin/weto".into());
 
     assert!(!autostart.is_enabled());
     autostart.enable().unwrap();
@@ -27,7 +28,10 @@ fn autostart_lives_in_exactly_one_file() {
 #[test]
 fn enabling_twice_does_not_multiply_the_file() {
     let tmp = tempfile::tempdir().unwrap();
-    let autostart = Autostart::rooted(tmp.path().join("autostart/weto.desktop"));
+    let autostart = Autostart::rooted(
+        tmp.path().join("autostart/weto.desktop"),
+        "/дом/.local/bin/weto".into(),
+    );
 
     autostart.enable().unwrap();
     autostart.enable().unwrap();
@@ -41,7 +45,10 @@ fn enabling_twice_does_not_multiply_the_file() {
 #[test]
 fn disabling_what_was_never_enabled_is_not_an_error() {
     let tmp = tempfile::tempdir().unwrap();
-    let autostart = Autostart::rooted(tmp.path().join("autostart/weto.desktop"));
+    let autostart = Autostart::rooted(
+        tmp.path().join("autostart/weto.desktop"),
+        "/дом/.local/bin/weto".into(),
+    );
 
     assert!(autostart.disable().is_ok());
 }
@@ -50,7 +57,10 @@ fn disabling_what_was_never_enabled_is_not_an_error() {
 /// правду только после перезагрузки — с незапущенной охраной.
 #[test]
 fn a_failed_write_is_reported_not_swallowed() {
-    let autostart = Autostart::rooted("/proc/недоступно/weto.desktop".into());
+    let autostart = Autostart::rooted(
+        "/proc/недоступно/weto.desktop".into(),
+        "/дом/.local/bin/weto".into(),
+    );
 
     assert!(autostart.enable().is_err());
 }
@@ -61,7 +71,9 @@ fn a_failed_write_is_reported_not_swallowed() {
 fn the_entry_points_at_an_absolute_executable() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("autostart/weto.desktop");
-    Autostart::rooted(file.clone()).enable().unwrap();
+    Autostart::rooted(file.clone(), "/дом/.local/bin/weto".into())
+        .enable()
+        .unwrap();
 
     let text = std::fs::read_to_string(&file).unwrap();
     let exec = text
@@ -71,4 +83,23 @@ fn the_entry_points_at_an_absolute_executable() {
 
     assert!(exec.starts_with('/'), "Exec={exec}");
     assert!(text.contains("Type=Application"));
+}
+
+/// Автозапуск обязан указывать на симлинк запуска, а не на каталог версии:
+/// `current_exe` на Linux уже разрешён через `/proc/self/exe`, и после первого
+/// обновления сессия поднимала бы старую версию, а после второго — ничего,
+/// потому что каталог версии удаляет `prune`.
+#[test]
+fn autostart_points_at_the_stable_launcher() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    let paths = Paths::rooted(home.clone());
+    Autostart::new(&paths).enable().unwrap();
+
+    let entry = std::fs::read_to_string(home.join(".config/autostart/weto.desktop")).unwrap();
+    assert!(
+        entry.contains(&format!("Exec={}/.local/bin/weto", home.display())),
+        "{entry}"
+    );
+    assert!(!entry.contains("/.local/share/weto/"), "{entry}");
 }
