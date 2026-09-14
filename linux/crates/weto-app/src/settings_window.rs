@@ -26,6 +26,11 @@ use weto_ui::theme;
 
 use crate::state::AppState;
 
+/// Минимальная высота окна. Ниже неё сегменты навигации и первая карточка
+/// начинают резаться, а прокрутке нечего показывать. Это не `WINDOW_HEIGHT`:
+/// то — рост по умолчанию, этот — пол, ниже которого окно не сужается.
+const MIN_WINDOW_HEIGHT: i32 = 480;
+
 /// Перерисовка, которую могут позвать и виджеты, ею же созданные: кнопка
 /// удаления живёт внутри строки, а строки пересобираются целиком.
 type Redraw = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
@@ -55,6 +60,12 @@ fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
         .default_width(ui::WINDOW_WIDTH)
         .default_height(ui::WINDOW_HEIGHT)
         .build();
+    // «Размер по умолчанию» — просьба, а не размер: тайловый композитор
+    // (Hyprland и прочие) выдаёт окну всю ячейку и `default_width`
+    // не спрашивает, а `resizable(false)` там тоже ничего не гарантирует.
+    // Поэтому ширину держит само содержимое — `ui::content_column` ниже, —
+    // а окну остаётся минимум, ниже которого карточки начали бы резаться.
+    window.set_size_request(ui::WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
     theme::mark_root(&window);
 
     window.connect_close_request(|_| {
@@ -63,7 +74,10 @@ fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     });
 
     let panel = ui::panel();
-    window.set_child(Some(&panel));
+    // Панель едет в колонку фиксированной ширины: растянули окно — колонка
+    // осталась своей ширины и встала по центру, а не разъехалась подписями
+    // к одному краю и контролами к другому.
+    window.set_child(Some(&ui::content_column(&panel)));
 
     // Роль заголовка окна в каноне исполняют сегменты навигации.
     let (segments, buttons) = ui::segments(&["Настройки", "Журнал"], 0);
