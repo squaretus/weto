@@ -5,6 +5,12 @@
 # Здесь оно ловится машинно — контракт ставит артефакт во временный $HOME,
 # проверяет раскладку и требует, чтобы после удаления не осталось ни одного
 # файла weto.
+#
+# Проверяется и завершение работающей копии: она переживала удаление и тут же
+# воссоздавала снесённые каталоги, потому что деинсталлятор искал её по пути
+# через current, а запускают её через симлинк в ~/.local/bin. Запущенная копия
+# здесь — подменённый sleep: честно ровно то, что и проверяется, — имя процесса
+# weto, запуск через $BIN/weto и файл под $DATA/weto/.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -60,8 +66,25 @@ COUNT="$(find "$FAKE_HOME/.config/autostart" -name '*.desktop' | wc -l | tr -d '
     echo "файл автозапуска остался" >&2; exit 1
 }
 
+# Подмена бинарника идёт последней: проверка версии и тумблер автозапуска
+# к этому моменту уже отработали на настоящем weto.
+echo "=== деинсталлятор находит работающую копию ==="
+cp /bin/sleep "$FAKE_HOME/.local/share/weto/$VERSION/bin/weto"
+"$FAKE_HOME/.local/bin/weto" 60 &
+FAKE_PID=$!
+sleep 0.3
+
 echo "=== удаление ==="
 bash "$UNPACKED/weto-$VERSION/uninstall.sh"
+
+# Зомби живым не считается: фоновое задание ждёт жатвы у самого контракта,
+# а вопрос здесь — работает ли копия.
+STATE="$(awk '/^State:/ {print $2}' "/proc/$FAKE_PID/status" 2>/dev/null || true)"
+if [ -n "$STATE" ] && [ "$STATE" != "Z" ]; then
+    echo "работающая копия пережила удаление (pid $FAKE_PID, состояние $STATE)" >&2
+    kill -9 "$FAKE_PID" 2>/dev/null || true
+    exit 1
+fi
 
 LEFT="$(find "$FAKE_HOME" -name '*weto*' -not -path "$UNPACKED/*" | wc -l | tr -d ' ')"
 if [ "$LEFT" -ne 0 ]; then

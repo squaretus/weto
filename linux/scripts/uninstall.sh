@@ -16,8 +16,17 @@ BIN="$HOME/.local/bin"
 echo "Удаление weto..."
 
 # Работающая копия завершается: иначе она перепишет настройки, которые
-# мы вот-вот удалим.
-pkill -f "$DATA/weto/current/bin/weto" 2>/dev/null || true
+# мы вот-вот удалим, и воссоздаст каталоги, которые мы удаляем.
+#
+# Матчить по командной строке нельзя: процесс запускают через $BIN/weto,
+# а искали путь через current — и pkill молча не находил ничего. Имя
+# процесса плюс проверка, что это именно наш файл, ошибиться не дают.
+for pid in $(pgrep -x weto 2>/dev/null || true); do
+    exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    case "$exe" in
+        "$DATA/weto/"*) kill "$pid" 2>/dev/null || true ;;
+    esac
+done
 sleep 1
 
 rm -f "$BIN/weto"
