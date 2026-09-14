@@ -143,7 +143,15 @@ struct MaintenanceCard: View {
         // пользователю, а не сносит поверх них молча: вернуть их будет уже некому.
         Task { @MainActor in
             let standing = await confirmResumed()
-            guard standing.isEmpty || askToUninstallAnyway(standing) else { return }
+            if !standing.isEmpty, !askToUninstallAnyway(standing) {
+                // Второй исход — выход, а не «ничего не делать». Охрана
+                // к этому моменту остановлена необратимо: ворота применения
+                // закрыты, фаза сброшена, а тумблера охраны в продукте нет.
+                // Прежняя «Отмена» оставляла на экране Weto, который ничего
+                // не охраняет и молчит об этом.
+                NSApplication.shared.terminate(nil)
+                return
+            }
             removeWeto()
         }
     }
@@ -169,18 +177,33 @@ struct MaintenanceCard: View {
         return standing
     }
 
+    /// Отвечает, удалять ли. Второй исход — не отказ, а выход: оба определены,
+    /// и живого приложения с выключенной охраной не остаётся ни при одном.
+    ///
+    /// Про остановленную охрану сказано прямо, и это не вежливость: к этому
+    /// моменту выход уже случился, обратно охрана не включится, а тумблера
+    /// у неё нет. Молчи диалог об этом, «не удалять» означало бы Weto
+    /// в менюбаре, который ничего не сторожит, — и пользователь узнал бы
+    /// об этом только по погибшей цели.
+    ///
+    /// Текст и набор кнопок дословно те же, что на Linux
+    /// (`settings_window.rs`, `standing_detail`): диалоги у платформ общие.
     private func askToUninstallAnyway(_ standing: [StoppedProcess]) -> Bool {
         let alert = NSAlert()
         alert.messageText = "Эти программы weto поставил на паузу, и они ещё не продолжились:"
         alert.informativeText = """
             \(standingList(standing))
 
-            Если удалить weto сейчас, вернуть их будет некому — только командой fg в их \
-            терминале. Удалить всё равно?
+            Охрана уже остановлена и обратно не включится: weto придётся \
+            запустить заново.
+
+            Если удалить weto сейчас, вернуть эти программы \
+            будет некому — только командой fg в их терминале. Если не удалять, \
+            их разберёт следующий запуск: учёт остановленных цел.
             """
         alert.alertStyle = .critical
         alert.addButton(withTitle: "Удалить всё равно")
-        alert.addButton(withTitle: "Отмена")
+        alert.addButton(withTitle: "Не удалять и закрыть weto")
 
         return alert.runModal() == .alertFirstButtonReturn
     }

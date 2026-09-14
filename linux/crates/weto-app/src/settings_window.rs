@@ -786,18 +786,27 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
                             }
 
                             let error = error.clone();
-                            confirm(
+                            ask_two_ways(
                                 &anchor,
-                                "Эти программы weto поставил на паузу, и они ещё \
-                                 не продолжились:",
-                                &format!(
-                                    "{}\n\nЕсли удалить weto сейчас, вернуть их будет \
-                                     некому — только командой fg в их терминале. \
-                                     Удалить всё равно?",
-                                    standing_list(&standing)
-                                ),
+                                "Эти программы weto поставил на паузу, и они ещё не продолжились:",
+                                &standing_detail(&standing),
                                 "Удалить всё равно",
+                                "Не удалять и закрыть weto",
                                 move || remove_weto(&error),
+                                || {
+                                    // Второй исход — выход, а не «ничего
+                                    // не делать». Охрана к этому моменту
+                                    // остановлена необратимо: ворота применения
+                                    // закрыты, фаза сброшена, а тумблера охраны
+                                    // в продукте нет. Прежняя «Отмена»
+                                    // оставляла в трее weto, который ничего
+                                    // не охраняет и молчит об этом, —
+                                    // на Linux ещё и надолго, потому что
+                                    // приложение держит себя само.
+                                    if let Some(app) = gtk4::gio::Application::default() {
+                                        app.quit();
+                                    }
+                                },
                             );
                         });
                     }
@@ -839,6 +848,24 @@ fn confirm_resumed(
     });
 }
 
+/// Пояснение к диалогу об оставшихся стоять. Дословно совпадает с macOS
+/// (`MaintenanceCard.askToUninstallAnyway`) — тексты и набор кнопок у диалогов
+/// общие для платформ.
+///
+/// Про остановленную охрану сказано прямо, и это не вежливость: к этому моменту
+/// выход уже случился, обратно охрана не включится, а тумблера у неё нет. Молчи
+/// диалог об этом, «не удалять» означало бы weto в трее, который ничего
+/// не сторожит, — и пользователь узнал бы об этом только по погибшей цели.
+fn standing_detail(standing: &[weto_config::stopped::StoppedProcess]) -> String {
+    format!(
+        "{}\n\nОхрана уже остановлена и обратно не включится: weto придётся \
+         запустить заново.\n\nЕсли удалить weto сейчас, вернуть эти программы \
+         будет некому — только командой fg в их терминале. Если не удалять, \
+         их разберёт следующий запуск: учёт остановленных цел.",
+        standing_list(standing)
+    )
+}
+
 /// Имена и pid тех, кто остался стоять, — одной строкой на диалог. Имя берётся
 /// из пути учёта: цель, снятая с охраны между делом, по имени не находится,
 /// а бинарник честнее пустой строки.
@@ -872,6 +899,41 @@ fn remove_weto(error: &gtk4::Label) {
             error.set_visible(true);
         }
     }
+}
+
+/// Диалог, у которого определены оба исхода, а не «сделать» и «ничего
+/// не делать»: обе кнопки что-то делают, и уйти из него в неопределённость
+/// нельзя. Esc уводит во второй исход — он для того и назван вслух.
+fn ask_two_ways(
+    anchor: &gtk4::Button,
+    title: &str,
+    detail: &str,
+    confirm_title: &str,
+    alternative_title: &str,
+    confirm_action: impl Fn() + 'static,
+    alternative_action: impl Fn() + 'static,
+) {
+    let dialog = gtk4::AlertDialog::builder()
+        .message(title)
+        .detail(detail)
+        .buttons([confirm_title, alternative_title])
+        .cancel_button(1)
+        .default_button(1)
+        .modal(true)
+        .build();
+
+    let window = anchor.root().and_downcast::<gtk4::Window>();
+    dialog.choose(
+        window.as_ref(),
+        gtk4::gio::Cancellable::NONE,
+        move |answer| {
+            if answer == Ok(0) {
+                confirm_action();
+            } else {
+                alternative_action();
+            }
+        },
+    );
 }
 
 /// Подтверждение необратимого действия. На macOS это `NSAlert`, здесь —
