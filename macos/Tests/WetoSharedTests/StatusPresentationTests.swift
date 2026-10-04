@@ -142,6 +142,9 @@ final class StatusPresentationTests: XCTestCase {
         let sixty = StatusPresentation.explanation(for: .paused(since: t0, reason: .confirmationUnavailable), remainingPause: 60)
         XCTAssertEqual(sixty.next, "Ждём ответа сервисов, 60 с до завершения; возобновятся при подтверждении безопасного выхода")
 
+        let five = StatusPresentation.explanation(for: .paused(since: t0, reason: .confirmationUnavailable), remainingPause: 299)
+        XCTAssertEqual(five.next, "Ждём ответа сервисов, 4:59 до завершения; возобновятся при подтверждении безопасного выхода")
+
         let one = StatusPresentation.explanation(for: .paused(since: t0, reason: .confirmationUnavailable), remainingPause: 1)
         XCTAssertEqual(one.next, "Ждём ответа сервисов, 1 с до завершения; возобновятся при подтверждении безопасного выхода")
 

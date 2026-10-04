@@ -11,6 +11,15 @@ final class WetoPauseBadgeTests: XCTestCase {
         XCTAssertEqual(WetoPauseBadge.countdown(until: t0, at: t0.addingTimeInterval(5)), "0 с")
     }
 
+    /// Больше минуты — минуты и секунды: «599 с» не читается. Последняя минута —
+    /// по-прежнему «43 с».
+    func test_countdown_switches_to_minutes_above_one_minute() {
+        XCTAssertEqual(WetoPauseBadge.countdown(until: t0.addingTimeInterval(600), at: t0), "10:00")
+        XCTAssertEqual(WetoPauseBadge.countdown(until: t0.addingTimeInterval(299.2), at: t0), "5:00")
+        XCTAssertEqual(WetoPauseBadge.countdown(until: t0.addingTimeInterval(61), at: t0), "1:01")
+        XCTAssertEqual(WetoPauseBadge.countdown(until: t0.addingTimeInterval(60), at: t0), "60 с")
+    }
+
     func test_countdown_without_a_deadline_just_says_paused() {
         XCTAssertEqual(WetoPauseBadge.countdown(until: nil, at: t0), "пауза")
     }

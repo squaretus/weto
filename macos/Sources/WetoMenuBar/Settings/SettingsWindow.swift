@@ -42,6 +42,7 @@ struct SettingsWindow: View {
                     case .settings:
                         TargetsCard()
                         NetworkSettingsCard()
+                        PauseCeilingCard()
                         GeoListCard(
                             title: "Чёрный список",
                             emptyText: "Список пуст",
