@@ -2591,6 +2591,43 @@ final class GuardVMTests: XCTestCase {
         harness.vm.stop()
     }
 
+    /// Пять минут в настройках — дедлайн через пять минут. Урезали до минуты на второй
+    /// минуте стояния — цели завершаются ближайшим тактом, запись называет минуту,
+    /// а журнал проверок про смену молчит: пробы она не просит.
+    func test_the_chosen_ceiling_drives_the_deadline_and_a_cut_applies_at_once() async {
+        let clock = TestClock()
+        let checks = CheckLogStore(storage: InMemoryCheckLog())
+        let harness = makeDelayedHarness(snapshot: utun5Snapshot(), checkLog: checks, now: { clock.now })
+        harness.settings.pauseCeiling = .fiveMinutes
+        harness.vm.start()
+        await harness.probe.waitUntilStarted()
+        await harness.probe.resumeFirst(with: geoOutcome())
+        await harness.vm.awaitPendingProbe()
+
+        clock.advance(by: 5)
+        harness.vm.handle(.geoSchedule)
+        await harness.probe.waitUntilStarted(atLeast: 2)
+        await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))
+        await harness.vm.awaitPendingProbe()
+        XCTAssertEqual(harness.vm.phase.title, "Выход не подтверждён")
+        XCTAssertEqual(harness.vm.pauseDeadline?.timeIntervalSince(clock.now), 300)
+
+        clock.advance(by: 90)
+        harness.vm.handle(.tick)
+        XCTAssertEqual(harness.vm.phase.title, "Выход не подтверждён", "на полутора минутах из пяти стоим")
+
+        let checksBefore = checks.all.count
+        harness.settings.pauseCeiling = .oneMinute
+        XCTAssertEqual(checks.all.count, checksBefore, "смена потолка не проверка подключения")
+        XCTAssertEqual(harness.vm.pauseDeadline?.timeIntervalSince(clock.now), -30, "дедлайн пересчитан от начала стояния")
+
+        harness.vm.handle(.tick)
+        XCTAssertEqual(harness.vm.phase, .danger(.pauseExpired(ceiling: 60)))
+        XCTAssertEqual(harness.signaler.batches.last?.signal, .kill)
+        XCTAssertEqual(harness.log.events.first?.resolutionText, "завершено по потолку: Подтверждение не получено за 1 мин")
+        harness.vm.stop()
+    }
+
     /// п. 11: добавление цели при действующем вердикте не трогает ни запущенные, ни сеть.
     func test_adding_a_target_under_an_established_verdict_touches_nothing() async {
         let harness = makeHarness(snapshot: utun5Snapshot(), geo: geoOutcome())

@@ -54,7 +54,7 @@ public final class GuardVM {
 
     /// Когда истечёт потолок паузы. `nil` — цели не стоят.
     public var pauseDeadline: Date? {
-        phase.pausedSince.map { $0.addingTimeInterval(PauseCeiling.standard.seconds) }
+        phase.pausedSince.map { $0.addingTimeInterval(controller.pauseCeiling) }
     }
 
     @ObservationIgnored private let settings: SettingsStore

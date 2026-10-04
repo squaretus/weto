@@ -78,6 +78,7 @@ public final class SettingsStore {
     private enum Key {
         static let isEnabled = "isEnabled"
         static let appTheme = "appTheme"
+        static let pauseCeilingSeconds = "pauseCeilingSeconds"
         /// Ключ новый: смысл выбора изменился с «идентификатор туннеля» на «правило
         /// приложения», и переносить прежнее значение нельзя — оно называет `utunN`
         /// или UUID сервиса, а не приложение.
@@ -102,6 +103,9 @@ public final class SettingsStore {
     @ObservationIgnored
     private var guardChangeHandlers: [(GuardConfigurationChange) -> Void] = []
 
+    @ObservationIgnored
+    private var pauseCeilingHandlers: [(PauseCeiling) -> Void] = []
+
     public init(defaults: UserDefaults, secrets: SecretStoring) {
         self.defaults = defaults
         self.secrets = secrets
@@ -109,6 +113,7 @@ public final class SettingsStore {
         self._isEnabled = defaults.object(forKey: Key.isEnabled) as? Bool ?? true
         self._appTheme = defaults.string(forKey: Key.appTheme)
             .flatMap(AppTheme.init(rawValue:)) ?? .dark
+        self._pauseCeiling = PauseCeiling(storedSeconds: defaults.object(forKey: Key.pauseCeilingSeconds) as? Int)
         self._vpnAppRule = defaults.string(forKey: Key.vpnAppRule)
         self._targets = Self.loadTargets(from: defaults)
         self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
@@ -142,6 +147,23 @@ public final class SettingsStore {
     public var appTheme: AppTheme {
         get { _appTheme }
         set { _appTheme = newValue; defaults.set(newValue.rawValue, forKey: Key.appTheme) }
+    }
+
+    /// Не `GuardConfigurationChange`: решение политики потолок не меняет,
+    /// и «правка настроек» попросила бы пробу и запись в журнале проверок.
+    /// Подписчик ровно один — контроллер охраны, он и выставляет потолок машине.
+    private var _pauseCeiling: PauseCeiling
+    public var pauseCeiling: PauseCeiling {
+        get { _pauseCeiling }
+        set {
+            _pauseCeiling = newValue
+            defaults.set(newValue.rawValue, forKey: Key.pauseCeilingSeconds)
+            for handler in pauseCeilingHandlers { handler(newValue) }
+        }
+    }
+
+    public func onPauseCeilingChange(_ handler: @escaping (PauseCeiling) -> Void) {
+        pauseCeilingHandlers.append(handler)
     }
 
     private var _vpnAppRule: String?
