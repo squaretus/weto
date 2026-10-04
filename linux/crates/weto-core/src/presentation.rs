@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use crate::guard_machine::GuardPhase;
+use crate::pause_ceiling::{countdown_text, duration_text};
 use crate::policy::{UnprovenReason, UnsafeEvidence};
 
 impl UnprovenReason {
@@ -44,7 +45,9 @@ impl UnsafeEvidence {
             UnsafeEvidence::NotWhitelistedCountry(code) => {
                 format!("Страна {code} не входит в белый список")
             }
-            UnsafeEvidence::PauseExpired => "Подтверждение не получено за 60 с".to_string(),
+            UnsafeEvidence::PauseExpired(ceiling) => {
+                format!("Подтверждение не получено за {}", duration_text(*ceiling))
+            }
         }
     }
 }
@@ -137,8 +140,9 @@ pub fn explanation(phase: &GuardPhase, remaining_pause: Option<Duration>) -> Sta
             action: "Цели остановлены".to_string(),
             evidence: reason.display_text(),
             next: format!(
-                "Ждём ответа сервисов, {remaining_seconds} с до завершения; возобновятся \
-                 при подтверждении безопасного выхода"
+                "Ждём ответа сервисов, {} до завершения; возобновятся \
+                 при подтверждении безопасного выхода",
+                countdown_text(remaining_seconds)
             ),
         },
         GuardPhase::Danger(evidence) => StatusExplanation {
@@ -351,7 +355,9 @@ mod tests {
             GuardStatusColor::Yellow
         );
         assert_eq!(
-            shield_color(&GuardPhase::Danger(UnsafeEvidence::PauseExpired)),
+            shield_color(&GuardPhase::Danger(UnsafeEvidence::PauseExpired(
+                Duration::from_secs(60)
+            ))),
             GuardStatusColor::Red
         );
     }
@@ -380,7 +386,7 @@ mod tests {
             },
             UnsafeEvidence::NotWhitelistedIp("203.0.113.28".to_string()),
             UnsafeEvidence::NotWhitelistedCountry("KZ".to_string()),
-            UnsafeEvidence::PauseExpired,
+            UnsafeEvidence::PauseExpired(Duration::from_secs(60)),
         ];
 
         let mut phases = vec![GuardPhase::Disabled, GuardPhase::Protected(reading())];
@@ -531,6 +537,33 @@ mod tests {
         }
     }
 
+    /// Больше минуты — минуты и секунды: «299 с» не читается.
+    #[test]
+    fn countdown_above_a_minute_reads_as_minutes_and_seconds() {
+        let phase = GuardPhase::Paused {
+            since: t0(),
+            reason: UnprovenReason::ConfirmationUnavailable,
+        };
+        let text = explanation(&phase, Some(Duration::from_secs(299)));
+        assert_eq!(
+            text.next,
+            "Ждём ответа сервисов, 4:59 до завершения; возобновятся \
+             при подтверждении безопасного выхода"
+        );
+    }
+
+    #[test]
+    fn the_expired_evidence_names_its_own_ceiling() {
+        assert_eq!(
+            UnsafeEvidence::PauseExpired(Duration::from_secs(300)).display_text(),
+            "Подтверждение не получено за 5 мин"
+        );
+        assert_eq!(
+            UnsafeEvidence::PauseExpired(Duration::from_secs(60)).display_text(),
+            "Подтверждение не получено за 1 мин"
+        );
+    }
+
     /// `remaining_pause` может не подъехать вовремя (например, дедлайн ещё
     /// не выставлен) — строка паузы не имеет права падать или показывать
     /// отрицательное число.
@@ -568,7 +601,7 @@ mod tests {
             reason: UnprovenReason::ConfirmationUnavailable
         }));
         assert!(should_explain(&GuardPhase::Danger(
-            UnsafeEvidence::PauseExpired
+            UnsafeEvidence::PauseExpired(Duration::from_secs(60))
         )));
     }
 

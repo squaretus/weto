@@ -212,7 +212,7 @@ fn the_ceiling_terminates_what_the_pause_could_not_confirm() {
 
     assert_eq!(
         expired,
-        GuardPhase::Danger(UnsafeEvidence::PauseExpired),
+        GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60))),
         "потолок — это доказательство, а не ещё одна пауза"
     );
     assert_eq!(s.world.signalled(Kill), vec![200, 201]);
@@ -245,7 +245,7 @@ fn a_repeated_staleness_announcement_does_not_restart_the_ceiling() {
 
     assert_eq!(
         s.controller.phase(),
-        GuardPhase::Danger(UnsafeEvidence::PauseExpired),
+        GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60))),
         "потолок считается от плохого результата, а не от последней новости"
     );
 }

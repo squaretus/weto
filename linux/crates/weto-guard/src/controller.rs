@@ -44,7 +44,7 @@ use weto_config::settings::Settings;
 use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading};
-use weto_core::guard_machine::{GuardAction, GuardInput, GuardMachine, GuardPhase, PAUSE_CEILING};
+use weto_core::guard_machine::{GuardAction, GuardInput, GuardMachine, GuardPhase};
 use weto_core::network::NetworkSnapshot;
 use weto_core::network::VpnAppStatus;
 use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
@@ -1091,7 +1091,7 @@ impl GuardController {
     fn terminate_targets(&self, scan: &Scan, settings: &Settings, evidence: &UnsafeEvidence) {
         let outcome = self.enforcer.terminate(scan);
         let reason = evidence.display_text();
-        let cause = if *evidence == UnsafeEvidence::PauseExpired {
+        let cause = if evidence.is_pause_expired() {
             "по потолку"
         } else {
             "по доказательству"
@@ -1375,7 +1375,9 @@ impl GuardController {
         inner.snapshot.phase = phase.clone();
         inner.snapshot.running = running;
         inner.snapshot.paused = inner.pause.paused.clone();
-        inner.snapshot.pause_deadline = phase.paused_since().map(|since| since + PAUSE_CEILING);
+        inner.snapshot.pause_deadline = phase
+            .paused_since()
+            .map(|since| since + inner.machine.pause_ceiling());
     }
 
     /// Текст, с которым закрывается эпизод у работающих целей.

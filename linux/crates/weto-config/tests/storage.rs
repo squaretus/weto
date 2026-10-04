@@ -611,7 +611,7 @@ fn a_paused_record_round_trips_with_its_resolution() {
     let mut paused = event(500, "Подключение ещё не проверено: вердикта ещё не было");
     paused.kind = KillEventKind::Paused;
     paused.resolution_text =
-        Some("завершено по потолку: Подтверждение не получено за 60 с".to_string());
+        Some("завершено по потолку: Подтверждение не получено за 1 мин".to_string());
 
     let json = serde_json::to_string(&paused).unwrap();
     let back: KillEvent = serde_json::from_str(&json).unwrap();
