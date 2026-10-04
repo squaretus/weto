@@ -12,7 +12,8 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
 | `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
 | `weto-core` | `ip.rs` | address validation and CIDR |
-| `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the 60 s ceiling |
+| `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the pause ceiling as a parameter (`set_pause_ceiling`) |
+| `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText` |
 | `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `PausedProcess`, `RecoveredProcess` |
 | `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation`/`should_explain`, `status_lines`, `idle_targets` |
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic |
@@ -71,8 +72,8 @@ the whole of what the Linux side is allowed to differ in:
 | — | a second dialog asks for the program file when the picked entry launches through Steam or flatpak | a `.app` always *is* the program; a `.desktop` entry need not name one at all, and guessing would guard the launcher — see the `appBundle` row under "Contracts that differ from macOS" |
 
 Everything else matches, including every wording that does not depend on the unported screen: the
-settings window is the same six cards in the same order
-(`Цели`, `Сеть и гео`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
+settings window is the same seven cards in the same order
+(`Цели`, `Сеть и гео`, `Пауза целей`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
 footer (github link, version, update tile), and the status popup is shield + title +
 two icon buttons, then the geo readout, the update banner, and live targets.
 
@@ -220,6 +221,15 @@ Everything the policy decides is shared. What the system dictates is not:
   same reason — a second copy of the parse-and-dedupe algorithm would drift silently.
   `allowed_countries` / `allowed_ip_ranges` are `serde(default)`, so a config written before the
   whitelist existed loads as an empty one.
+- **The pause ceiling is saved past the revision.** `Settings.pause_ceiling_seconds` in
+  `config.toml` (a config without the key loads as 60; an unknown number reads as one minute via
+  `Settings::pause_ceiling()`, not at load time). `pause_ceiling_card` saves it with
+  `SharedSettings::edit_untracked`, which does not bump `revision`: the revision invalidates the
+  verdict, so a ceiling change would have sent the guard into «Проверка» with a probe — the macOS
+  counterpart is the separate `onPauseCeilingChange` bus. There is no subscriber here:
+  `GuardController::feed` sets the machine's ceiling from the settings before every input, so a
+  change reaches the current pause on the next tick, and `pause_deadline` in the snapshot is
+  `paused_since + machine.pause_ceiling()` — screen and threshold share one source.
 - **The journal keeps one record per killed process and one `episode_id` per pass**, same
   contract as `WetoShared`. `KillReporting` carries a `KillContext` — reason, geo readout,
   diagnostics — instead of a bare `&str`. `Journal::refine_episode` rewrites every record of the
@@ -401,7 +411,9 @@ one record the journal is kept for out of its fifty.
    `pause_resolved` skips those pids so the episode's outcome cannot overwrite them.
 2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the bad
    result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
-   restart it. At 60 s the phase becomes `Danger(PauseExpired)` and the targets are killed.
+   restart it. At the ceiling (the user's setting, 1 min by default) the phase becomes
+   `Danger(PauseExpired(ceiling))` and the targets are killed; the evidence names the ceiling that
+   fired («Подтверждение не получено за 5 мин»).
 3. A good answer moves the phase back to a `Run` action — but the obligation is discharged by observation,
    not by delivery. `settle_resume` runs on **every** pass with running targets while the ledger is
    non-empty: it sends `SIGCONT` bottom-up and strikes an entry off only once the kernel shows the
@@ -453,6 +465,7 @@ per-target icons are not fetched, so the status window shows generic glyphs.
 three explanation lines straight from `GuardPhase` (`weto_core::presentation::shield_color`,
 `explanation`, `should_explain` — the same texts as macOS `GuardVM.statusColor` and
 `StatusPresentation.explanation`, word for word), and every standing target gets a pause
-badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`),
+badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`; «4:59»
+above a minute, «43 с» in the last one — same as macOS),
 the `fg` hint and the "Показать терминал" button where the emulator can be raised —
 see "Raising the terminal" above.

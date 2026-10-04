@@ -17,14 +17,16 @@ application state — they take values and closures, never view models.
   paused target, plus the (i) hint and "Показать терминал" button for one that lost its
   foreground job. Takes `now` as a parameter rather than running its own timer, so every badge in
   the popup and the explanation's third line tick from the exact same clock
-  (`StatusPopupView`'s single `TimelineView`)
+  (`StatusPopupView`'s single `TimelineView`). `remainingText(seconds:)` is the one countdown
+  format: above a minute «4:59», the last minute «43 с» (the ceiling is a 1–10 min setting, and
+  «299 с» does not read); the explanation line in `StatusPresentation` reuses it
 - `macos/Sources/WetoDesign/Components/WetoDeleteRowAction.swift`
 - `macos/Sources/WetoDesign/Components/MenuBarImageRenderer.swift`
 - `macos/Sources/WetoDesign/TargetIconStore.swift`
 - `macos/Sources/WetoDesign/DesignResources.swift`
 - `macos/Sources/WetoDesign/Resources/cli-claude.svg`, `macos/Sources/WetoDesign/Resources/cli-codex.png`
 - Tests: `macos/Tests/WetoDesignTests/DesignResourcesTests.swift`, `MenuBarImageRendererTests.swift`,
-  `WetoPauseBadgeTests.swift` (countdown rounding), `WetoPillButtonStyleTests.swift`
+  `WetoPauseBadgeTests.swift` (countdown rounding and the minutes format), `WetoPillButtonStyleTests.swift`
   (`.controlSize(.small)` metrics)
 
 ## Entry points
@@ -41,7 +43,8 @@ application state — they take values and closures, never view models.
   `WetoIconButtonStyle()`, `WetoFieldStyle()`, `WetoMenuButton(_ title:items:)`
 - `StatusShield(tone:)`, `WetoBanner(tone:systemImage:text:trailing:)`,
   `WetoProcessPill(icon:title:isCommandLine:childCount:)`,
-  `WetoPauseBadge(deadline:now:hint:onShowTerminal:)`,
+  `WetoPauseBadge(deadline:now:hint:onShowTerminal:)`, `WetoPauseBadge.countdown(until:at:)`,
+  `WetoPauseBadge.remainingText(seconds:) → String`,
   `WetoDeleteRowAction(label:hint:action:)`
 - `MenuBarImageRenderer.image(flagImage:color:) → NSImage` — no country code: nothing draws it
 - `TargetIconStore.shared.icon(for: TargetIconKind, size:) → NSImage?`
@@ -54,8 +57,8 @@ application state — they take values and closures, never view models.
 - Bundled resources: `weto_WetoDesign.bundle` (brand CLI icons)
 - System: `NSWorkspace.shared.icon(forFile:)` for `.app` bundles and for the Terminal fallback
   (`/System/Applications/Utilities/Terminal.app`)
-- Consumers: `macos/Sources/WetoMenuBar/**` only (`MenuBarLabel`, `StatusPopupView`, `Settings/*`,
-  `JournalRow`)
+- Consumers: `macos/Sources/WetoMenuBar/**` (`MenuBarLabel`, `StatusPopupView`, `Settings/*`,
+  `JournalRow`) and `WetoShared` (`StatusPresentation` borrows `WetoPauseBadge.remainingText`)
 
 ## Side effects
 <!-- generated, verify -->

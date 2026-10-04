@@ -22,6 +22,9 @@ parsing, validation and persistence happen in the stores.
 - `macos/Sources/WetoMenuBar/Settings/SettingsWindow.swift`
 - `macos/Sources/WetoMenuBar/Settings/TargetsCard.swift`
 - `macos/Sources/WetoMenuBar/Settings/NetworkSettingsCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/PauseCeilingCard.swift` — «Пауза целей», right after «Сеть и гео»:
+  a `WetoSegmentedControl` over `PauseCeiling.allCases` bound to `settings.pauseCeiling` through
+  the binding setter (not `onChange`), caption under the card
 - `macos/Sources/WetoMenuBar/Settings/GeoListCard.swift` — built twice, for the blacklist and the whitelist
 - `macos/Sources/WetoMenuBar/Settings/MaintenanceCard.swift`
 - `macos/Sources/WetoMenuBar/Settings/JournalCard.swift`
@@ -160,6 +163,7 @@ parsing, validation and persistence happen in the stores.
 - `.claude/rules/ARCHITECTURE.md` — module index and key contracts
 - `docs/design-system.md` — visual language the cards and popup must follow, including the pause
   badge and "Показать терминал"
-- `features/geo-whitelist.md` — why the settings screen shows six cards
+- `features/geo-whitelist.md` — the whitelist card (the screen now has seven cards)
+- `features/pause-ceiling-setting.md` — the «Пауза целей» card
 - `features/pause-instead-of-kill.md` — the popup states this view renders
 - `.claude/docs/debug-map.md`

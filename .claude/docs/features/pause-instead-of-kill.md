@@ -8,9 +8,9 @@ an actual leak did. Now only `UnsafeEvidence` (chosen VPN app not running, black
 blocked country, country conflict, whitelist miss, or the pause ceiling expired) kills anything.
 Everything else — no verdict for the current path, ipinfo silent, confirmation silent, a
 different address named by the fallback — is `UnprovenReason` and pauses the targets
-(`SIGSTOP`) with a 60 s ceiling instead. See `decisions/pause-instead-of-kill.md` for the full
-argument and the owner's 2026-09-09 amendment (tolerance and a standing "Проверка" were both
-tried and then removed — see below).
+(`SIGSTOP`) with a ceiling instead (60 s, now a setting — `features/pause-ceiling-setting.md`).
+See `decisions/pause-instead-of-kill.md` for the full argument and the owner's 2026-09-09
+amendment (tolerance and a standing "Проверка" were both tried and then removed — see below).
 
 ## Scope
 Both platforms behave the same way, and since the GTK screen was ported both also *show* it the
@@ -118,7 +118,7 @@ episode outcome is not rewritten, `stop()`'s «не подтверждено» s
 - [ ] `swift test --filter StoppedLedgerTests` — corrupted-file readout, add/remove/clear.
 - [ ] A real pause: silence ipinfo/confirmation while a target runs → target gets `SIGSTOP`
       within one probe, popup shows «Выход не подтверждён» with a live countdown, target resumes
-      on the next safe probe or is killed at the 60 s ceiling.
+      on the next safe probe or is killed at the pause ceiling (1 min by default).
 - [ ] Kill `weto` while a target is paused, relaunch → target gets `SIGCONT` on startup
       (`resumeOrphans`), or, if `stopped.json` is corrupted, a `startupRecovery`/`ledgerUnreadable`
       entry appears in the check-journal.
