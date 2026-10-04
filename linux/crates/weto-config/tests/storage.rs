@@ -6,6 +6,7 @@ use std::time::SystemTime;
 use weto_config::journal::{Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY};
 use weto_config::paths::Paths;
 use weto_config::settings::{GeoListEntryError, GeoListKind, Settings, Target};
+use weto_core::pause_ceiling::PauseCeiling;
 use weto_core::process::TargetKind;
 
 fn event(pid: i32, reason: &str) -> KillEvent {
@@ -94,6 +95,44 @@ fn a_missing_settings_file_is_a_fresh_install_not_an_error() {
 
     assert_eq!(settings, Settings::default());
     assert!(settings.is_enabled, "охрана включена по умолчанию");
+}
+
+#[test]
+fn the_pause_ceiling_defaults_to_one_minute_and_survives_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("weto/config.toml");
+    assert_eq!(Settings::default().pause_ceiling(), PauseCeiling::OneMinute);
+
+    let settings = Settings {
+        pause_ceiling_seconds: 300,
+        ..Default::default()
+    };
+    settings.save(&path).unwrap();
+
+    assert_eq!(
+        Settings::load(&path).unwrap().pause_ceiling(),
+        PauseCeiling::FiveMinutes
+    );
+}
+
+/// Конфиг, написанный до появления выбора, открывается с прежней минутой,
+/// а мусор в ключе — тоже с минутой, а не с ошибкой загрузки.
+#[test]
+fn an_old_or_odd_pause_ceiling_reads_as_one_minute() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.toml");
+
+    std::fs::write(&path, "is_enabled = true\n").unwrap();
+    assert_eq!(
+        Settings::load(&path).unwrap().pause_ceiling(),
+        PauseCeiling::OneMinute
+    );
+
+    std::fs::write(&path, "pause_ceiling_seconds = 42\n").unwrap();
+    assert_eq!(
+        Settings::load(&path).unwrap().pause_ceiling(),
+        PauseCeiling::OneMinute
+    );
 }
 
 #[test]

@@ -15,6 +15,7 @@ use gtk4::prelude::*;
 use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack};
 
 use weto_config::settings::{GeoListKind, Theme};
+use weto_core::pause_ceiling::PauseCeiling;
 use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
@@ -106,12 +107,13 @@ fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     window
 }
 
-/// Страница настроек: шесть карточек и подвал, всё под прокруткой.
+/// Страница настроек: семь карточек и подвал, всё под прокруткой.
 fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWindow {
     let page = GtkBox::new(Orientation::Vertical, ui::SPACE3);
 
     page.append(&targets_card(window, state.clone()));
     page.append(&network_card(window, state.clone()));
+    page.append(&pause_ceiling_card(state.clone()));
     page.append(&geo_list_card(
         state.clone(),
         GeoListKind::Blocked,
@@ -634,6 +636,54 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
     }
 
     card
+}
+
+// --- Пауза целей ----------------------------------------------------------
+
+/// Сколько цели стоят на паузе до завершения. Порт `PauseCeilingCard`:
+/// подпись и сегменты, объяснение — под карточкой.
+fn pause_ceiling_card(state: Arc<AppState>) -> GtkBox {
+    let holder = GtkBox::new(Orientation::Vertical, ui::SPACE2);
+    let card = ui::card("Пауза целей");
+
+    let box_ = GtkBox::new(Orientation::Vertical, ui::SPACE2);
+    box_.add_css_class("weto-row");
+    box_.append(&ui::label("Сколько ждать подтверждения"));
+
+    let current = state.settings.current().pause_ceiling();
+    let titles: Vec<String> = PauseCeiling::ALL.iter().map(|c| c.title()).collect();
+    let title_refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+    let selected = PauseCeiling::ALL
+        .iter()
+        .position(|c| *c == current)
+        .unwrap_or(0);
+    let (segments, buttons) = ui::segments(&title_refs, selected);
+    box_.append(&segments);
+    card.append(&box_);
+    holder.append(&card);
+
+    // Мимо ревизии: потолок решения политики не меняет, а ревизия обесценила бы
+    // вердикт и увела охрану в «Проверку» с пробой.
+    for (button, ceiling) in buttons.iter().zip(PauseCeiling::ALL) {
+        let state = state.clone();
+        button.connect_toggled(move |button| {
+            if button.is_active() {
+                state
+                    .settings
+                    .edit_untracked(|s| s.pause_ceiling_seconds = ceiling.seconds());
+            }
+        });
+    }
+
+    let hint = ui::caption(
+        "Столько цели стоят на паузе, ожидая ответа сервисов. \
+         Не дождались — цели завершаются.",
+    );
+    hint.set_wrap(true);
+    hint.set_xalign(0.0);
+    holder.append(&hint);
+
+    holder
 }
 
 // --- Внешний вид ----------------------------------------------------------

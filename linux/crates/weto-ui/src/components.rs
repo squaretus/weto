@@ -281,7 +281,7 @@ pub fn process_pill(
     pill
 }
 
-/// Отсчёт до потолка паузы: «43 с», округление вверх — «0 с» не появляется,
+/// Отсчёт до потолка паузы: «4:59», на последней минуте «43 с», округление вверх — «0 с» не появляется,
 /// пока пауза ещё не истекла. Без дедлайна — «пауза». Порт
 /// `WetoPauseBadge.countdown`: секундного таймера внутри нет, `now` приходит
 /// снаружи одним и тем же значением для всех значков разом.
@@ -294,7 +294,7 @@ pub fn pause_countdown_text(deadline: Option<SystemTime>, now: SystemTime) -> St
     if remaining.subsec_nanos() > 0 {
         seconds += 1;
     }
-    format!("{seconds} с")
+    weto_core::pause_ceiling::countdown_text(seconds)
 }
 
 /// Значок «на паузе»: капсула `amber` с отсчётом до потолка. `hint` — цель
@@ -455,6 +455,14 @@ mod countdown_tests {
                 format!("{seconds} с")
             );
         }
+    }
+
+    /// Больше минуты — минуты и секунды: «600 с» не читается.
+    #[test]
+    fn switches_to_minutes_above_one_minute() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let deadline = now + Duration::from_secs(600);
+        assert_eq!(pause_countdown_text(Some(deadline), now), "10:00");
     }
 
     /// Округление вверх: 42.2 с не имеет права показаться как «42 с» — тогда

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use weto_core::ip::IpRange;
+use weto_core::pause_ceiling::PauseCeiling;
 use weto_core::policy::GuardConfig;
 use weto_core::process::{TargetKind, TargetRule};
 
@@ -24,6 +25,10 @@ pub struct Settings {
     pub allowed_ip_ranges: Vec<String>,
     pub targets: Vec<Target>,
     pub theme: Theme,
+    /// Потолок паузы в секундах. `serde(default)` у структуры держит конфиги
+    /// без этого ключа на прежней минуте; незнакомое число нормализует
+    /// `pause_ceiling()`, а не загрузка.
+    pub pause_ceiling_seconds: u64,
     /// Ревизия растёт на каждое сохранение: по ней охрана понимает, что прежний
     /// вердикт больше не свеж.
     pub revision: u64,
@@ -60,6 +65,7 @@ impl Default for Settings {
             allowed_ip_ranges: Vec::new(),
             targets: Vec::new(),
             theme: Theme::Dark,
+            pause_ceiling_seconds: PauseCeiling::default().seconds(),
             revision: 0,
         }
     }
@@ -96,6 +102,10 @@ pub enum SettingsError {
 }
 
 impl Settings {
+    pub fn pause_ceiling(&self) -> PauseCeiling {
+        PauseCeiling::from_seconds(self.pause_ceiling_seconds)
+    }
+
     /// Отсутствие файла — не ошибка: свежая установка начинает с умолчаний.
     pub fn load(path: &Path) -> Result<Settings, SettingsError> {
         match std::fs::read_to_string(path) {

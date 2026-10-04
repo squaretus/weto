@@ -227,6 +227,50 @@ fn the_ceiling_terminates_what_the_pause_could_not_confirm() {
     );
 }
 
+/// Потолок выбран в настройках: пять минут — на второй минуте цели стоят,
+/// а дедлайн на экране отсчитан от начала стояния по выбранному потолку.
+#[test]
+fn the_chosen_ceiling_is_what_the_pause_waits_for() {
+    let s = stand();
+    s.settings.0.lock().unwrap().pause_ceiling_seconds = 300;
+    guarded(&s);
+    services_go_silent(&s);
+
+    s.hands.advance(120);
+    let phase = s.tick();
+    assert_eq!(phase.action(), GuardAction::Pause);
+    assert!(s.world.signalled(Kill).is_empty());
+
+    let since = phase.paused_since().expect("стоим");
+    assert_eq!(
+        s.controller.snapshot().pause_deadline,
+        Some(since + Duration::from_secs(300))
+    );
+}
+
+/// Урезали потолок ниже простоянного — цели завершаются ближайшим тактом,
+/// и улика называет новый потолок.
+#[test]
+fn a_ceiling_cut_below_the_time_already_paused_terminates_at_once() {
+    let s = stand();
+    s.settings.0.lock().unwrap().pause_ceiling_seconds = 600;
+    guarded(&s);
+    services_go_silent(&s);
+    s.hands.advance(180);
+    assert_eq!(s.tick().action(), GuardAction::Pause);
+
+    // Мимо ревизии — так правит окно настроек (`edit_untracked`).
+    s.settings.0.lock().unwrap().pause_ceiling_seconds = 60;
+    s.hands.advance(1);
+    let phase = s.tick();
+
+    assert_eq!(
+        phase,
+        GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
+    );
+    assert_eq!(s.world.signalled(Kill), vec![200, 201]);
+}
+
 /// Потерю вердикта под паузой объявляют каждый такт, и отсчёт от неё
 /// не перезапускается: иначе минуту можно было бы продлевать вечно сменами пути.
 #[test]
