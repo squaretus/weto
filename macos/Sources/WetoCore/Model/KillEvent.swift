@@ -241,7 +241,8 @@ extension UnsafeEvidence {
             return "Расхождение стран: ipinfo — \(primary), подтверждение — \(confirmed)"
         case .notWhitelistedIP(let ip): return "Адрес \(ip) не входит в белый список"
         case .notWhitelistedCountry(let code): return "Страна \(code) не входит в белый список"
-        case .pauseExpired: return "Подтверждение не получено за \(Int(Constants.pauseCeilingSeconds)) с"
+        case .pauseExpired(let ceiling):
+            return "Подтверждение не получено за \(PauseCeiling.durationText(ceiling))"
         }
     }
 }

@@ -104,15 +104,23 @@ public struct GuardMachine: Equatable, Sendable {
 
     public private(set) var phase: GuardPhase
 
-    /// Сколько цели могут стоять до завершения.
-    public let pauseCeiling: TimeInterval
+    /// Сколько цели могут стоять до завершения. Меняется настройкой и действует
+    /// на текущую паузу сразу: отсчёт идёт от `pausedSince`, а не от смены.
+    public private(set) var pauseCeiling: TimeInterval
 
     public init(
         phase: GuardPhase = .disabled,
-        pauseCeiling: TimeInterval = Constants.pauseCeilingSeconds
+        pauseCeiling: TimeInterval = PauseCeiling.standard.seconds
     ) {
         self.phase = phase
         self.pauseCeiling = pauseCeiling
+    }
+
+    /// Параметр, а не вход: фаза и момент постановки не меняются, меняется
+    /// только порог `.tick`. Урезанный ниже простоянного потолок завершит цели
+    /// на ближайшем такте.
+    public mutating func setPauseCeiling(_ ceiling: TimeInterval) {
+        pauseCeiling = ceiling
     }
 
     public func remainingPause(at now: Date) -> TimeInterval? {
@@ -154,7 +162,7 @@ public struct GuardMachine: Equatable, Sendable {
             guard let since = phase.pausedSince, now.timeIntervalSince(since) >= pauseCeiling else {
                 return .none
             }
-            phase = .danger(.pauseExpired)
+            phase = .danger(.pauseExpired(ceiling: pauseCeiling))
             return .terminate
 
         case .verdict(let decision, let geo):
@@ -173,7 +181,7 @@ public struct GuardMachine: Equatable, Sendable {
             case .safe:
                 // Снимается только доказательство, которое переоценка способна опровергнуть:
                 // истёкший потолок опровергается лишь настоящей пробой.
-                if case .danger(let evidence) = phase, evidence != .pauseExpired {
+                if case .danger(let evidence) = phase, !evidence.isPauseExpired {
                     phase = .protected(reading)
                 }
                 return .none

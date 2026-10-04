@@ -17,16 +17,16 @@ final class GuardMachineFixtureTests: XCTestCase {
         let reading = suite.reading.asReading
         for fixture in suite.cases {
             var machine = GuardMachine(
-                phase: try fixture.start.phase(reading: reading),
+                phase: try fixture.start.phase(reading: reading, ceiling: fixture.ceilingSeconds),
                 pauseCeiling: fixture.ceilingSeconds
             )
             for step in fixture.steps {
                 let effect = machine.apply(
-                    try step.input.asInput(reading: reading),
+                    try step.input.asInput(reading: reading, ceiling: fixture.ceilingSeconds),
                     at: Date(timeIntervalSince1970: step.at)
                 )
                 XCTAssertEqual(effect, try step.effect.asEffect, "«\(fixture.name)» @\(step.at): эффект")
-                XCTAssertTrue(step.phase.matches(machine.phase), "«\(fixture.name)» @\(step.at): фаза \(machine.phase)")
+                XCTAssertTrue(step.phase.matches(machine.phase, ceiling: fixture.ceilingSeconds), "«\(fixture.name)» @\(step.at): фаза \(machine.phase)")
             }
         }
     }
@@ -107,7 +107,7 @@ final class GuardMachineFixtureTests: XCTestCase {
         /// постановки, а он в файле не задаётся — такие случаи начинаются с шага,
         /// который на паузу и ставит. У `verifying` момента нет вовсе (цели в ней
         /// работают, и считать от неё нечего), поэтому стартовой она быть может.
-        func phase(reading: GeoReading) throws -> GuardPhase {
+        func phase(reading: GeoReading, ceiling: TimeInterval) throws -> GuardPhase {
             switch kind {
             case "disabled": return .disabled
             case "verifying": return .verifying(cause: try parsedCause)
@@ -117,7 +117,7 @@ final class GuardMachineFixtureTests: XCTestCase {
                 return .interference(reading, reason: try reason.asUnproven)
             case "danger":
                 guard let evidence else { throw Failure("стартовая фаза danger без улики") }
-                return .danger(try evidence.asEvidence)
+                return .danger(try evidence.asEvidence(ceiling: ceiling))
             default:
                 throw Failure("фаза «\(kind)» стартовой быть не может")
             }
@@ -132,7 +132,7 @@ final class GuardMachineFixtureTests: XCTestCase {
             }
         }
 
-        func matches(_ actual: GuardPhase) -> Bool {
+        func matches(_ actual: GuardPhase, ceiling: TimeInterval) -> Bool {
             switch (kind, actual) {
             case ("disabled", .disabled): return true
             case ("verifying", .verifying(let actualCause)):
@@ -147,7 +147,7 @@ final class GuardMachineFixtureTests: XCTestCase {
                 return (try? reason.asUnproven) == actualReason
             case ("danger", .danger(let actualEvidence)):
                 guard let evidence else { return true }
-                return (try? evidence.asEvidence) == actualEvidence
+                return (try? evidence.asEvidence(ceiling: ceiling)) == actualEvidence
             default: return false
             }
         }
@@ -160,7 +160,7 @@ final class GuardMachineFixtureTests: XCTestCase {
         let geo: Geo?
         let evidence: Evidence?
 
-        func asInput(reading: GeoReading) throws -> GuardInput {
+        func asInput(reading: GeoReading, ceiling: TimeInterval) throws -> GuardInput {
             switch kind {
             case "tick": return .tick
             case "disarmed": return .disarmed
@@ -171,13 +171,13 @@ final class GuardMachineFixtureTests: XCTestCase {
                 return .verdictLost(parsed)
             case "evidence":
                 guard let evidence else { throw Failure("вход evidence без улики") }
-                return .evidence(try evidence.asEvidence)
+                return .evidence(try evidence.asEvidence(ceiling: ceiling))
             case "verdict":
                 guard let decision, let geo else { throw Failure("вход verdict без решения или гео") }
-                return .verdict(try decision.asDecision, geo: try geo.asOutcome(reading: reading))
+                return .verdict(try decision.asDecision(ceiling: ceiling), geo: try geo.asOutcome(reading: reading))
             case "reassessment":
                 guard let decision else { throw Failure("вход reassessment без решения") }
-                return .reassessment(try decision.asDecision, reading: reading)
+                return .reassessment(try decision.asDecision(ceiling: ceiling), reading: reading)
             default:
                 throw Failure("неизвестный вход «\(kind)»")
             }
@@ -189,8 +189,8 @@ final class GuardMachineFixtureTests: XCTestCase {
         let reason: Reason?
         let evidence: Evidence?
 
-        var asDecision: GuardDecision {
-            get throws {
+        func asDecision(ceiling: TimeInterval) throws -> GuardDecision {
+            do {
                 switch kind {
                 case "safe": return .safe
                 case "unproven":
@@ -198,7 +198,7 @@ final class GuardMachineFixtureTests: XCTestCase {
                     return .unproven(try reason.asUnproven)
                 case "kill":
                     guard let evidence else { throw Failure("kill без улики") }
-                    return .kill(try evidence.asEvidence)
+                    return .kill(try evidence.asEvidence(ceiling: ceiling))
                 default:
                     throw Failure("неизвестное решение «\(kind)»")
                 }
@@ -259,8 +259,9 @@ final class GuardMachineFixtureTests: XCTestCase {
         let primary: String?
         let confirmed: String?
 
-        var asEvidence: UnsafeEvidence {
-            get throws {
+        /// Потолок улики `pauseExpired` — потолок случая: в файле он не повторяется.
+        func asEvidence(ceiling: TimeInterval) throws -> UnsafeEvidence {
+            do {
                 switch kind {
                 case "vpnAppNotRunning": return .vpnAppNotRunning
                 case "blacklistedIP":
@@ -278,7 +279,7 @@ final class GuardMachineFixtureTests: XCTestCase {
                 case "notWhitelistedCountry":
                     guard let code else { throw Failure("notWhitelistedCountry без страны") }
                     return .notWhitelistedCountry(code)
-                case "pauseExpired": return .pauseExpired
+                case "pauseExpired": return .pauseExpired(ceiling: ceiling)
                 default:
                     throw Failure("неизвестная улика «\(kind)»")
                 }

@@ -54,7 +54,7 @@ public final class GuardVM {
 
     /// Когда истечёт потолок паузы. `nil` — цели не стоят.
     public var pauseDeadline: Date? {
-        phase.pausedSince.map { $0.addingTimeInterval(Constants.pauseCeilingSeconds) }
+        phase.pausedSince.map { $0.addingTimeInterval(PauseCeiling.standard.seconds) }
     }
 
     @ObservationIgnored private let settings: SettingsStore
@@ -1052,7 +1052,7 @@ public final class GuardVM {
 
         // Исход эпизода паузы: те же pid новых записей не заводят.
         let skip = pausedEpisodePIDs
-        let cause = evidence == .pauseExpired ? "по потолку" : "по доказательству"
+        let cause = evidence.isPauseExpired ? "по потолку" : "по доказательству"
         // Шелл под доказательство не попадает: `ProcessEnforcer.terminate` возвращает
         // ему SIGCONT, а не SIGKILL, — «завершено» в его записи было бы неправдой.
         resolvePauseEpisode(

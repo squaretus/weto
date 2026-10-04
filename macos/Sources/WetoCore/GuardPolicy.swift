@@ -69,8 +69,17 @@ public enum UnsafeEvidence: Equatable, Sendable {
     case countryConflict(primary: String, confirmed: String)
     case notWhitelistedIP(String)
     case notWhitelistedCountry(String)
-    /// Потолок паузы: подтверждения не дождались.
-    case pauseExpired
+    /// Потолок паузы: подтверждения не дождались. Несёт потолок, по которому
+    /// завершили: настройку могут сменить потом, а запись обязана назвать
+    /// то число, что действовало.
+    case pauseExpired(ceiling: TimeInterval)
+}
+
+extension UnsafeEvidence {
+    public var isPauseExpired: Bool {
+        if case .pauseExpired = self { return true }
+        return false
+    }
 }
 
 public enum GuardDecision: Equatable, Sendable {

@@ -28,6 +28,7 @@
     "Полезная нагрузка узла обязательна для тех kind, у которых она есть (detail, observed, ip, code, source, primary,",
     "confirmed, cause), как и reason у стартовой фазы interference: умолчаний нет, отсутствие поля — ошибка раннера,",
     "а не пустая строка.",
+    "Улика pauseExpired несёт потолок случая: раннеры строят её из ceilingSeconds, поэтому в файле он не повторяется.",
     "",
     "Два первых случая — эпизоды реального журнала 2026-09-07: 18:03:21Z и 19:31:51Z."
   ],
@@ -49,6 +50,15 @@
         { "at": 5, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "paused", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "effect": "none" },
         { "at": 59, "input": { "kind": "tick" }, "phase": { "kind": "paused", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "effect": "none" },
         { "at": 60, "input": { "kind": "tick" }, "phase": { "kind": "danger", "evidence": { "kind": "pauseExpired" } }, "effect": "terminate" }
+      ]
+    },
+    {
+      "name": "потолок выбран в настройках: пять минут — на 299 с цели стоят, на 300 с завершение по потолку",
+      "ceilingSeconds": 300, "start": { "kind": "protected" },
+      "steps": [
+        { "at": 0, "input": { "kind": "verdict", "decision": { "kind": "unproven", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "geo": { "kind": "unavailable", "detail": "таймаут запроса" } }, "phase": { "kind": "paused", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "effect": "pause" },
+        { "at": 299, "input": { "kind": "tick" }, "phase": { "kind": "paused", "reason": { "kind": "geoUnavailable", "detail": "таймаут запроса" } }, "effect": "none" },
+        { "at": 300, "input": { "kind": "tick" }, "phase": { "kind": "danger", "evidence": { "kind": "pauseExpired" } }, "effect": "terminate" }
       ]
     },
     {

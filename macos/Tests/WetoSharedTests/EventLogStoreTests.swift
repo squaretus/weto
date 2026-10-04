@@ -285,7 +285,7 @@ final class PolicyReasonTextTests: XCTestCase {
             .countryConflict(primary: "KZ", confirmed: "DE"),
             .notWhitelistedIP("1.2.3.4"),
             .notWhitelistedCountry("DE"),
-            .pauseExpired,
+            .pauseExpired(ceiling: 60),
         ]
         for reason in evidence {
             XCTAssertFalse(reason.displayText.isEmpty, "пустой текст у \(reason)")

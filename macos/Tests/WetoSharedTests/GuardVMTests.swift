@@ -2566,7 +2566,7 @@ final class GuardVMTests: XCTestCase {
         )
         XCTAssertEqual(harness.log.events.first?.diagnostics?.outgoingInterface, "utun5")
         XCTAssertEqual(
-            harness.vm.pauseDeadline?.timeIntervalSince(clock.now), Constants.pauseCeilingSeconds,
+            harness.vm.pauseDeadline?.timeIntervalSince(clock.now), PauseCeiling.standard.seconds,
             "потолок отсчитывается от начала стояния"
         )
 
@@ -2577,11 +2577,11 @@ final class GuardVMTests: XCTestCase {
         clock.advance(by: 31)   // 5 с до паузы + 5 × 6 + 31 = 61 с стояния
         harness.vm.handle(.tick)
 
-        XCTAssertEqual(harness.vm.phase, .danger(.pauseExpired))
+        XCTAssertEqual(harness.vm.phase, .danger(.pauseExpired(ceiling: 60)))
         XCTAssertEqual(harness.signaler.batches.last?.signal, .kill)
         XCTAssertEqual(harness.signaler.batches.last?.pids, [500, 501])
         XCTAssertEqual(harness.log.events.first?.kind, .paused, "повторных записей terminated нет")
-        XCTAssertEqual(harness.log.events.first?.resolutionText, "завершено по потолку: Подтверждение не получено за 60 с")
+        XCTAssertEqual(harness.log.events.first?.resolutionText, "завершено по потолку: Подтверждение не получено за 1 мин")
         XCTAssertEqual(
             harness.log.events.count, eventsBeforeSilence + 2,
             "две записи паузы по молчанию, ни одной новой при завершении"
@@ -3362,7 +3362,7 @@ final class GuardVMTests: XCTestCase {
 
         XCTAssertEqual(
             harness.vm.pauseDeadline?.timeIntervalSince(harness.vm.phase.pausedSince ?? Date()),
-            Constants.pauseCeilingSeconds
+            PauseCeiling.standard.seconds
         )
 
         harness.vm.handle(.geoSchedule)
@@ -3542,14 +3542,14 @@ final class GuardVMTests: XCTestCase {
         )
 
         // Потолок доедает минуту, начатую плохим результатом, а не смену пути.
-        clock.advance(by: Constants.pauseCeilingSeconds - 20 + 1)
+        clock.advance(by: PauseCeiling.standard.seconds - 20 + 1)
         h.vm.handle(.tick)
 
-        XCTAssertEqual(h.vm.phase, .danger(.pauseExpired))
+        XCTAssertEqual(h.vm.phase, .danger(.pauseExpired(ceiling: 60)))
         let closed = h.log.events.filter { $0.episodeID == episode }
         XCTAssertEqual(
             Set(closed.map(\.resolutionText)),
-            ["завершено по потолку: Подтверждение не получено за 60 с"]
+            ["завершено по потолку: Подтверждение не получено за 1 мин"]
         )
         XCTAssertEqual(
             Set(closed.map(\.reasonText)),
