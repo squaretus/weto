@@ -128,11 +128,23 @@ fn an_old_or_odd_pause_ceiling_reads_as_one_minute() {
         PauseCeiling::OneMinute
     );
 
-    std::fs::write(&path, "pause_ceiling_seconds = 42\n").unwrap();
-    assert_eq!(
-        Settings::load(&path).unwrap().pause_ceiling(),
-        PauseCeiling::OneMinute
-    );
+    // Значение не того типа — тоже минута, а не ошибка загрузки: упавший разбор
+    // оставил бы охрану без целей, а следующая правка затёрла бы их умолчаниями.
+    for odd in [
+        "pause_ceiling_seconds = 42",
+        "pause_ceiling_seconds = \"5 мин\"",
+        "pause_ceiling_seconds = -1",
+        "pause_ceiling_seconds = 300.5",
+    ] {
+        std::fs::write(
+            &path,
+            format!("{odd}\n[[targets]]\nentry = \"nano\"\ndisplay_name = \"nano\"\nkind = \"binary\"\npath = \"/usr/bin/nano\"\n"),
+        )
+        .unwrap();
+        let settings = Settings::load(&path).unwrap_or_else(|e| panic!("{odd}: {e:?}"));
+        assert_eq!(settings.pause_ceiling(), PauseCeiling::OneMinute, "{odd}");
+        assert_eq!(settings.targets.len(), 1, "{odd}: цели не потеряны");
+    }
 }
 
 #[test]

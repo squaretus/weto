@@ -27,7 +27,10 @@ pub struct Settings {
     pub theme: Theme,
     /// Потолок паузы в секундах. `serde(default)` у структуры держит конфиги
     /// без этого ключа на прежней минуте; незнакомое число нормализует
-    /// `pause_ceiling()`, а не загрузка.
+    /// `pause_ceiling()`, а не загрузка. Значение не того типа тоже читается
+    /// как минута: упавший разбор оставил бы охрану без целей, а следующая
+    /// правка затёрла бы их умолчаниями.
+    #[serde(deserialize_with = "lenient_pause_ceiling")]
     pub pause_ceiling_seconds: u64,
     /// Ревизия растёт на каждое сохранение: по ней охрана понимает, что прежний
     /// вердикт больше не свеж.
@@ -69,6 +72,22 @@ impl Default for Settings {
             revision: 0,
         }
     }
+}
+
+fn lenient_pause_ceiling<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Seconds(u64),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Raw::deserialize(deserializer)? {
+        Raw::Seconds(seconds) => seconds,
+        Raw::Other(_) => PauseCeiling::default().seconds(),
+    })
 }
 
 /// Вид списка геоправил. Разбор записи, проверка дубликата и удаление —
