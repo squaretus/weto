@@ -52,6 +52,57 @@ pub fn row(first: bool) -> GtkBox {
     row
 }
 
+/// Ставит или снимает линию над строкой, не пересобирая её. Строка ввода
+/// под списком живёт дольше самого списка: тот перерисовывается, а линия
+/// над вводом зависит от того, есть ли над ним записи.
+pub fn set_divided(row: &GtkBox, divided: bool) {
+    if divided {
+        row.add_css_class("divided");
+    } else {
+        row.remove_css_class("divided");
+    }
+}
+
+/// Нужна ли линия над строкой ввода под списком из `entries` записей.
+///
+/// Пустой список показывает одну строку-заглушку, и линия под ней отделяла бы
+/// ввод от пустоты: на macOS (`TargetsCard`, `GeoListCard`) её там нет.
+pub fn input_row_divided(entries: usize) -> bool {
+    entries > 0
+}
+
+/// Подпись отказа внутри строки — порт `WetoRow { Text(error) }` с macOS:
+/// паддинг строки, без линии, капшен цветом `red`. Строка скрыта, пока
+/// показывать нечего; показывают и прячут именно её, а не подпись, иначе
+/// пустая строка держала бы паддинг.
+pub fn error_row() -> (GtkBox, Label) {
+    let row = row(true);
+    let error = Label::new(None);
+    // Один класс, а не `weto-caption` вместе с `weto-error`: из двух равных
+    // по силе селекторов цвет выбирал порядок правил, и отказ выходил блёклым.
+    error.add_css_class("weto-error");
+    error.set_halign(Align::Start);
+    error.set_hexpand(true);
+    error.set_xalign(0.0);
+    error.set_wrap(true);
+    row.append(&error);
+    row.set_visible(false);
+    (row, error)
+}
+
+/// Показывает отказ в строке `error_row` или прячет строку, когда отказа
+/// больше нет. Прячется строка целиком: пустая подпись в видимой строке
+/// держала бы паддинг.
+pub fn set_error(error: &Label, text: Option<&str>) {
+    if let Some(text) = text {
+        error.set_text(text);
+    }
+    match error.parent() {
+        Some(row) => row.set_visible(text.is_some()),
+        None => error.set_visible(text.is_some()),
+    }
+}
+
 pub fn label(text: &str) -> Label {
     let label = Label::new(Some(text));
     label.add_css_class("weto-label");
@@ -62,6 +113,31 @@ pub fn label(text: &str) -> Label {
 pub fn value(text: &str) -> Label {
     let label = Label::new(Some(text));
     label.add_css_class("weto-value");
+    label.set_halign(Align::End);
+    label
+}
+
+/// Значение цветом `ink` — имя выбранного VPN-приложения: это выбор
+/// пользователя, а не показание.
+pub fn ink_value(text: &str) -> Label {
+    let label = value(text);
+    label.add_css_class("ink");
+    label
+}
+
+/// Значение цветом `faint` — «не выбрано»: значения нет, и ярче подсказки
+/// оно стоять не должно.
+pub fn faint_value(text: &str) -> Label {
+    let label = value(text);
+    label.add_css_class("faint");
+    label
+}
+
+/// Число шрифтом данных — табличные цифры, `dim`: так на macOS стоит счётчик
+/// процессов цели (`WetoTokens.data`), и разряды не пляшут при смене числа.
+pub fn data_value(text: &str) -> Label {
+    let label = Label::new(Some(text));
+    label.add_css_class("weto-data-value");
     label.set_halign(Align::End);
     label
 }

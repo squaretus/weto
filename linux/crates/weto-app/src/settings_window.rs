@@ -16,11 +16,13 @@ use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack}
 
 use weto_config::settings::{GeoListKind, Theme};
 use weto_core::pause_ceiling::PauseCeiling;
+use weto_core::presentation::{target_description, target_fallback_name};
 use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 use weto_sys::target_resolver::{
-    applications_dirs, display_name_for, resolve_launch_entry, resolve_launch_target, Resolution,
+    applications_dirs, display_name_for, locate_target, resolve_launch_entry,
+    resolve_launch_target, Resolution,
 };
 use weto_ui::components as ui;
 use weto_ui::theme;
@@ -139,7 +141,9 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let list = GtkBox::new(Orientation::Vertical, 0);
     card.append(&list);
 
-    let add_row = ui::row(false);
+    // Линию над вводом ставит перерисовка: пока целей нет, над ним одна
+    // строка-заглушка, и линия отделяла бы ввод от пустоты.
+    let add_row = ui::row(true);
     let entry = ui::entry("Новая цель");
     // Формат ввода — значком в конце поля, а не подписью под карточкой: подпись
     // под карточкой не читалась как относящаяся к полю. Про бандлы здесь
@@ -162,9 +166,11 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let redraw = {
         let state = state.clone();
         let list = list.clone();
+        let add_row = add_row.clone();
         move || {
             clear(&list);
             let settings = state.settings.current();
+            ui::set_divided(&add_row, ui::input_row_divided(settings.targets.len()));
 
             if settings.targets.is_empty() {
                 let row = ui::row(true);
@@ -193,7 +199,7 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
                     .filter(|r| r.entry == target.entry)
                     .map(|r| r.process_count)
                     .sum();
-                row.append(&ui::value(&count.to_string()));
+                row.append(&ui::data_value(&count.to_string()));
 
                 let remove = ui::icon_button("user-trash-symbolic");
                 remove.set_tooltip_text(Some("Удалить цель"));
@@ -333,14 +339,17 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     holder
 }
 
-/// Описание цели под именем. Вида `appBundle` на Linux нет, поэтому и строки
-/// «приложение:» здесь не бывает.
+/// Описание цели под именем — что стоит за ней сейчас, а не в момент
+/// добавления. Путь спрашивается у границы при каждой перерисовке: обновление
+/// инструмента из версионного каталога меняет развёрнутый путь целиком,
+/// и запомненный путь показывал бы удалённую версию. Чего на диске нет,
+/// то «не найдено» — с подсказкой, что делать, как на macOS.
 fn resolved_description(target: &weto_config::settings::Target) -> String {
-    let kind = match target.kind {
-        TargetKind::Binary => "бинарник",
-        TargetKind::Script => "скрипт",
-    };
-    format!("{kind}: {}", target.path)
+    target_description(
+        &target.entry,
+        target.kind,
+        locate_target(&target.entry).as_deref(),
+    )
 }
 
 /// Добавление цели с готовым именем.
@@ -364,7 +373,7 @@ fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<Stri
     let resolved = resolve_launch_target(text);
     let name = display_name
         .or_else(|| display_name_for(text))
-        .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
+        .unwrap_or_else(|| target_fallback_name(text));
 
     state.settings.edit(|s| {
         s.targets.push(weto_config::settings::Target {
@@ -385,31 +394,71 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // VPN-приложение: та же форма, что цель, — команда или путь. Список туннелей
     // здесь стоял раньше и ушёл вместе с самим выбором туннеля: имена вида utun6
     // и wg0 пользователю ничего не говорят и меняются при переподключении.
+    //
+    // Строка в двух состояниях, как `NetworkSettingsCard` на macOS: не выбрано —
+    // «не выбрано», поле и «Выбрать»; выбрано — имя над описанием справа
+    // и корзина. Поле вместо файлового диалога — отступление Linux: команду
+    // и путь здесь вводят руками, как у цели.
     let vpn_row = ui::row(true);
     vpn_row.append(&ui::label("VPN-приложение"));
     vpn_row.append(&ui::spacer());
-    let vpn_value = ui::label("не выбрано");
-    vpn_row.append(&vpn_value);
+
+    let unchosen = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
+    unchosen.append(&ui::faint_value("не выбрано"));
     let vpn_entry = ui::entry("Команда или путь");
     let vpn_set = ui::primary_button("Выбрать");
-    let vpn_clear = ui::muted_button("Снять");
-    vpn_row.append(&vpn_entry);
-    vpn_row.append(&vpn_set);
-    vpn_row.append(&vpn_clear);
+    unchosen.append(&vpn_entry);
+    unchosen.append(&vpn_set);
+    vpn_row.append(&unchosen);
+
+    let chosen = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
+    let chosen_text = GtkBox::new(Orientation::Vertical, 2);
+    chosen_text.set_valign(gtk4::Align::Center);
+    let vpn_name = ui::ink_value("");
+    vpn_name.set_xalign(1.0);
+    let vpn_description = ui::caption("");
+    vpn_description.set_halign(gtk4::Align::End);
+    vpn_description.set_xalign(1.0);
+    vpn_description.set_selectable(true);
+    vpn_description.set_wrap(true);
+    vpn_description.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+    chosen_text.append(&vpn_name);
+    chosen_text.append(&vpn_description);
+    chosen.append(&chosen_text);
+    let vpn_clear = ui::icon_button("user-trash-symbolic");
+    vpn_clear.set_tooltip_text(Some("Снять выбор"));
+    vpn_clear.set_valign(gtk4::Align::Center);
+    chosen.append(&vpn_clear);
+    vpn_row.append(&chosen);
     card.append(&vpn_row);
 
-    {
+    // Состояние строки берётся из настроек при каждом показе: выбор меняют
+    // и кнопки этой же строки, и правка конфига снаружи, а описание обязано
+    // следовать за версионным путём так же, как у целей.
+    let show: Rc<dyn Fn()> = {
         let state = state.clone();
-        let vpn_value = vpn_value.clone();
-        let show = move || {
-            let chosen = state.settings.current().vpn_app;
-            vpn_value.set_text(&match chosen {
-                Some(app) => format!("{} — {}", app.display_name, resolved_description(&app)),
-                None => "не выбрано".to_string(),
-            });
-        };
-        show();
+        Rc::new(move || {
+            let app = state.settings.current().vpn_app;
+            unchosen.set_visible(app.is_none());
+            chosen.set_visible(app.is_some());
+            if let Some(app) = app {
+                // Текст меняется, только когда изменился: такт идёт дважды
+                // в секунду, а подмена снимала бы выделение с описания,
+                // которое копируют в обращение.
+                let description = resolved_description(&app);
+                if vpn_name.text() != app.display_name {
+                    vpn_name.set_text(&app.display_name);
+                }
+                if vpn_description.text() != description {
+                    vpn_description.set_text(&description);
+                }
+            }
+        })
+    };
+    show();
 
+    {
+        let show = show.clone();
         window_tick(window, std::time::Duration::from_millis(500), move || {
             show();
             gtk4::glib::ControlFlow::Continue
@@ -419,6 +468,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     {
         let state = state.clone();
         let vpn_entry = vpn_entry.clone();
+        let show = show.clone();
         let window = window.downgrade();
         vpn_set.connect_clicked(move |_| {
             // Окно захвачено слабо: обработчик живёт внутри самого окна,
@@ -434,13 +484,12 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
             // невыбранное VPN-приложение не значит ничего, а выбранное
             // и не запущенное — доказательство, то есть завершение всех целей.
             // Ярлык flatpak, принятый молча, устроил бы это на ровном месте.
-            // Строку статуса обновляет свой таймер, поэтому перерисовывать
-            // отсюда нечего.
-            let redraw: Rc<dyn Fn()> = Rc::new(|| {});
+            // Перерисовка — сама строка: выбор переключает её во второе
+            // состояние сразу, а не на следующем такте.
             commit_entry(
                 &window,
                 &state,
-                &redraw,
+                &show,
                 &vpn_entry.text(),
                 Destination::VpnApp,
             );
@@ -452,6 +501,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         let state = state.clone();
         vpn_clear.connect_clicked(move |_| {
             state.settings.edit(|s| s.set_vpn_app(None));
+            show();
         });
     }
 
@@ -479,38 +529,77 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     token_row.append(&token_entry);
     card.append(&token_row);
 
-    let token_error = ui::caption("");
-    token_error.add_css_class("weto-error");
-    token_error.set_wrap(true);
-    token_error.set_xalign(0.0);
-    token_error.set_visible(false);
-    card.append(&token_error);
+    // Ошибка — своей строкой под полем, с паддингом строки, как `WetoRow`
+    // на macOS.
+    let (token_error_row, token_error) = ui::error_row();
+    card.append(&token_error_row);
 
-    let store = FileSecretStore::new(state.paths.token_file());
-    let stored = store.load().ok().flatten().unwrap_or_default();
-    token_entry.set_text(&mask(&stored));
+    // Сохранённый токен помнится здесь, а не перечитывается: маска при уходе
+    // из поля обязана описывать то, что записано сейчас, а не при открытии окна.
+    let path = state.paths.token_file();
+    let stored = Rc::new(RefCell::new(
+        FileSecretStore::new(path.clone())
+            .load()
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+    ));
+    token_entry.set_text(&token_field_text(&stored.borrow(), false));
+
+    // Подмена текста при входе в поле и уходе из него — не ввод. `set_text`
+    // у поля GTK — это стирание и вставка, и `changed` приходит дважды:
+    // первым — с пустой строкой, которую обработчик принял бы за стёртый
+    // ключ и записал.
+    let replacing = Rc::new(std::cell::Cell::new(false));
 
     {
-        let token_error = token_error.clone();
-        let path = state.paths.token_file();
-        let masked = mask(&stored);
+        let stored = stored.clone();
+        let replacing = replacing.clone();
         token_entry.connect_changed(move |entry| {
-            let value = entry.text().to_string();
-            // Маска — не ввод: пока её не тронули, сохранять нечего.
-            if value == masked {
+            if replacing.get() {
                 return;
             }
+            // Маска и показ токена при входе в поле — не ввод: сохранять
+            // нечего. Решает чистый помощник, здесь только запись.
+            let Some(value) = token_to_save(&entry.text(), &stored.borrow()) else {
+                return;
+            };
             // Токен считается сохранённым только после успешной записи:
             // тихая ошибка выдавала бы его за сохранённый.
-            match FileSecretStore::new(path.clone()).save(value.trim()) {
-                Ok(()) => token_error.set_visible(false),
-                Err(error) => {
-                    token_error.set_text(&error.to_string());
-                    token_error.set_visible(true);
+            match FileSecretStore::new(path.clone()).save(&value) {
+                Ok(()) => {
+                    *stored.borrow_mut() = value;
+                    ui::set_error(&token_error, None);
                 }
+                Err(error) => ui::set_error(&token_error, Some(&error.to_string())),
             }
         });
     }
+
+    // В фокусе — сам токен, вне фокуса — маска, как на macOS. Маска, стоявшая
+    // в поле и при правке, уходила в файл вместе с дописанным символом:
+    // токеном из точек, на который ipinfo отвечает отказом.
+    //
+    // Поле берётся у контроллера, а не захватывается: контроллер принадлежит
+    // полю, и сильная ссылка на поле из его же обработчика замкнула бы цикл.
+    let focus = gtk4::EventControllerFocus::new();
+    for focused in [true, false] {
+        let stored = stored.clone();
+        let replacing = replacing.clone();
+        let show = move |controller: &gtk4::EventControllerFocus| {
+            if let Some(entry) = controller.widget().and_downcast::<gtk4::Entry>() {
+                replacing.set(true);
+                entry.set_text(&token_field_text(&stored.borrow(), focused));
+                replacing.set(false);
+            }
+        };
+        if focused {
+            focus.connect_enter(show);
+        } else {
+            focus.connect_leave(show);
+        }
+    }
+    token_entry.add_controller(focus);
 
     // Таймаут подтверждения: сколько цели стоят на паузе до завершения.
     // Мимо ревизии: потолок решения политики не меняет, а ревизия обесценила бы
@@ -553,18 +642,46 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     card
 }
 
-/// Показываем хвост токена, а не сам токен: подтвердить «тот ли ключ» так можно,
-/// а подсмотреть через плечо — нет.
+/// Что стоит в поле токена. В фокусе — сам токен: его правят, и правка
+/// маски сохраняла бы точки. Вне фокуса — маска: хвост токена, а не сам
+/// токен, — подтвердить «тот ли ключ» так можно, а подсмотреть через плечо
+/// нет. Порт `onChange(of: isTokenFocused)` из `NetworkSettingsCard`.
+fn token_field_text(stored: &str, focused: bool) -> String {
+    if focused {
+        stored.to_string()
+    } else {
+        mask(stored)
+    }
+}
+
+/// Что сохранить из поля токена, если сохранять есть что.
+///
+/// Точка маски в настоящем токене не встречается, поэтому текст с ней — маска
+/// или её обломок, а не ввод: так маска не уходит в файл ни целой,
+/// ни правленой. Совпавший с записанным текст — показ токена при входе
+/// в поле, а не правка.
+fn token_to_save(text: &str, stored: &str) -> Option<String> {
+    if text.contains(MASK_DOT) {
+        return None;
+    }
+    let value = text.trim();
+    (value != stored).then(|| value.to_string())
+}
+
+/// Знак маски токена.
+const MASK_DOT: char = '•';
+
 fn mask(token: &str) -> String {
     let length = token.chars().count();
     if length == 0 {
         return String::new();
     }
+    let dots = |count: usize| MASK_DOT.to_string().repeat(count);
     if length <= 4 {
-        return "•".repeat(length);
+        return dots(length);
     }
     let tail: String = token.chars().skip(length - 4).collect();
-    format!("{}{tail}", "•".repeat(length - 4))
+    format!("{}{tail}", dots(length - 4))
 }
 
 // --- Списки геоправил -----------------------------------------------------
@@ -577,7 +694,9 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
     let list = GtkBox::new(Orientation::Vertical, 0);
     card.append(&list);
 
-    let add_row = ui::row(false);
+    // Линию над вводом ставит перерисовка: пока список пуст, над ним одна
+    // строка-заглушка, и линия отделяла бы ввод от пустоты.
+    let add_row = ui::row(true);
     let entry = ui::entry("Код страны (RU), IP или CIDR");
     // Плейсхолдер исчезает при первом символе, поэтому формат повторён значком.
     ui::entry_hint(
@@ -590,12 +709,9 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
     add_row.append(&add);
     card.append(&add_row);
 
-    let error = ui::caption("");
-    error.add_css_class("weto-error");
-    error.set_wrap(true);
-    error.set_xalign(0.0);
-    error.set_visible(false);
-    card.append(&error);
+    // Отказ — своей строкой под вводом, с паддингом строки, как на macOS.
+    let (error_row, error) = ui::error_row();
+    card.append(&error_row);
 
     // Перерисовка через `Rc`, чтобы её могли позвать и кнопки внутри строк,
     // которые она же и создаёт.
@@ -604,9 +720,11 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
         let state = state.clone();
         let list = list.clone();
         let self_ref = redraw.clone();
+        let add_row = add_row.clone();
         let draw: Rc<dyn Fn()> = Rc::new(move || {
             clear(&list);
             let entries = state.settings.current().entries(kind);
+            ui::set_divided(&add_row, ui::input_row_divided(entries.len()));
 
             if entries.is_empty() {
                 let row = ui::row(true);
@@ -672,13 +790,10 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
             match outcome {
                 Ok(()) => {
                     entry.set_text("");
-                    error.set_visible(false);
+                    ui::set_error(&error, None);
                     redraw();
                 }
-                Err(failure) => {
-                    error.set_text(&failure.to_string());
-                    error.set_visible(true);
-                }
+                Err(failure) => ui::set_error(&error, Some(&failure.to_string())),
             }
         }
     };
@@ -734,11 +849,8 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
     let card = ui::card("Обслуживание");
     let autostart = Autostart::new(&state.paths);
 
-    let error = ui::caption("");
-    error.add_css_class("weto-error");
-    error.set_wrap(true);
-    error.set_xalign(0.0);
-    error.set_visible(false);
+    // Отказ — своей строкой под тумблерами, с паддингом строки, как на macOS.
+    let (error_row, error) = ui::error_row();
 
     // Автозапуск.
     let launch_row = ui::row(true);
@@ -761,11 +873,8 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
             };
 
             match outcome {
-                Ok(()) => error.set_visible(false),
-                Err(failure) => {
-                    error.set_text(&failure.to_string());
-                    error.set_visible(true);
-                }
+                Ok(()) => ui::set_error(&error, None),
+                Err(failure) => ui::set_error(&error, Some(&failure.to_string())),
             }
 
             // Состояние берём из системы, а не из нажатия: отказ не должен
@@ -776,8 +885,10 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
     }
 
     // Автообновление. Та же настройка, что галочка в окне обновления:
-    // хранилище одно, поэтому оба места показывают одно и то же.
-    let auto_row = ui::row(false);
+    // хранилище одно, поэтому оба места показывают одно и то же. Линии между
+    // тумблерами нет, как в `MaintenanceCard` на macOS: два тумблера
+    // читаются одной группой.
+    let auto_row = ui::row(true);
     auto_row.append(&ui::label("Обновлять автоматически"));
     auto_row.append(&ui::spacer());
     let auto = ui::toggle();
@@ -797,7 +908,7 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
         });
     }
 
-    card.append(&error);
+    card.append(&error_row);
 
     let actions = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
     actions.set_margin_top(ui::SPACE3);
@@ -980,8 +1091,7 @@ fn remove_weto(error: &gtk4::Label) {
             // а тумблера охраны в продукте нет. Оставить окно с текстом ошибки
             // значило бы оставить иконку в трее у приложения, которое уже
             // ничего не охраняет и молчит об этом.
-            error.set_text(&failure);
-            error.set_visible(true);
+            ui::set_error(error, Some(&failure));
 
             let dialog = gtk4::AlertDialog::builder()
                 .message("Удаление прошло не полностью")
@@ -1429,7 +1539,7 @@ fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<Str
     let resolved = resolve_launch_target(text);
     let name = display_name
         .or_else(|| display_name_for(text))
-        .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
+        .unwrap_or_else(|| target_fallback_name(text));
 
     state.settings.edit(|s| {
         s.set_vpn_app(Some(weto_config::settings::Target {
@@ -1475,4 +1585,48 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod token_field_tests {
+    use super::{token_field_text, token_to_save};
+
+    /// В фокусе поле показывает сам токен — его правят, — а вне фокуса маску:
+    /// подтвердить «тот ли ключ» по хвосту можно, подсмотреть через плечо — нет.
+    /// Как `onChange(of: isTokenFocused)` в `NetworkSettingsCard` на macOS.
+    #[test]
+    fn the_field_shows_the_token_only_while_focused() {
+        assert_eq!(token_field_text("abcd1234efgh", true), "abcd1234efgh");
+        assert_eq!(token_field_text("abcd1234efgh", false), "••••••••efgh");
+        assert_eq!(token_field_text("abc", false), "•••");
+        assert_eq!(token_field_text("", false), "");
+        assert_eq!(token_field_text("", true), "");
+    }
+
+    /// Маска — не ввод: ни она сама, ни правленая маска не сохраняются. Раньше
+    /// маска стояла в поле и в фокусе, и дописанный к ней символ уходил в файл
+    /// токеном из точек — ipinfo отвечал отказом, а цели вставали на паузу.
+    #[test]
+    fn the_mask_is_never_saved() {
+        let stored = "abcd1234efgh";
+        assert_eq!(token_to_save("••••••••efgh", stored), None);
+        assert_eq!(token_to_save("••••••••efghX", stored), None);
+        assert_eq!(token_to_save("••••••••efg", stored), None);
+    }
+
+    /// Сохраняется только настоящая правка: показ токена при входе в поле
+    /// записью не является, а пробелы по краям — частая добыча копирования.
+    #[test]
+    fn only_a_real_edit_is_saved() {
+        let stored = "abcd1234efgh";
+        assert_eq!(token_to_save(stored, stored), None);
+        assert_eq!(
+            token_to_save(" newtoken42 ", stored),
+            Some("newtoken42".to_string())
+        );
+        // Стёртое поле — тоже правка: пользователь убирает ключ.
+        assert_eq!(token_to_save("", stored), Some(String::new()));
+        // Пустое поле при пустом токене — нечего сохранять.
+        assert_eq!(token_to_save("", ""), None);
+    }
 }

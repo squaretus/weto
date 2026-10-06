@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use weto_sys::target_resolver::{
-    icon_for, resolve_launch_entry, resolve_launch_target, Resolution,
+    icon_for, locate_target, resolve_launch_entry, resolve_launch_target, Resolution,
 };
 
 /// Пакет из четырёх звеньев. Возвращает корень раскладки и путь настоящего
@@ -247,6 +247,71 @@ fn the_icon_is_read_from_the_chosen_entry() {
     assert_eq!(
         icon_for(&root.join("missing.desktop").to_string_lossy()),
         None
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Настройки спрашивают границу заново при каждой перерисовке, а не помнят путь
+/// с момента добавления: обновление инструмента из версионного каталога меняет
+/// развёрнутый путь целиком, и описание цели показывало бы удалённую версию.
+#[test]
+fn a_target_is_located_where_it_points_now() {
+    let root = temp_dir("versions");
+    let versions = root.join("versions");
+    fs::create_dir_all(&versions).unwrap();
+    for version in ["2.1.228", "2.1.241"] {
+        let binary = versions.join(version);
+        fs::write(&binary, "\x7fELF").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let link = root.join("claude");
+    std::os::unix::fs::symlink(versions.join("2.1.228"), &link).unwrap();
+    let entry = link.to_string_lossy().into_owned();
+
+    let before = locate_target(&entry);
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(versions.join("2.1.241"), &link).unwrap();
+    let after = locate_target(&entry);
+
+    let canonical = |version: &str| {
+        fs::canonicalize(versions.join(version))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert_eq!(before, Some(canonical("2.1.228")));
+    assert_eq!(after, Some(canonical("2.1.241")));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Граница путь не выдумывает: запись, за которой на диске ничего нет, —
+/// «не найдено», а не сама запись, выданная за путь.
+#[test]
+fn a_target_that_is_not_on_disk_is_not_located() {
+    assert_eq!(locate_target("/opt/такого/нет/never-installed"), None);
+    assert_eq!(locate_target("weto-never-installed-command"), None);
+}
+
+/// Целиком читается только то, что может быть скриптом-запускатором.
+/// Описание цели в настройках спрашивает границу каждую секунду, а бинарник
+/// инструмента весит сотни мегабайт — `claude` около двухсот: чтение его
+/// целиком ради проверки «не скрипт ли это» гоняло бы их по памяти
+/// на каждой перерисовке. Запускатор — несколько строк, и файл крупнее
+/// предела им не считается, даже если начинается как скрипт.
+#[test]
+fn a_file_too_large_for_a_launcher_is_not_read_as_one() {
+    let root = temp_dir("large");
+    let neighbour = root.join("DemoApp");
+    fs::write(&neighbour, "\x7fELF").unwrap();
+    let large = root.join("demo-launcher");
+    let mut text =
+        String::from("#!/bin/sh\nexec \"$(dirname \"$(readlink -f \"$0\")\")/DemoApp\" \"$@\"\n");
+    text.push_str(&"#\n".repeat(1024 * 1024));
+    fs::write(&large, text).unwrap();
+
+    assert_eq!(
+        resolve_launch_target(&large.to_string_lossy()),
+        fs::canonicalize(&large).unwrap().to_string_lossy(),
     );
     let _ = fs::remove_dir_all(&root);
 }

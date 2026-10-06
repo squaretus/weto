@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::guard_machine::GuardPhase;
 use crate::pause_ceiling::{countdown_text, duration_text};
 use crate::policy::{UnprovenReason, UnsafeEvidence};
+use crate::process::TargetKind;
 
 impl UnprovenReason {
     pub fn display_text(&self) -> String {
@@ -295,6 +296,44 @@ fn outcome_text(outcome: &crate::geo::SourceOutcome) -> String {
         crate::geo::SourceOutcome::Failed(failure) => failure.display_text(),
         crate::geo::SourceOutcome::NotRequested => "не запрашивалось".to_string(),
     }
+}
+
+/// Что стоит за целью — и почему её не нашли, если не нашли. Порт
+/// `GuardVM.resolvedDescription`, тексты дословно оттуда.
+///
+/// `found` — путь того, что запустится, если граница его нашла на диске;
+/// `None` — не нашла. Сама граница «не найдено» не сообщает: цель, которой
+/// на машине нет, для неё не ошибка, а цель, которую ещё не установили, —
+/// поэтому вопрос задаёт экран, а отвечают ему здесь.
+///
+/// Одного «не найдено в системе» мало: имя ищется по списку каталогов,
+/// и не найтись оно может просто потому, что инструмент лежит в своём.
+/// Подсказка про полный путь — единственный выход, который у пользователя
+/// есть прямо сейчас. Вида `appBundle` на Linux нет, поэтому и строки
+/// «приложение:» здесь не бывает.
+pub fn target_description(entry: &str, kind: TargetKind, found: Option<&str>) -> String {
+    let Some(path) = found else {
+        return if entry.contains('/') {
+            "не найдено: по этому пути нет исполняемого файла".to_string()
+        } else {
+            "не найдено по имени — укажите полный путь к файлу".to_string()
+        };
+    };
+    match kind {
+        TargetKind::Binary => format!("бинарник: {path}"),
+        TargetKind::Script => format!("скрипт: {path}"),
+    }
+}
+
+/// Имя цели, у которой нет ярлыка: введённое имя или последний сегмент
+/// введённого пути — как `TargetResolver` на macOS.
+///
+/// Развёрнутый путь для имени не годится: у инструментов из версионного
+/// каталога (`~/.local/share/claude/versions/2.1.241`) последний сегмент —
+/// номер версии, и цель подписывалась бы им.
+pub fn target_fallback_name(entry: &str) -> String {
+    let entry = entry.trim_end_matches('/');
+    entry.rsplit('/').next().unwrap_or(entry).to_string()
 }
 
 #[cfg(test)]
@@ -720,5 +759,39 @@ mod tests {
         let lines = status_lines_without_report();
         assert_eq!(lines[0].value, "неизвестен");
         assert_eq!(lines[1].value, "—");
+    }
+
+    /// Тексты описания цели — дословно `GuardVM.resolvedDescription` с macOS.
+    /// Не нашлась цель по пути и по имени — разные беды и разные выходы:
+    /// путь можно поправить, а имя ищется по списку каталогов, и подсказка
+    /// про полный путь — единственный выход, который у пользователя есть.
+    #[test]
+    fn target_description_names_what_runs_and_why_it_was_not_found() {
+        assert_eq!(
+            target_description("nano", TargetKind::Binary, Some("/usr/bin/pico")),
+            "бинарник: /usr/bin/pico"
+        );
+        assert_eq!(
+            target_description("qwen", TargetKind::Script, Some("/opt/qwen/cli.js")),
+            "скрипт: /opt/qwen/cli.js"
+        );
+        assert_eq!(
+            target_description("/opt/нет/такого", TargetKind::Binary, None),
+            "не найдено: по этому пути нет исполняемого файла"
+        );
+        assert_eq!(
+            target_description("never-installed", TargetKind::Binary, None),
+            "не найдено по имени — укажите полный путь к файлу"
+        );
+    }
+
+    /// Имя цели без ярлыка берётся из того, что ввёл пользователь, а не из
+    /// развёрнутого пути: у инструментов из версионного каталога последний
+    /// сегмент — номер версии, и цель «claude» подписывалась «2.1.241».
+    /// Порт `TargetResolver.rule(forEntry:at:)`.
+    #[test]
+    fn a_target_without_a_shortcut_is_named_by_what_was_typed() {
+        assert_eq!(target_fallback_name("claude"), "claude");
+        assert_eq!(target_fallback_name("/usr/local/bin/qwen"), "qwen");
     }
 }

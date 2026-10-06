@@ -23,6 +23,11 @@ use std::path::{Path, PathBuf};
 /// случаю, а ограничение спасает от кольца из симлинков.
 const MAX_HOPS: usize = 4;
 
+/// Крупнее этого скрипт-запускатор не бывает: он из нескольких строк.
+/// Предел не даёт читать целиком бинарник — у инструментов он весит сотни
+/// мегабайт, а описание цели в настройках спрашивает границу каждую секунду.
+const LAUNCHER_SIZE_LIMIT: u64 = 256 * 1024;
+
 /// Каталоги с ярлыками приложений — местный аналог `/Applications`.
 ///
 /// Системный идёт первым, и это не вкусовщина: в пользовательском обычно лежит
@@ -75,6 +80,21 @@ pub fn resolve_launch_target(entry: &str) -> String {
     match resolve_launch_entry(entry) {
         Resolution::Resolved(path) => path,
         Resolution::NeedsPath { .. } => entry.to_string(),
+    }
+}
+
+/// Где цель лежит сейчас — или `None`, если на диске за ней ничего нет.
+///
+/// Для описания цели в настройках, а не для охраны: охране ненайденная цель
+/// не ошибка, а экрану нужен ответ «не найдено», и `resolve_launch_target`
+/// его не даёт — запись, за которой ничего нет, он возвращает как есть.
+/// Спрашивается при каждой перерисовке: обновление инструмента
+/// из версионного каталога меняет развёрнутый путь целиком. Чужой
+/// запускатор — тоже «не найдено»: файла программы ярлык не называет.
+pub fn locate_target(entry: &str) -> Option<String> {
+    match resolve_launch_entry(entry) {
+        Resolution::Resolved(path) if Path::new(&path).is_file() => Some(path),
+        _ => None,
     }
 }
 
@@ -148,8 +168,12 @@ fn next_hop(path: &str) -> Hop {
     }
 
     // Скрипт читается как текст; на бинарнике чтение просто не сложится.
-    let neighbour = std::fs::read_to_string(file)
-        .ok()
+    // Но сперва размер: чтобы «не сложиться», `read_to_string` прочёл бы
+    // бинарник целиком.
+    let small = std::fs::metadata(file).is_ok_and(|meta| meta.len() <= LAUNCHER_SIZE_LIMIT);
+    let neighbour = small
+        .then(|| std::fs::read_to_string(file).ok())
+        .flatten()
         .and_then(|text| weto_core::launcher::sibling_binary_from_launcher(&text));
     let Some(neighbour) = neighbour else {
         return Hop::Stop;
