@@ -1259,8 +1259,9 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     let list = GtkBox::new(Orientation::Vertical, 0);
     card.append(&list);
 
-    // Ряд из двух кнопок: выгрузка рядом с очисткой, как на macOS.
-    let buttons = ui::row(false);
+    // Ряд из двух кнопок: выгрузка рядом с очисткой, как на macOS. Линии над
+    // ним нет — его отделяет от записей отступ, а не разделитель строк.
+    let buttons = ui::action_row();
     buttons.set_margin_top(ui::SPACE3);
     let export_button = ui::muted_button("Выгрузить журнал");
     export_button.set_hexpand(true);
@@ -1274,29 +1275,44 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
         let state = state.clone();
         let list = list.clone();
         let clear_button = clear_button.clone();
-        let export_button = export_button.clone();
         move || {
             clear(&list);
             let journal = state.journal();
+            let entries = journal.entries();
 
-            if journal.entries().is_empty() {
+            // Выгрузка доступна всегда, а не только когда есть завершения:
+            // ради «нажал проверить, и ничего не произошло» журнал проверок
+            // и заведён, а завершений в этом случае нет вовсе. Да и пустая
+            // выгрузка не бесполезна — в ней настройки и версии. Очищать же
+            // пустой журнал нечего.
+            clear_button.set_visible(!entries.is_empty());
+
+            if entries.is_empty() {
                 let row = ui::row(true);
                 row.append(&ui::caption("Срабатываний не было"));
                 list.append(&row);
-                clear_button.set_visible(false);
-                export_button.set_visible(false);
                 return;
             }
 
-            clear_button.set_visible(true);
-            export_button.set_visible(true);
             // Свежие сверху: журнал так и хранится, разворачивать нечего.
-            for event in journal.entries() {
+            // Линия стоит между записями, а не над первой.
+            let visible = entries.iter().take(weto_config::journal::VISIBLE_LIMIT);
+            for (index, event) in visible.enumerate() {
+                if index > 0 {
+                    list.append(&ui::divider());
+                }
                 list.append(&ui::journal_row(
                     &event.title(),
                     &event.summary_text(),
-                    &diagnostics(event),
+                    event.resolution_line().as_deref(),
+                    &event.diagnostics_text(&local_timestamp(event.at)),
                 ));
+            }
+
+            if let Some(text) = weto_config::journal::visible_limit_caption(entries.len()) {
+                let row = ui::row(true);
+                row.append(&ui::caption(&text));
+                list.append(&row);
             }
         }
     };
@@ -1326,6 +1342,7 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
                 return;
             };
             let Some(text) = state.export_journal() else {
+                report_export_failure(&window, "не удалось собрать файл журнала");
                 return;
             };
 
@@ -1334,12 +1351,13 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
                 .initial_name(weto_config::export::JournalExport::file_name(&stamp_now()))
                 .build();
 
+            let parent = window.clone();
             dialog.save(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
                 // Отмена — не ошибка: пользователь передумал.
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
                 if let Err(error) = std::fs::write(&path, &text) {
-                    eprintln!("weto: журнал не выгрузился: {error}");
+                    report_export_failure(&parent, &error.to_string());
                 }
             });
         });
@@ -1350,26 +1368,34 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     scroll(&page)
 }
 
-fn diagnostics(event: &weto_config::journal::KillEvent) -> String {
-    let mut parts = Vec::new();
-    if let Some(ip) = &event.ip {
-        parts.push(format!("IP: {ip}"));
-    }
-    if let Some(country) = &event.country {
-        parts.push(format!("ipinfo: {country}"));
-    }
-    if let (Some(source), Some(country)) = (&event.confirm_source, &event.confirmed_country) {
-        parts.push(format!("{source}: {country}"));
-    }
-    // Чем процесс попал под охрану: потомок называет родителя, шелл объясняет,
-    // что целью он не был вовсе, а стоял ради её терминала.
-    if let Some(basis) = event.matched_by.detail_text(event.parent_pid) {
-        parts.push(basis);
-    }
-    if let Some(resolution) = &event.resolution_text {
-        parts.push(format!("итог: {resolution}"));
-    }
-    parts.join(" · ")
+/// Местное время записи для строки показаний.
+///
+/// Смещение берётся на момент самой записи, а не на «сейчас»: запись, сделанная
+/// до перевода часов, иначе показывала бы чужой час. Пояс знает GLib, ядро
+/// получает готовое смещение — системы оно не касается.
+fn local_timestamp(at: std::time::SystemTime) -> String {
+    let seconds = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    let offset = gtk4::glib::DateTime::from_unix_local(seconds)
+        .map(|local| local.utc_offset().as_seconds())
+        .unwrap_or_default();
+    weto_core::timestamp::to_local_display(at, offset)
+}
+
+/// Неудавшаяся выгрузка — диалогом, как `NSAlert` на macOS: в терминал,
+/// куда она писалась раньше, пользователь приложения из трея не смотрит,
+/// и выглядело это как «нажал — ничего не произошло».
+fn report_export_failure(window: &ApplicationWindow, failure: &str) {
+    let dialog = gtk4::AlertDialog::builder()
+        .message("Журнал не выгрузился")
+        .detail(failure)
+        .buttons(["OK"])
+        .default_button(0)
+        .modal(true)
+        .build();
+    dialog.show(Some(window));
 }
 
 // --- Общее ----------------------------------------------------------------

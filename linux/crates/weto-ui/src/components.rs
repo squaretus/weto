@@ -415,22 +415,43 @@ pub fn pause_badge(
     (row, Some(button))
 }
 
-/// Запись журнала: три строки без плашек, рамок и цвета.
-pub fn journal_row(target: &str, summary: &str, diagnostics: &str) -> GtkBox {
-    let row = GtkBox::new(Orientation::Vertical, 0);
+/// Запись журнала без плашек, рамок и цвета — порт `JournalRow` с macOS:
+/// цель, сводка, исход эпизода, если он есть, и строка показаний.
+///
+/// Исход стоит своей строкой цветом сводки, а не хвостом блёклых показаний:
+/// именно он объясняет запись «подключение ещё не проверено», после которой
+/// всё оказалось в порядке, и в показаниях его не замечали.
+pub fn journal_row(
+    title: &str,
+    summary: &str,
+    resolution: Option<&str>,
+    diagnostics: &str,
+) -> GtkBox {
+    // Зазор между строками записи — 2, как у `JournalRow` на macOS: он мельче
+    // шага сетки намеренно, строки одной записи читаются одним блоком.
+    const LINE_GAP: i32 = 2;
+
+    let row = GtkBox::new(Orientation::Vertical, LINE_GAP);
     row.add_css_class("weto-row");
 
-    row.append(&label(target));
+    row.append(&label(title));
 
-    let summary_label = Label::new(Some(summary));
-    summary_label.add_css_class("weto-value");
-    summary_label.set_halign(Align::Start);
-    summary_label.set_wrap(true);
-    row.append(&summary_label);
+    let wrapped = |text: &str, class: &str| {
+        let line = Label::new(Some(text));
+        line.add_css_class(class);
+        line.set_halign(Align::Start);
+        line.set_xalign(0.0);
+        line.set_wrap(true);
+        line
+    };
 
-    let diagnostics_label = Label::new(Some(diagnostics));
-    diagnostics_label.add_css_class("weto-journal-diagnostics");
-    diagnostics_label.set_halign(Align::Start);
+    row.append(&wrapped(summary, "weto-value"));
+
+    if let Some(resolution) = resolution {
+        row.append(&wrapped(resolution, "weto-value"));
+    }
+
+    let diagnostics_label = wrapped(diagnostics, "weto-journal-diagnostics");
     // Диагностическую строку в каноне выделяют мышью.
     diagnostics_label.set_selectable(true);
     row.append(&diagnostics_label);

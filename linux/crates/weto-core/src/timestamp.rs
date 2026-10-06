@@ -1,4 +1,5 @@
-//! Отметки времени в журнале и выгрузке — строкой ISO 8601 в UTC.
+//! Отметки времени в журнале и выгрузке — строкой ISO 8601 в UTC,
+//! а на экране — местным временем (`to_local_display`).
 //!
 //! `SystemTime` по умолчанию сериализуется объектом `{secs_since_epoch, nanos}`,
 //! а macOS пишет `"2026-08-27T13:32:46Z"`. Файл выгрузки читают и человек,
@@ -52,6 +53,30 @@ pub fn from_iso8601(text: &str) -> Option<SystemTime> {
         return None;
     }
     Some(UNIX_EPOCH + Duration::from_secs(seconds as u64))
+}
+
+/// Отметка для глаз — `dd.MM.yyyy HH:mm:ss`, как `JournalRow` на macOS.
+///
+/// Время местное, но пояс сюда приходит готовым смещением: ядро не знает
+/// о системе, а смещение берётся на тот момент, который печатается, —
+/// запись, сделанная до перевода часов, иначе показывала бы чужой час.
+pub fn to_local_display(time: SystemTime, utc_offset_seconds: i64) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+        + utc_offset_seconds;
+
+    let days = seconds.div_euclid(86_400);
+    let time_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+
+    format!(
+        "{day:02}.{month:02}.{year:04} {:02}:{:02}:{:02}",
+        time_of_day / 3600,
+        (time_of_day % 3600) / 60,
+        time_of_day % 60
+    )
 }
 
 /// Григорианская дата из числа дней с эпохи — алгоритм Хиннанта.
@@ -118,5 +143,28 @@ pub mod iso8601_option {
                 serde::de::Error::custom(format!("непонятная отметка времени: {text}"))
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Формат — `dd.MM.yyyy HH:mm:ss` из `JournalRow` на macOS, в местном времени.
+    #[test]
+    fn local_display_reads_as_on_macos() {
+        let at = from_iso8601("2026-10-06T11:03:09Z").unwrap();
+
+        assert_eq!(to_local_display(at, 3 * 3600), "06.10.2026 14:03:09");
+        assert_eq!(to_local_display(at, 0), "06.10.2026 11:03:09");
+    }
+
+    /// Смещение переносит дату, а не только часы: запись за полночь по UTC
+    /// в западном поясе ещё вчерашняя.
+    #[test]
+    fn local_display_moves_the_date_with_the_offset() {
+        let at = from_iso8601("2026-01-01T01:30:00Z").unwrap();
+
+        assert_eq!(to_local_display(at, -5 * 3600), "31.12.2025 20:30:00");
     }
 }

@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 use std::time::SystemTime;
 
-use weto_config::journal::{Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY};
+use weto_config::journal::{
+    visible_limit_caption, Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY, VISIBLE_LIMIT,
+};
 use weto_config::paths::Paths;
 use weto_config::settings::{GeoListEntryError, GeoListKind, Settings, Target};
 use weto_core::pause_ceiling::PauseCeiling;
@@ -443,6 +445,77 @@ fn nameless_target_still_reads_as_something() {
     nameless.target_name.clear();
 
     assert_eq!(nameless.title(), "неизвестная цель · pid 1");
+}
+
+/// Строка показаний — дословно `JournalRow.diagnostics` на macOS: время первым,
+/// адрес всегда, даже неизвестный, затем страны и основание.
+#[test]
+fn diagnostics_open_with_the_time_and_always_name_the_address() {
+    let bare = event(1, "VPN не поднят");
+    assert_eq!(
+        bare.diagnostics_text("06.10.2026 14:03:09"),
+        "06.10.2026 14:03:09 · IP: неизвестен"
+    );
+
+    let mut full = event(2, "Страна ipinfo заблокирована");
+    full.ip = Some("203.0.113.7".to_string());
+    full.country = Some("KZ".to_string());
+    full.confirmed_country = Some("KZ".to_string());
+    full.confirm_source = Some("geojs".to_string());
+    full.matched_by = MatchBasis::Descendant;
+    full.parent_pid = 40;
+    assert_eq!(
+        full.diagnostics_text("06.10.2026 14:03:09"),
+        "06.10.2026 14:03:09 · IP: 203.0.113.7 · ipinfo: KZ · geojs: KZ · потомок 40"
+    );
+}
+
+/// Подтверждённая страна без названного сервиса не пропадает: на macOS
+/// она подписана «подтверждение».
+#[test]
+fn a_confirmation_without_a_named_source_is_still_shown() {
+    let mut event = event(1, "Расхождение стран");
+    event.confirmed_country = Some("RU".to_string());
+
+    assert_eq!(
+        event.diagnostics_text("t"),
+        "t · IP: неизвестен · подтверждение: RU"
+    );
+}
+
+/// Исход эпизода — своя строка «Итог: …», а не хвост блёклой диагностики:
+/// именно он объясняет запись, после которой всё оказалось в порядке.
+#[test]
+fn the_outcome_stands_on_a_line_of_its_own() {
+    let mut event = event(1, "Подключение ещё не проверено");
+    assert_eq!(event.resolution_line(), None);
+
+    event.resolution_text = Some("возобновлено проверкой".to_string());
+    assert_eq!(
+        event.resolution_line().as_deref(),
+        Some("Итог: возобновлено проверкой")
+    );
+    assert!(
+        !event.diagnostics_text("t").contains("тог"),
+        "исход не дублируется в строке показаний"
+    );
+}
+
+/// На экране — последние двадцать, остальное честно отсылает к выгрузке
+/// (`JournalCard.visibleLimit` на macOS).
+#[test]
+fn the_card_says_how_many_records_it_leaves_to_the_export() {
+    assert_eq!(VISIBLE_LIMIT, 20);
+    assert_eq!(visible_limit_caption(0), None);
+    assert_eq!(visible_limit_caption(20), None);
+    assert_eq!(
+        visible_limit_caption(21).as_deref(),
+        Some("Показаны последние 20 из 21 — выгрузите журнал целиком")
+    );
+    assert_eq!(
+        visible_limit_caption(CAPACITY).as_deref(),
+        Some("Показаны последние 20 из 100 — выгрузите журнал целиком")
+    );
 }
 
 #[test]

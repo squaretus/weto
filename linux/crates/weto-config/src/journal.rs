@@ -108,6 +108,56 @@ impl KillEvent {
         };
         format!("{name} · pid {}", self.pid)
     }
+
+    /// Исход эпизода отдельной строкой: именно он объясняет запись
+    /// «подключение ещё не проверено», после которой всё оказалось в порядке.
+    /// В блёклой строке показаний его не замечали.
+    pub fn resolution_line(&self) -> Option<String> {
+        self.resolution_text
+            .as_ref()
+            .map(|resolution| format!("Итог: {resolution}"))
+    }
+
+    /// Строка показаний — дословно `JournalRow.diagnostics` на macOS.
+    ///
+    /// Время приходит готовой строкой: местный пояс знает система, а не конфиг.
+    /// Адрес назван всегда, даже неизвестный, — пропуск читался бы как «адрес
+    /// не спрашивали». Подтверждённая страна без названного сервиса подписана
+    /// «подтверждение», а не пропадает.
+    pub fn diagnostics_text(&self, timestamp: &str) -> String {
+        let mut parts = vec![
+            timestamp.to_string(),
+            format!("IP: {}", self.ip.as_deref().unwrap_or("неизвестен")),
+        ];
+        if let Some(country) = &self.country {
+            parts.push(format!("ipinfo: {country}"));
+        }
+        if let Some(confirmed) = &self.confirmed_country {
+            let source = self.confirm_source.as_deref().unwrap_or("подтверждение");
+            parts.push(format!("{source}: {confirmed}"));
+        }
+        // Чем процесс попал под охрану: потомок называет родителя, шелл объясняет,
+        // что целью он не был вовсе, а стоял ради её терминала.
+        if let Some(basis) = self.matched_by.detail_text(self.parent_pid) {
+            parts.push(basis);
+        }
+        parts.join(" · ")
+    }
+}
+
+/// Сколько записей показывает карточка «Журнал» — `JournalCard.visibleLimit`
+/// на macOS.
+///
+/// Хранится сто, а запись — на процесс: одно падение VPN — это десятки строк,
+/// и списком в окне настроек их не читают. Разбор идёт по выгрузке, поэтому
+/// на экране последние двадцать и честная строка про остальные.
+pub const VISIBLE_LIMIT: usize = 20;
+
+/// Строка под списком, когда записей больше, чем показано.
+pub fn visible_limit_caption(total: usize) -> Option<String> {
+    (total > VISIBLE_LIMIT).then(|| {
+        format!("Показаны последние {VISIBLE_LIMIT} из {total} — выгрузите журнал целиком")
+    })
 }
 
 /// Журналы до переименования писали булев признак `isDescendant`: читаем его,
