@@ -10,7 +10,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use weto_sys::target_resolver::{resolve_launch_entry, resolve_launch_target, Resolution};
+use weto_sys::target_resolver::{
+    icon_for, resolve_launch_entry, resolve_launch_target, Resolution,
+};
 
 /// Пакет из четырёх звеньев. Возвращает корень раскладки и путь настоящего
 /// бинарника — того, что покажет `/proc/<pid>/exe`.
@@ -221,6 +223,30 @@ fn an_ordinary_entry_resolves_without_asking() {
                 .to_string_lossy()
                 .into_owned()
         )
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Иконка пилюли читается из ярлыка, который выбрал пользователь; у команды
+/// и бинарника её нет, и пилюля рисует значок терминала.
+#[test]
+fn the_icon_is_read_from_the_chosen_entry() {
+    let root = temp_dir("icon");
+    let entry = root.join("editor.desktop");
+    fs::write(
+        &entry,
+        "[Desktop Entry]\nName=Editor\nIcon=accessories-text-editor\nExec=/bin/sh\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        icon_for(&entry.to_string_lossy()).as_deref(),
+        Some("accessories-text-editor")
+    );
+    assert_eq!(icon_for("/bin/sh"), None);
+    assert_eq!(
+        icon_for(&root.join("missing.desktop").to_string_lossy()),
+        None
     );
     let _ = fs::remove_dir_all(&root);
 }

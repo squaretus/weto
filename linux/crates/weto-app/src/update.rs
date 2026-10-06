@@ -12,6 +12,7 @@ use weto_update::checker::ReleaseChecker;
 use weto_update::installer::Installer;
 use weto_update::layout::Layout;
 use weto_update::policy::{UpdateDeferral, UpdateInfo};
+use weto_update::progress::{UpdatePhase, UpdateProgress};
 use weto_update::rollback::{roll_back_if_needed, LaunchMarker};
 use weto_update::scheduler::{DeferralReading, Finding, UpdateScheduler};
 use weto_update::store::UpdateStore;
@@ -45,6 +46,27 @@ pub enum Progress {
     Failed(String),
     /// Установка удалась; дальше только перезапуск.
     Installed,
+}
+
+impl Progress {
+    /// Ход в фазах macOS — ими говорит баннер. Отдельной фазы распаковки
+    /// установщик не сообщает, но загрузка кончается долей 1.0 ровно перед ней:
+    /// всё, что после полной доли, — уже установка. Успех читается так же:
+    /// следом идёт перезапуск, и «Доступно обновление» было бы неправдой.
+    pub fn as_update_progress(&self) -> UpdateProgress {
+        match self {
+            Progress::Idle => UpdateProgress::idle(),
+            Progress::Running(fraction) if *fraction < 1.0 => {
+                UpdateProgress::new(UpdatePhase::Downloading, f64::from(*fraction), None)
+            }
+            Progress::Running(_) | Progress::Installed => {
+                UpdateProgress::new(UpdatePhase::Installing, 1.0, None)
+            }
+            Progress::Failed(reason) => {
+                UpdateProgress::new(UpdatePhase::Failed, 0.0, Some(reason.clone()))
+            }
+        }
+    }
 }
 
 pub struct Updates {
@@ -243,4 +265,38 @@ pub fn start(state: Arc<AppState>) {
 
         gtk4::glib::ControlFlow::Continue
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Баннер говорит фазами macOS. Установщик знает только долю скачанного:
+    /// пока она меньше единицы — загрузка, дальше распаковка и переключение
+    /// версии, то есть установка. Успех — тоже установка: перезапуск уже идёт,
+    /// и «Доступно обновление» в этот миг было бы неправдой.
+    #[test]
+    fn the_installer_progress_reads_as_macos_phases() {
+        assert_eq!(Progress::Idle.as_update_progress(), UpdateProgress::idle());
+        assert_eq!(
+            Progress::Running(0.25).as_update_progress(),
+            UpdateProgress::new(UpdatePhase::Downloading, 0.25, None)
+        );
+        assert_eq!(
+            Progress::Running(1.0).as_update_progress().phase,
+            UpdatePhase::Installing
+        );
+        assert_eq!(
+            Progress::Installed.as_update_progress().phase,
+            UpdatePhase::Installing
+        );
+        assert_eq!(
+            Progress::Failed("распаковка не удалась: диск полон".into()).as_update_progress(),
+            UpdateProgress::new(
+                UpdatePhase::Failed,
+                0.0,
+                Some("распаковка не удалась: диск полон".into())
+            )
+        );
+    }
 }

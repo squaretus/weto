@@ -202,6 +202,14 @@ pub fn idle_targets(phase: &GuardPhase) -> IdleTargetsNotice {
     }
 }
 
+/// Несёт ли пилюля цели метку `terminal`. Порт `isCommandLine` с macOS, где
+/// метки нет только у бандла `.app`. Здесь аналог бандла — ярлык `.desktop`:
+/// правило у всех целей бинарник или скрипт, и по нему приложение от команды
+/// не отличить, а по тому, что выбрал пользователь, — можно.
+pub fn is_command_line_target(entry: &str) -> bool {
+    !entry.ends_with(".desktop")
+}
+
 /// Строка показаний: ключ слева, значение справа.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusLine {
@@ -640,6 +648,21 @@ mod tests {
             .hint,
             None
         );
+    }
+
+    /// Метка `terminal` — у всякой цели, кроме ярлыка `.desktop`: ярлык здесь
+    /// и есть приложение (на macOS — бандл `.app`), а бинарник, скрипт или
+    /// команда — то, что живёт в терминале. Порт `isCommandLine: kind != .appBundle`.
+    #[test]
+    fn only_a_desktop_entry_is_not_a_command_line_target() {
+        assert!(!is_command_line_target(
+            "/usr/share/applications/firefox.desktop"
+        ));
+        assert!(is_command_line_target("claude"));
+        assert!(is_command_line_target("/usr/bin/nano"));
+        assert!(is_command_line_target("/home/me/.local/bin/qwen"));
+        // Слово в середине пути ярлыком цель не делает.
+        assert!(is_command_line_target("/opt/app.desktop/bin/run"));
     }
 
     #[test]

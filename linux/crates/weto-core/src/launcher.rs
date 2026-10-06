@@ -102,6 +102,29 @@ pub fn name_from_desktop_entry(text: &str, locale: Option<&str>) -> Option<Strin
     localized.or(plain)
 }
 
+/// Иконка приложения из ярлыка — `Icon=` секции `[Desktop Entry]`: имя
+/// из темы иконок или абсолютный путь к файлу. Пилюля цели показывает её,
+/// как macOS показывает иконку бандла.
+pub fn icon_from_desktop_entry(text: &str) -> Option<String> {
+    let mut in_entry_section = false;
+    let mut icon = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+
+        if line.starts_with('[') {
+            in_entry_section = line == "[Desktop Entry]";
+            continue;
+        }
+        if in_entry_section {
+            if let Some(value) = line.strip_prefix("Icon=") {
+                icon = non_empty(value);
+            }
+        }
+    }
+    icon
+}
+
 /// Разбор одной строки `Exec` до настоящей программы.
 ///
 /// Порядок шагов важен: `env` может стоять перед `sh`, а `sh -c` — перед
@@ -318,6 +341,29 @@ pub fn sibling_binary_from_launcher(script: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Иконка пилюли — из `Icon=` секции `[Desktop Entry]`: имя из темы или
+    /// абсолютный путь. Ключи секций `[Desktop Action …]` и пустое значение
+    /// иконкой не являются.
+    #[test]
+    fn the_icon_comes_from_the_entry_section() {
+        let entry = "[Desktop Entry]\nName=Firefox\nIcon=firefox\nExec=firefox %u\n\
+                     [Desktop Action new-window]\nIcon=window-new\n";
+        assert_eq!(icon_from_desktop_entry(entry).as_deref(), Some("firefox"));
+
+        let path = "[Desktop Entry]\nIcon=/opt/app/icon.png\n";
+        assert_eq!(
+            icon_from_desktop_entry(path).as_deref(),
+            Some("/opt/app/icon.png")
+        );
+
+        assert_eq!(icon_from_desktop_entry("[Desktop Entry]\nIcon=\n"), None);
+        assert_eq!(icon_from_desktop_entry("[Desktop Entry]\nName=X\n"), None);
+        assert_eq!(
+            icon_from_desktop_entry("[Desktop Action a]\nIcon=window-new\n"),
+            None
+        );
+    }
 
     #[test]
     fn the_command_comes_from_the_main_section_without_its_arguments() {

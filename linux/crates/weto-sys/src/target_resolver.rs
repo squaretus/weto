@@ -91,6 +91,16 @@ pub fn display_name_for(entry: &str) -> Option<String> {
     weto_core::launcher::name_from_desktop_entry(&text, ui_locale().as_deref())
 }
 
+/// Иконка приложения из ярлыка — для пилюли цели. Как и имя: файл читает
+/// граница, текст разбирает ядро. У цели, заданной не ярлыком, иконки нет.
+pub fn icon_for(entry: &str) -> Option<String> {
+    if !entry.ends_with(".desktop") {
+        return None;
+    }
+    let text = std::fs::read_to_string(entry).ok()?;
+    weto_core::launcher::icon_from_desktop_entry(&text)
+}
+
 /// Язык интерфейса — первые две буквы из `LANG` или `LC_MESSAGES`.
 ///
 /// Ровно то, чем локализованные ключи ярлыка и подписаны (`Name[ru]`):

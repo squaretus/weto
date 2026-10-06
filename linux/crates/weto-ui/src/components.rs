@@ -77,16 +77,21 @@ pub fn caption(text: &str) -> Label {
 ///
 /// Недоступное значение — короткое тире, неизвестный адрес — «неизвестен».
 /// Пустых мест и прочерков другого вида в каноне нет.
+///
+/// Показания выделяются мышью, как `.textSelection(.enabled)` на macOS: адрес
+/// и ответ сервиса копируют в обращение к провайдеру.
 pub fn data_row(key: &str, text: Option<&str>) -> GtkBox {
     let row = GtkBox::new(Orientation::Horizontal, SPACE2);
 
     let key_label = Label::new(Some(&format!("{key}:")));
     key_label.add_css_class("weto-data-key");
     key_label.set_halign(Align::Start);
+    key_label.set_selectable(true);
 
     let value_label = Label::new(Some(text.unwrap_or("—")));
     value_label.add_css_class("weto-data-value");
     value_label.set_halign(Align::Start);
+    value_label.set_selectable(true);
 
     row.append(&key_label);
     row.append(&value_label);
@@ -316,29 +321,40 @@ pub fn status_title(text: &str, state: GuardStatusColor) -> Label {
     label
 }
 
-/// Пилюля живой цели. `extra` — «и ещё N процессов» этого сеанса. `accessory` —
-/// значок паузы (`pause_badge`) у стоящей цели, вставляется перед `+N`;
-/// `None` — цель работает штатно, порт `WetoProcessPill` без аксессуара.
+/// Пилюля живой цели — порт `WetoProcessPill`: иконка, имя одной строкой,
+/// метка `terminal` у цели из командной строки, справа аксессуар и `+N`.
+///
+/// `icon` — `Icon=` ярлыка: имя из темы или абсолютный путь; `None` и имя,
+/// которого в теме нет, дают значок терминала. `extra` — «и ещё N процессов»
+/// этого сеанса. `accessory` — значок паузы (`pause_badge`) у стоящей цели.
+///
+/// Пути под именем нет: на macOS его нет тоже, а длинный путь распирал окно.
+/// Имя обрезается в середине — у версионных путей различается именно хвост.
 pub fn process_pill(
     name: &str,
-    subtitle: Option<&str>,
+    icon: Option<&str>,
+    is_command_line: bool,
     extra: usize,
     accessory: Option<&GtkBox>,
 ) -> GtkBox {
     let pill = GtkBox::new(Orientation::Horizontal, SPACE3);
     pill.add_css_class("weto-pill");
 
-    let icon = gtk4::Image::from_icon_name("utilities-terminal-symbolic");
-    icon.set_pixel_size(32);
-    pill.append(&icon);
+    pill.append(&pill_icon(icon));
 
-    let text = GtkBox::new(Orientation::Vertical, 0);
-    text.set_hexpand(true);
-    text.append(&label(name));
-    if let Some(subtitle) = subtitle {
-        text.append(&caption(subtitle));
+    let title = label(name);
+    title.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    title.set_single_line_mode(true);
+    pill.append(&title);
+
+    if is_command_line {
+        // Шрифт данных цветом `faint` — ровно стиль ключа показаний.
+        let kind = Label::new(Some("terminal"));
+        kind.add_css_class("weto-data-key");
+        pill.append(&kind);
     }
-    pill.append(&text);
+
+    pill.append(&spacer());
 
     if let Some(accessory) = accessory {
         pill.append(accessory);
@@ -351,6 +367,29 @@ pub fn process_pill(
     }
 
     pill
+}
+
+/// Иконка пилюли 32×32. Имени, которого в теме нет, GTK рисует «битую
+/// картинку» — лучше честный значок терминала.
+fn pill_icon(icon: Option<&str>) -> gtk4::Image {
+    const FALLBACK: &str = "utilities-terminal-symbolic";
+
+    let image = match icon {
+        Some(path) if path.starts_with('/') && std::path::Path::new(path).is_file() => {
+            gtk4::Image::from_file(path)
+        }
+        Some(name) if !name.starts_with('/') && icon_in_theme(name) => {
+            gtk4::Image::from_icon_name(name)
+        }
+        _ => gtk4::Image::from_icon_name(FALLBACK),
+    };
+    image.set_pixel_size(32);
+    image
+}
+
+fn icon_in_theme(name: &str) -> bool {
+    gtk4::gdk::Display::default()
+        .is_some_and(|display| gtk4::IconTheme::for_display(&display).has_icon(name))
 }
 
 /// Отсчёт до потолка паузы: «4:59», на последней минуте «43 с», округление вверх — «0 с» не появляется,
@@ -383,36 +422,38 @@ pub fn pause_badge(
     hint: Option<&str>,
     terminal: bool,
 ) -> (GtkBox, Option<Button>) {
-    let badge = GtkBox::new(Orientation::Horizontal, SPACE2);
-    badge.add_css_class("weto-pause-badge");
+    let row = GtkBox::new(Orientation::Horizontal, SPACE2);
+
+    let capsule = GtkBox::new(Orientation::Horizontal, SPACE2);
+    capsule.add_css_class("weto-pause-badge");
 
     let icon = gtk4::Image::from_icon_name("media-playback-pause-symbolic");
     icon.set_pixel_size(12);
-    badge.append(&icon);
+    capsule.append(&icon);
 
     let countdown = Label::new(Some(&pause_countdown_text(deadline, now)));
     countdown.add_css_class("weto-pause-countdown");
-    badge.append(&countdown);
+    capsule.append(&countdown);
+    row.append(&capsule);
 
+    // (i) и кнопка стоят рядом с капсулой, а не внутри неё: заливка `amber` —
+    // это фон отсчёта, и всё, что легло бы на неё, читалось бы частью отсчёта.
+    // Цвет (i) — `faint`, как у подсказок: смысл несёт текст, а не значок.
     if let Some(hint) = hint {
         let info = gtk4::Image::from_icon_name("dialog-information-symbolic");
         info.set_pixel_size(12);
+        info.add_css_class("weto-hint");
         info.set_tooltip_text(Some(hint));
-        badge.append(&info);
+        row.append(&info);
     }
 
-    if !terminal {
-        return (badge, None);
-    }
+    let button = terminal.then(|| {
+        let button = compact_primary_button("Показать терминал");
+        row.append(&button);
+        button
+    });
 
-    // Кнопка стоит рядом с капсулой, а не внутри неё: заливка `amber` — это
-    // фон значка, и первичная пилюля поверх него читалась бы как часть отсчёта.
-    let row = GtkBox::new(Orientation::Horizontal, SPACE2);
-    row.append(&badge);
-    let button = compact_primary_button("Показать терминал");
-    row.append(&button);
-
-    (row, Some(button))
+    (row, button)
 }
 
 /// Запись журнала без плашек, рамок и цвета — порт `JournalRow` с macOS:
@@ -465,18 +506,22 @@ pub enum BannerTone {
     Warning,
 }
 
-/// Баннер: тон задаёт только иконка, текст всегда приглушённый.
+/// Баннер: тон задаёт только цвет иконки, текст всегда приглушённый. Порт
+/// `WetoBanner`: иконку выбирает вызывающий, и у баннера обновления она одна
+/// и та же при любом тоне — меняется только цвет.
 ///
 /// Зазор между иконкой, текстом и действием — `SPACE2`, как у `WetoBanner`
 /// на macOS: `SPACE3` отводит внутренний отступ баннера по горизонтали.
-pub fn banner(tone: BannerTone, text: &str, action: Option<&str>) -> (GtkBox, Option<Button>) {
+pub fn banner(
+    tone: BannerTone,
+    icon_name: &str,
+    text: &str,
+    action: Option<&str>,
+) -> (GtkBox, Option<Button>) {
     let banner = GtkBox::new(Orientation::Horizontal, SPACE2);
     banner.add_css_class("weto-banner");
 
-    let icon = gtk4::Image::from_icon_name(match tone {
-        BannerTone::News => "software-update-available-symbolic",
-        BannerTone::Warning => "dialog-warning-symbolic",
-    });
+    let icon = gtk4::Image::from_icon_name(icon_name);
     icon.add_css_class("weto-banner-icon");
     icon.add_css_class(match tone {
         BannerTone::News => "news",
@@ -486,6 +531,8 @@ pub fn banner(tone: BannerTone, text: &str, action: Option<&str>) -> (GtkBox, Op
 
     let text_label = caption(text);
     text_label.set_hexpand(true);
+    text_label.set_wrap(true);
+    text_label.set_xalign(0.0);
     banner.append(&text_label);
 
     let button = action.map(|title| {

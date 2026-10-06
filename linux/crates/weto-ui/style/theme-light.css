@@ -388,6 +388,14 @@ popover.weto-hint-popover > arrow {
 .weto-status-title.killed  { color: rgb(212, 58, 83); }
 .weto-status-title.disabled { color: rgba(22, 16, 44, 0.52); }
 
+/* Строка цветом статуса — «Цели не запущены» под заголовком: значок и текст
+   того же цвета, что щит (`tone.color` в `StatusPopupView`). Два класса
+   побеждают одноклассовый `.weto-caption` при любом порядке правил. */
+.weto-status-tone.guarded { color: rgb(14, 138, 91); }
+.weto-status-tone.pending { color: rgb(157, 106, 9); }
+.weto-status-tone.killed  { color: rgb(212, 58, 83); }
+.weto-status-tone.disabled { color: rgba(22, 16, 44, 0.52); }
+
 /* --- Пилюля процесса ---------------------------------------------------- */
 
 .weto-pill {
