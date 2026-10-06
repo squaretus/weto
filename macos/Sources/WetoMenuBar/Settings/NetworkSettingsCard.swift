@@ -20,16 +20,15 @@ struct NetworkSettingsCard: View {
         return String(repeating: "•", count: token.count - 4) + token.suffix(4)
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: WetoTokens.space2) {
-            card
+    /// Пояснение к таймауту — значком сразу после названия настройки.
+    static let timeoutHint = """
+        Сколько цели стоят на паузе, если сервисы не подтвердили безопасный выход. \
+        Подтверждение пришло — цели продолжают работу, не пришло за это время — завершаются. \
+        Отсчёт идёт от начала паузы, новое значение действует сразу, в том числе на текущую паузу.
+        """
 
-            Text("Столько цели стоят на паузе, ожидая ответа сервисов. Не дождались — цели завершаются.")
-                .font(WetoTokens.diagnostics)
-                .foregroundStyle(WetoTokens.faint.resolve(scheme))
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, WetoTokens.space2)
-        }
+    var body: some View {
+        card
     }
 
     private var card: some View {
@@ -97,11 +96,7 @@ struct NetworkSettingsCard: View {
     @ViewBuilder
     private var tokenRow: some View {
         WetoRow {
-            Text("Токен ipinfo")
-                .font(WetoTokens.label)
-                .foregroundStyle(WetoTokens.ink.resolve(scheme))
-                .fixedSize()
-                .padding(.trailing, WetoTokens.space5 - WetoTokens.space3)
+            labelColumn { tokenLabel }
 
             TextField("", text: $tokenDraft, prompt: Text("Ключ ipinfo.io"))
                 .textFieldStyle(WetoFieldStyle())
@@ -121,11 +116,7 @@ struct NetworkSettingsCard: View {
     /// Потолок паузы: сколько цели стоят, ожидая подтверждения, до завершения.
     private var timeoutRow: some View {
         WetoRow {
-            Text("Таймаут")
-                .font(WetoTokens.label)
-                .foregroundStyle(WetoTokens.ink.resolve(scheme))
-                .fixedSize()
-                .padding(.trailing, WetoTokens.space5 - WetoTokens.space3)
+            labelColumn { timeoutLabel }
 
             WetoSegmentedControl(
                 selection: Binding(
@@ -135,6 +126,33 @@ struct NetworkSettingsCard: View {
                 options: PauseCeiling.allCases.map { ($0, $0.title) }
             )
         }
+    }
+
+    private var tokenLabel: some View {
+        Text("Токен ipinfo")
+            .font(WetoTokens.label)
+            .foregroundStyle(WetoTokens.ink.resolve(scheme))
+    }
+
+    private var timeoutLabel: some View {
+        HStack(spacing: WetoTokens.space1) {
+            Text("Таймаут")
+                .font(WetoTokens.label)
+                .foregroundStyle(WetoTokens.ink.resolve(scheme))
+            WetoHint(Self.timeoutHint)
+        }
+    }
+
+    /// Подписи строк с полем и с сегментами — одна колонка шириной с самую длинную:
+    /// поле токена и сегменты таймаута начинаются с одной вертикали.
+    private func labelColumn<Label: View>(@ViewBuilder _ label: () -> Label) -> some View {
+        ZStack(alignment: .leading) {
+            tokenLabel.hidden()
+            timeoutLabel.hidden()
+            label()
+        }
+        .fixedSize()
+        .padding(.trailing, WetoTokens.space5 - WetoTokens.space3)
     }
 
     private func pickFromDisk() {

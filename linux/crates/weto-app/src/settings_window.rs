@@ -141,6 +141,15 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 
     let add_row = ui::row(false);
     let entry = ui::entry("Новая цель");
+    // Формат ввода — значком в конце поля, а не подписью под карточкой: подпись
+    // под карточкой не читалась как относящаяся к полю. Про бандлы здесь
+    // не сказано ни слова — на Linux нет каталога, которым можно накрыть
+    // процессы разом, и вид цели `appBundle` не переносится.
+    ui::entry_hint(
+        &entry,
+        "Имя команды (nano) или путь (/usr/bin/curl). \
+         Дочерние процессы завершаются вместе с родителем.",
+    );
     let add = ui::primary_button("Добавить");
     let pick = ui::muted_button("Выбрать…");
     add_row.append(&entry);
@@ -149,17 +158,6 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     card.append(&add_row);
 
     holder.append(&card);
-
-    // Подпись под карточкой, а не внутри: так в каноне. Про бандлы здесь
-    // не сказано ни слова — на Linux нет каталога, которым можно накрыть
-    // процессы разом, и вид цели `appBundle` не переносится.
-    let hint = ui::caption(
-        "Имя команды (nano) или путь (/usr/bin/curl). \
-         Дочерние процессы завершаются вместе с родителем.",
-    );
-    hint.set_wrap(true);
-    hint.set_xalign(0.0);
-    holder.append(&hint);
 
     let redraw = {
         let state = state.clone();
@@ -457,9 +455,18 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         });
     }
 
+    // Подписи строк с полем и с сегментами — одна колонка шириной с самую длинную:
+    // поле токена и сегменты таймаута начинаются с одной вертикали. Отступ после
+    // колонки — `space5`, как в каноне и на macOS.
+    let label_column = gtk4::SizeGroup::new(gtk4::SizeGroupMode::Horizontal);
+
     // Токен ipinfo.
     let token_row = ui::row(false);
-    token_row.append(&ui::label("Токен ipinfo"));
+    let token_label = ui::label("Токен ipinfo");
+    token_label.set_xalign(0.0);
+    token_label.set_margin_end(ui::SPACE5 - ui::SPACE3);
+    label_column.add_widget(&token_label);
+    token_row.append(&token_label);
     let token_entry = ui::entry("Ключ ipinfo.io");
     token_row.append(&token_entry);
     card.append(&token_row);
@@ -501,7 +508,17 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // Мимо ревизии: потолок решения политики не меняет, а ревизия обесценила бы
     // вердикт и увела охрану в «Проверку» с пробой.
     let timeout_row = ui::row(false);
-    timeout_row.append(&ui::label("Таймаут"));
+    let timeout_label = GtkBox::new(Orientation::Horizontal, ui::SPACE1);
+    timeout_label.append(&ui::label("Таймаут"));
+    timeout_label.append(&ui::hint(
+        "Сколько цели стоят на паузе, если сервисы не подтвердили безопасный выход. \
+         Подтверждение пришло — цели продолжают работу, не пришло за это время — \
+         завершаются. Отсчёт идёт от начала паузы, новое значение действует сразу, \
+         в том числе на текущую паузу.",
+    ));
+    timeout_label.set_margin_end(ui::SPACE5 - ui::SPACE3);
+    label_column.add_widget(&timeout_label);
+    timeout_row.append(&timeout_label);
     let current = state.settings.current().pause_ceiling();
     let titles: Vec<String> = PauseCeiling::ALL.iter().map(|c| c.title()).collect();
     let title_refs: Vec<&str> = titles.iter().map(String::as_str).collect();
@@ -525,18 +542,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         });
     }
 
-    // Подпись под карточкой, а не внутри: так в каноне.
-    let holder = GtkBox::new(Orientation::Vertical, ui::SPACE2);
-    holder.append(&card);
-    let hint = ui::caption(
-        "Столько цели стоят на паузе, ожидая ответа сервисов. \
-         Не дождались — цели завершаются.",
-    );
-    hint.set_wrap(true);
-    hint.set_xalign(0.0);
-    holder.append(&hint);
-
-    holder
+    card
 }
 
 /// Показываем хвост токена, а не сам токен: подтвердить «тот ли ключ» так можно,
@@ -565,6 +571,12 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
 
     let add_row = ui::row(false);
     let entry = ui::entry("Код страны (RU), IP или CIDR");
+    // Плейсхолдер исчезает при первом символе, поэтому формат повторён значком.
+    ui::entry_hint(
+        &entry,
+        "Код страны из двух букв (RU), IP-адрес (203.0.113.7) \
+         или диапазон CIDR (203.0.113.0/24).",
+    );
     let add = ui::primary_button("Добавить");
     add_row.append(&entry);
     add_row.append(&add);

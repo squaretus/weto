@@ -182,6 +182,42 @@ pub fn entry(prompt: &str) -> Entry {
     entry
 }
 
+/// Значок «?» с пояснением при наведении — сразу после названия настройки.
+/// Порт `WetoHint`.
+pub fn hint(text: &str) -> gtk4::Image {
+    let icon = gtk4::Image::from_icon_name("dialog-question-symbolic");
+    icon.add_css_class("weto-hint");
+    icon.set_pixel_size(12);
+    icon.set_valign(Align::Center);
+    icon.set_tooltip_text(Some(text));
+    icon
+}
+
+/// Значок в поле виден, пока в поле ничего не набрано: кто начал набирать,
+/// подсказку уже прочитал, а стерев ввод, увидит её снова.
+pub fn field_hint_shown(text: &str) -> bool {
+    text.is_empty()
+}
+
+/// Пояснение к формату ввода: значок «?» в конце поля, пока поле пустое.
+/// Порт `wetoFieldHint`.
+pub fn entry_hint(entry: &Entry, text: &str) {
+    let text = text.to_string();
+    let apply = move |entry: &Entry| {
+        if field_hint_shown(&entry.text()) {
+            entry.set_icon_from_icon_name(
+                gtk4::EntryIconPosition::Secondary,
+                Some("dialog-question-symbolic"),
+            );
+            entry.set_icon_tooltip_text(gtk4::EntryIconPosition::Secondary, Some(&text));
+        } else {
+            entry.set_icon_from_icon_name(gtk4::EntryIconPosition::Secondary, None);
+        }
+    };
+    apply(entry);
+    entry.connect_changed(apply);
+}
+
 pub fn toggle() -> Switch {
     let switch = Switch::new();
     switch.add_css_class("weto-switch");
@@ -435,6 +471,19 @@ pub fn content_column(child: &impl IsA<gtk4::Widget>) -> GtkBox {
     column.set_hexpand(false);
     column.append(child);
     column
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::field_hint_shown;
+
+    /// Кто начал набирать, подсказку уже прочитал; стёр ввод — видит её снова.
+    #[test]
+    fn the_field_hint_shows_only_while_the_field_is_empty() {
+        assert!(field_hint_shown(""));
+        assert!(!field_hint_shown("n"));
+        assert!(!field_hint_shown(" "));
+    }
 }
 
 #[cfg(test)]

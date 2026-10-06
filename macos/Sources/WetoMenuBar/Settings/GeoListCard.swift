@@ -8,6 +8,10 @@ import WetoDesign
 /// в одну карточку не должен подмешиваться в другую.
 struct GeoListCard: View {
 
+    /// Плейсхолдер исчезает при первом символе, поэтому формат повторён значком в конце поля.
+    private static let inputHint =
+        "Код страны из двух букв (RU), IP-адрес (203.0.113.7) или диапазон CIDR (203.0.113.0/24)."
+
     @Environment(AppCoordinator.self) private var coordinator
 
     let title: String
@@ -65,6 +69,7 @@ struct GeoListCard: View {
                     )
                     .textFieldStyle(WetoFieldStyle())
                     .labelsHidden()
+                    .wetoFieldHint(Self.inputHint, fieldText: newEntry)
                     .onSubmit { commit() }
 
                     Button("Добавить") { commit() }

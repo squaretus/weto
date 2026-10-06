@@ -20,11 +20,10 @@ parsing, validation and persistence happen in the stores.
   needs to
 - `macos/Sources/WetoMenuBar/JournalRow.swift`
 - `macos/Sources/WetoMenuBar/Settings/SettingsWindow.swift`
-- `macos/Sources/WetoMenuBar/Settings/TargetsCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/TargetsCard.swift` — input format hint is `.wetoFieldHint` in the field, shown while it is empty
 - `macos/Sources/WetoMenuBar/Settings/NetworkSettingsCard.swift` — VPN app, ipinfo token and the
   «Таймаут» row: a `WetoSegmentedControl` over `PauseCeiling.allCases` bound to
-  `settings.pauseCeiling` through the binding setter (not `onChange`); the caption under the card
-  explains the timeout
+  `settings.pauseCeiling` through the binding setter (not `onChange`); the explanation is a `WetoHint` «?» right after «Таймаут»; token and timeout labels share one column (`labelColumn`)
 - `macos/Sources/WetoMenuBar/Settings/GeoListCard.swift` — built twice, for the blacklist and the whitelist
 - `macos/Sources/WetoMenuBar/Settings/MaintenanceCard.swift`
 - `macos/Sources/WetoMenuBar/Settings/JournalCard.swift`
