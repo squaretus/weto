@@ -137,7 +137,7 @@ done
 cat > "$OUT/_distribution.xml" << DIST
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>weto</title>
+    <title>Weto</title>
     <welcome file="welcome.html"/>
     <conclusion file="conclusion.html"/>
     <options customize="never" require-scripts="false" hostArchitectures="arm64"/>

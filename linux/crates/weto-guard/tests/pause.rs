@@ -970,7 +970,7 @@ fn processes_found_standing_at_startup_are_resumed_and_explained() {
     let recorded = s.reporter.recorded();
     assert_eq!(recorded.recovered.len(), 2);
     assert!(recorded.recovered.iter().all(|entry| entry.reason
-        == "Найдены остановленными от прошлого запуска weto: пробы за этим стоянием нет"));
+        == "Найдены остановленными от прошлого запуска Weto: пробы за этим стоянием нет"));
     assert_eq!(
         recorded
             .recovered

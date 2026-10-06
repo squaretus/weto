@@ -459,7 +459,7 @@ one record the journal is kept for out of its fifty.
    pids get reused), a `startupRecovery` / `standingProcessesRemain` record in the checks journal,
    and its own kill-journal episode. An unreadable ledger leaves a `ledgerUnreadable` record.
 5. `shutdown()` resumes everything on a clean exit and admits it cannot observe the result: the
-   outcome is «не подтверждено …, weto проверит их при следующем запуске». It hangs off one funnel —
+   outcome is «не подтверждено …, Weto проверит их при следующем запуске». It hangs off one funnel —
    `application.connect_shutdown` in `main.rs` — because buttons are not an exit path: GApplication
    quits by itself once the last window is gone, and that route left the targets standing. A
    `SIGTERM` handler turns the session logout into the same `quit`, so it goes through the funnel

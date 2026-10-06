@@ -30,7 +30,9 @@ const PATH: &str = "/org/freedesktop/Notifications";
 const REMEMBERED: usize = 16;
 
 pub trait KillNotifying: Send + Sync {
-    fn notify(&self, target_names: &[String], reason: &str);
+    /// Цели прохода («claude ×34», «codex»), причина и число процессов,
+    /// завершённых этим проходом. Порт macOS `GuardNotifying.notifyTerminated`.
+    fn notify(&self, target_names: &[String], reason: &str, killed_count: usize);
 
     /// Терминальная цель под паузой потеряла терминал: её задание перестало
     /// быть передним, и без уведомления пропажу процесса из терминала
@@ -92,7 +94,7 @@ impl DesktopNotifier {
             return;
         };
         let actions: Vec<String> = if self.actionable {
-            vec!["default".to_string(), "Открыть weto".to_string()]
+            vec!["default".to_string(), "Открыть Weto".to_string()]
         } else {
             Vec::new()
         };
@@ -106,7 +108,9 @@ impl DesktopNotifier {
                 Some(SERVICE),
                 "Notify",
                 &(
-                    "weto",
+                    // Имя приложения сервер показывает в шапке уведомления:
+                    // это текст интерфейса, и пишется он «Weto».
+                    "Weto",
                     0u32,
                     "security-high",
                     summary.as_str(),
@@ -137,13 +141,18 @@ impl Default for DesktopNotifier {
 }
 
 impl KillNotifying for DesktopNotifier {
-    fn notify(&self, target_names: &[String], reason: &str) {
-        let targets = if target_names.is_empty() {
-            "неизвестная цель".to_string()
-        } else {
-            target_names.join(", ")
-        };
-        self.send(format!("Завершено: {targets}"), reason.to_string());
+    /// Дословно как на macOS (`UserNotificationGuardNotifier.notifyTerminated`
+    /// с текстом из `GuardVM.terminateTargets`): заголовок общий, а цели,
+    /// причина и число — в тексте. Число — процессы, а не цели: «claude ×34»
+    /// это тридцать четыре завершённых процесса.
+    fn notify(&self, target_names: &[String], reason: &str, killed_count: usize) {
+        self.send(
+            "Weto: процессы завершены".to_string(),
+            format!(
+                "{}: {reason}. Завершено процессов: {killed_count}.",
+                target_names.join(", ")
+            ),
+        );
     }
 
     fn notify_backgrounded(&self, target_name: &str) {

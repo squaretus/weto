@@ -31,7 +31,7 @@ use crate::state::AppState;
 pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("weto")
+        .title("Weto")
         .default_width(ui::POPUP_WIDTH)
         .resizable(false)
         .build();

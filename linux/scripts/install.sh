@@ -46,7 +46,7 @@ mkdir -p "$DATA/applications" "$DATA/icons/hicolor/scalable/apps"
 cat > "$DATA/applications/weto.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=weto
+Name=Weto
 Comment=Завершает цели, когда трафик идёт мимо VPN
 Exec=$BIN/weto
 Icon=weto

@@ -50,6 +50,15 @@ do
     [ -e "$FAKE_HOME/$path" ] || { echo "НЕТ: $path" >&2; exit 1; }
 done
 
+echo "=== ярлык называет приложение «Weto» ==="
+# Имя в ярлыке — текст интерфейса (меню приложений, «Запуск приложений»),
+# а имя файла и значка — идентификаторы и остаются строчными.
+grep -qx 'Name=Weto' "$FAKE_HOME/.local/share/applications/weto.desktop" || {
+    echo "в ярлыке не «Name=Weto»:" >&2
+    cat "$FAKE_HOME/.local/share/applications/weto.desktop" >&2
+    exit 1
+}
+
 echo "=== версия совпадает с тегом ==="
 REPORTED="$("$FAKE_HOME/.local/bin/weto" --version)"
 [ "$REPORTED" = "$VERSION" ] || {
@@ -68,6 +77,9 @@ echo "=== автозапуск — ровно один файл ==="
 "$FAKE_HOME/.local/bin/weto" --autostart on
 COUNT="$(find "$FAKE_HOME/.config/autostart" -name '*.desktop' | wc -l | tr -d ' ')"
 [ "$COUNT" -eq 1 ] || { echo "файлов автозапуска: $COUNT" >&2; exit 1; }
+grep -qx 'Name=Weto' "$FAKE_HOME/.config/autostart/weto.desktop" || {
+    echo "в ярлыке автозапуска не «Name=Weto»" >&2; exit 1
+}
 "$FAKE_HOME/.local/bin/weto" --autostart off
 [ ! -e "$FAKE_HOME/.config/autostart/weto.desktop" ] || {
     echo "файл автозапуска остался" >&2; exit 1

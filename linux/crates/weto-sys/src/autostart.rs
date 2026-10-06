@@ -64,7 +64,7 @@ impl Autostart {
         let entry = format!(
             "[Desktop Entry]\n\
              Type=Application\n\
-             Name=weto\n\
+             Name=Weto\n\
              Comment=Завершает цели, когда трафик идёт мимо VPN\n\
              Exec={executable}\n\
              Icon=weto\n\

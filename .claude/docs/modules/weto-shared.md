@@ -19,7 +19,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   answered with a stop `Constants.resumeRetryLimit` times stops being poked (zsh's `notify` would
   print `suspended (tty input)` to the user once a second) — it stays on the books, and
   `terminate`/`stop` still signal it. `stop()` cannot observe anything after its own SIGCONT,
-  so its outcome is «не подтверждено: … weto проверит их при следующем запуске» — neither the
+  so its outcome is «не подтверждено: … Weto проверит их при следующем запуске» — neither the
   optimistic nor the pessimistic lie. `confirmResumed()` is the one exception to that promise and
   belongs to uninstall alone: there is no next launch to keep it, so the obligation is discharged by
   observation instead (see invariants). Both it and `stop()` go through `resumeFromLedger()` with an

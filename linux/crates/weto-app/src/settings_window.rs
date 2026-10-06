@@ -60,7 +60,7 @@ pub fn present(app: &gtk4::Application, state: Arc<AppState>) {
 fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("weto — настройки")
+        .title("Weto — настройки")
         .default_width(ui::WINDOW_WIDTH)
         .default_height(ui::WINDOW_HEIGHT)
         .build();
@@ -953,26 +953,7 @@ fn maintenance_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox 
     card.append(&actions);
 
     close.connect_clicked(move |button| {
-        confirm(
-            button,
-            "Закрыть weto?",
-            // Про «до следующего входа в систему» текст обещать не имеет права:
-            // автозапуск по умолчанию выключен, и без него weto не вернётся
-            // никогда. Дословно как на macOS.
-            "Приложение завершится и перестанет охранять цели. Настройки, журнал \
-             и автозапуск сохранятся: если автозапуск включён, weto вернётся \
-             при следующем входе в систему.",
-            "Закрыть",
-            || {
-                // Замороженных целей выход не оставляет: SIGCONT шлёт воронка
-                // `connect_shutdown`, а не эта кнопка — иначе обязательство
-                // держалось бы на трёх кнопках, а закрытие последнего окна
-                // проходило бы мимо него.
-                if let Some(app) = gtk4::gio::Application::default() {
-                    app.quit();
-                }
-            },
-        );
+        ask_to_close(button.root().and_downcast::<gtk4::Window>().as_ref());
     });
 
     {
@@ -983,7 +964,7 @@ fn maintenance_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox 
             let state = state.clone();
             confirm(
                 button,
-                "Удалить weto?",
+                "Удалить Weto?",
                 "Будут удалены приложение, автозапуск, настройки, журнал и токен ipinfo. \
                  Действие необратимо.",
                 "Удалить",
@@ -1015,10 +996,10 @@ fn maintenance_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox 
                             let error = error.clone();
                             ask_two_ways(
                                 &anchor,
-                                "Эти программы weto поставил на паузу, и они ещё не продолжились:",
+                                "Эти программы Weto поставил на паузу, и они ещё не продолжились:",
                                 &standing_detail(&standing),
                                 "Удалить всё равно",
-                                "Не удалять и закрыть weto",
+                                "Не удалять и закрыть Weto",
                                 move || remove_weto(&error),
                                 || {
                                     // Второй исход — выход, а не «ничего
@@ -1085,8 +1066,8 @@ fn confirm_resumed(
 /// не сторожит, — и пользователь узнал бы об этом только по погибшей цели.
 fn standing_detail(standing: &[weto_config::stopped::StoppedProcess]) -> String {
     format!(
-        "{}\n\nОхрана уже остановлена и обратно не включится: weto придётся \
-         запустить заново.\n\nЕсли удалить weto сейчас, вернуть эти программы \
+        "{}\n\nОхрана уже остановлена и обратно не включится: Weto придётся \
+         запустить заново.\n\nЕсли удалить Weto сейчас, вернуть эти программы \
          будет некому — только командой fg в их терминале. Если не удалять, \
          их разберёт следующий запуск: учёт остановленных цел.",
         standing_list(standing)
@@ -1128,7 +1109,7 @@ fn remove_weto(error: &gtk4::Label) {
             let dialog = gtk4::AlertDialog::builder()
                 .message("Удаление прошло не полностью")
                 .detail(format!(
-                    "{failure}\n\nweto закроется: охрана уже остановлена, и продолжать \
+                    "{failure}\n\nWeto закроется: охрана уже остановлена, и продолжать \
                      он не может. Оставшееся удалите вручную."
                 ))
                 .buttons(["Закрыть"])
@@ -1185,6 +1166,61 @@ fn ask_two_ways(
     );
 }
 
+thread_local! {
+    /// Диалог закрытия уже на экране. Второй «Выход» из трея поднимал бы
+    /// вторую копию поверх первой, и отвечать пришлось бы дважды.
+    static CLOSE_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// «Закрыть Weto?» — один диалог на оба входа: кнопку «Закрыть приложение»
+/// в «Обслуживании» и пункт «Выход» в трее. На macOS выйти можно только через
+/// него, и «Выход» без вопроса снимал бы охрану одним промахом по меню.
+///
+/// Про «до следующего входа в систему» текст обещать не имеет права:
+/// автозапуск по умолчанию выключен, и без него Weto не вернётся никогда.
+/// Дословно как на macOS (`MaintenanceCard.confirmClose`).
+pub fn close_confirmation() -> gtk4::AlertDialog {
+    confirmation(
+        "Закрыть Weto?",
+        "Приложение завершится и перестанет охранять цели. Настройки, журнал \
+         и автозапуск сохранятся: если автозапуск включён, Weto вернётся \
+         при следующем входе в систему.",
+        "Закрыть",
+    )
+}
+
+/// Спрашивает «Закрыть Weto?» и выходит по согласию. Окна может не быть
+/// вовсе — «Выход» из трея при закрытом окне, — тогда диалог стоит сам по себе.
+pub fn ask_to_close(parent: Option<&gtk4::Window>) {
+    if CLOSE_ASKED.with(|asked| asked.replace(true)) {
+        return;
+    }
+    close_confirmation().choose(parent, gtk4::gio::Cancellable::NONE, |answer| {
+        CLOSE_ASKED.with(|asked| asked.set(false));
+        if answer == Ok(0) {
+            // Замороженных целей выход не оставляет: SIGCONT шлёт воронка
+            // `connect_shutdown`, а не этот диалог — иначе обязательство
+            // держалось бы на каждом входе в выход, а закрытие последнего окна
+            // проходило бы мимо него.
+            quit();
+        }
+    });
+}
+
+/// Диалог подтверждения: «сделать» и «Отмена», Enter и Esc — «Отмена».
+/// Enter по привычке не должен делать необратимое; на macOS так же
+/// (`makeSafeButtonDefault`).
+fn confirmation(title: &str, detail: &str, confirm_title: &str) -> gtk4::AlertDialog {
+    gtk4::AlertDialog::builder()
+        .message(title)
+        .detail(detail)
+        .buttons([confirm_title, "Отмена"])
+        .cancel_button(1)
+        .default_button(1)
+        .modal(true)
+        .build()
+}
+
 /// Подтверждение необратимого действия. На macOS это `NSAlert`, здесь —
 /// `AlertDialog`: обе системы просят подтверждение у своего диалога, а не
 /// у самодельного окна.
@@ -1195,17 +1231,8 @@ fn confirm(
     confirm_title: &str,
     action: impl Fn() + 'static,
 ) {
-    let dialog = gtk4::AlertDialog::builder()
-        .message(title)
-        .detail(detail)
-        .buttons([confirm_title, "Отмена"])
-        .cancel_button(1)
-        .default_button(1)
-        .modal(true)
-        .build();
-
     let window = anchor.root().and_downcast::<gtk4::Window>();
-    dialog.choose(
+    confirmation(title, detail, confirm_title).choose(
         window.as_ref(),
         gtk4::gio::Cancellable::NONE,
         move |answer| {
@@ -1290,8 +1317,8 @@ fn ask_for_program_path(
     // охраняет, за вторым следит. Общая часть — что без файла не выйдет ни то,
     // ни другое.
     let purpose = match destination {
-        Destination::Target => "weto будет охранять именно его",
-        Destination::VpnApp => "по нему weto и поймёт, запущен ли VPN-клиент",
+        Destination::Target => "Weto будет охранять именно его",
+        Destination::VpnApp => "по нему Weto и поймёт, запущен ли VPN-клиент",
     };
     let dialog = gtk4::AlertDialog::builder()
         .message("Нужен файл программы")
@@ -1536,7 +1563,7 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
             };
 
             let dialog = gtk4::FileDialog::builder()
-                .title("Выгрузка журнала weto")
+                .title("Выгрузка журнала Weto")
                 .initial_name(weto_config::export::JournalExport::file_name(&stamp_now()))
                 .build();
 

@@ -70,7 +70,7 @@ impl ksni::Tray for WetoTray {
     /// и это единственное место, где текст статуса виден без открытия окна.
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "weto".to_string(),
+            title: "Weto".to_string(),
             description: self.title.clone(),
             icon_name: String::new(),
             icon_pixmap: Vec::new(),
@@ -130,5 +130,16 @@ mod tests {
 
         assert_eq!(tray.title, GuardPhase::default().title());
         assert_eq!(tray.state, shield_color(&GuardPhase::default()));
+    }
+
+    /// Подсказка при наведении называет приложение так же, как весь интерфейс:
+    /// «Weto». Идентификатор элемента трея — не текст и остаётся `com.weto.app`.
+    #[test]
+    fn the_tooltip_names_the_app_weto() {
+        let (events, _receiver) = std::sync::mpsc::channel();
+        let tray = WetoTray::new(events);
+
+        assert_eq!(ksni::Tray::tool_tip(&tray).title, "Weto");
+        assert_eq!(ksni::Tray::id(&tray), "com.weto.app");
     }
 }
