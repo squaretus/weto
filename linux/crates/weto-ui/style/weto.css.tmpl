@@ -25,20 +25,26 @@
 
 /* --- Панель ------------------------------------------------------------- */
 
+/* Рамки и радиуса нет, как у `WetoPanel` на macOS: окно рисует свою рамку
+   само, и вторая скруглённая рамка внутри него читалась как карточка,
+   в которую вложено всё окно. */
 .weto-panel {
     background-color: {{shell}};
-    border: 1px solid {{line}};
-    border-radius: {{radiusPanel}};
     padding: {{space4}};
 }
 
 /* --- Карточка ----------------------------------------------------------- */
 
+/* Тень — `WetoCard` на macOS: `radius: 10, y: 4`. Радиус SwiftUI — это
+   сигма размытия, а размытие в CSS вдвое шире её, отсюда 20px. Правило у тем
+   общее, а `cardShadow` у тёмной прозрачный: там карточка отделяется от фона
+   цветом, в светлой — тенью. */
 .weto-card {
     background-color: {{card}};
     border: 1px solid {{line}};
     border-radius: {{radiusCard}};
     padding: {{space4}};
+    box-shadow: 0 4px 20px {{cardShadow}};
 }
 
 /* Капс обязателен: карточка без заголовка в каноне не используется. */
@@ -149,7 +155,7 @@
     border: none;
     box-shadow: none;
     border-radius: {{radiusTile}};
-    padding: 4px 12px;
+    padding: {{space2}} 12px;
     min-height: 0;
 }
 
@@ -208,12 +214,13 @@
     min-height: calc({{controlHeightCompact}} - 2px);
 }
 
-/* Нажатие — только непрозрачность заливки: геометрия не сдвигается. */
+/* Нажатие — только непрозрачность заливки: геометрия не сдвигается.
+   0.7 — то же значение, что у `WetoPillButtonStyle` на macOS. */
 .weto-primary:active,
 .weto-muted:active,
 .weto-destructive:active,
 .weto-dropdown > button:active {
-    opacity: 0.82;
+    opacity: 0.7;
 }
 
 .weto-primary:focus-visible,
@@ -230,7 +237,7 @@
     border: none;
     box-shadow: none;
     color: {{faint}};
-    padding: 2px;
+    padding: {{space1}};
     min-height: 0;
     min-width: 0;
 }
@@ -432,15 +439,3 @@ popover.weto-hint-popover > arrow {
 
 .weto-banner-icon.news { color: {{violet}}; }
 .weto-banner-icon.warning { color: {{amber}}; }
-
-/* --- Кнопка закрытия окна ----------------------------------------------- */
-
-.weto-close-button {
-    background-color: {{close}};
-    background-image: none;
-    border: none;
-    border-radius: 6px;
-    min-width: 12px;
-    min-height: 12px;
-    padding: 0;
-}

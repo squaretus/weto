@@ -445,8 +445,11 @@ pub enum BannerTone {
 }
 
 /// Баннер: тон задаёт только иконка, текст всегда приглушённый.
+///
+/// Зазор между иконкой, текстом и действием — `SPACE2`, как у `WetoBanner`
+/// на macOS: `SPACE3` отводит внутренний отступ баннера по горизонтали.
 pub fn banner(tone: BannerTone, text: &str, action: Option<&str>) -> (GtkBox, Option<Button>) {
-    let banner = GtkBox::new(Orientation::Horizontal, SPACE3);
+    let banner = GtkBox::new(Orientation::Horizontal, SPACE2);
     banner.add_css_class("weto-banner");
 
     let icon = gtk4::Image::from_icon_name(match tone {
