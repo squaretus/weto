@@ -142,9 +142,11 @@ fn the_settings_page_matches_the_macos_cards() {
             launch_paths: vec![],
         }))
     });
-    // Выбор, сделанный не этой строкой, она подхватывает своим тактом.
-    pump(Duration::from_millis(700));
-    assert!(!shown(vpn_entry.upcast_ref()), "поле видно у выбранного");
+    // Выбор, сделанный не этой строкой, она подхватывает своим тактом — его
+    // и ждём, а не фиксированное время: под нагрузкой такт приходит позже.
+    wait_for("поле видно у выбранного", || {
+        !shown(vpn_entry.upcast_ref())
+    });
     assert!(!shown(unset.upcast_ref()));
     assert!(shown(clear.upcast_ref()));
     let name = find_label(root, "VPN Client").expect("нет имени приложения");
@@ -182,18 +184,21 @@ fn the_settings_page_matches_the_macos_cards() {
     assert_eq!(token.text(), format!("{MASK}X"));
     assert_eq!(stored_token(&state), TOKEN, "маска ушла в файл");
 
+    // Фокус доезжает событием, а не вызовом: ждём его, а не фиксированное время.
     window.present();
-    pump(Duration::from_millis(100));
     token.grab_focus();
-    pump(Duration::from_millis(100));
-    assert_eq!(token.text(), TOKEN, "в фокусе — сам токен");
+    wait_for("в фокусе — сам токен", || {
+        token.text() == TOKEN
+    });
 
     token.set_text("newtoken42");
     assert_eq!(stored_token(&state), "newtoken42");
 
     target_input.grab_focus();
-    pump(Duration::from_millis(100));
-    assert_eq!(token.text(), "••••••en42", "маска — от записанного сейчас");
+    wait_for(
+        "маска — от записанного сейчас",
+        || token.text() == "••••••en42",
+    );
     assert_eq!(stored_token(&state), "newtoken42");
 
     window.close();
@@ -264,6 +269,16 @@ fn row_of(widget: &impl IsA<Widget>) -> Widget {
 /// Предков проверяет сам `is_visible` — поэтому окно обязано быть показано.
 fn shown(widget: &Widget) -> bool {
     widget.is_visible()
+}
+
+/// Ждёт условия, крутя главный цикл: такты окна и события фокуса доезжают
+/// не мгновенно, а фиксированное ожидание под нагрузкой оказывается коротким.
+fn wait_for(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done() {
+        assert!(Instant::now() < deadline, "не дождались: {what}");
+        pump(Duration::from_millis(20));
+    }
 }
 
 /// Крутит главный цикл заданное время: такты окна идут своим ходом.

@@ -145,8 +145,9 @@ fn the_update_tile_follows_the_check_like_macos() {
             state,
             finding: None,
         });
-        pump(Duration::from_millis(600));
-        assert_eq!(tile.tooltip_text().as_deref(), Some(hint));
+        // Плитку перерисовывает такт окна, а не сам исход: ждём его по условию,
+        // а не фиксированным временем — под нагрузкой такт приходит позже.
+        wait_for(|| tile.tooltip_text().as_deref() == Some(hint));
         assert_eq!(tile.icon_name().as_deref(), Some("view-refresh-symbolic"));
     }
 
