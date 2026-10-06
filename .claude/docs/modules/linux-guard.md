@@ -57,26 +57,50 @@ Verified against `ip route get` in `policy-routing-contract.sh`.
 
 ## The UI is a port, not a redesign
 
-Both windows mirror their macOS counterparts element for element, and the list below is
-the whole of what the Linux side is allowed to differ in:
+Both windows mirror their macOS counterparts element for element, with the same texts word for
+word — the app is «Weto» in window titles, dialogs, notifications, the tray tooltip and `Name=` of
+both desktop entries. The table is the whole list of what the Linux side differs in; a difference
+missing from it is a bug, not a platform trait.
 
 | macOS | Linux | Why |
 |---|---|---|
-| popup anchored to the menu bar icon | ordinary window | SNI reports no coordinates; Wayland forbids self-positioning |
+| popup anchored to the menu bar icon | ordinary window «Weto», fixed size | SNI reports no coordinates; Wayland forbids self-positioning |
+| hidden title bar: three system circles, no title | the system GTK header bar with a title («Weto», «Weto — настройки», «Обновление Weto»); `.weto-panel` inside it is fill and padding only, no frame of its own | owner decision, 2026-10-06 |
+| settings window 500 × 640, not resizable | resizable, floor 500 × 480; the content column stays 500 wide | a tiling compositor hands the window its whole cell whatever `resizable(false)` says — see "The settings window holds its own width" |
+| SF Symbols | symbolic icons of the icon theme (`security-high-symbolic`, `view-refresh-symbolic`, `emblem-system-symbolic`, `user-trash-symbolic`, `dialog-question-symbolic`, …) | SF Symbols exist on macOS only; colour comes from our CSS, the shape from Adwaita/Breeze |
+| SF Pro | `font-family: sans-serif` — whatever the system resolves; sizes, weights and `tnum` still come from the tokens | SF ships with macOS only |
 | target hint mentions bundles | hint mentions command and path only | `appBundle` does not exist here |
-| `NSAlert` for destructive confirmations | `Gtk.AlertDialog` | each platform asks its own dialog |
-| — | tray context menu (check / settings / quit) | SNI needs one; the popup carries the same actions |
-| country flag in the menu bar | country name as text | no flag rendering here yet; the set ships with macOS only |
-| app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
+| `NSAlert` for destructive confirmations | `Gtk.AlertDialog`, Enter and Esc on the safe button as on macOS | each platform asks its own dialog |
+| — | tray context menu: «Проверить сейчас», «Настройки», «Выход»; «Выход» asks the same «Закрыть Weto?» as «Закрыть приложение» (`settings_window::ask_to_close`) | SNI needs a menu; on macOS that dialog is the only way out, so a menu item must not bypass it |
+| country flag and status dot in the menu bar | the app's grid glyph tinted with the status colour, the phase title in the tooltip; no country | flags ship with the macOS bundle only |
+| target picker: `NSOpenPanel` in `/Applications` | «Выбрать…» opens `Gtk.FileDialog` in the first XDG applications directory; a `.desktop` entry stands in for a bundle | the platform's own picker and its own notion of an app |
+| VPN app: «не выбрано» + «Выбрать…» with a file panel; chosen → name over description and a trash «Снять выбор» | the same two states, but the unchosen one is «не выбрано», a «Команда или путь» field and «Выбрать» | deliberate (2026-10-06): the client is named the way a target is typed, by command or path |
+| pill icon: app, brand or Terminal.app icon | `Icon=` of the target's `.desktop` entry (theme name or absolute file), else `utilities-terminal-symbolic`; the `terminal` label on every target not added through a `.desktop` entry (`presentation::is_command_line_target`) | no bundles: whether a target is an app is known only from what the user picked |
 | the "Показать терминал" button raises any terminal | the button is there only for an emulator that comes out on the session bus | raising a window means asking the application itself (`org.freedesktop.Application.Activate`); an emulator that owns no bus name — xterm, alacritty, kitty, foot, xfce4-terminal, mate-terminal, terminator — cannot be asked, and nothing short of `wmctrl`/`xdotool` would change that. The `(i)` hint stays: it is the answer the user needs. See "Raising the terminal" below |
 | tapping the notification always opens the popup | tapping opens the status window when the notification server announces `actions` | the capability is the server's, not ours (`GetCapabilities`); without it the notification is still delivered, just not clickable |
 | — | a second dialog asks for the program file when the picked entry launches through Steam or flatpak | a `.app` always *is* the program; a `.desktop` entry need not name one at all, and guessing would guard the launcher — see the `appBundle` row under "Contracts that differ from macOS" |
+| «Автозапуск указывает на другую копию…» in Maintenance | no such line | the autostart entry always names the one launcher path, `~/.local/bin/weto` (`Paths::launcher`), so there is no other copy to point at |
+| update window as `UpdateDialogView` | the same window minus the daemon texts and the «release has no package» case, plus three behaviour differences | listed under "Self-update" |
 
-Everything else matches, including every wording that does not depend on the unported screen: the
-settings window is the same six cards in the same order
-(`Цели`, `Сеть и гео`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
-footer (github link, version, update tile), and the status popup is shield + title +
-two icon buttons, then the geo readout, the update banner, and live targets.
+The settings window is the same six cards in the same order (`Цели`, `Сеть и гео`,
+`Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same footer (github link,
+version, update tile); the «Журнал» tab shows the latest 20 records with «Показаны последние 20 из N
+— выгрузите журнал целиком» when there are more. The status window, top to bottom:
+
+1. shield, title, «Проверить сейчас» (a spinner in its place while a probe flies), settings;
+2. the three explanation lines — what weto did, why, what next — hidden in `Disabled` and
+   `Protected` (`presentation::should_explain`);
+3. the geo readout, selectable;
+4. the red permission-failure line while the kernel refuses a signal to a target — «Не удалось
+   приостановить/возобновить/завершить процессы [pid] — недостаточно прав»
+   (`GuardSnapshot::permission_failure`), gone once the targets run again;
+5. the update banner, worded by the install phase (`UpdateStrings::banner_progress`: «Проверка
+   релиза…», «Загрузка X… N %», «Установка…», the failure in the Warning tone, otherwise
+   «Доступно обновление X» with «Подробнее»; a spinner replaces the button while in flight);
+6. a divider and the live targets: one single-line pill each — name ellipsised in the middle,
+   `terminal` label, the pause badge with its countdown, `(i)` outside the amber capsule,
+   «Показать терминал» where it can work, `+N`; with nothing running, the idle line in the shield
+   colour; with no targets configured, neither the divider nor the list.
 
 **There is no guard on/off switch, and that is deliberate.** `is_enabled` exists in the
 settings model on both platforms and is exposed by neither. The same goes for a
@@ -223,9 +247,9 @@ Everything the policy decides is shared. What the system dictates is not:
   therefore takes `app.hold()` when `tray::install` reports success (`lifecycle::holds_application`),
   and the hold guard is kept in a thread-local — dropped on the spot it would hold nothing. Without
   a tray (vanilla GNOME) the old behaviour stays, because a held windowless app could only be closed
-  with `kill`. The exit funnel is untouched: `app.quit()` from the tray item and from «Закрыть
-  приложение» still goes through `connect_shutdown`. The cost of holding is that per-window timers
-  now have to end with their window — `status_window.rs` breaks its 500 ms refresh on
+  with `kill`. The exit funnel is untouched: the tray's «Выход» and «Закрыть приложение» both ask
+  «Закрыть Weto?» (`settings_window::ask_to_close`) and only then quit, through `connect_shutdown`.
+  The cost of holding is that per-window timers now have to end with their window — `status_window.rs` breaks its 500 ms refresh on
   `connect_destroy`, or every reopen would leave another one running.
 - **The settings window holds its own width.** A tiling compositor hands the window the whole cell
   and ignores `default_width`, so card rows (label, `spacer()` with `hexpand`, control) spread to
@@ -339,13 +363,13 @@ points at the new version.
   buttons (`dialog_width`, port of `minimumWidth`). A prompt opens it by itself; the close button
   postpones for 3 h (`RemindInterval::ON_CLOSE`). The checkbox and the Maintenance toggle are one
   value (`Updates::auto_install`), and turning it on installs the found version at once, as on
-  macOS. No release notes (owner decision, 2026-10-06). Deviations, each forced or deliberate:
-  the footer tile opens the window for an already found version instead of fetching again
-  (same outcome, no network round-trip); a new prompt forgets a previous install failure — on
-  macOS the window keeps only «Открыть страницу релиза» until restart; texts about the daemon and
-  about a release without a package are not ported (there is no daemon, and a release without a
-  Linux archive is not a finding); the `Checking` phase marks the manual check (the tile is
-  insensitive until it answers), not an install-time re-check, which Linux does not have.
+  macOS. No release notes (owner decision, 2026-10-06). Not ported: the texts about the helper
+  daemon and about a release without a package (there is no daemon, and a release without a Linux
+  archive is not a finding). Behaviour deviations, each forced or deliberate: the footer tile
+  opens the window for an already found version instead of fetching again (same outcome, no
+  network round-trip); a new prompt forgets a previous install failure — on macOS the window keeps
+  only «Открыть страницу релиза» until restart; the `Checking` phase marks the manual check (the
+  tile is insensitive until it answers), not an install-time re-check, which Linux does not have.
 - **The stable path is the launch symlink, `~/.local/bin/weto`** (`Paths::launcher`, written
   literally the way `install.sh` writes it). Anything outside the running process that has to name
   the binary means that symlink, never the versioned directory: the autostart entry writes
@@ -376,7 +400,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-506 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+510 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
@@ -517,8 +541,9 @@ one record the journal is kept for out of its fifty.
 
 ## Not here yet
 
-Secret Service over D-Bus — the token lives in a `0600` file. Country flags and
-per-target icons are not fetched, so the status window shows generic glyphs.
+Secret Service over D-Bus — the token lives in a `0600` file. Country flags are not shipped, so
+neither the tray nor the readout shows one. A target's pill icon comes only from its `.desktop`
+entry; a command or path target keeps the terminal glyph.
 
 **The pause has a face now.** The status window builds its title, shield colour and the
 three explanation lines straight from `GuardPhase` (`weto_core::presentation::shield_color`,
