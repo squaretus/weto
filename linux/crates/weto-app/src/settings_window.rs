@@ -20,8 +20,8 @@ use weto_core::presentation::{target_description, target_fallback_name};
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 use weto_sys::target_resolver::{
-    applications_dirs, display_name_for, launch_paths_for, locate_target_with_kind,
-    resolve_launch_entry, resolve_launch_target, target_kind_for, Resolution,
+    applications_dirs, display_name_for, launch_paths_for, locate_with_launch_paths,
+    resolve_launch_entry, resolve_launch_target, target_kind_for, LaunchTargetResolver, Resolution,
 };
 use weto_ui::components as ui;
 use weto_ui::theme;
@@ -356,8 +356,14 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 /// то «не найдено» — с подсказкой, что делать, как на macOS. Вид берётся
 /// у файла тем же ответом, что и путь: цель, записанная бинарником до того,
 /// как вид стали различать, подписана «скрипт», как её и узнаёт охрана.
+///
+/// Кандидаты те же, что у охраны (`locate_with_launch_paths`): голое имя,
+/// которого нет в `PATH` приложения, находится по файлу в `PATH`, запомненному
+/// при добавлении, — иначе под целью, которую охрана сторожит, стояло бы
+/// «не найдено».
 fn resolved_description(target: &weto_config::settings::Target) -> String {
-    let found = locate_target_with_kind(&target.entry);
+    let found =
+        locate_with_launch_paths(&LaunchTargetResolver, &target.entry, &target.launch_paths);
     target_description(
         &target.entry,
         found.as_ref().map_or(target.kind, |found| found.kind),

@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use weto_config::settings::{Settings, Target};
 use weto_core::process::TargetRule;
-use weto_sys::target_resolver::TargetResolving;
+use weto_sys::target_resolver::{locate_with_launch_paths, TargetResolving};
 
 /// Как часто запись цели разрешается заново. То же число, что у macOS
 /// (`Constants.targetRuleRefreshSeconds`): обновление инструмента замечается
@@ -158,14 +158,9 @@ impl RuleCache {
             extend_unique(&mut rule.launch_paths, &previous.launch_paths);
         }
 
-        let mut candidates = std::iter::once(target.entry.as_str()).chain(
-            target
-                .launch_paths
-                .iter()
-                .map(String::as_str)
-                .filter(|path| path.starts_with('/') && *path != target.entry),
-        );
-        if let Some(fresh) = candidates.find_map(|candidate| self.resolver.locate(candidate)) {
+        if let Some(fresh) =
+            locate_with_launch_paths(self.resolver.as_ref(), &target.entry, &target.launch_paths)
+        {
             let mut launch_paths = vec![fresh.path.clone()];
             extend_unique(&mut launch_paths, &rule.launch_paths);
             rule.path = fresh.path;

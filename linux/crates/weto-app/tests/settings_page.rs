@@ -46,7 +46,21 @@ fn the_settings_page_matches_the_macos_cards() {
     FileSecretStore::new(state.paths.token_file())
         .save(TOKEN)
         .expect("токен не записался");
+    // Голое имя, которого нет в `PATH` этого процесса, но с файлом в `PATH`,
+    // запомненным при добавлении: так выглядит `claude`, добавленный из терминала
+    // с `~/.local/bin` в `PATH`, когда приложение подняла сессия без него.
+    let stored = home.join("bin/weto-stored-command");
+    std::fs::create_dir_all(stored.parent().unwrap()).unwrap();
+    std::fs::write(&stored, b"\x7fELF\x02\x01\x01\x00").unwrap();
+    let stored = stored.to_string_lossy().into_owned();
     state.settings.edit(|s| {
+        s.targets.push(Target {
+            entry: "weto-stored-command".to_string(),
+            display_name: "weto-stored-command".to_string(),
+            kind: TargetKind::Binary,
+            path: "/opt/old/versions/2.1.228".to_string(),
+            launch_paths: vec!["weto-stored-command".to_string(), stored.clone()],
+        });
         s.targets.push(Target {
             entry: "weto-never-installed-command".to_string(),
             display_name: "weto-never-installed-command".to_string(),
@@ -76,6 +90,14 @@ fn the_settings_page_matches_the_macos_cards() {
     assert!(
         find_label(root, "бинарник: /opt/old/versions/2.1.228").is_none(),
         "описание показывает путь с момента добавления"
+    );
+
+    // Описание спрашивает ту же цепочку, что охрана: голое имя не нашлось —
+    // следом идёт файл в `PATH`, запомненный при добавлении. Охрана эту цель
+    // находит и сторожит, и «не найдено» под ней было бы неправдой.
+    assert!(
+        find_label(root, &format!("бинарник: {stored}")).is_some(),
+        "описание цели не дошло до запомненного пути запуска"
     );
 
     // Число процессов — шрифтом данных, как `WetoTokens.data`.
