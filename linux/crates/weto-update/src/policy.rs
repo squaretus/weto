@@ -14,11 +14,17 @@ pub enum Outcome {
     Install,
 }
 
+/// Найденный релиз. Заметок релиза здесь нет: окно их не показывает
+/// (решение владельца), а держать неиспользуемое поле значило бы обещать их.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
+    /// Версия, с которой спрашивали: окно говорит «у вас X», подвал —
+    /// «X — последняя версия».
+    pub current_version: String,
     pub latest_version: String,
+    /// Страница релиза — ручной путь, когда установка не удалась.
+    pub release_url: String,
     pub download_url: String,
-    pub release_notes: Option<String>,
     pub is_newer: bool,
 }
 
@@ -30,6 +36,36 @@ pub struct UpdateDeferral {
     /// Абсолютная дата, раньше которой окно не всплывает.
     pub remind_at: Option<SystemTime>,
     pub auto_install: bool,
+}
+
+/// На сколько отложить разговор об обновлении — порт `RemindInterval` с macOS.
+/// Три пункта меню «Напомнить позже»; крестик окна — `ON_CLOSE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemindInterval {
+    OneHour,
+    ThreeHours,
+    SixHours,
+}
+
+impl RemindInterval {
+    /// Порядок пунктов меню.
+    pub const ALL: [RemindInterval; 3] = [
+        RemindInterval::OneHour,
+        RemindInterval::ThreeHours,
+        RemindInterval::SixHours,
+    ];
+
+    /// Закрытие окна крестиком: молчаливое закрытие не должно означать
+    /// «больше никогда», как `dismissDialog` на macOS.
+    pub const ON_CLOSE: RemindInterval = RemindInterval::ThreeHours;
+
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(match self {
+            RemindInterval::OneHour => 3600,
+            RemindInterval::ThreeHours => 3 * 3600,
+            RemindInterval::SixHours => 6 * 3600,
+        })
+    }
 }
 
 /// Дальше этого срока сохранённое напоминание считается испорченным: перевод

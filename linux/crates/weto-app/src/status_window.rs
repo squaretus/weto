@@ -131,7 +131,7 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
             // кнопка, пересозданная посреди нажатия, нажатия не получила бы.
             let pending = crate::update::shared().and_then(|updates| {
                 let info = updates.pending()?;
-                Some((info, updates.progress().as_update_progress()))
+                Some((info, updates.update_progress()))
             });
             let banner_view = pending
                 .as_ref()

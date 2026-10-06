@@ -25,6 +25,13 @@ pub mod update_window;
 
 thread_local! {
     static STYLES: RefCell<Option<CssProvider>> = const { RefCell::new(None) };
+    static THEME: std::cell::Cell<Theme> = const { std::cell::Cell::new(Theme::Dark) };
+}
+
+/// Тема, поставленная последней. Её спрашивает то, что CSS не перекрасит, —
+/// картинка иконки приложения в окне обновления.
+pub fn current_theme() -> Theme {
+    THEME.with(|slot| slot.get())
 }
 
 /// Смена темы — подмена таблицы стилей целиком: CSS-переменных на GTK 4.14 нет,
@@ -34,6 +41,7 @@ pub fn apply_theme(theme: SettingsTheme) {
         SettingsTheme::Dark => Theme::Dark,
         SettingsTheme::Light => Theme::Light,
     };
+    THEME.with(|slot| slot.set(theme));
     STYLES.with(|slot| {
         let mut slot = slot.borrow_mut();
         let provider = match slot.as_ref() {

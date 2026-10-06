@@ -126,8 +126,8 @@ fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWi
         "Белый список",
     ));
     page.append(&appearance_card(state.clone()));
-    page.append(&maintenance_card(state.clone()));
-    page.append(&footer(window, state.clone()));
+    page.append(&maintenance_card(window, state.clone()));
+    page.append(&footer(window));
 
     scroll(&page)
 }
@@ -845,7 +845,20 @@ fn appearance_card(state: Arc<AppState>) -> GtkBox {
 
 // --- Обслуживание ---------------------------------------------------------
 
-fn maintenance_card(state: Arc<AppState>) -> GtkBox {
+/// Включена ли автоустановка — у механизма обновления, а без него (тест окна)
+/// — в хранилище.
+fn auto_install(state: &AppState) -> bool {
+    match crate::update::shared() {
+        Some(updates) => updates.auto_install(),
+        None => {
+            weto_update::store::UpdateStore::new(state.paths.state_dir.clone())
+                .deferral()
+                .auto_install
+        }
+    }
+}
+
+fn maintenance_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let card = ui::card("Обслуживание");
     let autostart = Autostart::new(&state.paths);
 
@@ -885,26 +898,41 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
     }
 
     // Автообновление. Та же настройка, что галочка в окне обновления:
-    // хранилище одно, поэтому оба места показывают одно и то же. Линии между
-    // тумблерами нет, как в `MaintenanceCard` на macOS: два тумблера
-    // читаются одной группой.
+    // значение одно (`Updates::auto_install`), и оба места сверяются с ним
+    // своим тактом. Включение сразу ставит найденное обновление — как
+    // сеттер `isAutoInstallEnabled` на macOS. Линии между тумблерами нет,
+    // как в `MaintenanceCard` на macOS: два тумблера читаются одной группой.
     let auto_row = ui::row(true);
     auto_row.append(&ui::label("Обновлять автоматически"));
     auto_row.append(&ui::spacer());
     let auto = ui::toggle();
-    auto.set_active(
-        weto_update::store::UpdateStore::new(state.paths.state_dir.clone())
-            .deferral()
-            .auto_install,
-    );
+    auto.set_active(auto_install(&state));
     auto_row.append(&auto);
     card.append(&auto_row);
 
     {
         let state_dir = state.paths.state_dir.clone();
         auto.connect_state_set(move |_, value| {
-            weto_update::store::UpdateStore::new(state_dir.clone()).set_auto_install(value);
+            match crate::update::shared() {
+                Some(updates) => updates.set_auto_install(value),
+                // Механизм обновления не поднят (тест окна) — пишем в хранилище
+                // напрямую: настройка от этого не перестаёт быть настройкой.
+                None => {
+                    weto_update::store::UpdateStore::new(state_dir.clone()).set_auto_install(value)
+                }
+            }
             gtk4::glib::Propagation::Proceed
+        });
+    }
+    {
+        let auto = auto.clone();
+        let state = state.clone();
+        window_tick(window, std::time::Duration::from_millis(500), move || {
+            let stored = auto_install(&state);
+            if auto.is_active() != stored {
+                auto.set_active(stored);
+            }
+            gtk4::glib::ControlFlow::Continue
         });
     }
 
@@ -1303,7 +1331,7 @@ fn ask_for_program_path(
 
 // --- Подвал ---------------------------------------------------------------
 
-fn footer(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
+fn footer(window: &ApplicationWindow) -> GtkBox {
     let footer = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
     footer.set_margin_top(ui::SPACE2);
 
@@ -1315,9 +1343,9 @@ fn footer(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let version = ui::caption(&format!("версия {}", crate::update::current_version()));
     footer.append(&version);
 
-    // Кнопка только проверяет: установка запускается из окна обновления.
-    // Ручная проверка игнорирует пропуск и отсрочку — другого способа вернуть
-    // пропущенную версию нет.
+    // Плитка только проверяет или показывает найденное: установка запускается
+    // из окна обновления. Ручная проверка игнорирует пропуск и отсрочку —
+    // другого способа вернуть пропущенную версию нет.
     let check = ui::tile_button("view-refresh-symbolic");
     check.set_tooltip_text(Some("Проверить обновления"));
     footer.append(&check);
@@ -1330,29 +1358,76 @@ fn footer(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         );
     });
 
+    // Найденная версия открывает окно, а не проверяет заново: на macOS
+    // повторная проверка заканчивается тем же окном, здесь — без похода в сеть.
+    //
+    // Приложение берётся у корня кнопки, а не у захваченного окна: сильная
+    // ссылка на окно в обработчике его же виджета держала бы окно в памяти
+    // после закрытия (`window_release.rs`).
     {
-        let _state = state.clone();
         check.connect_clicked(move |button| {
-            if let Some(updates) = crate::update::shared() {
-                updates.check_now();
-                button.set_sensitive(false);
+            let Some(updates) = crate::update::shared() else {
+                return;
+            };
+            match updates.found() {
+                Some(info) => {
+                    let app = button
+                        .root()
+                        .and_downcast::<gtk4::Window>()
+                        .and_then(|window| window.application());
+                    if let Some(app) = app {
+                        crate::update_window::present(&app, &info);
+                    }
+                }
+                None => {
+                    updates.check_now();
+                    // Неактивна сразу, а не со следующего такта: второе нажатие
+                    // в эти полсекунды начинать нечего.
+                    button.set_sensitive(false);
+                }
             }
         });
     }
 
-    // Кнопка оживает, когда проверка закончилась, и меняет иконку, когда
-    // находка есть: тогда она открывает окно обновления, а не проверяет заново.
+    // Состояние плитки — из исхода проверки, как `SettingsFooter` на macOS:
+    // неактивна, пока идут проверка или установка; подсказка называет исход;
+    // иконка и имя для диктора говорят, что нажатие покажет обновление.
     {
         let check = check.clone();
-        window_tick(window, std::time::Duration::from_millis(500), move || {
-            let updates = crate::update::shared();
-            let pending = updates.as_ref().and_then(|u| u.pending());
-            check.set_sensitive(true);
-            check.set_icon_name(if pending.is_some() {
+        let mut shown: Option<(bool, String)> = None;
+        let mut refresh = move || {
+            let Some(updates) = crate::update::shared() else {
+                return;
+            };
+            // Активность ставится каждый такт: нажатие гасит плитку само,
+            // и проверка, ответившая быстрее такта, иначе оставила бы её
+            // погашенной навсегда.
+            check.set_sensitive(!updates.is_busy());
+
+            let state = updates.state();
+            let installing = updates.progress().as_update_progress().is_in_flight();
+            let offers = crate::update::footer_shows_update(&state, updates.pending().is_some());
+            let view = (offers, crate::update::footer_hint(&state, installing));
+            if shown.as_ref() == Some(&view) {
+                return;
+            }
+            let (offers, hint) = &view;
+            check.set_tooltip_text(Some(hint));
+            check.set_icon_name(if *offers {
                 "software-update-available-symbolic"
             } else {
                 "view-refresh-symbolic"
             });
+            check.update_property(&[gtk4::accessible::Property::Label(if *offers {
+                "Показать обновление"
+            } else {
+                "Проверить обновления"
+            })]);
+            shown = Some(view);
+        };
+        refresh();
+        window_tick(window, std::time::Duration::from_millis(500), move || {
+            refresh();
             gtk4::glib::ControlFlow::Continue
         });
     }
@@ -1474,7 +1549,7 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     }
 
     page.append(&card);
-    page.append(&footer(window, state));
+    page.append(&footer(window));
     scroll(&page)
 }
 

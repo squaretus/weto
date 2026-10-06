@@ -203,7 +203,8 @@
 .weto-primary,
 .weto-muted,
 .weto-destructive,
-.weto-dropdown > button {
+.weto-dropdown > button,
+.weto-menu-button > button {
     font-size: 13px;
     font-weight: 600;
     border-radius: 11px;
@@ -223,7 +224,8 @@
 }
 
 .weto-muted,
-.weto-dropdown > button {
+.weto-dropdown > button,
+.weto-menu-button > button {
     background-color: rgb(42, 40, 51);
     border-color: rgba(255, 255, 255, 0.08);
     color: rgb(244, 242, 251);
@@ -248,7 +250,8 @@
 .weto-primary:active,
 .weto-muted:active,
 .weto-destructive:active,
-.weto-dropdown > button:active {
+.weto-dropdown > button:active,
+.weto-menu-button > button:active {
     opacity: 0.7;
 }
 
@@ -256,6 +259,7 @@
 .weto-muted:focus-visible,
 .weto-destructive:focus-visible,
 .weto-dropdown > button:focus-visible,
+.weto-menu-button > button:focus-visible,
 .weto-icon-button:focus-visible {
     outline: 2px solid rgb(139, 123, 255);
     outline-offset: 1px;
@@ -311,6 +315,87 @@
 .weto-dropdown popover row:selected {
     background-color: rgb(139, 123, 255);
     color: #ffffff;
+}
+
+/* --- Кнопка с меню ------------------------------------------------------ */
+
+/* Пилюля — как у приглушённой кнопки (правила выше), стрелка — её цветом.
+   Меню — карточкой, как список у выпадающего: пункты — действия, поэтому
+   выбранного среди них нет, есть только наведённый. */
+.weto-menu-button {
+    background: none;
+    border: none;
+    box-shadow: none;
+    min-height: 0;
+    padding: 0;
+}
+
+.weto-menu-button > button > box {
+    border-spacing: 6px;
+}
+
+.weto-menu-popover > contents {
+    background-color: rgb(32, 31, 40);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 3px;
+}
+
+.weto-menu-item {
+    border-radius: 10px;
+    padding: 3px 6px;
+    min-height: 0;
+    color: rgb(244, 242, 251);
+    font-size: 13px;
+    background: none;
+    box-shadow: none;
+}
+
+.weto-menu-item:hover,
+.weto-menu-item:focus-visible {
+    background-color: rgb(139, 123, 255);
+    color: #ffffff;
+}
+
+/* --- Галочка ------------------------------------------------------------ */
+
+/* Подпись — шрифт значения цветом `dim`, как тумблер автоустановки в окне
+   обновления на macOS; отмеченная — `violet`, как включённый тумблер. */
+.weto-check {
+    font-size: 13px;
+    color: rgba(244, 242, 251, 0.66);
+}
+
+.weto-check > check {
+    background-image: none;
+    background-color: rgb(42, 40, 51);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: none;
+}
+
+.weto-check > check:checked {
+    background-color: rgb(139, 123, 255);
+    border-color: rgb(139, 123, 255);
+    color: #ffffff;
+}
+
+/* --- Окно обновления ---------------------------------------------------- */
+
+/* Поля окна — 18, как `UpdateDialogView.padding`: по ним считается ширина
+   окна из замера кнопок, и расходиться с кодом им нельзя (`SPACE5`). */
+.weto-update-dialog {
+    background-color: rgb(23, 22, 29);
+    padding: 18px;
+}
+
+.weto-status-title.ink {
+    color: rgb(244, 242, 251);
+}
+
+.weto-update-dialog progressbar > trough > progress {
+    background-color: rgb(139, 123, 255);
+    background-image: none;
+    border-color: rgb(139, 123, 255);
 }
 
 /* --- Поле ввода --------------------------------------------------------- */

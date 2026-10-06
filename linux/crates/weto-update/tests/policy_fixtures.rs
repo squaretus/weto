@@ -54,12 +54,16 @@ struct Case {
 impl Case {
     fn as_info(&self) -> UpdateInfo {
         UpdateInfo {
+            current_version: "0.0.0".to_string(),
             latest_version: self.latest_version.clone(),
+            release_url: format!(
+                "https://github.com/squaretus/weto/releases/tag/v{}",
+                self.latest_version
+            ),
             download_url: format!(
                 "https://github.com/squaretus/weto/releases/download/v{}/weto.tar.zst",
                 self.latest_version
             ),
-            release_notes: None,
             is_newer: self.is_newer,
         }
     }

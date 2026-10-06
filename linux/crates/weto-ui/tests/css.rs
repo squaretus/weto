@@ -95,12 +95,15 @@ fn the_two_themes_actually_differ() {
 fn painted_controls_switch_off_the_theme_gradient() {
     // Только то, что GTK рисует как контрол. Карточкам и панелям градиент
     // штатная тема не назначает, и требовать от них сброса было бы шумом.
-    const CONTROLS: [&str; 5] = [
+    const CONTROLS: [&str; 8] = [
         ".weto-primary",
         ".weto-tile-button",
         ".weto-entry",
         ".weto-segments button:checked",
         ".weto-dropdown > button",
+        ".weto-menu-button > button",
+        ".weto-menu-item:hover",
+        ".weto-check > check:checked",
     ];
 
     for (theme, css) in [("тёмная", DARK_CSS), ("светлая", LIGHT_CSS)] {
@@ -154,6 +157,7 @@ fn a_pressed_control_dims_as_on_macos() {
         ".weto-muted:active",
         ".weto-destructive:active",
         ".weto-dropdown > button:active",
+        ".weto-menu-button > button:active",
     ] {
         let block =
             block_for(LIGHT_CSS, selector).unwrap_or_else(|| panic!("нет правила {selector}"));

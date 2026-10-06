@@ -206,6 +206,55 @@ pub fn destructive_button(text: &str) -> Button {
     pill(text, "weto-destructive")
 }
 
+/// Кнопка с меню — порт `WetoMenuButton`: выглядит как приглушённая пилюля
+/// со стрелкой вниз, а пункты меню — действия, а не выбор значения
+/// («Напомнить позже» → «через час»). Поэтому не `DropDown`: тот помнит
+/// выбранный пункт и показывает его вместо подписи.
+///
+/// Возвращает и сами пункты: действие на них вешает вызывающий, а меню
+/// закрывается само по нажатию на любой.
+pub fn menu_button(text: &str, items: &[&str]) -> (gtk4::MenuButton, Vec<Button>) {
+    let menu = gtk4::MenuButton::new();
+    menu.add_css_class("weto-menu-button");
+    menu.set_label(text);
+    menu.set_always_show_arrow(true);
+    menu.set_valign(Align::Center);
+
+    let list = GtkBox::new(Orientation::Vertical, 0);
+    let popover = gtk4::Popover::new();
+    popover.add_css_class("weto-menu-popover");
+    popover.set_has_arrow(false);
+    popover.set_child(Some(&list));
+    menu.set_popover(Some(&popover));
+
+    let buttons = items
+        .iter()
+        .map(|title| {
+            let item = Button::with_label(title);
+            item.add_css_class("weto-menu-item");
+            item.set_has_frame(false);
+            if let Some(label) = item.child().and_downcast::<Label>() {
+                label.set_xalign(0.0);
+            }
+            let popover = popover.clone();
+            item.connect_clicked(move |_| popover.popdown());
+            list.append(&item);
+            item
+        })
+        .collect();
+
+    (menu, buttons)
+}
+
+/// Галочка с подписью — порт `Toggle(…).toggleStyle(.checkbox)` в окне
+/// обновления: подпись шрифтом значения цветом `dim`, отмеченная — `violet`.
+pub fn checkbox(text: &str) -> gtk4::CheckButton {
+    let check = gtk4::CheckButton::with_label(text);
+    check.add_css_class("weto-check");
+    check.set_halign(Align::Start);
+    check
+}
+
 /// Выпадающий список. Тот же контрол, что и приглушённая кнопка: стоит с ней
 /// на одной высоте и по тому же центру.
 pub fn dropdown() -> DropDown {

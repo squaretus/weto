@@ -14,6 +14,7 @@
 //! без причины, лежащей в самой платформе.
 
 pub mod checker;
+pub mod dialog;
 pub mod installer;
 pub mod layout;
 pub mod policy;

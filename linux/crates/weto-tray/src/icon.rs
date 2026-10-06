@@ -84,9 +84,126 @@ pub fn render(state: GuardStatusColor, size: u32) -> Pixmap {
     }
 }
 
+/// Иконка приложения целиком — заливка из `icon.json` и слой знака с рамкой,
+/// по бандлу своей темы. Порт `render-icon.swift` с macOS: окно обновления
+/// показывает ту же картинку, что `WetoAppIcon` там, и тем же способом —
+/// из исходников, а не из иконки, которую кто-то установил или нет.
+///
+/// Поля вокруг фигуры — 8 %, радиус — 0.2237 стороны: те же числа, что
+/// у макосного композитора, иначе иконки двух платформ разошлись бы по форме.
+///
+pub fn app_icon(light: bool, size: u32) -> Picture {
+    let (manifest, layer) = if light {
+        (LIGHT_ICON_JSON, LIGHT_GRID_SVG)
+    } else {
+        (DARK_ICON_JSON, GRID_SVG)
+    };
+
+    let side = size as f32;
+    let inset = (side * 0.08).round();
+    let square = side - inset * 2.0;
+    let background = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}">
+             <rect x="{inset}" y="{inset}" width="{square}" height="{square}"
+                   rx="{radius}" fill="{fill}"/>
+           </svg>"#,
+        radius = square * 0.2237,
+        fill = fill_colour(manifest),
+    );
+
+    let options = resvg::usvg::Options::default();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).expect("нулевой размер иконки");
+
+    let backdrop =
+        resvg::usvg::Tree::from_str(&background, &options).expect("подложка иконки не разбирается");
+    resvg::render(
+        &backdrop,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+
+    // Слой рисуется внутри фигуры: знак занимает центр своей канвы и поля
+    // держит сам, поэтому канва просто вписывается в квадрат.
+    let glyph = resvg::usvg::Tree::from_str(layer, &options).expect("слой иконки не разбирается");
+    let scale = square / glyph.size().width().max(1.0);
+    resvg::render(
+        &glyph,
+        resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, inset, inset),
+        &mut pixmap.as_mut(),
+    );
+
+    Picture {
+        size,
+        rgba: pixmap.data().to_vec(),
+    }
+}
+
+/// Квадратная картинка для окна. Отдельно от `Pixmap`: тому нужен ARGB
+/// для StatusNotifierItem, а GTK берёт RGBA как есть.
+pub struct Picture {
+    pub size: u32,
+    /// RGBA с предумноженной альфой — так отдаёт tiny-skia.
+    pub rgba: Vec<u8>,
+}
+
+const DARK_ICON_JSON: &str = include_str!("../../../../shared/icon/dark.icon/icon.json");
+const LIGHT_ICON_JSON: &str = include_str!("../../../../shared/icon/light.icon/icon.json");
+const LIGHT_GRID_SVG: &str = include_str!("../../../../shared/icon/light.icon/Assets/grid.svg");
+
+/// Цвет заливки из `icon.json`: первая точка градиента вида
+/// `srgb:0.09020,0.08627,0.11373,1.00000` — так её пишет Icon Composer.
+/// Обе точки у наших бандлов совпадают, и градиент вырождается в цвет.
+fn fill_colour(manifest: &str) -> String {
+    let start = manifest.find("srgb:").expect("в icon.json нет заливки") + "srgb:".len();
+    let rest = &manifest[start..];
+    let end = rest.find('"').expect("заливка в icon.json не закрыта");
+    let channels: Vec<u8> = rest[..end]
+        .split(',')
+        .take(3)
+        .map(|part| (part.trim().parse::<f32>().unwrap_or(0.0) * 255.0).round() as u8)
+        .collect();
+    format!("#{:02X}{:02X}{:02X}", channels[0], channels[1], channels[2])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Фон иконки — токен `shell` своей темы: та самая пара, на которой
+    /// приложение рисует заголовки. Пиксель в центре верхнего поля фигуры —
+    /// заливка, а угол канвы прозрачен: снаружи фигуры поля.
+    #[test]
+    fn the_app_icon_is_the_shell_square_of_its_theme() {
+        assert_eq!(fill_colour(DARK_ICON_JSON), "#17161D");
+        assert_eq!(fill_colour(LIGHT_ICON_JSON), "#E7E4F1");
+
+        let size = 104u32;
+        for (light, shell) in [(false, [0x17, 0x16, 0x1D]), (true, [0xE7, 0xE4, 0xF1])] {
+            let icon = app_icon(light, size);
+            assert_eq!(icon.rgba.len(), (size * size * 4) as usize);
+
+            let at = |x: u32, y: u32| {
+                let i = ((y * size + x) * 4) as usize;
+                [
+                    icon.rgba[i],
+                    icon.rgba[i + 1],
+                    icon.rgba[i + 2],
+                    icon.rgba[i + 3],
+                ]
+            };
+            assert_eq!(at(0, 0)[3], 0, "угол канвы — поле, а не заливка");
+            let backdrop = at(size / 2, 14);
+            assert_eq!(backdrop[3], 255, "под знаком нет заливки");
+            assert_eq!(&backdrop[..3], &shell, "заливка не цвета темы");
+        }
+    }
+
+    /// Знак в светлой теме тёмный, а в тёмной — светлый: у бандлов разные
+    /// слои, и перепутать их значило бы нарисовать знак цветом фона.
+    #[test]
+    fn each_theme_draws_its_own_glyph() {
+        assert_ne!(app_icon(true, 64).rgba, app_icon(false, 64).rgba);
+    }
 
     /// Перекраска держится на том, что в исходнике штрих задан этим цветом.
     /// Если знак перерисуют другим — тест назовёт причину, по которой иконка

@@ -11,6 +11,10 @@ use crate::version::Version;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
+    /// `releases/latest` ответил 404: у репозитория ещё нет ни одного релиза.
+    /// Это не отказ сети, и подвал говорит о нём своими словами.
+    #[error("Релизов пока нет")]
+    NoReleases,
     #[error("не спросить о релизах: {0}")]
     Request(String),
     #[error("ответ не разбирается: {0}")]
@@ -22,7 +26,9 @@ pub enum CheckError {
 #[derive(Debug, Deserialize)]
 struct Release {
     tag_name: String,
-    body: Option<String>,
+    /// Страница релиза. Заметки (`body`) не читаются: окно их не показывает.
+    #[serde(default)]
+    html_url: Option<String>,
     #[serde(default)]
     assets: Vec<Asset>,
     #[serde(default)]
@@ -38,6 +44,7 @@ struct Asset {
 }
 
 pub struct ReleaseChecker {
+    repository: String,
     api_url: String,
     /// Суффикс имени архива под текущую машину.
     asset_suffix: String,
@@ -46,6 +53,7 @@ pub struct ReleaseChecker {
 impl ReleaseChecker {
     pub fn new(repository: &str, arch: &str) -> ReleaseChecker {
         ReleaseChecker {
+            repository: repository.to_string(),
             api_url: format!("https://api.github.com/repos/{repository}/releases/latest"),
             asset_suffix: format!("-{arch}-linux.tar.zst"),
         }
@@ -71,7 +79,10 @@ impl ReleaseChecker {
             .set("Accept", "application/vnd.github+json")
             .set("User-Agent", "weto")
             .call()
-            .map_err(|e| CheckError::Request(e.to_string()))?;
+            .map_err(|e| match e {
+                ureq::Error::Status(404, _) => CheckError::NoReleases,
+                other => CheckError::Request(other.to_string()),
+            })?;
 
         let body = response
             .into_string()
@@ -92,10 +103,19 @@ impl ReleaseChecker {
             .find(|asset| asset.name.ends_with(&self.asset_suffix))
             .ok_or_else(|| CheckError::NoAsset(release.tag_name.clone()))?;
 
+        // Без ссылки в ответе страница всё равно известна — по тегу.
+        let release_url = release.html_url.clone().unwrap_or_else(|| {
+            format!(
+                "https://github.com/{}/releases/tag/{}",
+                self.repository, release.tag_name
+            )
+        });
+
         Ok(UpdateInfo {
+            current_version: current.to_string(),
             latest_version: latest.to_string(),
+            release_url,
             download_url: asset.browser_download_url.clone(),
-            release_notes: release.body.clone(),
             is_newer: latest > *current,
         })
     }

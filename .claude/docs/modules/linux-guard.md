@@ -287,6 +287,19 @@ points at the new version.
   there the system installer validates the package.
 - **A manual check ignores skip and deferral** — the only and sufficient way to bring back
   a skipped version, which is why there is no "unskip" button.
+- **The update window is a port of `UpdateDialogView`** (`weto-app/src/update_window.rs`): what
+  it shows is decided by `weto_update::dialog::UpdateDialogModel` (port of the macOS model, same
+  tests), texts by `weto_update::strings::UpdateStrings`, the width by measuring the three live
+  buttons (`dialog_width`, port of `minimumWidth`). A prompt opens it by itself; the close button
+  postpones for 3 h (`RemindInterval::ON_CLOSE`). The checkbox and the Maintenance toggle are one
+  value (`Updates::auto_install`), and turning it on installs the found version at once, as on
+  macOS. No release notes (owner decision, 2026-10-06). Deviations, each forced or deliberate:
+  the footer tile opens the window for an already found version instead of fetching again
+  (same outcome, no network round-trip); a new prompt forgets a previous install failure — on
+  macOS the window keeps only «Открыть страницу релиза» until restart; texts about the daemon and
+  about a release without a package are not ported (there is no daemon, and a release without a
+  Linux archive is not a finding); the `Checking` phase marks the manual check (the tile is
+  insensitive until it answers), not an install-time re-check, which Linux does not have.
 - **The stable path is the launch symlink, `~/.local/bin/weto`** (`Paths::launcher`, written
   literally the way `install.sh` writes it). Anything outside the running process that has to name
   the binary means that symlink, never the versioned directory: the autostart entry writes
