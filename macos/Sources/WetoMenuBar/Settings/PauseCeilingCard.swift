@@ -13,7 +13,7 @@ struct PauseCeilingCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: WetoTokens.space2) {
-            WetoCard("Пауза целей") {
+            WetoCard("Таймаут подтверждения") {
                 VStack(alignment: .leading, spacing: WetoTokens.space2) {
                     Text("Сколько ждать подтверждения")
                         .font(WetoTokens.label)

@@ -73,7 +73,7 @@ the whole of what the Linux side is allowed to differ in:
 
 Everything else matches, including every wording that does not depend on the unported screen: the
 settings window is the same seven cards in the same order
-(`Цели`, `Сеть и гео`, `Пауза целей`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
+(`Цели`, `Сеть и гео`, `Таймаут подтверждения`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
 footer (github link, version, update tile), and the status popup is shield + title +
 two icon buttons, then the geo readout, the update banner, and live targets.
 

@@ -24,7 +24,7 @@ the phase model are unchanged; only the `Tick` threshold of the `Пауза` pha
   `UnsafeEvidence.isPauseExpired` / `is_pause_expired`; macOS `SettingsStore.pauseCeiling`
   (UserDefaults key `pauseCeilingSeconds`) with its own `onPauseCeilingChange` bus; Linux
   `Settings.pause_ceiling_seconds` (serde default 60, unknown → 60 via `pause_ceiling()`) and
-  `SharedSettings::edit_untracked`; the «Пауза целей» card right after «Сеть и гео».
+  `SharedSettings::edit_untracked`; the «Таймаут подтверждения» card right after «Сеть и гео».
 - Modified: `pauseExpired` → `pauseExpired(ceiling:)` / `PauseExpired(Duration)`, wording
   «Подтверждение не получено за 1 мин» (was «за 60 с»); countdown format — above a minute «4:59»,
   the last minute «43 с» (`WetoPauseBadge.remainingText`, `pause_countdown_text`, the paused

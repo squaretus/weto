@@ -638,13 +638,13 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
     card
 }
 
-// --- Пауза целей ----------------------------------------------------------
+// --- Таймаут подтверждения ------------------------------------------------
 
 /// Сколько цели стоят на паузе до завершения. Порт `PauseCeilingCard`:
 /// подпись и сегменты, объяснение — под карточкой.
 fn pause_ceiling_card(state: Arc<AppState>) -> GtkBox {
     let holder = GtkBox::new(Orientation::Vertical, ui::SPACE2);
-    let card = ui::card("Пауза целей");
+    let card = ui::card("Таймаут подтверждения");
 
     let box_ = GtkBox::new(Orientation::Vertical, ui::SPACE2);
     box_.add_css_class("weto-row");
