@@ -337,17 +337,37 @@ fn the_real_proc_reports_a_deleted_binary_by_its_former_path() {
     let binary = tmp.path().join("228");
     fs::copy("/bin/sleep", &binary).unwrap();
     let binary = fs::canonicalize(&binary).unwrap();
-    let child = Spawned(
-        std::process::Command::new(&binary)
-            .arg("86402")
-            .spawn()
-            .unwrap(),
-    );
+    let child = Spawned(spawn_freshly_written(
+        std::process::Command::new(&binary).arg("86402"),
+    ));
     fs::remove_file(&binary).unwrap();
 
     let snapshot = snapshot_of(child.pid()).expect("реестр обязан видеть потомка");
 
     assert_eq!(snapshot.executable_path, binary.to_string_lossy());
+}
+
+/// Запуск только что записанного бинарника переживает `ETXTBSY`.
+///
+/// `fs::copy` держит копию открытой на запись, и тесты соседних потоков
+/// в это время порождают свои процессы: `fork` дублирует открытый дескриптор
+/// в потомка, а `O_CLOEXEC` закрывает его лишь на `exec` потомка. Пока чужой
+/// потомок между `fork` и `exec`, у копии есть писатель, и ядро отказывает
+/// в её запуске с `ETXTBSY`, хотя свой дескриптор мы давно закрыли. Окно
+/// короткое и закрывается само, поэтому стандартное лекарство — повторить
+/// запуск (так делают и Go, и cargo); других ошибок повтор не глотает.
+fn spawn_freshly_written(command: &mut std::process::Command) -> std::process::Child {
+    const ATTEMPTS: u32 = 50;
+    for attempt in 1..=ATTEMPTS {
+        match command.spawn() {
+            Ok(child) => return child,
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempt < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => panic!("копия бинарника не запустилась: {error}"),
+        }
+    }
+    unreachable!("последняя попытка возвращает или паникует")
 }
 
 /// Управляющий терминал заводится честным pty через `script`: у процесса

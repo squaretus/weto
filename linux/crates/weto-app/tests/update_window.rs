@@ -140,6 +140,11 @@ fn the_update_window_matches_the_macos_dialog() {
         expected > 3 * 100,
         "кнопки померились без стилей: {expected}"
     );
+    // Промежутки меряются по размещению, а размещает кадр окна: под нагрузкой
+    // он может не успеть в фиксированную прокачку, и ряд читался бы нулями.
+    wait_for(Duration::from_secs(5), || {
+        skip.width() > 0 && remind.width() > 0 && install.width() > 0
+    });
     let left_gap = remind
         .compute_point(root, &gtk4::graphene::Point::new(0.0, 0.0))
         .unwrap()
@@ -172,8 +177,7 @@ fn the_update_window_matches_the_macos_dialog() {
         .find(|button| button.label().as_deref() == Some("через 6 часов"))
         .expect("нет пункта «через 6 часов»");
     six_hours.emit_clicked();
-    pump(Duration::from_millis(100));
-    assert!(application.windows().is_empty(), "отсрочка не закрыла окно");
+    wait_for(Duration::from_secs(5), || application.windows().is_empty());
     assert_eq!(updates.pending(), None, "баннер остался после отсрочки");
     assert_postponed(&store, 6);
 
@@ -187,8 +191,7 @@ fn the_update_window_matches_the_macos_dialog() {
         .next()
         .expect("окно не открылось снова");
     window.close();
-    pump(Duration::from_millis(100));
-    assert!(application.windows().is_empty());
+    wait_for(Duration::from_secs(5), || application.windows().is_empty());
     assert_postponed(&store, 3);
 
     // --- Галочка ставит сразу; отказ — текст и страница релиза -----------------
@@ -233,9 +236,14 @@ fn the_update_window_matches_the_macos_dialog() {
     );
 
     // Следующая находка снова предлагает выбор: кнопки не пропадают навсегда.
+    // Окно перечитывает ход своим тактом раз в 200 мс, поэтому ответ ждётся
+    // по условию, а не прокачкой фиксированной длины: под нагрузкой поток
+    // просыпается поздно, и последний сон прокачки перешагивал срок такта
+    // без единой итерации цикла после него.
     updates.apply(prompt());
-    pump(Duration::from_millis(300));
-    assert!(find_button(root, "Обновить").is_visible());
+    wait_for(Duration::from_secs(5), || {
+        find_button(root, "Обновить").is_visible()
+    });
     assert!(!find_button(root, "Открыть страницу релиза").is_visible());
 
     window.close();
