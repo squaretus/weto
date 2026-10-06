@@ -219,7 +219,7 @@ struct StatusPopupView: View {
     private var readout: some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(lines) { line in
-                HStack(spacing: 4) {
+                HStack(spacing: WetoTokens.space2) {
                     Text(verbatim: "\(line.key):")
                         .foregroundStyle(WetoTokens.faint.resolve(scheme))
                     Text(line.value)
