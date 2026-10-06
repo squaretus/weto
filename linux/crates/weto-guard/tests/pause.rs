@@ -431,6 +431,89 @@ fn a_refused_resume_is_named_as_a_refusal() {
     assert!(ledger_pids(&s).contains(&200));
 }
 
+// --- отказ в правах на экране ----------------------------------------------
+
+/// Отказ ядра в SIGSTOP виден не только журналу: экран называет pid красной
+/// строкой под показаниями — текстом macOS дословно (`GuardVM.pauseTargets`).
+/// Цели снова работают — строка гаснет: она про сигналы, которых больше нет.
+#[test]
+fn a_refused_pause_is_shown_until_the_targets_run_again() {
+    let s = stand();
+    guarded(&s);
+    assert_eq!(s.controller.snapshot().permission_failure, None);
+
+    s.world.refuses(200);
+    services_go_silent(&s);
+
+    assert_eq!(
+        s.controller.snapshot().permission_failure.as_deref(),
+        Some("Не удалось приостановить процессы [200] — недостаточно прав")
+    );
+
+    s.geo.everything_answers_again();
+    s.probe_now();
+    s.tick();
+
+    assert_eq!(s.controller.snapshot().permission_failure, None);
+}
+
+/// Отказ в SIGCONT гасить тем же проходом нельзя: строка — про сигнал,
+/// который только что не дошёл, а цель так и стоит.
+#[test]
+fn a_refused_resume_is_shown_on_the_screen() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+    assert_eq!(s.controller.snapshot().permission_failure, None);
+
+    s.world.refuses(200);
+    s.geo.everything_answers_again();
+    s.probe_now();
+
+    assert_eq!(
+        s.controller.snapshot().permission_failure.as_deref(),
+        Some("Не удалось возобновить процессы [200] — недостаточно прав")
+    );
+}
+
+/// Отказ в SIGKILL по доказательству называется так же — своим глаголом.
+#[test]
+fn a_refused_termination_is_shown_on_the_screen() {
+    let s = stand();
+    guarded(&s);
+    s.world.refuses(200);
+
+    s.world.vpn_app_closes();
+    let phase = s.tick();
+
+    assert_eq!(phase, GuardPhase::Danger(UnsafeEvidence::VpnAppNotRunning));
+    assert_eq!(
+        s.controller.snapshot().permission_failure.as_deref(),
+        Some("Не удалось завершить процессы [200] — недостаточно прав")
+    );
+}
+
+/// Цель, снятая с охраны под паузой, отпускается сразу — и отказ в этом
+/// SIGCONT называется тем же текстом, что отказ в возобновлении.
+#[test]
+fn a_refused_release_is_shown_on_the_screen() {
+    let mut world = terminal_session();
+    world.push(detached(300, 1, NANO));
+    let s = stand_guarding(&[CLAUDE, NANO], World::of(world), &[]);
+    guarded(&s);
+    services_go_silent(&s);
+
+    s.world.refuses(300);
+    s.settings
+        .edit(|settings| settings.targets.retain(|target| target.entry != NANO));
+    s.controller.tick();
+
+    assert_eq!(
+        s.controller.snapshot().permission_failure.as_deref(),
+        Some("Не удалось возобновить процессы [300] — недостаточно прав")
+    );
+}
+
 // --- журнал стояния ---------------------------------------------------------
 
 /// Объяснён обязан быть каждый посланный SIGSTOP — и цель, и её потомок,

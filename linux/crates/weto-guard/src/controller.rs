@@ -54,6 +54,7 @@ use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget};
 use weto_sys::background::{BackgroundDispatching, ThreadDispatcher};
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
+use weto_sys::process_signaler::SignalResult;
 use weto_sys::secret_store::SecretStoring;
 
 use crate::enforcer::{ProcessEnforcer, ResumeOutcome, Scan};
@@ -187,6 +188,9 @@ pub struct GuardSnapshot {
     pub paused: Vec<PausedProcess>,
     /// Когда истекает потолок паузы. `None` — цели не стоят.
     pub pause_deadline: Option<SystemTime>,
+    /// Сигнал не дошёл до целей из-за нехватки прав: экран называет pid
+    /// красной строкой под показаниями. Порт `GuardVM.permissionFailure`.
+    pub permission_failure: Option<String>,
 }
 
 /// Учёт стояния: что уже описано журналом и кому сколько раз досылали SIGCONT.
@@ -243,6 +247,8 @@ struct Inner {
     last_reading: Option<GeoReading>,
     last_network: NetworkSnapshot,
     pause: PauseBook,
+    /// Последний отказ ядра в сигнале целям — до прохода, который его снимет.
+    permission_failure: Option<String>,
     snapshot: GuardSnapshot,
 }
 
@@ -373,6 +379,7 @@ impl GuardController {
                 last_reading: None,
                 last_network: NetworkSnapshot::default(),
                 pause: PauseBook::default(),
+                permission_failure: None,
                 snapshot: GuardSnapshot::default(),
             }),
             probe: ProbeGate::default(),
@@ -728,6 +735,13 @@ impl GuardController {
             // первым, а не «запуском запрещён».
             let context = self.kill_context(settings, self.safe_outcome_text(&phase), None, scan);
             self.reporter.episode_finished(&context);
+            // Отказ в правах — про сигналы, которых больше нет: цели работают.
+            // Гаснет до продолжения, а не после: отказ в SIGCONT — про сигнал,
+            // который только что не дошёл, и гасить его тем же проходом нельзя.
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .permission_failure = None;
             self.settle_resume(scan, settings, &phase);
         }
 
@@ -767,6 +781,10 @@ impl GuardController {
 
     fn pause_targets(&self, scan: &Scan, settings: &Settings, phase: &GuardPhase) {
         let outcome = self.enforcer.pause(scan);
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .permission_failure = refusal_text("приостановить", &refused_pids(&outcome.results));
 
         // Пилюля с отсчётом описывает то, что стоит сейчас: цель, умершая под
         // паузой сама или снятая с охраны, оставалась бы в списке с живым
@@ -876,6 +894,13 @@ impl GuardController {
         if outcome.is_empty() {
             return;
         }
+        if let Some(text) = refusal_text("возобновить", &refused_pids(&outcome.results))
+        {
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .permission_failure = Some(text);
+        }
 
         let observed: HashSet<i32> = outcome.released.iter().copied().collect();
         let (pending, reason, staleness) = {
@@ -952,12 +977,13 @@ impl GuardController {
         };
 
         let outcome = self.enforcer.resume(Some(scan), &abandoned);
-        let refused: Vec<i32> = outcome
-            .results
-            .iter()
-            .filter(|result| !result.is_delivered())
-            .map(|result| result.pid)
-            .collect();
+        let refused = refused_pids(&outcome.results);
+        if let Some(text) = refusal_text("возобновить", &refused) {
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .permission_failure = Some(text);
+        }
 
         let answered: Vec<i32> = outcome
             .unresolved
@@ -1095,6 +1121,10 @@ impl GuardController {
 
     fn terminate_targets(&self, scan: &Scan, settings: &Settings, evidence: &UnsafeEvidence) {
         let outcome = self.enforcer.terminate(scan);
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .permission_failure = refusal_text("завершить", &outcome.refused);
         let reason = evidence.display_text();
         let cause = if evidence.is_pause_expired() {
             "по потолку"
@@ -1383,6 +1413,7 @@ impl GuardController {
         inner.snapshot.pause_deadline = phase
             .paused_since()
             .map(|since| since + inner.machine.pause_ceiling());
+        inner.snapshot.permission_failure = inner.permission_failure.clone();
     }
 
     /// Текст, с которым закрывается эпизод у работающих целей.
@@ -1819,6 +1850,23 @@ impl GuardController {
         inner.last_report = None;
         inner.last_reading = None;
     }
+}
+
+/// Кому ядро отказало в сигнале.
+fn refused_pids(results: &[SignalResult]) -> Vec<i32> {
+    results
+        .iter()
+        .filter(|result| !result.is_delivered())
+        .map(|result| result.pid)
+        .collect()
+}
+
+/// Строка отказа прав для экрана — текстом `GuardVM` с macOS дословно; список
+/// pid печатается так же, как массив Swift: `[200, 201]`. Отказов нет — нет
+/// и строки.
+fn refusal_text(action: &str, refused: &[i32]) -> Option<String> {
+    (!refused.is_empty())
+        .then(|| format!("Не удалось {action} процессы {refused:?} — недостаточно прав"))
 }
 
 fn standing_pids(entries: &[weto_config::stopped::StoppedProcess]) -> Vec<i32> {

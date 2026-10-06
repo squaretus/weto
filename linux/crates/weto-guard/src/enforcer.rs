@@ -37,6 +37,8 @@ impl Scan {
 pub struct EnforcementResult {
     pub killed: Vec<MatchedProcess>,
     pub running: Vec<RunningTarget>,
+    /// Кому ядро отказало в SIGKILL: экран называет их строкой отказа прав.
+    pub refused: Vec<i32>,
 }
 
 /// Итог паузы одного прохода.
@@ -477,6 +479,7 @@ impl ProcessEnforcer {
             return EnforcementResult {
                 killed: Vec::new(),
                 running: Vec::new(),
+                refused: Vec::new(),
             };
         }
 
@@ -523,6 +526,11 @@ impl ProcessEnforcer {
                 .filter(|m| killed.contains(&m.pid))
                 .collect(),
             running: running_targets(&scan.processes, &scan.rules),
+            refused: results
+                .iter()
+                .filter(|result| !result.is_delivered())
+                .map(|result| result.pid)
+                .collect(),
         }
     }
 

@@ -7,8 +7,9 @@
 //!
 //! Состав повторяет `StatusPopupView` построчно: шапка со щитом, заголовком
 //! и двумя иконками, три строки объяснения (там, где есть что объяснять),
-//! показания гео, баннер обновления и живые цели с бейджем паузы. Карточек
-//! и крупных кнопок в попапе нет — управление живёт в окне настроек.
+//! показания гео, строка отказа прав, баннер обновления и живые цели
+//! с бейджем паузы. Карточек и крупных кнопок в попапе нет — управление
+//! живёт в окне настроек.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -74,6 +75,17 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
     // --- Показания гео ---
     let readout = GtkBox::new(Orientation::Vertical, 2);
     panel.append(&readout);
+
+    // Отказ ядра в сигнале целям: красная строка сразу под показаниями, как
+    // на macOS. Без неё отказ оставался только в журнале, а цель, которую
+    // weto не смог остановить, выглядела остановленной.
+    let permission_failure = Label::new(None);
+    permission_failure.add_css_class("weto-permission-failure");
+    permission_failure.set_halign(Align::Start);
+    permission_failure.set_xalign(0.0);
+    permission_failure.set_wrap(true);
+    permission_failure.set_visible(false);
+    panel.append(&permission_failure);
 
     // Баннер обновления стоит после показаний и появляется только тогда, когда
     // политика решила показать находку. Тихий исход прячет и его, и окно.
@@ -161,6 +173,14 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
             };
             update_readout(&readout, &lines, &shown_lines, &mut readout_values);
             shown_lines = lines;
+
+            match &snapshot.permission_failure {
+                Some(text) => {
+                    permission_failure.set_text(text);
+                    permission_failure.set_visible(true);
+                }
+                None => permission_failure.set_visible(false),
+            }
 
             clear(&targets_slot);
             if !state.settings.current().targets.is_empty() {

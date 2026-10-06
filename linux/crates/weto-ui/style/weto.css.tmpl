@@ -73,6 +73,14 @@
     color: {{red}};
 }
 
+/* Отказ ядра в сигнале целям — строка под показаниями попапа: размер
+   капшена, цвет `red`, как в `StatusPopupView`. Своим классом, а не парой
+   `.weto-caption.weto-error`: та полагалась бы на порядок правил. */
+.weto-permission-failure {
+    font-size: {{fontCaptionSize}};
+    color: {{red}};
+}
+
 /* Подсказка рядом со строкой состояния — приглушённая, смысл несёт текст слева. */
 .weto-hint {
     color: {{faint}};
