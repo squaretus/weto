@@ -14,6 +14,7 @@ fn entry(pid: i32, is_shell: bool) -> StoppedProcess {
         executable_path: format!("/usr/bin/цель-{pid}"),
         stopped_at: UNIX_EPOCH + Duration::from_secs(1_756_300_366),
         is_shell,
+        target_entry: None,
     }
 }
 
@@ -84,6 +85,7 @@ fn a_recycled_pid_replaces_the_stale_entry_instead_of_dropping_the_fresh_one() {
         executable_path: "/usr/bin/claude".to_string(),
         stopped_at: UNIX_EPOCH + Duration::from_secs(1_756_400_000),
         is_shell: false,
+        target_entry: None,
     };
     assert!(
         ledger.add(std::slice::from_ref(&fresh)),
@@ -116,6 +118,7 @@ fn a_replacement_keeps_the_order_of_its_own_batch() {
             executable_path: "/usr/bin/zsh".to_string(),
             stopped_at: UNIX_EPOCH + Duration::from_secs(1_756_400_000),
             is_shell: true,
+            target_entry: None,
         },
         entry(201, false),
         entry(202, false),
@@ -231,6 +234,7 @@ fn the_moment_is_written_as_an_iso_8601_string() {
         executable_path: "/usr/bin/nano".to_string(),
         stopped_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_756_300_366),
         is_shell: false,
+        target_entry: None,
     }]);
     ledger.save(&path).unwrap();
 
@@ -266,4 +270,28 @@ fn an_entry_written_with_the_deleted_suffix_is_read_without_it() {
         "/home/me/.local/share/claude/versions/228"
     );
     assert!(!ledger.started_from_corrupted_file());
+}
+
+/// Запись цели переживает файл: по ней охрана решает, снята ли цель с охраны,
+/// и после падения weto спросить это больше не у кого. У шелла и у записи
+/// прежней версии поля нет вовсе — файл остаётся читаемым обеими.
+#[test]
+fn the_target_of_an_entry_survives_the_file_and_is_absent_for_a_shell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("stopped.json");
+    let mut ledger = StoppedLedger::default();
+    ledger.add(&[
+        entry(100, true),
+        StoppedProcess {
+            target_entry: Some("claude".to_string()),
+            ..entry(200, false)
+        },
+    ]);
+    ledger.save(&path).unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text.matches("\"targetEntry\"").count(), 1, "{text}");
+    let loaded = StoppedLedger::load(&path);
+    assert_eq!(loaded.entries()[0].target_entry, None);
+    assert_eq!(loaded.entries()[1].target_entry.as_deref(), Some("claude"));
 }

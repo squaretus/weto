@@ -813,7 +813,7 @@ impl GuardController {
 
         // Пилюли мало: цель, снятую с охраны, надо ещё и отпустить. Этим же проходом,
         // а не исходом эпизода — до него процесс стоял бы уже ничьим.
-        self.release_unguarded(&outcome.matched, scan, settings);
+        self.release_unguarded(scan, settings);
 
         // Про pid, уже описанный этим эпизодом, второй записи не бывает.
         // Шеллы идут тем же списком: объяснён обязан быть каждый SIGSTOP,
@@ -898,19 +898,23 @@ impl GuardController {
     /// Цель, снятую с охраны, отпускаем немедленно: weto не держит того, кого больше
     /// не сторожит.
     ///
-    /// Повод стоять у записи учёта ровно один — правило, под которое она попала.
-    /// Правило убрали — повода нет, и ждать исхода эпизода (до минуты потолка)
+    /// Повод стоять у записи учёта ровно один — цель, под которую она попала.
+    /// Цель сняли с охраны — повода нет, и ждать исхода эпизода (до минуты потолка)
     /// значит держать замороженным процесс, про который пользователь уже сказал
     /// «это не моё». Отпускает `ProcessEnforcer::release`: он же решает, можно ли
-    /// отпустить шелл, и шлёт сигналы в обратном стоп-порядке.
+    /// отпустить шелл, и шлёт сигналы в обратном стоп-порядке. Решает запись цели
+    /// в настройках, а не совпадение с правилом: осиротевший потомок и сеанс цели,
+    /// сменившей форму, с правилом не совпадают, а с охраны их никто не снимал.
     ///
     /// Журналу дописывается свой исход, а не эпизодный: стояние этой записи кончилось
     /// раньше эпизода и по другой причине. Исходов два, потому что установлено бывает
     /// разное: сигнал отправлен — это одно, наблюдение показало процесс идущим —
     /// другое. Пока наблюдения нет, запись из учёта не уходит, и обязательство
     /// исполняет следующий проход.
-    fn release_unguarded(&self, guarded: &[MatchedProcess], scan: &Scan, settings: &Settings) {
-        let outcome = self.enforcer.release(guarded, Some(scan));
+    fn release_unguarded(&self, scan: &Scan, settings: &Settings) {
+        let outcome = self
+            .enforcer
+            .release(&guarded_entries(settings), Some(scan));
         if outcome.is_empty() {
             return;
         }
@@ -1140,7 +1144,7 @@ impl GuardController {
     }
 
     fn terminate_targets(&self, scan: &Scan, settings: &Settings, evidence: &UnsafeEvidence) {
-        let outcome = self.enforcer.terminate(scan);
+        let outcome = self.enforcer.terminate(scan, &guarded_entries(settings));
         self.inner
             .lock()
             .expect("состояние охраны")
@@ -1232,10 +1236,12 @@ impl GuardController {
         }
 
         let mut names: HashMap<i32, String> = HashMap::new();
+        let mut entries: HashMap<i32, String> = HashMap::new();
         let mut bases: HashMap<i32, MatchBasis> = HashMap::new();
         if !scan.is_empty() {
             for process in weto_core::process::matches(&scan.processes, &scan.rules) {
                 names.insert(process.pid, process.target_name.clone());
+                entries.insert(process.pid, process.target_entry.clone());
                 bases.insert(process.pid, process.matched_by);
             }
         }
@@ -1262,6 +1268,11 @@ impl GuardController {
                             .unwrap_or_default()
                             .to_string()
                     }),
+                    target_entry: entry
+                        .target_entry
+                        .clone()
+                        .or_else(|| entries.get(&entry.pid).cloned())
+                        .unwrap_or_default(),
                     parent_pid: parents.get(&entry.pid).copied().unwrap_or_default(),
                     executable_path: entry.executable_path.clone(),
                     // Шеллом запись сделал не текущий разбор, а учёт: ради терминала
@@ -1882,6 +1893,17 @@ impl GuardController {
 }
 
 /// Кому ядро отказало в сигнале.
+/// Записи целей в настройках: то, что пользователь охранять не переставал.
+/// Отпустить стоящий процесс как снятый с охраны можно, только когда его цели
+/// здесь нет, — а не когда он перестал совпадать с правилом.
+fn guarded_entries(settings: &Settings) -> HashSet<String> {
+    settings
+        .targets
+        .iter()
+        .map(|target| target.entry.clone())
+        .collect()
+}
+
 fn refused_pids(results: &[SignalResult]) -> Vec<i32> {
     results
         .iter()

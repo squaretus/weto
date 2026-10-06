@@ -149,10 +149,15 @@ pub fn locate_target_with_kind(entry: &str) -> Option<LocatedTarget> {
     let walk = walk(entry);
     match walk.resolution {
         Resolution::Resolved(path) if Path::new(&path).is_file() => {
+            // Файл, вид которого не прочитать, — не ответ, а «нового знания нет»:
+            // так выглядит переустановка пакета, пока файл пуст или недописан.
+            // Догадка «бинарник» здесь меняла бы вид живого скрипта на две
+            // секунды — и под паузой его сеанс получал бы SIGCONT как снятый
+            // с охраны.
             let kind = if walk.interpreted {
                 TargetKind::Script
             } else {
-                kind_of_file(&path)
+                kind_of_file(&path)?
             };
             Some(LocatedTarget { path, kind })
         }
@@ -174,28 +179,35 @@ pub fn target_kind_for(entry: &str) -> TargetKind {
 /// напрямую только ELF, всё прочее — шебанг-скрипт или формат binfmt_misc —
 /// запускает интерпретатором, и `exe` у такого процесса — интерпретатор.
 /// Поэтому не-ELF с содержимым узнаётся по argv: по пути он не совпал бы
-/// никогда. Нечитаемый или пустой файл остаётся бинарником — скрипт
-/// интерпретатору обязан быть читаем.
-fn kind_of_file(path: &str) -> TargetKind {
+/// никогда.
+///
+/// Нечитаемый файл и файл короче сигнатуры ELF ответа не дают (`None`):
+/// пакетный менеджер переустанавливает инструмент, и на миг файл пуст или
+/// недописан. Прежде такой файл считался бинарником, вид живого скрипта
+/// менялся на одно разрешение — и охрана переставала узнавать его сеансы.
+pub fn kind_of_file(path: &str) -> Option<TargetKind> {
     use std::io::Read;
 
-    let mut head = [0u8; 4];
+    const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
+    let mut head = [0u8; ELF_MAGIC.len()];
     let mut filled = 0;
-    if let Ok(mut file) = std::fs::File::open(path) {
-        while filled < head.len() {
-            match file.read(&mut head[filled..]) {
-                Ok(0) | Err(_) => break,
-                Ok(read) => filled += read,
-            }
+    let mut file = std::fs::File::open(path).ok()?;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(_) => return None,
         }
     }
     let head = &head[..filled];
     if head.starts_with(b"#!") {
-        TargetKind::Script
-    } else if head.is_empty() || head == b"\x7fELF" {
-        TargetKind::Binary
+        Some(TargetKind::Script)
+    } else if filled < ELF_MAGIC.len() {
+        None
+    } else if head == ELF_MAGIC {
+        Some(TargetKind::Binary)
     } else {
-        TargetKind::Script
+        Some(TargetKind::Script)
     }
 }
 
@@ -211,6 +223,11 @@ pub trait TargetResolving: Send + Sync {
     /// файла на диске нет (его как раз подменяет обновление) или ярлык ведёт
     /// к чужому запускатору. `None` — не «цели больше нет», а «нового знания нет».
     fn locate(&self, entry: &str) -> Option<LocatedTarget>;
+
+    /// Вид файла по его первым байтам, без разворота цепочки, — или `None`,
+    /// если ответа нет: файла нет или он пуст. Нужен правилу скрипта: путь
+    /// ELF-файла (интерпретатор, записанный старым конфигом) скриптом не бывает.
+    fn kind_of(&self, path: &str) -> Option<TargetKind>;
 }
 
 /// Настоящее разрешение — та же цепочка, что у описания цели в настройках.
@@ -222,6 +239,10 @@ pub struct LaunchTargetResolver;
 impl TargetResolving for LaunchTargetResolver {
     fn locate(&self, entry: &str) -> Option<LocatedTarget> {
         locate_target_with_kind(entry)
+    }
+
+    fn kind_of(&self, path: &str) -> Option<TargetKind> {
+        kind_of_file(path)
     }
 }
 

@@ -301,5 +301,6 @@ fn rule_of(target: &Target) -> TargetRule {
             }
             paths
         },
+        other_kind_paths: Vec::new(),
     }
 }

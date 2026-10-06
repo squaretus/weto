@@ -181,15 +181,25 @@ Everything the policy decides is shared. What the system dictates is not:
   argv, exactly as on macOS. The kind comes from the file: `target_resolver::locate_target_with_kind`
   reads at most four bytes of the canonical file — `#!` → `Script`, ELF magic → `Binary`, any
   other readable content → `Script` (the kernel executes only ELF directly; everything else, a
-  shebang script or a binfmt_misc format, runs under an interpreter whose path is `exe`), an
-  unreadable or empty file → `Binary`. The settings window stores that kind on add
-  (`target_kind_for`), and `RuleCache` re-derives it with the fresh path on every refresh, so a
-  config saved before the fix (everything was `Binary`) heals by itself and a tool that changes
-  form across an update keeps being guarded. `Script` matching compares only **absolute** argv
-  elements with `launch_paths`: the window stores the typed bare name (`qwen`) among them, and
-  equality with it would take `grep qwen` and `man qwen`; the filter sits in
-  `weto_core::process::matches_rule`, not in rule building, because rules are assembled in two
-  places (`Target::rule`, `RuleCache` memory) and the `Binary` branch never sees it.
+  shebang script or a binfmt_misc format, runs under an interpreter whose path is `exe`). An
+  unreadable file or one shorter than the ELF magic gives **no answer** (`kind_of_file` → `None`,
+  `locate` → `None`): that is a package reinstall caught mid-write, and guessing `Binary` there
+  flipped a live script's kind for one refresh. The settings window stores that kind on add
+  (`target_kind_for`, `Binary` when there is no answer), and `RuleCache` re-derives it with the
+  fresh path on every refresh, so a config saved before the fix (everything was `Binary`) heals by
+  itself. `Script` matching looks at **the script position only**: the process must be an
+  interpreter (`exe` or `argv[0]` basename, version suffix stripped, in
+  `weto_core::process::INTERPRETER_NAMES` or `pause_plan::SHELL_NAMES`), and the script is its
+  first argument after `argv[0]` that does not start with `-` (`node /p`, `node --inspect /p`,
+  `/usr/bin/node --harmony /p` from shebang options, `python3 -u /p`). Any-element matching took
+  `vim /p/qwen`, `less /p/qwen` and `code /p/qwen` with their trees, and an old config storing
+  `/usr/bin/node` as a script path caught every `#!/usr/bin/node` script through `argv[0]`. The
+  price is the same as with `SHELL_NAMES`: a script under an unknown interpreter is not matched.
+  The script must also be an **absolute** path: the window stores the typed bare name (`qwen`)
+  among `launch_paths`; that filter sits in `matches_rule` because rules are assembled in two
+  places (`Target::rule`, `RuleCache` memory). `RuleCache` additionally drops ELF files from the
+  script paths it builds (`TargetResolving::kind_of`): an interpreter stored by an old config is
+  never a script, and `python3 /usr/bin/node` must not match.
   [bugs/linux-script-targets-matched-as-binary](../bugs/linux-script-targets-matched-as-binary.md).
 - **Rules are re-resolved by the guard, not once by the settings window** — the macOS rule cache
   (`ProcessEnforcer.rules()`), ported as `weto_guard::rules::RuleCache`. The resolved path of a
@@ -203,14 +213,24 @@ Everything the policy decides is shared. What the system dictates is not:
   guard clock — never per 250 ms pass, and it never walks `/proc`, so the pass keeps its single
   walk. Re-resolution never narrows the guard: the new rule is the fresh path plus every launch
   path seen before (seeded from the stored `path`/`launch_paths`), a failed resolution (the file
-  is mid-replacement, `NeedsPath`) keeps the last known rule, and memory of removed entries is
-  dropped. The entry is tried first, then the absolute stored launch paths: on add the settings
-  window stores the `PATH` file a bare name was found at (`~/.local/bin/claude`, unresolved —
-  the symlink survives updates), so a guard whose `PATH` lacks it still finds the target. All
+  is mid-replacement or empty, `NeedsPath`) keeps the last known rule, and memory of removed
+  entries is dropped. A **kind change keeps the previous kind**: a tool that moved npm ↔ native
+  leaves sessions on the old form, so paths seen under the previous kind stay in
+  `TargetRule::other_kind_paths` and match by that kind's rules (`matches_rule` checks both
+  lists). Only an *observed* kind counts as previous: the kind stored in `config.toml` is
+  reinterpreted in the fresh one, and an unresolved entry is not remembered at all — otherwise an
+  old config with `/usr/bin/node` as a `Binary` would catch every Node process. The entry is
+  tried first, then the absolute stored launch paths: on add the settings window stores the
+  `PATH` file a bare name was found at (`~/.local/bin/claude`, unresolved — the symlink survives
+  updates), so a guard whose `PATH` lacks it still finds the target. The chain is one function,
+  `target_resolver::locate_with_launch_paths`, shared with the settings window's target
+  description, so a target the guard finds is never described as «не найдено». All
   five controller call sites (`run`, `recover_stopped`, `resume_from_ledger`, `apply_probe`,
   `vpn_app_status`) read the cache; `Settings::target_rules()` stays only as the seed and for
   tests. The registry strips the kernel's ` (deleted)` suffix from `exe`, so a session on a
-  version the update has removed still matches its remembered path. Pinned by
+  version the update has removed still matches its remembered path; the stopped ledger strips it
+  on read too (`weto_core::process::without_deleted_suffix`), because a ledger written before the
+  registry did would otherwise never match its `(pid, path)` pair and stay frozen. Pinned by
   `weto-guard/tests/rules.rs`. [bugs/linux-rules-resolved-once](../bugs/linux-rules-resolved-once.md).
 - **`appBundle` targets do not exist here.** A `.desktop` entry points at a file — an ordinary
   binary or a script handed to an interpreter — and the file decides the kind, as above; getting
@@ -357,6 +377,12 @@ points at the new version.
   there the system installer validates the package.
 - **A manual check ignores skip and deferral** — the only and sufficient way to bring back
   a skipped version, which is why there is no "unskip" button.
+- **Every request is bounded.** The release check has an overall timeout of 30 s
+  (`checker::CHECK_TIMEOUT`, ureq agent `timeout`): without it a channel that accepted the
+  connection and went silent kept the footer tile «Проверка…» and insensitive until restart,
+  since `check_now` refuses to start a second check while one is running. The archive download
+  is bounded per connection (30 s) and per silence between reads (60 s), not in total — a total
+  would cut an honest download on a slow link.
 - **The update window is a port of `UpdateDialogView`** (`weto-app/src/update_window.rs`): what
   it shows is decided by `weto_update::dialog::UpdateDialogModel` (port of the macOS model, same
   tests), texts by `weto_update::strings::UpdateStrings`, the width by measuring the three live
@@ -400,7 +426,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-510 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+528 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
@@ -416,6 +442,15 @@ once — the app outlives its last window, `active_window` is then empty so a tr
 "build a new one" branch, and `quit` still arrives at `connect_shutdown`, where the resume lives.
 It is a separate file because it is a separate process: GTK initialises once, from one thread, and
 the runner is parallel.
+
+The settings window is rebuilt on every open, so anything a closure keeps strongly outlives it.
+A handler living inside a widget must hold that widget's ancestors (and the widget itself)
+**weakly**: the VPN-app row's `show` held its own containers while their buttons held `show`, and
+the target, geo-list and journal redraws did the same with their rows (the geo redraw also held its
+own `Rc` slot) — the window went away, the cards and `Arc<AppState>` stayed, once per open.
+`window_tick` removes its source in `unrealize` itself rather than on its next tick, so a closed
+window frees its tick closures at once. `weto-app/tests/window_release.rs` checks both the window
+and that `Arc::strong_count` of the state returns to its baseline after closing.
 
 ## Sibling crates
 
@@ -484,9 +519,14 @@ one record the journal is kept for out of its fifty.
    re-application **is** the launch ban: `terminate_targets` runs each pass and kills whatever now
    matches, with the episode's evidence as the reason.
    Each such pass also asks whether the ledger still has a reason to hold what it holds:
-   `ProcessEnforcer::release` frees every live entry that matches nothing under the current rules —
-   the user removed its target, and weto has no business holding a process it no longer guards, let
-   alone until the ceiling. A shell is released only when no non-shell entry is still guarded (it
+   `ProcessEnforcer::release` frees every live entry whose target (`StoppedProcess::target_entry`,
+   the settings entry it was stopped under; a descendant carries its root's) is no longer among the
+   settings targets — the user removed it, and weto has no business holding a process it no longer
+   guards, let alone until the ceiling. It is the settings entry, not "matches no rule now": an
+   orphaned descendant whose standing root was killed, or a session of a target that changed form,
+   matches nothing and was still never released by the user; the old test freed them mid-pause
+   with a false «цель снята с охраны». An entry written by an older version has no target and is
+   held until the episode outcome. A shell is released only when no non-shell entry is still guarded (it
    stands for its target's terminal; freeing it first hands the terminal back and the target lands
    on `SIGTTIN`), signals go in the same reverse stop order, and the entry leaves the ledger by
    observation like any other. The record gets its own outcome — `RELEASE_SIGNALLED_TEXT` when the
@@ -496,7 +536,11 @@ one record the journal is kept for out of its fifty.
    result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
    restart it. At the ceiling (the user's setting, 1 min by default) the phase becomes
    `Danger(PauseExpired(ceiling))` and the targets are killed; the evidence names the ceiling that
-   fired («Подтверждение не получено за 5 мин»).
+   fired («Подтверждение не получено за 5 мин»). `ProcessEnforcer::terminate` kills what matches
+   **and** every live non-shell ledger entry whose target is still in settings: an orphaned
+   descendant is part of that target, and the old `SIGCONT` to "everything that does not match"
+   sent it back to work exactly when the exit was proven unsafe. Shells and entries of removed
+   targets get `SIGCONT` as before.
 3. A good answer moves the phase back to a `Run` action — but the obligation is discharged by observation,
    not by delivery. `settle_resume` runs on **every** pass with running targets while the ledger is
    non-empty: it sends `SIGCONT` bottom-up and strikes an entry off only once the kernel shows the

@@ -40,7 +40,21 @@ stored path instead of the cache.
   settings are forgotten.
 - The entry is tried first, then the stored absolute launch paths; on add the settings window
   stores the `PATH` file a bare name was found at (`launch_paths_for`, unresolved symlink).
-- `ProcRegistry` strips ` (deleted)` from `exe`.
+- `ProcRegistry` strips ` (deleted)` from `exe`; `StoppedLedgerReadout::load` strips it from
+  ledger entries written before that (both via `weto_core::process::without_deleted_suffix`).
+- Follow-up (whole-branch review): re-resolution could still narrow the guard. An empty or
+  truncated head during a package reinstall answered `Binary`; a tool switching npm ↔ native
+  flipped the kind for every accumulated path. The live session stopped matching, and under a
+  pause `ProcessEnforcer::release` sent it `SIGCONT` as «цель снята с охраны», `terminate` sent
+  `SIGCONT` instead of `SIGKILL`, and a script VPN client read as closed. Now: a head shorter than
+  the ELF magic or unreadable is no answer (`locate` → `None`, the last rule stays); paths seen
+  under a previous *observed* kind stay in `TargetRule::other_kind_paths` and match by that kind;
+  an entry nothing was ever observed for is not remembered. Independently, releasing a standing
+  entry depends on its target being removed from settings (`StoppedProcess::target_entry`), and
+  `terminate` kills live entries of still-guarded targets that no longer match.
+- The settings window's target description uses the same candidate chain
+  (`locate_with_launch_paths`), so a target found through its stored `PATH` file is not shown as
+  «не найдено».
 
 ## Regression checks
 - [ ] `linux/scripts/dev.sh cargo test -p weto-guard --test rules` — retarget 228→300 is picked
@@ -50,13 +64,26 @@ stored path instead of the cache.
       name missing from the guard's `PATH` is found by its stored `PATH` file.
 - [ ] `linux/scripts/dev.sh cargo test -p weto-sys --test process_registry` — the suffix is
       stripped on a fake root and on the real kernel (a copied binary deleted under a live process).
+- [ ] `cargo test -p weto-guard --test rules` — `a_target_that_changes_form_under_pause_stays_paused`,
+      `a_target_that_changed_form_under_pause_is_killed_by_evidence`,
+      `a_script_vpn_app_that_changes_form_is_still_running`; `--test pause` —
+      `an_orphaned_descendant_stays_held_while_its_target_is_guarded`,
+      `an_orphaned_descendant_is_killed_by_evidence_not_resumed`, and the removal tests still free
+      a removed target in the same pass.
+- [ ] `cargo test -p weto-sys --test target_resolver` —
+      `an_empty_or_truncated_file_gives_no_answer_instead_of_a_binary`; `-p weto-config --test
+      stopped` — `an_entry_written_with_the_deleted_suffix_is_read_without_it`.
+- [ ] `weto-app/tests/settings_page.rs` — a bare name missing from `PATH` is described by its
+      stored `PATH` file.
 - [ ] `linux/scripts/dev.sh cargo test -p weto-sys --test target_resolver` —
       `launch_paths_in`, `LaunchTargetResolver` following a re-pointed symlink.
 - [ ] Any new place that needs target rules in the guard must take them from `RuleCache`, not
       from `Settings::target_rules()`.
 
 ## Related files
-- `linux/crates/weto-guard/src/rules.rs`, `linux/crates/weto-guard/src/controller.rs`
+- `linux/crates/weto-guard/src/rules.rs`, `linux/crates/weto-guard/src/controller.rs`,
+  `linux/crates/weto-guard/src/enforcer.rs` (`release`, `terminate`)
+- `linux/crates/weto-config/src/stopped.rs` (`target_entry`, suffix on read)
 - `linux/crates/weto-sys/src/target_resolver.rs`, `linux/crates/weto-sys/src/process_registry.rs`
 - `linux/crates/weto-config/src/settings.rs` (`Target::rule`)
 - `linux/crates/weto-app/src/settings_window.rs` (`add_target_named`, `set_vpn_app_named`)

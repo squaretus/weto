@@ -42,6 +42,7 @@ fn stale(pid: i32, path: &str) -> StoppedProcess {
         executable_path: path.to_string(),
         stopped_at: UNIX_EPOCH + Duration::from_secs(999_000),
         is_shell: false,
+        target_entry: None,
     }
 }
 

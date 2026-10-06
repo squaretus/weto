@@ -514,3 +514,37 @@ fn a_file_run_by_an_interpreter_from_an_entry_is_a_script() {
     assert_eq!(target_kind_for(&cli.to_string_lossy()), TargetKind::Script);
     let _ = fs::remove_dir_all(&root);
 }
+
+/// Переустановка пакета: на миг файл цели пуст или недописан. Такой файл
+/// вида не знает — граница отвечает «нового знания нет», а не «бинарник»:
+/// иначе вид живого скрипта менялся на одно разрешение, и охрана переставала
+/// узнавать его сеансы, а под паузой отпускала их как снятые с охраны.
+#[test]
+fn an_empty_or_truncated_file_gives_no_answer_instead_of_a_binary() {
+    let root = temp_dir("truncated");
+    let cli = root.join("cli.js");
+    let entry = cli.to_string_lossy().into_owned();
+
+    fs::write(&cli, "").unwrap();
+    assert_eq!(LaunchTargetResolver.locate(&entry), None, "пустой файл");
+    assert_eq!(LaunchTargetResolver.kind_of(&entry), None);
+
+    fs::write(&cli, "\x7fEL").unwrap();
+    assert_eq!(
+        LaunchTargetResolver.locate(&entry),
+        None,
+        "недописанный ELF"
+    );
+
+    fs::write(&cli, "#!/usr/bin/env node\n").unwrap();
+    assert_eq!(
+        LaunchTargetResolver.locate(&entry).map(|found| found.kind),
+        Some(TargetKind::Script),
+        "дописанный файл снова отвечает"
+    );
+    assert_eq!(
+        LaunchTargetResolver.kind_of(&entry),
+        Some(TargetKind::Script)
+    );
+    let _ = fs::remove_dir_all(&root);
+}

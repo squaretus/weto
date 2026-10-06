@@ -449,6 +449,8 @@ pub struct FakeResolver(Arc<Mutex<ResolverInner>>);
 #[derive(Default)]
 struct ResolverInner {
     answers: std::collections::HashMap<String, LocatedTarget>,
+    /// Вид файлов по пути: всё, на что указывала запись, плюс отмеченное явно.
+    kinds: std::collections::HashMap<String, TargetKind>,
     calls: usize,
 }
 
@@ -465,13 +467,24 @@ impl FakeResolver {
     }
 
     fn answers(&self, entry: &str, path: &str, kind: TargetKind) {
-        self.0.lock().unwrap().answers.insert(
+        let mut inner = self.0.lock().unwrap();
+        inner.kinds.insert(path.to_string(), kind);
+        inner.answers.insert(
             entry.to_string(),
             LocatedTarget {
                 path: path.to_string(),
                 kind,
             },
         );
+    }
+
+    /// Файл — ELF: так граница отвечает про интерпретатор (`/usr/bin/node`).
+    pub fn is_elf(&self, path: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .kinds
+            .insert(path.to_string(), TargetKind::Binary);
     }
 
     /// Запись ни во что не разрешается: файл как раз подменяют.
@@ -490,6 +503,10 @@ impl TargetResolving for FakeResolver {
         let mut inner = self.0.lock().unwrap();
         inner.calls += 1;
         inner.answers.get(entry).cloned()
+    }
+
+    fn kind_of(&self, path: &str) -> Option<TargetKind> {
+        self.0.lock().unwrap().kinds.get(path).copied()
     }
 }
 

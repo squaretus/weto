@@ -19,7 +19,7 @@ use weto_config::settings::{Settings, Target};
 use weto_core::guard_machine::{GuardAction, GuardPhase};
 use weto_core::policy::UnsafeEvidence;
 use weto_core::process::{ProcessSnapshot, TargetKind};
-use weto_sys::process_signaler::ProcessSignal::{Kill, Stop};
+use weto_sys::process_signaler::ProcessSignal::{Kill, Resume, Stop};
 
 const LINK: &str = "/home/me/.local/bin/claude";
 const V228: &str = "/home/me/.local/share/claude/versions/228";
@@ -373,4 +373,178 @@ fn a_shebang_target_saved_as_a_binary_is_matched_by_its_arguments() {
         vec![200, 400, 404],
         "node с чужим скриптом, grep и man не встают"
     );
+}
+
+// --- вид цели сменился, а охрана не сузилась ---------------------------------
+
+const QWEN_NATIVE: &str = "/home/me/.local/share/qwen/versions/2/qwen";
+const HAPP_CLI: &str = "/opt/happ/cli.js";
+const HAPP_NATIVE: &str = "/opt/happ/2.0/happ";
+
+/// `qwen` из npm под охраной, его сеанс — node с `cli.js`; рядом живой VPN-клиент.
+fn qwen_stand() -> Stand {
+    let settings = Settings {
+        vpn_app: Some(target("/usr/bin/happ")),
+        blocked_countries: vec!["RU".to_string()],
+        targets: vec![Target {
+            entry: "qwen".to_string(),
+            display_name: "qwen".to_string(),
+            kind: TargetKind::Script,
+            path: QWEN_CLI.to_string(),
+            launch_paths: vec!["qwen".to_string(), QWEN_LINK.to_string()],
+        }],
+        ..Default::default()
+    };
+    let s = stand_over(
+        settings,
+        vec![
+            detached(77, 1, "/usr/bin/happ"),
+            interpreted(400, NODE, &["node", QWEN_CLI]),
+        ],
+    );
+    s.resolver.points_to_script("qwen", QWEN_CLI);
+    s
+}
+
+/// Пока цели стоят, `qwen` переставили из npm в нативную сборку: запись теперь
+/// ведёт к ELF-бинарнику. Стоящий сеанс — тот же node с `cli.js`, и он
+/// по-прежнему цель: пользователь её с охраны не снимал. Прежде сменившийся вид
+/// применялся ко всем путям сразу, сеанс переставал совпадать — и получал
+/// SIGCONT с записью «цель снята с охраны», которой не было.
+#[test]
+fn a_target_that_changes_form_under_pause_stays_paused() {
+    let s = qwen_stand();
+    guarded(&s);
+    assert_eq!(pause(&s), vec![400]);
+    s.world.forget_signals();
+
+    s.resolver.points("qwen", QWEN_NATIVE);
+    s.hands.advance_millis(2_000);
+    s.tick();
+
+    assert!(
+        s.world.signalled(Resume).is_empty(),
+        "сменившийся вид отпустил стоящую цель: {:?}",
+        s.world.signals()
+    );
+    assert!(s.world.is_stopped(400));
+    assert!(
+        s.reporter.recorded().released.is_empty(),
+        "журнал пишет «снята с охраны» про цель, которую никто не снимал"
+    );
+    assert_eq!(guarded_pids(&s), vec![400], "сеанс на прежней форме — цель");
+    assert_eq!(
+        s.controller
+            .snapshot()
+            .paused
+            .iter()
+            .map(|p| p.pid)
+            .collect::<Vec<i32>>(),
+        vec![400],
+        "пилюля стоящей цели на месте"
+    );
+
+    // Новый сеанс уже нативный — и под охраной тоже.
+    s.world.add(detached(401, 1, QWEN_NATIVE));
+    s.tick();
+    assert!(
+        s.world.signalled(Stop).contains(&401),
+        "{:?}",
+        s.world.signals()
+    );
+}
+
+/// Тот же переезд, а затем доказательство: стоящий сеанс на прежней форме
+/// завершается вместе с целями, а не получает SIGCONT и не уходит работать
+/// при доказанно опасном выходе.
+#[test]
+fn a_target_that_changed_form_under_pause_is_killed_by_evidence() {
+    let s = qwen_stand();
+    guarded(&s);
+    pause(&s);
+    s.resolver.points("qwen", QWEN_NATIVE);
+    s.hands.advance_millis(2_000);
+    s.tick();
+    s.world.forget_signals();
+
+    s.geo.everything_answers_again();
+    s.geo.now_reports("RU");
+    let phase = s.probe_now();
+
+    assert!(matches!(phase, GuardPhase::Danger(_)), "{phase:?}");
+    assert_eq!(s.world.signalled(Kill), vec![400]);
+    assert!(
+        s.world.signalled(Resume).is_empty(),
+        "{:?}",
+        s.world.signals()
+    );
+}
+
+/// Скрипт-VPN-клиент (node с `cli.js`) обновился до нативной сборки, а запущен
+/// всё ещё прежний процесс. Сменившийся вид не делает клиент закрытым: прежде
+/// охрана видела «VPN-приложение не запущено» и завершала все цели.
+#[test]
+fn a_script_vpn_app_that_changes_form_is_still_running() {
+    let settings = Settings {
+        vpn_app: Some(Target {
+            entry: HAPP_LINK.to_string(),
+            display_name: "Happ".to_string(),
+            kind: TargetKind::Script,
+            path: HAPP_CLI.to_string(),
+            launch_paths: vec![HAPP_LINK.to_string()],
+        }),
+        blocked_countries: vec!["RU".to_string()],
+        targets: vec![claude(LINK, &[LINK])],
+        ..Default::default()
+    };
+    let s = stand_over(
+        settings,
+        vec![
+            detached(200, 1, V228),
+            interpreted(77, NODE, &["node", HAPP_CLI]),
+        ],
+    );
+    s.resolver.points(LINK, V228);
+    s.resolver.points_to_script(HAPP_LINK, HAPP_CLI);
+    guarded(&s);
+
+    s.resolver.points(HAPP_LINK, HAPP_NATIVE);
+    s.hands.advance_millis(2_000);
+    let phase = s.tick();
+
+    assert!(matches!(phase, GuardPhase::Protected(_)), "{phase:?}");
+    assert!(s.world.signals().is_empty(), "{:?}", s.world.signals());
+}
+
+/// Старый конфиг хранил целью-скриптом сам интерпретатор (`exe` у `qwen`
+/// из npm — `/usr/bin/node`). На месте скрипта он стоять может — `python3
+/// /usr/bin/node` — и такое правило поймало бы чужой процесс. ELF скриптом
+/// не бывает: путь интерпретатора выпадает из путей скрипта при сборке правила.
+#[test]
+fn an_interpreter_stored_as_a_script_path_is_not_a_script() {
+    let settings = Settings {
+        vpn_app: Some(target("/usr/bin/happ")),
+        blocked_countries: vec!["RU".to_string()],
+        targets: vec![Target {
+            entry: "qwen".to_string(),
+            display_name: "qwen".to_string(),
+            kind: TargetKind::Script,
+            path: NODE.to_string(),
+            launch_paths: vec!["qwen".to_string(), QWEN_LINK.to_string()],
+        }],
+        ..Default::default()
+    };
+    let s = stand_over(
+        settings,
+        vec![
+            detached(77, 1, "/usr/bin/happ"),
+            interpreted(400, NODE, &["node", QWEN_CLI]),
+            interpreted(401, "/usr/bin/python3.12", &["python3", NODE]),
+        ],
+    );
+    s.resolver.points_to_script("qwen", QWEN_CLI);
+    s.resolver.is_elf(NODE);
+    guarded(&s);
+
+    assert_eq!(guarded_pids(&s), vec![400]);
 }

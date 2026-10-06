@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use weto_config::settings::{Settings, Target};
-use weto_core::process::TargetRule;
+use weto_core::process::{TargetKind, TargetRule};
 use weto_sys::target_resolver::{locate_with_launch_paths, TargetResolving};
 
 /// Как часто запись цели разрешается заново. То же число, что у macOS
@@ -135,41 +135,84 @@ impl RuleCache {
     /// обновления, живёт на прежнем бинарнике, и `/proc/<pid>/exe` называет
     /// старый путь. Забытый путь на диске уже не существует, поэтому новый
     /// процесс по нему появиться не может. Неудача разрешения — пока файл
-    /// подменяют, его на мгновение нет — оставляет прежнее правило: живой
-    /// процесс в этот момент никуда не девается.
+    /// подменяют, его на мгновение нет или он пуст — оставляет прежнее правило:
+    /// живой процесс в этот момент никуда не девается.
     ///
     /// Вид выводится заново вместе с путём, а не берётся из настроек: окно
     /// настроек до исправления записывало бинарником и скрипты (`qwen` из npm,
     /// у которого `exe` — `node`), и такая цель не совпадала ни с одним
-    /// процессом. Свежий вид чинит старый конфиг без участия пользователя
-    /// и переживает обновление, сменившее форму инструмента. Неудача
-    /// разрешения оставляет прежний вид вместе с прежним путём.
+    /// процессом. Свежий вид чинит старый конфиг без участия пользователя.
     ///
-    /// Спрашивается сперва сама запись, затем пути запуска из настроек:
-    /// голое имя, не найденное в `PATH` охраны, находится по файлу в `PATH`,
-    /// запомненному при добавлении (`~/.local/bin/claude`).
+    /// Сменившийся вид не отменяет прежний. Инструмент, переехавший из npm
+    /// в нативную сборку (или обратно), оставляет сеансы на прежней форме, и
+    /// они остаются целями: пути, увиденные в прежнем виде, сравниваются по его
+    /// правилам (`other_kind_paths`). Применить новый вид ко всем путям разом
+    /// значило бы молча потерять живой сеанс — а под паузой ещё и отпустить его
+    /// как снятый с охраны. Прежним считается только **увиденный** вид:
+    /// записанное в настройках трактуется в свежем, иначе старый конфиг с
+    /// `/usr/bin/node` бинарником ловил бы каждый node-процесс машины.
+    ///
+    /// Кандидаты — та же цепочка, что у описания цели в окне настроек
+    /// (`locate_with_launch_paths`): сперва запись, затем пути запуска.
     fn resolve(&self, target: &Target, known: &mut HashMap<String, TargetRule>) -> TargetRule {
-        // Отправная точка — то, что записано в настройках: путь, развёрнутый при
-        // добавлении, и пути запуска. Память прибавляет то, что выяснилось позже.
-        let mut rule = target.rule();
-        if let Some(previous) = known.get(&target.entry) {
-            rule.path = previous.path.clone();
-            rule.kind = previous.kind;
-            extend_unique(&mut rule.launch_paths, &previous.launch_paths);
-        }
+        let recorded = target.rule();
+        let previous = known.get(&target.entry).cloned();
+        let fresh =
+            locate_with_launch_paths(self.resolver.as_ref(), &target.entry, &target.launch_paths);
 
-        if let Some(fresh) =
-            locate_with_launch_paths(self.resolver.as_ref(), &target.entry, &target.launch_paths)
-        {
-            let mut launch_paths = vec![fresh.path.clone()];
-            extend_unique(&mut launch_paths, &rule.launch_paths);
-            rule.path = fresh.path;
-            rule.kind = fresh.kind;
-            rule.launch_paths = launch_paths;
-        }
+        let mut rule = match (previous, fresh) {
+            // Не видели ни разу: правило из настроек как есть, и запоминать
+            // его незачем — видом из настроек прежний вид не становится.
+            (None, None) => {
+                let mut rule = recorded;
+                self.drop_native_binaries(&mut rule);
+                return rule;
+            }
+            (Some(mut previous), None) => {
+                extend_unique(&mut previous.launch_paths, &recorded.launch_paths);
+                previous
+            }
+            (previous, Some(fresh)) => {
+                let mut current = vec![fresh.path.clone()];
+                let mut other = Vec::new();
+                if let Some(previous) = previous {
+                    if previous.kind == fresh.kind {
+                        extend_unique(&mut current, &previous.launch_paths);
+                        extend_unique(&mut other, &previous.other_kind_paths);
+                    } else {
+                        extend_unique(&mut current, &previous.other_kind_paths);
+                        extend_unique(&mut other, &previous.launch_paths);
+                    }
+                }
+                extend_unique(&mut current, &recorded.launch_paths);
+                TargetRule {
+                    kind: fresh.kind,
+                    path: fresh.path,
+                    launch_paths: current,
+                    other_kind_paths: other,
+                    ..recorded
+                }
+            }
+        };
 
+        self.drop_native_binaries(&mut rule);
         known.insert(target.entry.clone(), rule.clone());
         rule
+    }
+
+    /// ELF скриптом не бывает. Старые конфиги хранили целью-скриптом сам
+    /// интерпретатор (`exe` у `qwen` из npm — `/usr/bin/node`), а на месте
+    /// скрипта он стоять может: `python3 /usr/bin/node` под охрану попал бы.
+    /// Спрашиваются только абсолютные пути: голое имя открылось бы относительно
+    /// рабочего каталога, а совпасть по argv оно не может всё равно.
+    fn drop_native_binaries(&self, rule: &mut TargetRule) {
+        let scripts = match rule.kind {
+            TargetKind::Script => &mut rule.launch_paths,
+            TargetKind::Binary => &mut rule.other_kind_paths,
+        };
+        scripts.retain(|path| {
+            !path.starts_with('/') || self.resolver.kind_of(path) != Some(TargetKind::Binary)
+        });
     }
 }
 

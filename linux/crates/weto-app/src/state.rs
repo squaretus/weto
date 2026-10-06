@@ -743,6 +743,7 @@ mod tests {
         MatchedProcess {
             pid,
             target_name: "claude".to_string(),
+            target_entry: "claude".to_string(),
             parent_pid: 1,
             executable_path: "/usr/bin/claude".to_string(),
             matched_by: MatchBasis::Rule,

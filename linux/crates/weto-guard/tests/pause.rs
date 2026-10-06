@@ -923,6 +923,73 @@ fn the_shell_is_released_only_when_the_last_guarded_entry_is_gone() {
     );
 }
 
+/// Корень цели умер под паузой (пользователь добил стоящий claude), а его
+/// стоящий потомок осиротел и под правило больше не подпадает. Целью он от этого
+/// быть не перестал: claude никто с охраны не снимал. Прежде «не совпадает
+/// с правилом» читалось как «снят с охраны» — потомок и шелл получали SIGCONT
+/// посреди паузы, а журнал писал про снятие, которого не было.
+#[test]
+fn an_orphaned_descendant_stays_held_while_its_target_is_guarded() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+    assert_eq!(s.world.signalled(Stop), vec![100, 200, 201]);
+    s.world.forget_signals();
+
+    s.world.remove(200);
+    s.tick();
+
+    assert!(
+        s.world.signalled(Resume).is_empty(),
+        "осиротевший потомок отпущен посреди паузы: {:?}",
+        s.world.signals()
+    );
+    assert!(s.world.is_stopped(201));
+    assert!(
+        s.world.is_stopped(100),
+        "и шелл держит терминал по-прежнему"
+    );
+    assert!(
+        s.reporter.recorded().released.is_empty(),
+        "журнал пишет «снята с охраны» про цель, которую никто не снимал"
+    );
+    assert_eq!(s.controller.phase().action(), GuardAction::Pause);
+
+    // Исход эпизода отпускает его как всех: стояние кончилось безопасным выходом.
+    s.geo.everything_answers_again();
+    s.probe_now();
+    assert_eq!(s.world.signalled(Resume), vec![201, 100]);
+}
+
+/// Тот же сирота при доказательстве: он часть стоящей цели, и опасный выход
+/// завершает его вместе с ней, а не возвращает к работе.
+#[test]
+fn an_orphaned_descendant_is_killed_by_evidence_not_resumed() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+    s.world.remove(200);
+    s.tick();
+    s.world.forget_signals();
+
+    s.geo.everything_answers_again();
+    s.geo.now_reports("RU");
+    let phase = s.probe_now();
+
+    assert!(matches!(phase, GuardPhase::Danger(_)), "{phase:?}");
+    assert_eq!(s.world.signalled(Kill), vec![201]);
+    assert_eq!(
+        s.world.signalled(Resume),
+        vec![100],
+        "шелл — не цель: ему возвращают терминал"
+    );
+    assert_eq!(
+        ledger_pids(&s),
+        vec![100],
+        "завершённый уходит из учёта, шелл — по наблюдению следующим проходом"
+    );
+}
+
 // --- восстановление после падения -------------------------------------------
 
 fn standing_entry(pid: i32, path: &str, is_shell: bool) -> StoppedProcess {
@@ -931,6 +998,7 @@ fn standing_entry(pid: i32, path: &str, is_shell: bool) -> StoppedProcess {
         executable_path: path.to_string(),
         stopped_at: UNIX_EPOCH + Duration::from_secs(999_000),
         is_shell,
+        target_entry: None,
     }
 }
 

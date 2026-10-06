@@ -239,6 +239,7 @@ mod tests {
             .map(|(pid, basis)| MatchedProcess {
                 pid: *pid,
                 target_name: "claude".to_string(),
+                target_entry: "claude".to_string(),
                 parent_pid: 0,
                 executable_path: String::new(),
                 matched_by: *basis,
