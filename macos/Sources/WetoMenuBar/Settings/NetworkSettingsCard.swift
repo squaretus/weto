@@ -159,8 +159,9 @@ struct NetworkSettingsCard: View {
     /// поле токена и сегменты таймаута начинаются с одной вертикали.
     private func labelColumn<Label: View>(@ViewBuilder _ label: () -> Label) -> some View {
         ZStack(alignment: .leading) {
-            tokenLabel.hidden()
-            timeoutLabel.hidden()
+            // Копии только задают ширину колонки: ни VoiceOver, ни фокус их видеть не должны.
+            tokenLabel.hidden().accessibilityHidden(true)
+            timeoutLabel.hidden().accessibilityHidden(true)
             label()
         }
         .fixedSize()
