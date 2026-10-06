@@ -24,7 +24,7 @@ struct NetworkSettingsCard: View {
         VStack(alignment: .leading, spacing: WetoTokens.space2) {
             card
 
-            Text("VPN-приложение задаётся так же, как цель: имя команды, путь или бандл. Пока оно не запущено, цели не работают.")
+            Text("Столько цели стоят на паузе, ожидая ответа сервисов. Не дождались — цели завершаются.")
                 .font(WetoTokens.diagnostics)
                 .foregroundStyle(WetoTokens.faint.resolve(scheme))
                 .fixedSize(horizontal: false, vertical: true)
@@ -49,6 +49,10 @@ struct NetworkSettingsCard: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+
+                WetoDivider()
+
+                timeoutRow
             }
         }
         .onAppear { tokenDraft = maskedToken }
@@ -111,6 +115,25 @@ struct NetworkSettingsCard: View {
                     tokenDraft = focused ? coordinator.settings.ipinfoToken : maskedToken
                 }
                 .focused($isTokenFocused)
+        }
+    }
+
+    /// Потолок паузы: сколько цели стоят, ожидая подтверждения, до завершения.
+    private var timeoutRow: some View {
+        WetoRow {
+            Text("Таймаут")
+                .font(WetoTokens.label)
+                .foregroundStyle(WetoTokens.ink.resolve(scheme))
+                .fixedSize()
+                .padding(.trailing, WetoTokens.space5 - WetoTokens.space3)
+
+            WetoSegmentedControl(
+                selection: Binding(
+                    get: { coordinator.settings.pauseCeiling },
+                    set: { coordinator.settings.pauseCeiling = $0 }
+                ),
+                options: PauseCeiling.allCases.map { ($0, $0.title) }
+            )
         }
     }
 

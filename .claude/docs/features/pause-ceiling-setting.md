@@ -14,8 +14,8 @@ the phase model are unchanged; only the `Tick` threshold of the `Пауза` pha
 - Settings and guard: `WetoShared/SettingsStore.swift`, `GuardController.swift`, `GuardVM.swift`,
   `StatusPresentation.swift`; `weto-config/src/settings.rs`, `weto-app/src/state.rs`,
   `weto-guard/src/controller.rs`.
-- UI: `WetoMenuBar/Settings/PauseCeilingCard.swift`, `WetoDesign/Components/WetoPauseBadge.swift`;
-  `weto-app/src/settings_window.rs` (`pause_ceiling_card`), `weto-ui/src/components.rs`.
+- UI: `WetoMenuBar/Settings/NetworkSettingsCard.swift`, `WetoDesign/Components/WetoPauseBadge.swift`;
+  `weto-app/src/settings_window.rs` (`network_card`), `weto-ui/src/components.rs`.
 - Fixture: `shared/fixtures/guard-transitions.json` (new 300 s case).
 
 ## Changes
@@ -24,7 +24,7 @@ the phase model are unchanged; only the `Tick` threshold of the `Пауза` pha
   `UnsafeEvidence.isPauseExpired` / `is_pause_expired`; macOS `SettingsStore.pauseCeiling`
   (UserDefaults key `pauseCeilingSeconds`) with its own `onPauseCeilingChange` bus; Linux
   `Settings.pause_ceiling_seconds` (serde default 60, unknown → 60 via `pause_ceiling()`) and
-  `SharedSettings::edit_untracked`; the «Таймаут подтверждения» card right after «Сеть и гео».
+  `SharedSettings::edit_untracked`; the «Таймаут» row in the «Сеть и гео» card, with the timeout caption under the card.
 - Modified: `pauseExpired` → `pauseExpired(ceiling:)` / `PauseExpired(Duration)`, wording
   «Подтверждение не получено за 1 мин» (was «за 60 с»); countdown format — above a minute «4:59»,
   the last minute «43 с» (`WetoPauseBadge.remainingText`, `pause_countdown_text`, the paused

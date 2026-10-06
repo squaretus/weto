@@ -72,8 +72,8 @@ the whole of what the Linux side is allowed to differ in:
 | — | a second dialog asks for the program file when the picked entry launches through Steam or flatpak | a `.app` always *is* the program; a `.desktop` entry need not name one at all, and guessing would guard the launcher — see the `appBundle` row under "Contracts that differ from macOS" |
 
 Everything else matches, including every wording that does not depend on the unported screen: the
-settings window is the same seven cards in the same order
-(`Цели`, `Сеть и гео`, `Таймаут подтверждения`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
+settings window is the same six cards in the same order
+(`Цели`, `Сеть и гео`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
 footer (github link, version, update tile), and the status popup is shield + title +
 two icon buttons, then the geo readout, the update banner, and live targets.
 
@@ -223,7 +223,7 @@ Everything the policy decides is shared. What the system dictates is not:
   whitelist existed loads as an empty one.
 - **The pause ceiling is saved past the revision.** `Settings.pause_ceiling_seconds` in
   `config.toml` (a config without the key loads as 60; an unknown number reads as one minute via
-  `Settings::pause_ceiling()`, not at load time). `pause_ceiling_card` saves it with
+  `Settings::pause_ceiling()`, not at load time). the «Таймаут» row of `network_card` saves it with
   `SharedSettings::edit_untracked`, which does not bump `revision`: the revision invalidates the
   verdict, so a ceiling change would have sent the guard into «Проверка» with a probe — the macOS
   counterpart is the separate `onPauseCeilingChange` bus. There is no subscriber here:
