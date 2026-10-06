@@ -182,15 +182,29 @@ pub fn entry(prompt: &str) -> Entry {
     entry
 }
 
-/// Значок «?» с пояснением при наведении — сразу после названия настройки.
-/// Порт `WetoHint`.
-pub fn hint(text: &str) -> gtk4::Image {
-    let icon = gtk4::Image::from_icon_name("dialog-question-symbolic");
-    icon.add_css_class("weto-hint");
-    icon.set_pixel_size(12);
-    icon.set_valign(Align::Center);
-    icon.set_tooltip_text(Some(text));
-    icon
+/// Значок «?», открывающий пояснение по нажатию, — сразу после названия
+/// настройки. Порт `WetoHint`: по нажатию, а не по наведению — подсказка
+/// появляется сразу и в скруглённом окне цвета карточки. Фона у значка нет,
+/// но на наведение он отвечает цветом и курсором-указателем.
+pub fn hint(text: &str) -> Button {
+    let button = Button::from_icon_name("dialog-question-symbolic");
+    button.add_css_class("weto-hint-button");
+    button.set_has_frame(false);
+    button.set_valign(Align::Center);
+    button.set_cursor_from_name(Some("pointer"));
+    button.set_tooltip_text(None);
+    button.update_property(&[gtk4::accessible::Property::Label("Пояснение")]);
+
+    let popover = hint_popover(text);
+    popover.set_parent(&button);
+    {
+        let popover = popover.clone();
+        button.connect_clicked(move |_| popover.popup());
+    }
+    // Всплывающее окно — не дочерний виджет кнопки, а прицепленный: снимать
+    // его обязан тот, кто прицепил, иначе GTK ругается при разрушении кнопки.
+    button.connect_destroy(move |_| popover.unparent());
+    button
 }
 
 /// Значок в поле виден, пока в поле ничего не набрано: кто начал набирать,
@@ -199,23 +213,45 @@ pub fn field_hint_shown(text: &str) -> bool {
     text.is_empty()
 }
 
-/// Пояснение к формату ввода: значок «?» в конце поля, пока поле пустое.
-/// Порт `wetoFieldHint`.
+/// Пояснение к формату ввода: значок «?» в конце поля, пока поле пустое;
+/// нажатие на значок открывает пояснение. Порт `wetoFieldHint`.
 pub fn entry_hint(entry: &Entry, text: &str) {
-    let text = text.to_string();
+    let position = gtk4::EntryIconPosition::Secondary;
     let apply = move |entry: &Entry| {
-        if field_hint_shown(&entry.text()) {
-            entry.set_icon_from_icon_name(
-                gtk4::EntryIconPosition::Secondary,
-                Some("dialog-question-symbolic"),
-            );
-            entry.set_icon_tooltip_text(gtk4::EntryIconPosition::Secondary, Some(&text));
-        } else {
-            entry.set_icon_from_icon_name(gtk4::EntryIconPosition::Secondary, None);
-        }
+        let name = field_hint_shown(&entry.text()).then_some("dialog-question-symbolic");
+        entry.set_icon_from_icon_name(position, name);
     };
     apply(entry);
     entry.connect_changed(apply);
+    entry.set_icon_activatable(position, true);
+
+    let popover = hint_popover(text);
+    popover.set_parent(entry);
+    {
+        let popover = popover.clone();
+        entry.connect_icon_press(move |entry, pressed| {
+            if pressed == position {
+                popover.set_pointing_to(Some(&entry.icon_area(position)));
+                popover.popup();
+            }
+        });
+    }
+    entry.connect_destroy(move |_| popover.unparent());
+}
+
+/// Окно пояснения: скруглённое, цвета карточки, строка в ~40 знаков.
+fn hint_popover(text: &str) -> gtk4::Popover {
+    let label = Label::new(Some(text));
+    label.add_css_class("weto-hint-text");
+    label.set_wrap(true);
+    label.set_max_width_chars(40);
+    label.set_xalign(0.0);
+
+    let popover = gtk4::Popover::new();
+    popover.add_css_class("weto-hint-popover");
+    popover.set_position(gtk4::PositionType::Bottom);
+    popover.set_child(Some(&label));
+    popover
 }
 
 pub fn toggle() -> Switch {

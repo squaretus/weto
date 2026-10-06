@@ -27,6 +27,15 @@ struct NetworkSettingsCard: View {
         Отсчёт идёт от начала паузы, новое значение действует сразу, в том числе на текущую паузу.
         """
 
+    /// Пояснение к токену — после названия: поле обычно заполнено маской,
+    /// и значок в конце поля, видный только у пустого поля, его бы не показал.
+    static let tokenHint = """
+        Ключ ipinfo.io — единственного сервиса, который называет адрес выхода. \
+        Без ключа проверять нечем: цели встают на паузу и по таймауту завершаются. \
+        Ключ бесплатный: ipinfo.io → Sign Up → Dashboard → API Token. \
+        Хранится отдельно от настроек и в выгрузку журнала не попадает.
+        """
+
     var body: some View {
         card
     }
@@ -129,13 +138,16 @@ struct NetworkSettingsCard: View {
     }
 
     private var tokenLabel: some View {
-        Text("Токен ipinfo")
-            .font(WetoTokens.label)
-            .foregroundStyle(WetoTokens.ink.resolve(scheme))
+        HStack(spacing: WetoTokens.space2) {
+            Text("Токен ipinfo")
+                .font(WetoTokens.label)
+                .foregroundStyle(WetoTokens.ink.resolve(scheme))
+            WetoHint(Self.tokenHint)
+        }
     }
 
     private var timeoutLabel: some View {
-        HStack(spacing: WetoTokens.space1) {
+        HStack(spacing: WetoTokens.space2) {
             Text("Таймаут")
                 .font(WetoTokens.label)
                 .foregroundStyle(WetoTokens.ink.resolve(scheme))

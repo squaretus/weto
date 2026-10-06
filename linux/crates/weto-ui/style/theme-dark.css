@@ -73,8 +73,7 @@
     color: rgb(255, 107, 129);
 }
 
-/* Подсказка рядом со строкой состояния и значок «?» после названия настройки —
-   приглушённые, смысл несёт текст слева. */
+/* Подсказка рядом со строкой состояния — приглушённая, смысл несёт текст слева. */
 .weto-hint {
     color: rgba(244, 242, 251, 0.4);
 }
@@ -303,9 +302,45 @@
     color: rgba(244, 242, 251, 0.4);
 }
 
-/* Значок «?» в конце поля ввода — тот же приглушённый цвет, что у `.weto-hint`. */
+/* Значок «?»: без фона и рамки, но отвечает на наведение цветом. В поле ввода —
+   тот же значок в конце поля. */
+.weto-hint-button {
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: rgba(244, 242, 251, 0.4);
+}
+
+.weto-hint-button:hover,
+.weto-entry > image:hover {
+    color: rgba(244, 242, 251, 0.66);
+}
+
 .weto-entry > image {
     color: rgba(244, 242, 251, 0.4);
+}
+
+/* Окно пояснения — скруглённое, цвета карточки, как всё в приложении. */
+popover.weto-hint-popover > contents {
+    background-color: rgb(32, 31, 40);
+    color: rgb(244, 242, 251);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 15px;
+    padding: 12px;
+    box-shadow: none;
+}
+
+popover.weto-hint-popover > arrow {
+    background-color: rgb(32, 31, 40);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.weto-hint-text {
+    font-size: 13px;
+    color: rgb(244, 242, 251);
 }
 
 /* --- Тумблер ------------------------------------------------------------ */

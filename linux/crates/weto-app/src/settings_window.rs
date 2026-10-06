@@ -462,8 +462,16 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 
     // Токен ipinfo.
     let token_row = ui::row(false);
-    let token_label = ui::label("Токен ipinfo");
-    token_label.set_xalign(0.0);
+    // Пояснение — после названия: поле обычно заполнено маской, и значок в конце
+    // поля, видный только у пустого поля, его бы не показал.
+    let token_label = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
+    token_label.append(&ui::label("Токен ipinfo"));
+    token_label.append(&ui::hint(
+        "Ключ ipinfo.io — единственного сервиса, который называет адрес выхода. \
+         Без ключа проверять нечем: цели встают на паузу и по таймауту завершаются. \
+         Ключ бесплатный: ipinfo.io → Sign Up → Dashboard → API Token. \
+         Хранится отдельно от настроек и в выгрузку журнала не попадает.",
+    ));
     token_label.set_margin_end(ui::SPACE5 - ui::SPACE3);
     label_column.add_widget(&token_label);
     token_row.append(&token_label);
@@ -508,7 +516,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // Мимо ревизии: потолок решения политики не меняет, а ревизия обесценила бы
     // вердикт и увела охрану в «Проверку» с пробой.
     let timeout_row = ui::row(false);
-    let timeout_label = GtkBox::new(Orientation::Horizontal, ui::SPACE1);
+    let timeout_label = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
     timeout_label.append(&ui::label("Таймаут"));
     timeout_label.append(&ui::hint(
         "Сколько цели стоят на паузе, если сервисы не подтвердили безопасный выход. \

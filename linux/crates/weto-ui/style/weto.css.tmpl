@@ -67,8 +67,7 @@
     color: {{red}};
 }
 
-/* Подсказка рядом со строкой состояния и значок «?» после названия настройки —
-   приглушённые, смысл несёт текст слева. */
+/* Подсказка рядом со строкой состояния — приглушённая, смысл несёт текст слева. */
 .weto-hint {
     color: {{faint}};
 }
@@ -297,9 +296,45 @@
     color: {{faint}};
 }
 
-/* Значок «?» в конце поля ввода — тот же приглушённый цвет, что у `.weto-hint`. */
+/* Значок «?»: без фона и рамки, но отвечает на наведение цветом. В поле ввода —
+   тот же значок в конце поля. */
+.weto-hint-button {
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: {{faint}};
+}
+
+.weto-hint-button:hover,
+.weto-entry > image:hover {
+    color: {{dim}};
+}
+
 .weto-entry > image {
     color: {{faint}};
+}
+
+/* Окно пояснения — скруглённое, цвета карточки, как всё в приложении. */
+popover.weto-hint-popover > contents {
+    background-color: {{card}};
+    color: {{ink}};
+    border: 1px solid {{line}};
+    border-radius: {{radiusCard}};
+    padding: {{space4}};
+    box-shadow: none;
+}
+
+popover.weto-hint-popover > arrow {
+    background-color: {{card}};
+    border: 1px solid {{line}};
+}
+
+.weto-hint-text {
+    font-size: {{fontValueSize}};
+    color: {{ink}};
 }
 
 /* --- Тумблер ------------------------------------------------------------ */
