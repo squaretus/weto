@@ -4,6 +4,8 @@
 //! перепроверять релиз демону здесь не нужно: ставить будет то же приложение
 //! и в свой же домашний каталог.
 
+use std::time::Duration;
+
 use serde::Deserialize;
 
 use crate::policy::UpdateInfo;
@@ -43,7 +45,19 @@ struct Asset {
     browser_download_url: String,
 }
 
+/// Сколько ждать ответа о релизах — целиком, от соединения до последнего байта.
+///
+/// Без предела проверка на повисшем канале (прокси, принявший соединение
+/// и замолчавший; пакеты, теряющиеся после рукопожатия) не кончалась никогда:
+/// плитка подвала оставалась «Проверка…» и неактивной, а вторую проверку
+/// `check_now` не начинает, пока идёт первая, — до перезапуска приложения.
+/// Ответ GitHub API — килобайты, и полминуты хватает с запасом даже на плохом
+/// канале; общий предел, а не на чтение, потому что медленная струйка байтов
+/// иначе держала бы проверку так же долго, как молчание.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct ReleaseChecker {
+    agent: ureq::Agent,
     repository: String,
     api_url: String,
     /// Суффикс имени архива под текущую машину.
@@ -53,6 +67,7 @@ pub struct ReleaseChecker {
 impl ReleaseChecker {
     pub fn new(repository: &str, arch: &str) -> ReleaseChecker {
         ReleaseChecker {
+            agent: agent_with_timeout(CHECK_TIMEOUT),
             repository: repository.to_string(),
             api_url: format!("https://api.github.com/repos/{repository}/releases/latest"),
             asset_suffix: format!("-{arch}-linux.tar.zst"),
@@ -69,13 +84,22 @@ impl ReleaseChecker {
         self
     }
 
+    /// Только для тестов: тесту незачем ждать полминуты, чтобы увидеть, что
+    /// молчащий сервер кончается отказом.
+    pub fn with_timeout(mut self, timeout: Duration) -> ReleaseChecker {
+        self.agent = agent_with_timeout(timeout);
+        self
+    }
+
     /// Находит последний релиз и говорит, новее ли он текущей версии.
     ///
     /// Релиз без архива под нашу платформу — не находка, а ошибка: обновляться
     /// на него нечем, и делать вид, что обновление есть, значит показать окно,
     /// которое ничего не установит.
     pub fn latest(&self, current: &Version) -> Result<UpdateInfo, CheckError> {
-        let response = ureq::get(&self.api_url)
+        let response = self
+            .agent
+            .get(&self.api_url)
             .set("Accept", "application/vnd.github+json")
             .set("User-Agent", "weto")
             .call()
@@ -119,4 +143,8 @@ impl ReleaseChecker {
             is_newer: latest > *current,
         })
     }
+}
+
+fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new().timeout(timeout).build()
 }

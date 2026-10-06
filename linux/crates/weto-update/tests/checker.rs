@@ -157,3 +157,54 @@ fn a_tag_that_is_not_a_version_is_refused() {
         Err(CheckError::Parse(_))
     ));
 }
+
+/// Сервер, который соединение принимает и не отвечает ни байтом: так выглядит
+/// повисший прокси или канал, где пакеты молча теряются после рукопожатия.
+fn serve_silence() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        // Соединения держатся открытыми до конца процесса: закрытое соединение
+        // ureq прочёл бы как отказ сразу, и таймаут остался бы непроверенным.
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            held.push(stream);
+        }
+    });
+    format!("http://127.0.0.1:{port}/latest")
+}
+
+/// Ручная проверка без таймаута висела вечно: плитка подвала оставалась
+/// неактивной, а `check_now` отказывался начинать вторую, пока не кончится
+/// первая, — то есть до перезапуска. Молчащий сервер обязан кончаться
+/// отказом сети, и за ограниченное время.
+#[test]
+fn a_server_that_never_answers_ends_the_check_with_a_failure() {
+    let checker = ReleaseChecker::new("squaretus/weto", "x86_64")
+        .with_api_url(serve_silence())
+        .with_timeout(std::time::Duration::from_millis(300));
+
+    let (done, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(checker.latest(&Version::parse("1.1.0").unwrap()));
+    });
+    let result = answer
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("проверка повисла на молчащем сервере");
+
+    assert!(
+        matches!(result, Err(CheckError::Request(_))),
+        "{:?}",
+        result.map(|info| info.latest_version)
+    );
+}
+
+/// Продуктовый таймаут — общий на весь запрос и ограничен: проверка
+/// в фоне раз в час и ручная из подвала не имеют права висеть дольше.
+#[test]
+fn the_check_timeout_is_bounded() {
+    assert_eq!(
+        weto_update::checker::CHECK_TIMEOUT,
+        std::time::Duration::from_secs(30)
+    );
+}

@@ -598,6 +598,49 @@ mod tests {
         );
     }
 
+    /// Ручная проверка на канале, который принял соединение и замолчал, кончается
+    /// отказом с причиной, а плитка снова нажимается. Без таймаута она висела
+    /// «Проверка…» до перезапуска: вторую проверку `check_now` не начинает,
+    /// пока идёт первая.
+    #[test]
+    fn a_manual_check_on_a_silent_channel_fails_and_frees_the_tile() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let home = std::env::temp_dir().join(format!(
+            "weto-updates-{}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::SeqCst)
+        ));
+        let updates = Updates::new(
+            &Paths::rooted(home),
+            Arc::new(
+                ReleaseChecker::new(REPOSITORY, "x86_64")
+                    .with_api_url(format!("http://127.0.0.1:{port}/latest"))
+                    .with_timeout(Duration::from_millis(300)),
+            ),
+            Version::parse("1.1.0").unwrap(),
+        );
+
+        updates.check_now();
+        assert!(updates.is_busy());
+        wait_until("отказ проверки", || {
+            updates.state() != CheckState::Checking
+        });
+
+        assert!(
+            matches!(updates.state(), CheckState::Failed(_)),
+            "{:?}",
+            updates.state()
+        );
+        assert!(!updates.is_busy(), "плитка осталась неактивной");
+    }
+
     #[test]
     fn a_manual_check_without_news_asks_for_nothing() {
         let updates = updates("1.1.0", None);
