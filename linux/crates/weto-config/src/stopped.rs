@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use weto_core::process::without_deleted_suffix;
 
 /// Процесс, которому weto послал SIGSTOP. Путь хранится ради защиты
 /// от переиспользования pid: после падения weto по этому же pid может жить
@@ -50,7 +51,21 @@ impl StoppedLedgerReadout {
             return StoppedLedgerReadout::Entries(Vec::new());
         };
         match serde_json::from_str::<Vec<StoppedProcess>>(&text) {
-            Ok(entries) => StoppedLedgerReadout::Entries(entries),
+            // Версия до среза « (deleted)» писала путь как его отдало ядро,
+            // а обход теперь отдаёт его без суффикса: запись сравнивается
+            // с обходом по паре «pid + путь», и разойтись им нельзя.
+            Ok(entries) => StoppedLedgerReadout::Entries(
+                entries
+                    .into_iter()
+                    .map(|mut entry| {
+                        let path = without_deleted_suffix(&entry.executable_path);
+                        if path.len() != entry.executable_path.len() {
+                            entry.executable_path = path.to_string();
+                        }
+                        entry
+                    })
+                    .collect(),
+            ),
             Err(_) => StoppedLedgerReadout::Corrupted,
         }
     }

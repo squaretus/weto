@@ -240,3 +240,30 @@ fn the_moment_is_written_as_an_iso_8601_string() {
     assert!(text.contains("\"executablePath\""), "{text}");
     assert!(text.contains("\"isShell\""), "{text}");
 }
+
+/// Учёт, записанный версией до того, как реестр процессов научился срезать
+/// « (deleted)»: путь стоящего сеанса лежит в файле с суффиксом. Обход теперь
+/// отдаёт тот же процесс без него, пара «pid + путь» не совпала бы — и запись
+/// сочли бы чужим процессом на переиспользованном pid: SIGCONT ей не ушёл бы
+/// ни на старте, ни при снятии паузы, и сеанс остался бы замороженным навсегда.
+#[test]
+fn an_entry_written_with_the_deleted_suffix_is_read_without_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("stopped.json");
+    std::fs::write(
+        &path,
+        r#"[{"pid": 200,
+             "executablePath": "/home/me/.local/share/claude/versions/228 (deleted)",
+             "stoppedAt": "2025-08-27T13:12:46Z",
+             "isShell": false}]"#,
+    )
+    .unwrap();
+
+    let ledger = StoppedLedger::load(&path);
+
+    assert_eq!(
+        ledger.entries()[0].executable_path,
+        "/home/me/.local/share/claude/versions/228"
+    );
+    assert!(!ledger.started_from_corrupted_file());
+}
