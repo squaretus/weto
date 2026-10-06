@@ -162,11 +162,18 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 
     holder.append(&card);
 
+    // Виджеты карточки перерисовка держит слабо: её зовут кнопки внутри той же
+    // строки ввода, и сильная ссылка замкнула бы цикл строка → кнопка →
+    // обработчик → перерисовка → строка. Окно уходит, а карточка вместе
+    // с состоянием приложения оставалась бы в памяти на каждое открытие настроек.
     let redraw = {
         let state = state.clone();
-        let list = list.clone();
-        let add_row = add_row.clone();
+        let list = list.downgrade();
+        let add_row = add_row.downgrade();
         move || {
+            let (Some(list), Some(add_row)) = (list.upgrade(), add_row.upgrade()) else {
+                return;
+            };
             clear(&list);
             let settings = state.settings.current();
             ui::set_divided(&add_row, ui::input_row_divided(settings.targets.len()));
@@ -228,10 +235,14 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 
     let commit = {
         let state = state.clone();
-        let entry = entry.clone();
+        // Поле — слабо: этот же обработчик висит на нём самом.
+        let entry = entry.downgrade();
         let redraw = redraw.clone();
         let window = window.downgrade();
         move || {
+            let Some(entry) = entry.upgrade() else {
+                return;
+            };
             let text = entry.text().to_string();
             let text = text.trim().to_string();
             if text.is_empty() {
@@ -444,9 +455,27 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // Состояние строки берётся из настроек при каждом показе: выбор меняют
     // и кнопки этой же строки, и правка конфига снаружи, а описание обязано
     // следовать за версионным путём так же, как у целей.
+    //
+    // Виджеты строки замыкание держит слабо: кнопки «Выбрать» и корзина живут
+    // внутри `unchosen` и `chosen` и сами держат это замыкание, и сильная ссылка
+    // отсюда замкнула бы цикл контейнер → кнопка → обработчик → замыкание →
+    // контейнер. Окно при этом уходит, а строка вместе с состоянием приложения
+    // остаётся в памяти навсегда — на каждое открытие настроек.
     let show: Rc<dyn Fn()> = {
         let state = state.clone();
+        let unchosen = unchosen.downgrade();
+        let chosen = chosen.downgrade();
+        let vpn_name = vpn_name.downgrade();
+        let vpn_description = vpn_description.downgrade();
         Rc::new(move || {
+            let (Some(unchosen), Some(chosen), Some(vpn_name), Some(vpn_description)) = (
+                unchosen.upgrade(),
+                chosen.upgrade(),
+                vpn_name.upgrade(),
+                vpn_description.upgrade(),
+            ) else {
+                return;
+            };
             let app = state.settings.current().vpn_app;
             unchosen.set_visible(app.is_none());
             chosen.set_visible(app.is_some());
@@ -724,13 +753,21 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
 
     // Перерисовка через `Rc`, чтобы её могли позвать и кнопки внутри строк,
     // которые она же и создаёт.
+    //
+    // Себя перерисовка помнит слабо, как и виджеты карточки: сильная ссылка на
+    // собственную ячейку — цикл в счётчиках ссылок, который не рвётся никогда,
+    // а виджеты держат кнопки той же строки ввода. Ячейку держат обработчики
+    // ввода — ровно столько, сколько живёт карточка.
     let redraw: Redraw = Rc::new(RefCell::new(None));
     {
         let state = state.clone();
-        let list = list.clone();
-        let self_ref = redraw.clone();
-        let add_row = add_row.clone();
+        let list = list.downgrade();
+        let self_ref = Rc::downgrade(&redraw);
+        let add_row = add_row.downgrade();
         let draw: Rc<dyn Fn()> = Rc::new(move || {
+            let (Some(list), Some(add_row)) = (list.upgrade(), add_row.upgrade()) else {
+                return;
+            };
             clear(&list);
             let entries = state.settings.current().entries(kind);
             ui::set_divided(&add_row, ui::input_row_divided(entries.len()));
@@ -757,7 +794,8 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
                 let again = self_ref.clone();
                 remove.connect_clicked(move |_| {
                     state.settings.edit(|s| s.remove_entry(&blocked, kind));
-                    if let Some(draw) = again.borrow().clone() {
+                    let draw = again.upgrade().and_then(|slot| slot.borrow().clone());
+                    if let Some(draw) = draw {
                         draw();
                     }
                 });
@@ -787,10 +825,14 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
 
     let commit = {
         let state = state.clone();
-        let entry = entry.clone();
+        // Поле — слабо: этот же обработчик висит на нём самом.
+        let entry = entry.downgrade();
         let error = error.clone();
         let redraw = redraw.clone();
         move || {
+            let Some(entry) = entry.upgrade() else {
+                return;
+            };
             let text = entry.text().to_string();
             // Разбор и проверка живут в настройках: экрану остаётся показать отказ.
             let mut outcome = Ok(());
@@ -1492,11 +1534,16 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     buttons.append(&clear_button);
     card.append(&buttons);
 
+    // Слабо по той же причине, что у карточек настроек: перерисовку зовёт
+    // кнопка очистки, которую перерисовка сама прячет и показывает.
     let redraw = {
         let state = state.clone();
-        let list = list.clone();
-        let clear_button = clear_button.clone();
+        let list = list.downgrade();
+        let clear_button = clear_button.downgrade();
         move || {
+            let (Some(list), Some(clear_button)) = (list.upgrade(), clear_button.upgrade()) else {
+                return;
+            };
             clear(&list);
             let journal = state.journal();
             let entries = journal.entries();
