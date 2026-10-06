@@ -10,9 +10,11 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use weto_core::process::TargetKind;
 use weto_sys::target_resolver::{
-    icon_for, launch_paths_in, locate_target, resolve_launch_entry, resolve_launch_target,
-    LaunchTargetResolver, Resolution, TargetResolving,
+    icon_for, launch_paths_in, locate_target, locate_target_with_kind, resolve_launch_entry,
+    resolve_launch_target, target_kind_for, LaunchTargetResolver, LocatedTarget, Resolution,
+    TargetResolving,
 };
 
 /// Пакет из четырёх звеньев. Возвращает корень раскладки и путь настоящего
@@ -53,7 +55,14 @@ fn fake_package(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// PATH на время проверки: `which` внутри границы смотрит именно туда.
+///
+/// Переменная одна на процесс, а тесты идут параллельно: без замка два теста
+/// с подменой затирали бы `PATH` друг у друга.
 fn with_path<T>(directory: &Path, body: impl FnOnce() -> T) -> T {
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = PATH_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous = std::env::var_os("PATH");
     std::env::set_var("PATH", directory);
     let outcome = body();
@@ -376,10 +385,132 @@ fn the_guard_resolver_follows_a_retargeted_symlink() {
             .into_owned()
     };
 
-    assert_eq!(resolver.locate(&entry), Some(canonical("228")));
+    let binary = |version: &str| {
+        Some(LocatedTarget {
+            path: canonical(version),
+            kind: TargetKind::Binary,
+        })
+    };
+
+    assert_eq!(resolver.locate(&entry), binary("228"));
     fs::remove_file(&link).unwrap();
     assert_eq!(resolver.locate(&entry), None, "симлинка на мгновение нет");
     std::os::unix::fs::symlink(versions.join("300"), &link).unwrap();
-    assert_eq!(resolver.locate(&entry), Some(canonical("300")));
+    assert_eq!(resolver.locate(&entry), binary("300"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `qwen` из npm: в `PATH` лежит симлинк на `cli.js`, а тот начинается
+/// с `#!/usr/bin/env node`. Ядро запускает такой файл интерпретатором,
+/// и `/proc/<pid>/exe` называет `/usr/bin/node`, а не `cli.js`. Цель вида
+/// «бинарник» не совпадала ни с одним процессом — `qwen` оставался без охраны
+/// молча. Вид решает сам файл: шебанг — скрипт, совпадение по argv.
+#[test]
+fn a_shebang_file_behind_a_path_symlink_is_a_script() {
+    let root = temp_dir("shebang");
+    let bin = root.join("bin");
+    let dist = root.join("lib/node_modules/qwen/dist");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&dist).unwrap();
+    let cli = dist.join("cli.js");
+    fs::write(&cli, "#!/usr/bin/env node\nconsole.log('qwen')\n").unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+    let link = bin.join("qwen");
+    std::os::unix::fs::symlink(&cli, &link).unwrap();
+    let expected = Some(LocatedTarget {
+        path: fs::canonicalize(&cli)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        kind: TargetKind::Script,
+    });
+
+    let (by_name, kind_by_name) = with_path(&bin, || {
+        (locate_target_with_kind("qwen"), target_kind_for("qwen"))
+    });
+
+    assert_eq!(by_name, expected, "голое имя из PATH");
+    assert_eq!(kind_by_name, TargetKind::Script);
+    assert_eq!(
+        LaunchTargetResolver.locate(&link.to_string_lossy()),
+        expected,
+        "охрана получает вид вместе с путём"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Обратная сторона: бинарник остаётся бинарником — и тогда, когда до него
+/// ведёт `sh`-запускатор с соседним бинарником. Сам запускатор начинается
+/// с шебанга, но целью он не является: цепочка доходит до соседа, а процессом
+/// оказывается именно сосед.
+#[test]
+fn binaries_stay_binaries_even_behind_a_shell_launcher() {
+    let root = temp_dir("binary-kind");
+    let (root, real) = fake_package(&root);
+    let plain = root.join("tool");
+    fs::write(&plain, "\x7fELF").unwrap();
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(
+        locate_target_with_kind(&plain.to_string_lossy()).map(|found| found.kind),
+        Some(TargetKind::Binary)
+    );
+    assert_eq!(
+        locate_target_with_kind(&root.join("bin/demo").to_string_lossy()),
+        Some(LocatedTarget {
+            path: real.to_string_lossy().into_owned(),
+            kind: TargetKind::Binary,
+        })
+    );
+    // Цели, которой на диске нет, вид не из чего узнать — она остаётся
+    // бинарником, как была бы записана и раньше.
+    assert_eq!(
+        target_kind_for("/opt/такого/нет/never-installed"),
+        TargetKind::Binary
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Ярлык `Exec=node /opt/app/cli.js`: процессом окажется `node`, и цель
+/// `/usr/bin/node` увела бы под охрану все Node-процессы машины разом.
+/// Цель — сам файл, вид — скрипт, даже без шебанга: ядро ELF-а в нём
+/// не найдёт, и в `exe` он не появится никогда — только в argv.
+#[test]
+fn a_file_run_by_an_interpreter_from_an_entry_is_a_script() {
+    let root = temp_dir("interpreted");
+    let cli = root.join("cli.js");
+    fs::write(&cli, "console.log('без шебанга')\n").unwrap();
+    let entry = root.join("app.desktop");
+    fs::write(
+        &entry,
+        format!(
+            "[Desktop Entry]\nName=App\nExec=node {} %U\nType=Application\n",
+            cli.display()
+        ),
+    )
+    .unwrap();
+    let bare = root.join("repl.desktop");
+    fs::write(&bare, "[Desktop Entry]\nName=REPL\nExec=node\n").unwrap();
+
+    assert_eq!(
+        locate_target_with_kind(&entry.to_string_lossy()),
+        Some(LocatedTarget {
+            path: fs::canonicalize(&cli)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            kind: TargetKind::Script,
+        })
+    );
+    // Файла скрипта ярлык не назвал — интерпретатор целью не становится,
+    // путь спросят у пользователя.
+    assert_eq!(
+        resolve_launch_entry(&bare.to_string_lossy()),
+        Resolution::NeedsPath {
+            launcher: "node".to_string()
+        }
+    );
+    // Тот же файл, указанный пользователем во втором диалоге, — тоже скрипт.
+    assert_eq!(target_kind_for(&cli.to_string_lossy()), TargetKind::Script);
     let _ = fs::remove_dir_all(&root);
 }

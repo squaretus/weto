@@ -149,16 +149,32 @@ Everything the policy decides is shared. What the system dictates is not:
   Locked down by `netlink-events-contract.sh`.
 - **The poll stays** (1 s while safe, 250 ms while unsafe). Catching launches through the netlink
   connector needs `CAP_NET_ADMIN`, and the whole installation is designed to be unprivileged.
-- **Two macOS traps are solved by the kernel:** `readlink /proc/<pid>/exe` returns an
-  already-resolved path, so the `nano`→`pico` symlink never appears; argv arrives as a
-  ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is needed.
+- **The kernel solves the plumbing of two macOS traps, not the traps themselves.**
+  `readlink /proc/<pid>/exe` returns an already-resolved path, so the `nano`→`pico` symlink never
+  appears; argv arrives as a ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is
+  needed. The script trap stays: for a shebang file (`qwen` from npm → `cli.js` with
+  `#!/usr/bin/env node`) `exe` is `/usr/bin/node`, so the target must be a `Script` matched by
+  argv, exactly as on macOS. The kind comes from the file: `target_resolver::locate_target_with_kind`
+  reads at most four bytes of the canonical file — `#!` → `Script`, ELF magic → `Binary`, any
+  other readable content → `Script` (the kernel executes only ELF directly; everything else, a
+  shebang script or a binfmt_misc format, runs under an interpreter whose path is `exe`), an
+  unreadable or empty file → `Binary`. The settings window stores that kind on add
+  (`target_kind_for`), and `RuleCache` re-derives it with the fresh path on every refresh, so a
+  config saved before the fix (everything was `Binary`) heals by itself and a tool that changes
+  form across an update keeps being guarded. `Script` matching compares only **absolute** argv
+  elements with `launch_paths`: the window stores the typed bare name (`qwen`) among them, and
+  equality with it would take `grep qwen` and `man qwen`; the filter sits in
+  `weto_core::process::matches_rule`, not in rule building, because rules are assembled in two
+  places (`Target::rule`, `RuleCache` memory) and the `Binary` branch never sees it.
+  [bugs/linux-script-targets-matched-as-binary](../bugs/linux-script-targets-matched-as-binary.md).
 - **Rules are re-resolved by the guard, not once by the settings window** — the macOS rule cache
   (`ProcessEnforcer.rules()`), ported as `weto_guard::rules::RuleCache`. The resolved path of a
   versioned tool (`~/.local/share/claude/versions/2.1.228`) changes with every update; a rule
   copied from `config.toml` on every pass silently stopped matching the new session, and a
   self-updated VPN client read as closed → `Kill(VpnAppNotRunning)` every pass. The cache asks
-  `TargetResolving` (real: `LaunchTargetResolver` = `locate_target`; bare names go through the
-  process's own `PATH`, which the desktop session provides) when the `targets` / `vpn_app` value
+  `TargetResolving` (real: `LaunchTargetResolver` = `locate_target_with_kind`, path plus kind;
+  bare names go through the process's own `PATH`, which the desktop session provides) when the
+  `targets` / `vpn_app` value
   changed or `TARGET_RULE_REFRESH` (2 s, = `Constants.targetRuleRefreshSeconds`) elapsed on the
   guard clock — never per 250 ms pass, and it never walks `/proc`, so the pass keeps its single
   walk. Re-resolution never narrows the guard: the new rule is the fresh path plus every launch
@@ -172,14 +188,23 @@ Everything the policy decides is shared. What the system dictates is not:
   tests. The registry strips the kernel's ` (deleted)` suffix from `exe`, so a session on a
   version the update has removed still matches its remembered path. Pinned by
   `weto-guard/tests/rules.rs`. [bugs/linux-rules-resolved-once](../bugs/linux-rules-resolved-once.md).
-- **`appBundle` targets do not exist here.** A `.desktop` entry points at an ordinary
-  binary, so it is a `Binary` target — but getting from the entry to that binary is a chain, not
-  a field. `weto_core::launcher::command_from_desktop_entry` walks the `Exec` line and answers
-  with a `DesktopCommand`: wrappers are dropped (a leading `env` with its assignments, one level
+- **`appBundle` targets do not exist here.** A `.desktop` entry points at a file — an ordinary
+  binary or a script handed to an interpreter — and the file decides the kind, as above; getting
+  from the entry to that file is a chain, not a field.
+  `weto_core::launcher::command_from_desktop_entry` walks the `Exec` line and answers with a
+  `DesktopCommand`: wrappers are dropped (a leading `env` with its assignments, one level
   of `sh -c "…"` — taking the first word would have guarded `/usr/bin/env` or `/bin/sh`, i.e. half
   the machine), and `steam` / `flatpak` come back as `Indirect { launcher }` because they start the
   program themselves and the entry does not say what the process will be. Guessing there would
   have made `/usr/bin/steam` the target, so a VPN drop closed every game at once.
+  An interpreter followed by a script file (`node /opt/app/cli.js`, `python3.12 /opt/app/app.py`,
+  `deno run --allow-net /opt/app/main.ts`, and a shell given a file: `bash /opt/app/start.sh`)
+  comes back as `Script(path)`: the target is the file, and the resolver marks it `Script` even
+  without a shebang — otherwise `/usr/bin/node` would have been the target and a VPN drop would
+  have killed every Node process. Only long flags and deno/bun's `run` are skipped; a short flag
+  (`-m`, `-e`, `-jar`) or a non-absolute script stops the parse, and an interpreter then answers
+  `Indirect { launcher }` (→ `NeedsPath`), while a shell without a file stays a target as before
+  (`/bin/sh --login`).
   `target_resolver::resolve_launch_entry` carries that verdict to disk as a `Resolution`:
   `NeedsPath { launcher }` is the honest answer, and the settings window asks the user for the
   program file with a second dialog (`ask_for_program_path`). `resolve_launch_target` stays as the
@@ -351,7 +376,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-404 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+506 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake

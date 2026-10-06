@@ -138,6 +138,13 @@ impl RuleCache {
     /// подменяют, его на мгновение нет — оставляет прежнее правило: живой
     /// процесс в этот момент никуда не девается.
     ///
+    /// Вид выводится заново вместе с путём, а не берётся из настроек: окно
+    /// настроек до исправления записывало бинарником и скрипты (`qwen` из npm,
+    /// у которого `exe` — `node`), и такая цель не совпадала ни с одним
+    /// процессом. Свежий вид чинит старый конфиг без участия пользователя
+    /// и переживает обновление, сменившее форму инструмента. Неудача
+    /// разрешения оставляет прежний вид вместе с прежним путём.
+    ///
     /// Спрашивается сперва сама запись, затем пути запуска из настроек:
     /// голое имя, не найденное в `PATH` охраны, находится по файлу в `PATH`,
     /// запомненному при добавлении (`~/.local/bin/claude`).
@@ -147,6 +154,7 @@ impl RuleCache {
         let mut rule = target.rule();
         if let Some(previous) = known.get(&target.entry) {
             rule.path = previous.path.clone();
+            rule.kind = previous.kind;
             extend_unique(&mut rule.launch_paths, &previous.launch_paths);
         }
 
@@ -158,9 +166,10 @@ impl RuleCache {
                 .filter(|path| path.starts_with('/') && *path != target.entry),
         );
         if let Some(fresh) = candidates.find_map(|candidate| self.resolver.locate(candidate)) {
-            let mut launch_paths = vec![fresh.clone()];
+            let mut launch_paths = vec![fresh.path.clone()];
             extend_unique(&mut launch_paths, &rule.launch_paths);
-            rule.path = fresh;
+            rule.path = fresh.path;
+            rule.kind = fresh.kind;
             rule.launch_paths = launch_paths;
         }
 

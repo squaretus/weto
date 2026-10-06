@@ -296,3 +296,81 @@ fn a_bare_name_missing_from_the_guard_path_is_found_by_its_path_entry() {
 
     assert_eq!(guarded_pids(&s), vec![300]);
 }
+
+const QWEN_LINK: &str = "/home/me/.npm-global/bin/qwen";
+const QWEN_CLI: &str = "/home/me/.npm-global/lib/node_modules/@qwen-code/qwen-code/cli.js";
+const NODE: &str = "/usr/bin/node";
+
+/// Процесс интерпретатора: `exe` называет `node`, а скрипт виден только в argv.
+fn interpreted(pid: i32, executable_path: &str, arguments: &[&str]) -> ProcessSnapshot {
+    ProcessSnapshot {
+        pid,
+        parent_pid: 1,
+        executable_path: executable_path.to_string(),
+        arguments: Some(arguments.iter().map(|a| a.to_string()).collect()),
+        ..ProcessSnapshot::default()
+    }
+}
+
+/// `qwen` из npm, сохранённый так, как его сохраняло окно настроек до исправления:
+/// бинарником. `/proc/<pid>/exe` у него `/usr/bin/node`, и правило по пути
+/// не совпадало ни с чем — цель числилась добавленной и при падении VPN
+/// продолжала работать. Охрана выводит вид заново вместе со свежим путём:
+/// старый конфиг чинится без участия пользователя, а инструмент, сменивший
+/// форму с обновлением, не выпадает из-под охраны.
+///
+/// Совпадение по argv — только с абсолютными путями. Голое имя `qwen` лежит
+/// в путях запуска (так окно настроек запоминает введённое), и сравнение с ним
+/// уводило бы под охрану `grep qwen` и `man qwen`.
+#[test]
+fn a_shebang_target_saved_as_a_binary_is_matched_by_its_arguments() {
+    let settings = Settings {
+        vpn_app: Some(target("/usr/bin/happ")),
+        blocked_countries: vec!["RU".to_string()],
+        targets: vec![
+            claude(LINK, &[LINK]),
+            Target {
+                entry: "qwen".to_string(),
+                display_name: "qwen".to_string(),
+                kind: TargetKind::Binary,
+                path: QWEN_CLI.to_string(),
+                launch_paths: vec!["qwen".to_string(), QWEN_LINK.to_string()],
+            },
+        ],
+        ..Default::default()
+    };
+    let s = stand_over(
+        settings,
+        vec![
+            detached(200, 1, V228),
+            detached(77, 1, "/usr/bin/happ"),
+            interpreted(400, NODE, &[NODE, QWEN_LINK, "--yolo"]),
+            interpreted(401, NODE, &["node", "/home/me/other.js"]),
+            interpreted(402, "/usr/bin/grep", &["grep", "qwen"]),
+            interpreted(403, "/usr/bin/man", &["man", "qwen"]),
+            interpreted(404, NODE, &["node", QWEN_CLI]),
+        ],
+    );
+    s.resolver.points(LINK, V228);
+    s.resolver.points_to_script("qwen", QWEN_CLI);
+
+    guarded(&s);
+    assert_eq!(
+        guarded_pids(&s),
+        vec![200, 400, 404],
+        "qwen — по argv, claude — по-прежнему по пути"
+    );
+
+    // Пока файл подменяют, запись не разрешается — вид при этом остаётся
+    // выведенным, а не откатывается к сохранённому «бинарнику».
+    s.resolver.loses("qwen");
+    s.hands.advance_millis(2_000);
+    s.tick();
+    assert_eq!(guarded_pids(&s), vec![200, 400, 404]);
+
+    assert_eq!(
+        pause(&s),
+        vec![200, 400, 404],
+        "node с чужим скриптом, grep и man не встают"
+    );
+}

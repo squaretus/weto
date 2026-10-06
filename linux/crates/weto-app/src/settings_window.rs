@@ -17,12 +17,11 @@ use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack}
 use weto_config::settings::{GeoListKind, Theme};
 use weto_core::pause_ceiling::PauseCeiling;
 use weto_core::presentation::{target_description, target_fallback_name};
-use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 use weto_sys::target_resolver::{
-    applications_dirs, display_name_for, launch_paths_for, locate_target, resolve_launch_entry,
-    resolve_launch_target, Resolution,
+    applications_dirs, display_name_for, launch_paths_for, locate_target_with_kind,
+    resolve_launch_entry, resolve_launch_target, target_kind_for, Resolution,
 };
 use weto_ui::components as ui;
 use weto_ui::theme;
@@ -343,12 +342,15 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 /// добавления. Путь спрашивается у границы при каждой перерисовке: обновление
 /// инструмента из версионного каталога меняет развёрнутый путь целиком,
 /// и запомненный путь показывал бы удалённую версию. Чего на диске нет,
-/// то «не найдено» — с подсказкой, что делать, как на macOS.
+/// то «не найдено» — с подсказкой, что делать, как на macOS. Вид берётся
+/// у файла тем же ответом, что и путь: цель, записанная бинарником до того,
+/// как вид стали различать, подписана «скрипт», как её и узнаёт охрана.
 fn resolved_description(target: &weto_config::settings::Target) -> String {
+    let found = locate_target_with_kind(&target.entry);
     target_description(
         &target.entry,
-        target.kind,
-        locate_target(&target.entry).as_deref(),
+        found.as_ref().map_or(target.kind, |found| found.kind),
+        found.as_ref().map(|found| found.path.as_str()),
     )
 }
 
@@ -378,12 +380,15 @@ fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<Stri
     // охрана разрешает цель заново, и если голого имени в её PATH не окажется,
     // она начнёт с него, а не с развёрнутого пути, устаревающего с обновлением.
     let launch_paths = launch_paths_for(text);
+    // Скрипт с шебангом (`qwen` из npm) ядро запускает интерпретатором,
+    // и по пути `exe` он не совпал бы ни с одним процессом — его узнают по argv.
+    let kind = target_kind_for(text);
 
     state.settings.edit(|s| {
         s.targets.push(weto_config::settings::Target {
             entry: text.to_string(),
             display_name: name,
-            kind: TargetKind::Binary,
+            kind,
             path: resolved,
             launch_paths,
         })
@@ -1646,14 +1651,17 @@ fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<Str
     let name = display_name
         .or_else(|| display_name_for(text))
         .unwrap_or_else(|| target_fallback_name(text));
-    // Файл в PATH запоминается по той же причине, что у цели.
+    // Файл в PATH запоминается по той же причине, что у цели, и вид
+    // определяется так же: VPN-клиент-скрипт, записанный бинарником, читался бы
+    // закрытым всегда — а это завершение целей.
     let launch_paths = launch_paths_for(text);
+    let kind = target_kind_for(text);
 
     state.settings.edit(|s| {
         s.set_vpn_app(Some(weto_config::settings::Target {
             entry: text.to_string(),
             display_name: name,
-            kind: TargetKind::Binary,
+            kind,
             path: resolved,
             launch_paths,
         }))

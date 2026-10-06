@@ -19,6 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
+use weto_core::process::TargetKind;
+
 /// Сколько звеньев цепочки проходим. Больше не нужно ни одному известному
 /// случаю, а ограничение спасает от кольца из симлинков.
 const MAX_HOPS: usize = 4;
@@ -57,18 +59,51 @@ pub enum Resolution {
 /// Нерасходящаяся цель возвращается как есть: команда, которой нет на машине,
 /// — не ошибка, а цель, которую ещё не установили.
 pub fn resolve_launch_entry(entry: &str) -> Resolution {
+    walk(entry).resolution
+}
+
+/// Конец цепочки и то, как до него дошли.
+struct Walk {
+    resolution: Resolution,
+    /// Последнее звено передал интерпретатор (`Exec=node /opt/app/cli.js`):
+    /// файл запустится не сам, и в `exe` процесса его не будет никогда.
+    interpreted: bool,
+}
+
+fn walk(entry: &str) -> Walk {
     let mut current = entry.to_string();
+    let mut interpreted = false;
 
     for _ in 0..MAX_HOPS {
         let path = canonical(&current).unwrap_or_else(|| current.clone());
 
         match next_hop(&path) {
-            Hop::Next(next) => current = next,
-            Hop::Foreign(launcher) => return Resolution::NeedsPath { launcher },
-            Hop::Stop => return Resolution::Resolved(path),
+            Hop::Next(next) => {
+                current = next;
+                interpreted = false;
+            }
+            Hop::Interpreted(script) => {
+                current = script;
+                interpreted = true;
+            }
+            Hop::Foreign(launcher) => {
+                return Walk {
+                    resolution: Resolution::NeedsPath { launcher },
+                    interpreted: false,
+                }
+            }
+            Hop::Stop => {
+                return Walk {
+                    resolution: Resolution::Resolved(path),
+                    interpreted,
+                }
+            }
         }
     }
-    Resolution::Resolved(current)
+    Walk {
+        resolution: Resolution::Resolved(current),
+        interpreted,
+    }
 }
 
 /// Строковый фасад для тех, кому нужен один только путь.
@@ -92,9 +127,75 @@ pub fn resolve_launch_target(entry: &str) -> String {
 /// из версионного каталога меняет развёрнутый путь целиком. Чужой
 /// запускатор — тоже «не найдено»: файла программы ярлык не называет.
 pub fn locate_target(entry: &str) -> Option<String> {
-    match resolve_launch_entry(entry) {
-        Resolution::Resolved(path) if Path::new(&path).is_file() => Some(path),
+    locate_target_with_kind(entry).map(|found| found.path)
+}
+
+/// Файл цели и то, как её узнавать среди процессов.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedTarget {
+    pub path: String,
+    pub kind: TargetKind,
+}
+
+/// Где цель лежит сейчас и какого она вида — порт макосного
+/// `TargetResolver.rule(forEntry:at:)`.
+///
+/// Вид решает сам файл, а не то, как его назвали: скрипт ядро запускает
+/// интерпретатором, `/proc/<pid>/exe` называет `node`, и цель вида «бинарник»
+/// не совпала бы ни с одним процессом — `qwen` из npm оставался без охраны
+/// молча. Файл, который ярлык передаёт интерпретатору, — скрипт, даже
+/// без шебанга.
+pub fn locate_target_with_kind(entry: &str) -> Option<LocatedTarget> {
+    let walk = walk(entry);
+    match walk.resolution {
+        Resolution::Resolved(path) if Path::new(&path).is_file() => {
+            let kind = if walk.interpreted {
+                TargetKind::Script
+            } else {
+                kind_of_file(&path)
+            };
+            Some(LocatedTarget { path, kind })
+        }
         _ => None,
+    }
+}
+
+/// Вид цели для записи в настройки. Цели, которой на диске нет, вид узнать
+/// не из чего — она записывается бинарником, а охрана выведет вид заново,
+/// когда файл появится.
+pub fn target_kind_for(entry: &str) -> TargetKind {
+    locate_target_with_kind(entry).map_or(TargetKind::Binary, |found| found.kind)
+}
+
+/// Вид по первым байтам файла — целиком не читается: бинарник инструмента
+/// весит сотни мегабайт, а охрана спрашивает раз в две секунды.
+///
+/// Шебанг — скрипт, как на macOS. Но на Linux мерило шире: ядро исполняет
+/// напрямую только ELF, всё прочее — шебанг-скрипт или формат binfmt_misc —
+/// запускает интерпретатором, и `exe` у такого процесса — интерпретатор.
+/// Поэтому не-ELF с содержимым узнаётся по argv: по пути он не совпал бы
+/// никогда. Нечитаемый или пустой файл остаётся бинарником — скрипт
+/// интерпретатору обязан быть читаем.
+fn kind_of_file(path: &str) -> TargetKind {
+    use std::io::Read;
+
+    let mut head = [0u8; 4];
+    let mut filled = 0;
+    if let Ok(mut file) = std::fs::File::open(path) {
+        while filled < head.len() {
+            match file.read(&mut head[filled..]) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => filled += read,
+            }
+        }
+    }
+    let head = &head[..filled];
+    if head.starts_with(b"#!") {
+        TargetKind::Script
+    } else if head.is_empty() || head == b"\x7fELF" {
+        TargetKind::Binary
+    } else {
+        TargetKind::Script
     }
 }
 
@@ -109,7 +210,7 @@ pub trait TargetResolving: Send + Sync {
     /// Файл, который запустится по записи сейчас, или `None`, если ответа нет:
     /// файла на диске нет (его как раз подменяет обновление) или ярлык ведёт
     /// к чужому запускатору. `None` — не «цели больше нет», а «нового знания нет».
-    fn locate(&self, entry: &str) -> Option<String>;
+    fn locate(&self, entry: &str) -> Option<LocatedTarget>;
 }
 
 /// Настоящее разрешение — та же цепочка, что у описания цели в настройках.
@@ -119,8 +220,8 @@ pub trait TargetResolving: Send + Sync {
 pub struct LaunchTargetResolver;
 
 impl TargetResolving for LaunchTargetResolver {
-    fn locate(&self, entry: &str) -> Option<String> {
-        locate_target(entry)
+    fn locate(&self, entry: &str) -> Option<LocatedTarget> {
+        locate_target_with_kind(entry)
     }
 }
 
@@ -205,6 +306,9 @@ fn canonical(text: &str) -> Option<String> {
 enum Hop {
     /// Следующее звено цепочки.
     Next(String),
+    /// Файл, который ярлык передаёт интерпретатору: процессом станет
+    /// интерпретатор, а файл — его аргументом.
+    Interpreted(String),
     /// Чужой запускатор: дальше цепочки нет и быть не может.
     Foreign(String),
     /// Дальше идти некуда — это и есть цель.
@@ -221,6 +325,7 @@ fn next_hop(path: &str) -> Hop {
         };
         return match weto_core::launcher::command_from_desktop_entry(&text) {
             Some(weto_core::launcher::DesktopCommand::Command(command)) => Hop::Next(command),
+            Some(weto_core::launcher::DesktopCommand::Script(script)) => Hop::Interpreted(script),
             Some(weto_core::launcher::DesktopCommand::Indirect { launcher }) => {
                 Hop::Foreign(launcher)
             }

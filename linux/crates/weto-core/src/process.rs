@@ -229,9 +229,17 @@ fn matches_rule(process: &ProcessSnapshot, rule: &TargetRule) -> bool {
             let Some(arguments) = &process.arguments else {
                 return false;
             };
+            // Только абсолютные пути. Окно настроек запоминает среди путей
+            // запуска и введённое голое имя (`qwen`), а поэлементное сравнение
+            // с ним уводило бы под охрану `grep qwen` и `man qwen`. Скрипт
+            // интерпретатор получает абсолютным путём: шелл находит его
+            // по `PATH`, и ядро передаёт дальше найденный путь. Отсев стоит
+            // здесь, а не при сборке правила: правило собирают и настройки,
+            // и кэш охраны с памятью путей, а ветка бинарника его не видит
+            // вовсе — `exe` всегда абсолютный, голое имя с ним не совпадает.
             arguments
                 .iter()
-                .any(|argument| rule.launch_paths.contains(argument))
+                .any(|argument| argument.starts_with('/') && rule.launch_paths.contains(argument))
         }
     }
 }
@@ -452,6 +460,22 @@ mod tests {
             "/usr/bin/node",
             &["node", "/usr/local/bin/qwen"],
         )];
+        assert_eq!(pids(&procs, &[rule]), vec![10]);
+    }
+
+    /// Окно настроек запоминает введённое имя (`qwen`) среди путей запуска.
+    /// Для бинарника это безвредно — `exe` всегда абсолютный, — а у скрипта
+    /// argv сравнивается поэлементно, и голое имя совпадало бы с `grep qwen`
+    /// и `man qwen`. Интерпретатор получает скрипт абсолютным путём: шелл
+    /// находит его по `PATH`, и ядро передаёт дальше найденный путь.
+    #[test]
+    fn script_ignores_a_bare_name_among_its_launch_paths() {
+        let rule = script("/opt/qwen/cli.js", &["qwen", "/usr/local/bin/qwen"]);
+        let procs = vec![
+            process(10, 1, "/usr/bin/node", &["node", "/usr/local/bin/qwen"]),
+            process(11, 1, "/usr/bin/grep", &["grep", "qwen"]),
+            process(12, 1, "/usr/bin/man", &["man", "qwen"]),
+        ];
         assert_eq!(pids(&procs, &[rule]), vec![10]);
     }
 

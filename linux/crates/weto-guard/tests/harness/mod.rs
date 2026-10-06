@@ -31,7 +31,7 @@ use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::process_registry::ProcessRegistryReading;
 use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
 use weto_sys::secret_store::{SecretError, SecretStoring};
-use weto_sys::target_resolver::TargetResolving;
+use weto_sys::target_resolver::{LocatedTarget, TargetResolving};
 
 // --- сеть -------------------------------------------------------------------
 
@@ -448,18 +448,30 @@ pub struct FakeResolver(Arc<Mutex<ResolverInner>>);
 
 #[derive(Default)]
 struct ResolverInner {
-    answers: std::collections::HashMap<String, String>,
+    answers: std::collections::HashMap<String, LocatedTarget>,
     calls: usize,
 }
 
 impl FakeResolver {
     /// Запись теперь ведёт сюда — как симлинк, перевешенный обновлением.
     pub fn points(&self, entry: &str, path: &str) {
-        self.0
-            .lock()
-            .unwrap()
-            .answers
-            .insert(entry.to_string(), path.to_string());
+        self.answers(entry, path, TargetKind::Binary);
+    }
+
+    /// Запись ведёт к файлу с шебангом — так граница отвечает про `qwen`
+    /// из npm, чей `cli.js` начинается с `#!/usr/bin/env node`.
+    pub fn points_to_script(&self, entry: &str, path: &str) {
+        self.answers(entry, path, TargetKind::Script);
+    }
+
+    fn answers(&self, entry: &str, path: &str, kind: TargetKind) {
+        self.0.lock().unwrap().answers.insert(
+            entry.to_string(),
+            LocatedTarget {
+                path: path.to_string(),
+                kind,
+            },
+        );
     }
 
     /// Запись ни во что не разрешается: файл как раз подменяют.
@@ -474,7 +486,7 @@ impl FakeResolver {
 }
 
 impl TargetResolving for FakeResolver {
-    fn locate(&self, entry: &str) -> Option<String> {
+    fn locate(&self, entry: &str) -> Option<LocatedTarget> {
         let mut inner = self.0.lock().unwrap();
         inner.calls += 1;
         inner.answers.get(entry).cloned()

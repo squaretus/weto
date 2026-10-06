@@ -110,6 +110,13 @@ path stored at add time. Compare the target's `/proc/<pid>/exe` with what `locat
 returns now; a ` (deleted)` suffix must not reach the matcher (`ProcRegistry` strips it).
 `bugs/linux-rules-resolved-once.md`.
 
+## If a Linux script target (npm/pip tool, `Exec=node …`) is never guarded
+
+`/proc/<pid>/exe` of a script is its interpreter, so the rule must be `Script` and match argv.
+Check `locate_target_with_kind(entry).kind` and that `cmdline` carries the script by an absolute
+path — bare names in `launch_paths` are ignored on purpose. A `.desktop` target equal to an
+interpreter (`/usr/bin/node`) is the bug. `bugs/linux-script-targets-matched-as-binary.md`.
+
 Past failures worth reading before guessing: `bugs/tunnel-without-network-service.md`
 (a healthy tunnel reported as bypassed, and third-party 429s killing targets),
 `bugs/a-quarter-of-the-process-list.md` (three quarters of the machine invisible to the guard).
