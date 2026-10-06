@@ -24,7 +24,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `background.rs` | the background track: one thread per probe, so a pass never waits for a request |
 | `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
 | `weto-core` | `launcher.rs` | `.desktop` text: `DesktopCommand`, `name_from_desktop_entry`, wrapper stripping |
-| `weto-sys` | `target_resolver.rs` | the same chain on disk: `Resolution`, `display_name_for` |
+| `weto-sys` | `target_resolver.rs` | the same chain on disk: `Resolution`, `display_name_for`; `TargetResolving` / `LaunchTargetResolver` for the guard; `launch_paths_for` (the `PATH` file stored on add) |
 | `weto-sys` | `desktop_entries.rs` | the `.desktop` index over the XDG application directories |
 | `weto-sys` | `terminal.rs` | raises it: `org.freedesktop.Application.Activate` over the session bus |
 | `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
@@ -34,6 +34,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping |
 | `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger |
+| `weto-guard` | `rules.rs` | `RuleCache`: target and VPN-app rules re-resolved on a target-list change or every `TARGET_RULE_REFRESH` (2 s), never narrowed |
 | `weto-app` | `lifecycle.rs` | whether the process outlives its windows (`holds_application`) |
 | `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
 
@@ -151,6 +152,26 @@ Everything the policy decides is shared. What the system dictates is not:
 - **Two macOS traps are solved by the kernel:** `readlink /proc/<pid>/exe` returns an
   already-resolved path, so the `nano`→`pico` symlink never appears; argv arrives as a
   ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is needed.
+- **Rules are re-resolved by the guard, not once by the settings window** — the macOS rule cache
+  (`ProcessEnforcer.rules()`), ported as `weto_guard::rules::RuleCache`. The resolved path of a
+  versioned tool (`~/.local/share/claude/versions/2.1.228`) changes with every update; a rule
+  copied from `config.toml` on every pass silently stopped matching the new session, and a
+  self-updated VPN client read as closed → `Kill(VpnAppNotRunning)` every pass. The cache asks
+  `TargetResolving` (real: `LaunchTargetResolver` = `locate_target`; bare names go through the
+  process's own `PATH`, which the desktop session provides) when the `targets` / `vpn_app` value
+  changed or `TARGET_RULE_REFRESH` (2 s, = `Constants.targetRuleRefreshSeconds`) elapsed on the
+  guard clock — never per 250 ms pass, and it never walks `/proc`, so the pass keeps its single
+  walk. Re-resolution never narrows the guard: the new rule is the fresh path plus every launch
+  path seen before (seeded from the stored `path`/`launch_paths`), a failed resolution (the file
+  is mid-replacement, `NeedsPath`) keeps the last known rule, and memory of removed entries is
+  dropped. The entry is tried first, then the absolute stored launch paths: on add the settings
+  window stores the `PATH` file a bare name was found at (`~/.local/bin/claude`, unresolved —
+  the symlink survives updates), so a guard whose `PATH` lacks it still finds the target. All
+  five controller call sites (`run`, `recover_stopped`, `resume_from_ledger`, `apply_probe`,
+  `vpn_app_status`) read the cache; `Settings::target_rules()` stays only as the seed and for
+  tests. The registry strips the kernel's ` (deleted)` suffix from `exe`, so a session on a
+  version the update has removed still matches its remembered path. Pinned by
+  `weto-guard/tests/rules.rs`. [bugs/linux-rules-resolved-once](../bugs/linux-rules-resolved-once.md).
 - **`appBundle` targets do not exist here.** A `.desktop` entry points at an ordinary
   binary, so it is a `Binary` target — but getting from the entry to that binary is a chain, not
   a field. `weto_core::launcher::command_from_desktop_entry` walks the `Exec` line and answers

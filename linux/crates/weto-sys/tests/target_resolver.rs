@@ -11,7 +11,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use weto_sys::target_resolver::{
-    icon_for, locate_target, resolve_launch_entry, resolve_launch_target, Resolution,
+    icon_for, launch_paths_in, locate_target, resolve_launch_entry, resolve_launch_target,
+    LaunchTargetResolver, Resolution, TargetResolving,
 };
 
 /// Пакет из четырёх звеньев. Возвращает корень раскладки и путь настоящего
@@ -313,5 +314,72 @@ fn a_file_too_large_for_a_launcher_is_not_read_as_one() {
         resolve_launch_target(&large.to_string_lossy()),
         fs::canonicalize(&large).unwrap().to_string_lossy(),
     );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Голое имя запоминается вместе с файлом в `PATH`, на котором оно нашлось, —
+/// симлинком, а не развёрнутым путём: симлинк переживает обновление
+/// инструмента, развёрнутый путь — нет. С него охрана и начнёт, если сама
+/// голого имени не найдёт.
+#[test]
+fn a_bare_command_is_remembered_with_its_path_entry() {
+    let root = temp_dir("path-entry");
+    let versions = root.join("versions");
+    let bin = root.join("bin");
+    fs::create_dir_all(&versions).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    let binary = versions.join("2.1.228");
+    fs::write(&binary, "\x7fELF").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&binary, bin.join("claude")).unwrap();
+    let search = std::env::join_paths([root.join("пусто"), bin.clone()]).unwrap();
+
+    assert_eq!(
+        launch_paths_in("claude", Some(&search)),
+        vec![
+            "claude".to_string(),
+            bin.join("claude").to_string_lossy().into_owned()
+        ],
+    );
+    // Путь — уже путь: искать его в `PATH` нечего.
+    let entry = bin.join("claude").to_string_lossy().into_owned();
+    assert_eq!(launch_paths_in(&entry, Some(&search)), vec![entry.clone()]);
+    // Команды нет нигде — запоминается только запись.
+    assert_eq!(
+        launch_paths_in("weto-never-installed-command", Some(&search)),
+        vec!["weto-never-installed-command".to_string()],
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Охрана спрашивает границу через `TargetResolving`: ответ обязан следовать
+/// за симлинком, перевешенным обновлением, а цель, которой на диске на миг
+/// нет, ответа не получает — это «нового знания нет», а не путь.
+#[test]
+fn the_guard_resolver_follows_a_retargeted_symlink() {
+    let root = temp_dir("guard-resolver");
+    let versions = root.join("versions");
+    fs::create_dir_all(&versions).unwrap();
+    for version in ["228", "300"] {
+        let binary = versions.join(version);
+        fs::write(&binary, "\x7fELF").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let link = root.join("claude");
+    std::os::unix::fs::symlink(versions.join("228"), &link).unwrap();
+    let entry = link.to_string_lossy().into_owned();
+    let resolver = LaunchTargetResolver;
+    let canonical = |version: &str| {
+        fs::canonicalize(versions.join(version))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    assert_eq!(resolver.locate(&entry), Some(canonical("228")));
+    fs::remove_file(&link).unwrap();
+    assert_eq!(resolver.locate(&entry), None, "симлинка на мгновение нет");
+    std::os::unix::fs::symlink(versions.join("300"), &link).unwrap();
+    assert_eq!(resolver.locate(&entry), Some(canonical("300")));
     let _ = fs::remove_dir_all(&root);
 }

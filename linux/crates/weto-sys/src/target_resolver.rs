@@ -98,6 +98,67 @@ pub fn locate_target(entry: &str) -> Option<String> {
     }
 }
 
+/// Граница разрешения цели для охраны. Порт макосного `TargetResolving`.
+///
+/// Охране мало пути, запомненного при добавлении: у инструментов из версионного
+/// каталога (`~/.local/share/claude/versions/2.1.228`) обновление меняет
+/// развёрнутый путь целиком, и правило, разрешённое однажды, молча переставало
+/// совпадать с новым процессом. Поэтому охрана спрашивает заново — а тесту
+/// нужно подменить ответ, не трогая диск.
+pub trait TargetResolving: Send + Sync {
+    /// Файл, который запустится по записи сейчас, или `None`, если ответа нет:
+    /// файла на диске нет (его как раз подменяет обновление) или ярлык ведёт
+    /// к чужому запускатору. `None` — не «цели больше нет», а «нового знания нет».
+    fn locate(&self, entry: &str) -> Option<String>;
+}
+
+/// Настоящее разрешение — та же цепочка, что у описания цели в настройках.
+/// Голые имена ищутся по `PATH` самого процесса: на Linux его даёт сессия
+/// рабочего стола, а не launchd, как на macOS.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LaunchTargetResolver;
+
+impl TargetResolving for LaunchTargetResolver {
+    fn locate(&self, entry: &str) -> Option<String> {
+        locate_target(entry)
+    }
+}
+
+/// Пути запуска, которые стоит запомнить вместе с целью при добавлении:
+/// сама запись и, для голого имени, файл в `PATH`, на котором она нашлась
+/// (`~/.local/bin/claude`), — без разворота симлинков.
+///
+/// Нужен тот, что до разворота: симлинк в `PATH` переживает обновление,
+/// а развёрнутый путь — нет. Если позже охрана не найдёт голое имя (её `PATH`
+/// не тот, что у терминала, где цель добавляли), разрешение начнётся с него.
+pub fn launch_paths_for(entry: &str) -> Vec<String> {
+    launch_paths_in(entry, std::env::var_os("PATH").as_deref())
+}
+
+/// То же с явно заданным `PATH`: переменная процесса одна на все потоки,
+/// и тесты, меняющие её параллельно, затирали бы её друг у друга.
+pub fn launch_paths_in(entry: &str, search_path: Option<&std::ffi::OsStr>) -> Vec<String> {
+    let mut paths = vec![entry.to_string()];
+    if let Some(found) = search_path.and_then(|value| path_entry(entry, value)) {
+        let found = found.to_string_lossy().into_owned();
+        if !paths.contains(&found) {
+            paths.push(found);
+        }
+    }
+    paths
+}
+
+/// Файл голой команды в `PATH` как он там лежит — без разворота симлинков.
+fn path_entry(command: &str, search_path: &std::ffi::OsStr) -> Option<PathBuf> {
+    if command.is_empty() || command.contains('/') {
+        return None;
+    }
+    std::env::split_paths(search_path)
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(command))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Имя приложения из ярлыка — то, которое пользователь видел в диалоге выбора.
 ///
 /// Последний сегмент пути именем не является: у инструментов из версионного

@@ -50,14 +50,16 @@ use weto_core::network::VpnAppStatus;
 use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
 use weto_core::policy::GuardSignals;
 use weto_core::policy::{decide, decide_local, GuardDecision, UnsafeEvidence};
-use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget};
+use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget, TargetRule};
 use weto_sys::background::{BackgroundDispatching, ThreadDispatcher};
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::process_signaler::SignalResult;
 use weto_sys::secret_store::SecretStoring;
+use weto_sys::target_resolver::{LaunchTargetResolver, TargetResolving};
 
 use crate::enforcer::{ProcessEnforcer, ResumeOutcome, Scan};
+use crate::rules::RuleCache;
 
 /// Окно коалесценции: несколько событий сети подряд не должны порождать
 /// несколько запросов. У подтверждающего сервиса лимит 60 запросов в минуту.
@@ -344,6 +346,10 @@ pub struct GuardController {
     /// этого признака второй вызов слал бы SIGCONT по второму разу и заново
     /// сохранял бы уже удалённый файл учёта.
     enforcement: Mutex<bool>,
+    /// Правила целей и VPN-приложения, разрешаемые заново раз в окно, а не
+    /// однажды при добавлении: путь версионного инструмента меняется
+    /// с каждым его обновлением.
+    rules: RuleCache,
     coalesce_window: Duration,
     now: Clock,
 }
@@ -384,6 +390,7 @@ impl GuardController {
             }),
             probe: ProbeGate::default(),
             enforcement: Mutex::new(false),
+            rules: RuleCache::new(Box::new(LaunchTargetResolver)),
             coalesce_window: COALESCE_WINDOW,
             now: Box::new(SystemTime::now),
         }
@@ -420,6 +427,19 @@ impl GuardController {
     /// То же самое для стенда, который собрал охрану раньше, чем узнал про часы.
     pub fn set_clock(&mut self, now: Clock) {
         self.now = now;
+    }
+
+    /// Разрешение целей задаётся снаружи ради тестов: обновление инструмента
+    /// проверяется перевешенным ответом границы, а не симлинком на диске.
+    /// Приложение берёт настоящее — `LaunchTargetResolver`.
+    pub fn with_resolver(mut self, resolver: Box<dyn TargetResolving>) -> GuardController {
+        self.set_resolver(resolver);
+        self
+    }
+
+    /// То же самое для стенда, собравшего охрану раньше, чем он выбрал границу.
+    pub fn set_resolver(&mut self, resolver: Box<dyn TargetResolving>) {
+        self.rules = RuleCache::new(resolver);
     }
 
     pub fn snapshot(&self) -> GuardSnapshot {
@@ -517,7 +537,7 @@ impl GuardController {
         // наблюдению за учётом и показаниям журнала. Между ним и сигналами лежит
         // только работа редьюсера — в память и без единого syscall; запрос к сети
         // ушёл бы после применения, а не до.
-        let scan = self.enforcer.scan(&settings.target_rules());
+        let scan = self.enforcer.scan(&self.target_rules(&settings));
 
         if !settings.is_enabled || !config.has_targets() {
             self.inner.lock().expect("состояние охраны").announced_loss = None;
@@ -1205,7 +1225,7 @@ impl GuardController {
             );
         }
 
-        let rules = settings.target_rules();
+        let rules = self.target_rules(&settings);
         let (outcome, scan) = self.enforcer.resume_orphans(&rules);
         if outcome.unresolved.is_empty() {
             return;
@@ -1347,7 +1367,7 @@ impl GuardController {
     /// последний сигнал получают и те записи, которым такт досылать перестал
     /// (`RESUME_RETRY_LIMIT`): обязательство исполняют завершение и выход.
     fn resume_from_ledger(&self, settings: &Settings) -> (Scan, ResumeOutcome) {
-        let scan = self.enforcer.scan(&settings.target_rules());
+        let scan = self.enforcer.scan(&self.target_rules(settings));
         let outcome = self.enforcer.resume(Some(&scan), &HashSet::new());
         (scan, outcome)
     }
@@ -1770,7 +1790,7 @@ impl GuardController {
         // Пока проба летела, целей могло не остаться вовсе: настройки читаются
         // непосредственно перед применением, а не на старте запроса.
         // Проход ответа — такой же проход: обход у него свой и один.
-        let scan = self.enforcer.scan(&settings.target_rules());
+        let scan = self.enforcer.scan(&self.target_rules(&settings));
 
         let config = settings.guard_config();
         if !settings.is_enabled || !config.has_targets() {
@@ -1784,13 +1804,22 @@ impl GuardController {
         self.enforce(&settings, &scan);
     }
 
+    /// Правила целей этого прохода — из кэша, разрешаемого заново раз в окно.
+    /// Путь из настроек тут лишь отправная точка: у версионного инструмента
+    /// он устаревает с первым обновлением, и новый сеанс выпадал бы из-под охраны.
+    fn target_rules(&self, settings: &Settings) -> Vec<TargetRule> {
+        self.rules.targets(settings, (self.now)())
+    }
+
     /// Запущено ли выбранное VPN-приложение.
     ///
-    /// Обход `/proc` буквально тот же, что у целей: правило приложения приходит
-    /// из настроек уже разрешённым, а в список целей не попадает никогда —
-    /// завершать свой источник защиты охрана не имеет права.
+    /// Обход `/proc` буквально тот же, что у целей, а правило приложения —
+    /// из того же кэша и разрешается заново тем же порядком: клиент,
+    /// обновившийся своим апдейтером, живёт на новом пути, и правило,
+    /// разрешённое однажды, объявило бы его закрытым. В список целей оно
+    /// не попадает никогда — завершать свой источник защиты охрана не имеет права.
     fn vpn_app_status(&self, settings: &Settings, scan: &Scan) -> VpnAppStatus {
-        let Some(rule) = settings.vpn_app_rule() else {
+        let Some(rule) = self.rules.vpn_app(settings, (self.now)()) else {
             return VpnAppStatus::NotChosen;
         };
         if self.enforcer.is_running_in(&rule, scan) {

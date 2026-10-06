@@ -21,7 +21,7 @@ use weto_core::process::TargetKind;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 use weto_sys::target_resolver::{
-    applications_dirs, display_name_for, locate_target, resolve_launch_entry,
+    applications_dirs, display_name_for, launch_paths_for, locate_target, resolve_launch_entry,
     resolve_launch_target, Resolution,
 };
 use weto_ui::components as ui;
@@ -374,6 +374,10 @@ fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<Stri
     let name = display_name
         .or_else(|| display_name_for(text))
         .unwrap_or_else(|| target_fallback_name(text));
+    // Голое имя запоминается вместе с файлом в PATH (`~/.local/bin/claude`):
+    // охрана разрешает цель заново, и если голого имени в её PATH не окажется,
+    // она начнёт с него, а не с развёрнутого пути, устаревающего с обновлением.
+    let launch_paths = launch_paths_for(text);
 
     state.settings.edit(|s| {
         s.targets.push(weto_config::settings::Target {
@@ -381,7 +385,7 @@ fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<Stri
             display_name: name,
             kind: TargetKind::Binary,
             path: resolved,
-            launch_paths: vec![text.to_string()],
+            launch_paths,
         })
     });
 }
@@ -1615,6 +1619,8 @@ fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<Str
     let name = display_name
         .or_else(|| display_name_for(text))
         .unwrap_or_else(|| target_fallback_name(text));
+    // Файл в PATH запоминается по той же причине, что у цели.
+    let launch_paths = launch_paths_for(text);
 
     state.settings.edit(|s| {
         s.set_vpn_app(Some(weto_config::settings::Target {
@@ -1622,7 +1628,7 @@ fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<Str
             display_name: name,
             kind: TargetKind::Binary,
             path: resolved,
-            launch_paths: vec![text.to_string()],
+            launch_paths,
         }))
     });
 }

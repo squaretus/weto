@@ -103,6 +103,13 @@ one is `~/.local/bin/weto` (`Paths::launcher`) — `bugs/launch-path-is-the-syml
 Check `~/.config/autostart/weto.desktop`'s `Exec=` (a versioned path there is the bug) and the kill
 loop in `linux/scripts/uninstall.sh` (it must match on the process name plus `/proc/<pid>/exe`).
 
+## If a Linux target stops being guarded after it updates, or the VPN app reads as closed
+
+The guard's rules come from `weto_guard::rules::RuleCache`, re-resolved every 2 s — not from the
+path stored at add time. Compare the target's `/proc/<pid>/exe` with what `locate_target(entry)`
+returns now; a ` (deleted)` suffix must not reach the matcher (`ProcRegistry` strips it).
+`bugs/linux-rules-resolved-once.md`.
+
 Past failures worth reading before guessing: `bugs/tunnel-without-network-service.md`
 (a healthy tunnel reported as bypassed, and third-party 429s killing targets),
 `bugs/a-quarter-of-the-process-list.md` (three quarters of the machine invisible to the guard).

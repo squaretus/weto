@@ -31,6 +31,7 @@ use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::process_registry::ProcessRegistryReading;
 use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
 use weto_sys::secret_store::{SecretError, SecretStoring};
+use weto_sys::target_resolver::TargetResolving;
 
 // --- сеть -------------------------------------------------------------------
 
@@ -437,6 +438,49 @@ impl SecretStoring for NoSecret {
     }
 }
 
+/// Разрешение целей: какой файл стоит за записью сейчас.
+///
+/// По умолчанию не знает ничего, и охрана живёт на путях из настроек — ровно
+/// то, что видят все тесты, не про обновление целей. Обновление инструмента
+/// здесь — перевешенный ответ, а не симлинк на диске.
+#[derive(Clone, Default)]
+pub struct FakeResolver(Arc<Mutex<ResolverInner>>);
+
+#[derive(Default)]
+struct ResolverInner {
+    answers: std::collections::HashMap<String, String>,
+    calls: usize,
+}
+
+impl FakeResolver {
+    /// Запись теперь ведёт сюда — как симлинк, перевешенный обновлением.
+    pub fn points(&self, entry: &str, path: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .answers
+            .insert(entry.to_string(), path.to_string());
+    }
+
+    /// Запись ни во что не разрешается: файл как раз подменяют.
+    pub fn loses(&self, entry: &str) {
+        self.0.lock().unwrap().answers.remove(entry);
+    }
+
+    /// Сколько раз охрана спросила диск.
+    pub fn calls(&self) -> usize {
+        self.0.lock().unwrap().calls
+    }
+}
+
+impl TargetResolving for FakeResolver {
+    fn locate(&self, entry: &str) -> Option<String> {
+        let mut inner = self.0.lock().unwrap();
+        inner.calls += 1;
+        inner.answers.get(entry).cloned()
+    }
+}
+
 #[derive(Clone)]
 pub struct FakeSettings(pub Arc<Mutex<Settings>>);
 
@@ -640,6 +684,7 @@ pub struct Harness {
     pub world: World,
     pub reporter: RecordingReporter,
     pub checks: RecordingChecks,
+    pub resolver: FakeResolver,
     pub ledger_path: std::path::PathBuf,
     /// Каталог живёт ровно столько, сколько стенд: учёт остановленных пишется
     /// настоящим файлом, а не выдумкой.
@@ -783,6 +828,7 @@ fn build_over(
     let checks = RecordingChecks::default();
 
     let probes = QueuedProbes::default();
+    let resolver = FakeResolver::default();
 
     let controller = Arc::new(
         GuardController::new(
@@ -795,7 +841,8 @@ fn build_over(
             Box::new(checks.clone()),
         )
         .with_coalesce_window(window)
-        .with_probes(Box::new(probes.clone())),
+        .with_probes(Box::new(probes.clone()))
+        .with_resolver(Box::new(resolver.clone())),
     );
 
     Harness {
@@ -807,6 +854,7 @@ fn build_over(
         world,
         reporter,
         checks,
+        resolver,
         ledger_path,
         _home: home,
     }
