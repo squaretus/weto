@@ -14,6 +14,7 @@ pub mod guard_machine;
 pub mod ip;
 pub mod launcher;
 pub mod network;
+pub mod pause_ceiling;
 pub mod pause_plan;
 pub mod policy;
 pub mod presentation;

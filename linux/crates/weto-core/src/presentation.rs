@@ -9,7 +9,9 @@
 use std::time::Duration;
 
 use crate::guard_machine::GuardPhase;
+use crate::pause_ceiling::{countdown_text, duration_text};
 use crate::policy::{UnprovenReason, UnsafeEvidence};
+use crate::process::TargetKind;
 
 impl UnprovenReason {
     pub fn display_text(&self) -> String {
@@ -44,7 +46,9 @@ impl UnsafeEvidence {
             UnsafeEvidence::NotWhitelistedCountry(code) => {
                 format!("Страна {code} не входит в белый список")
             }
-            UnsafeEvidence::PauseExpired => "Подтверждение не получено за 60 с".to_string(),
+            UnsafeEvidence::PauseExpired(ceiling) => {
+                format!("Подтверждение не получено за {}", duration_text(*ceiling))
+            }
         }
     }
 }
@@ -137,8 +141,9 @@ pub fn explanation(phase: &GuardPhase, remaining_pause: Option<Duration>) -> Sta
             action: "Цели остановлены".to_string(),
             evidence: reason.display_text(),
             next: format!(
-                "Ждём ответа сервисов, {remaining_seconds} с до завершения; возобновятся \
-                 при подтверждении безопасного выхода"
+                "Ждём ответа сервисов, {} до завершения; возобновятся \
+                 при подтверждении безопасного выхода",
+                countdown_text(remaining_seconds)
             ),
         },
         GuardPhase::Danger(evidence) => StatusExplanation {
@@ -196,6 +201,14 @@ pub fn idle_targets(phase: &GuardPhase) -> IdleTargetsNotice {
         text: "Цели не запущены".to_string(),
         hint,
     }
+}
+
+/// Несёт ли пилюля цели метку `terminal`. Порт `isCommandLine` с macOS, где
+/// метки нет только у бандла `.app`. Здесь аналог бандла — ярлык `.desktop`:
+/// правило у всех целей бинарник или скрипт, и по нему приложение от команды
+/// не отличить, а по тому, что выбрал пользователь, — можно.
+pub fn is_command_line_target(entry: &str) -> bool {
+    !entry.ends_with(".desktop")
 }
 
 /// Строка показаний: ключ слева, значение справа.
@@ -285,6 +298,44 @@ fn outcome_text(outcome: &crate::geo::SourceOutcome) -> String {
     }
 }
 
+/// Что стоит за целью — и почему её не нашли, если не нашли. Порт
+/// `GuardVM.resolvedDescription`, тексты дословно оттуда.
+///
+/// `found` — путь того, что запустится, если граница его нашла на диске;
+/// `None` — не нашла. Сама граница «не найдено» не сообщает: цель, которой
+/// на машине нет, для неё не ошибка, а цель, которую ещё не установили, —
+/// поэтому вопрос задаёт экран, а отвечают ему здесь.
+///
+/// Одного «не найдено в системе» мало: имя ищется по списку каталогов,
+/// и не найтись оно может просто потому, что инструмент лежит в своём.
+/// Подсказка про полный путь — единственный выход, который у пользователя
+/// есть прямо сейчас. Вида `appBundle` на Linux нет, поэтому и строки
+/// «приложение:» здесь не бывает.
+pub fn target_description(entry: &str, kind: TargetKind, found: Option<&str>) -> String {
+    let Some(path) = found else {
+        return if entry.contains('/') {
+            "не найдено: по этому пути нет исполняемого файла".to_string()
+        } else {
+            "не найдено по имени — укажите полный путь к файлу".to_string()
+        };
+    };
+    match kind {
+        TargetKind::Binary => format!("бинарник: {path}"),
+        TargetKind::Script => format!("скрипт: {path}"),
+    }
+}
+
+/// Имя цели, у которой нет ярлыка: введённое имя или последний сегмент
+/// введённого пути — как `TargetResolver` на macOS.
+///
+/// Развёрнутый путь для имени не годится: у инструментов из версионного
+/// каталога (`~/.local/share/claude/versions/2.1.241`) последний сегмент —
+/// номер версии, и цель подписывалась бы им.
+pub fn target_fallback_name(entry: &str) -> String {
+    let entry = entry.trim_end_matches('/');
+    entry.rsplit('/').next().unwrap_or(entry).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,7 +402,9 @@ mod tests {
             GuardStatusColor::Yellow
         );
         assert_eq!(
-            shield_color(&GuardPhase::Danger(UnsafeEvidence::PauseExpired)),
+            shield_color(&GuardPhase::Danger(UnsafeEvidence::PauseExpired(
+                Duration::from_secs(60)
+            ))),
             GuardStatusColor::Red
         );
     }
@@ -380,7 +433,7 @@ mod tests {
             },
             UnsafeEvidence::NotWhitelistedIp("203.0.113.28".to_string()),
             UnsafeEvidence::NotWhitelistedCountry("KZ".to_string()),
-            UnsafeEvidence::PauseExpired,
+            UnsafeEvidence::PauseExpired(Duration::from_secs(60)),
         ];
 
         let mut phases = vec![GuardPhase::Disabled, GuardPhase::Protected(reading())];
@@ -531,6 +584,33 @@ mod tests {
         }
     }
 
+    /// Больше минуты — минуты и секунды: «299 с» не читается.
+    #[test]
+    fn countdown_above_a_minute_reads_as_minutes_and_seconds() {
+        let phase = GuardPhase::Paused {
+            since: t0(),
+            reason: UnprovenReason::ConfirmationUnavailable,
+        };
+        let text = explanation(&phase, Some(Duration::from_secs(299)));
+        assert_eq!(
+            text.next,
+            "Ждём ответа сервисов, 4:59 до завершения; возобновятся \
+             при подтверждении безопасного выхода"
+        );
+    }
+
+    #[test]
+    fn the_expired_evidence_names_its_own_ceiling() {
+        assert_eq!(
+            UnsafeEvidence::PauseExpired(Duration::from_secs(300)).display_text(),
+            "Подтверждение не получено за 5 мин"
+        );
+        assert_eq!(
+            UnsafeEvidence::PauseExpired(Duration::from_secs(60)).display_text(),
+            "Подтверждение не получено за 1 мин"
+        );
+    }
+
     /// `remaining_pause` может не подъехать вовремя (например, дедлайн ещё
     /// не выставлен) — строка паузы не имеет права падать или показывать
     /// отрицательное число.
@@ -568,7 +648,7 @@ mod tests {
             reason: UnprovenReason::ConfirmationUnavailable
         }));
         assert!(should_explain(&GuardPhase::Danger(
-            UnsafeEvidence::PauseExpired
+            UnsafeEvidence::PauseExpired(Duration::from_secs(60))
         )));
     }
 
@@ -607,6 +687,21 @@ mod tests {
             .hint,
             None
         );
+    }
+
+    /// Метка `terminal` — у всякой цели, кроме ярлыка `.desktop`: ярлык здесь
+    /// и есть приложение (на macOS — бандл `.app`), а бинарник, скрипт или
+    /// команда — то, что живёт в терминале. Порт `isCommandLine: kind != .appBundle`.
+    #[test]
+    fn only_a_desktop_entry_is_not_a_command_line_target() {
+        assert!(!is_command_line_target(
+            "/usr/share/applications/firefox.desktop"
+        ));
+        assert!(is_command_line_target("claude"));
+        assert!(is_command_line_target("/usr/bin/nano"));
+        assert!(is_command_line_target("/home/me/.local/bin/qwen"));
+        // Слово в середине пути ярлыком цель не делает.
+        assert!(is_command_line_target("/opt/app.desktop/bin/run"));
     }
 
     #[test]
@@ -664,5 +759,39 @@ mod tests {
         let lines = status_lines_without_report();
         assert_eq!(lines[0].value, "неизвестен");
         assert_eq!(lines[1].value, "—");
+    }
+
+    /// Тексты описания цели — дословно `GuardVM.resolvedDescription` с macOS.
+    /// Не нашлась цель по пути и по имени — разные беды и разные выходы:
+    /// путь можно поправить, а имя ищется по списку каталогов, и подсказка
+    /// про полный путь — единственный выход, который у пользователя есть.
+    #[test]
+    fn target_description_names_what_runs_and_why_it_was_not_found() {
+        assert_eq!(
+            target_description("nano", TargetKind::Binary, Some("/usr/bin/pico")),
+            "бинарник: /usr/bin/pico"
+        );
+        assert_eq!(
+            target_description("qwen", TargetKind::Script, Some("/opt/qwen/cli.js")),
+            "скрипт: /opt/qwen/cli.js"
+        );
+        assert_eq!(
+            target_description("/opt/нет/такого", TargetKind::Binary, None),
+            "не найдено: по этому пути нет исполняемого файла"
+        );
+        assert_eq!(
+            target_description("never-installed", TargetKind::Binary, None),
+            "не найдено по имени — укажите полный путь к файлу"
+        );
+    }
+
+    /// Имя цели без ярлыка берётся из того, что ввёл пользователь, а не из
+    /// развёрнутого пути: у инструментов из версионного каталога последний
+    /// сегмент — номер версии, и цель «claude» подписывалась «2.1.241».
+    /// Порт `TargetResolver.rule(forEntry:at:)`.
+    #[test]
+    fn a_target_without_a_shortcut_is_named_by_what_was_typed() {
+        assert_eq!(target_fallback_name("claude"), "claude");
+        assert_eq!(target_fallback_name("/usr/local/bin/qwen"), "qwen");
     }
 }

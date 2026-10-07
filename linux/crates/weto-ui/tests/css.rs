@@ -95,13 +95,15 @@ fn the_two_themes_actually_differ() {
 fn painted_controls_switch_off_the_theme_gradient() {
     // Только то, что GTK рисует как контрол. Карточкам и панелям градиент
     // штатная тема не назначает, и требовать от них сброса было бы шумом.
-    const CONTROLS: [&str; 6] = [
+    const CONTROLS: [&str; 8] = [
         ".weto-primary",
         ".weto-tile-button",
-        ".weto-close-button",
         ".weto-entry",
         ".weto-segments button:checked",
         ".weto-dropdown > button",
+        ".weto-menu-button > button",
+        ".weto-menu-item:hover",
+        ".weto-check > check:checked",
     ];
 
     for (theme, css) in [("тёмная", DARK_CSS), ("светлая", LIGHT_CSS)] {
@@ -128,6 +130,69 @@ fn painted_controls_switch_off_the_theme_gradient() {
             );
         }
     }
+}
+
+/// У панели нет ни рамки, ни радиуса — как у `WetoPanel` на macOS: окно рисует
+/// свою рамку само, и вторая скруглённая рамка внутри него читалась как ещё
+/// одна карточка, в которую вложено всё окно.
+#[test]
+fn the_panel_has_no_frame_of_its_own() {
+    for (theme, css) in [("тёмная", DARK_CSS), ("светлая", LIGHT_CSS)] {
+        let block = block_for(css, ".weto-panel")
+            .unwrap_or_else(|| panic!("в {theme} теме нет правила .weto-panel"));
+        assert!(
+            !block.contains("border"),
+            "у .weto-panel осталась рамка ({theme} тема): {block}"
+        );
+        assert!(block.contains("background-color"), "панель потеряла фон");
+    }
+}
+
+/// Нажатие гасит контрол до 0.7 — та же непрозрачность, что у пилюль
+/// и плитки на macOS (`WetoControls.swift`).
+#[test]
+fn a_pressed_control_dims_as_on_macos() {
+    for selector in [
+        ".weto-primary:active",
+        ".weto-muted:active",
+        ".weto-destructive:active",
+        ".weto-dropdown > button:active",
+        ".weto-menu-button > button:active",
+    ] {
+        let block =
+            block_for(LIGHT_CSS, selector).unwrap_or_else(|| panic!("нет правила {selector}"));
+        assert!(
+            block.contains("opacity: 0.7;"),
+            "{selector} гасится не до 0.7: {block}"
+        );
+    }
+}
+
+/// В светлой теме карточка отделяется от фона тенью `cardShadow`, в тёмной —
+/// только цветом (`WetoCard.swift`, `design-system.md`). Правило у тем общее,
+/// поэтому в тёмной тень обязана выйти прозрачной, а не исчезнуть из правила.
+#[test]
+fn the_card_casts_a_shadow_only_in_the_light_theme() {
+    let shadow = |css: &str| -> String {
+        let block = block_for(css, ".weto-card").expect("нет правила .weto-card");
+        block
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("box-shadow:"))
+            .unwrap_or_else(|| panic!("у карточки нет тени: {block}"))
+            .to_string()
+    };
+
+    assert!(
+        shadow(LIGHT_CSS).contains("rgba(24, 14, 60, 0.08)"),
+        "в светлой теме у карточки не та тень: {}",
+        shadow(LIGHT_CSS)
+    );
+    assert!(
+        shadow(DARK_CSS).contains("rgba(0, 0, 0, 0)"),
+        "в тёмной теме у карточки видна тень: {}",
+        shadow(DARK_CSS)
+    );
 }
 
 /// Тело правила вместе с телами правил, где селектор перечислен через запятую.

@@ -21,6 +21,9 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   `GuardMachine.apply(_:at:)`. Pinned by the shared golden fixture
   `shared/fixtures/guard-transitions.json` (version 2), run by both `GuardMachineTests` here
   and the Rust counterpart in `linux-guard`.
+- `macos/Sources/WetoCore/PauseCeiling.swift` — the four pause-ceiling choices (1/2/5/10 min,
+  `standard` = 1 min), `init(storedSeconds:)` (unknown → 1 min) and `durationText` («5 мин»,
+  «90 с») shared by the settings segments and the `pauseExpired` wording
 - `macos/Sources/WetoCore/PausePlan.swift` — `PausePlanner.plan(matched:processes:)`: who gets
   SIGSTOP and in what order (shell before its target, parent before descendants; `resumeOrder`
   is the reverse), which roots are already stopped (`skipped`), which lost their foreground
@@ -53,6 +56,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `GuardMachine.apply(_ input: GuardInput, at: Date) → GuardEffect` — the pure reducer:
   `.verdict`/`.reassessment`/`.evidence`/`.verdictLost`/`.tick`/`.disarmed` in,
   `.none`/`.pause`/`.resume`/`.terminate` out. `GuardController` owns the one live instance.
+- `GuardMachine.setPauseCeiling(_:)` — the ceiling is a parameter, not a `GuardInput`
 - `PausePlanner.plan(matched:processes:) → PausePlan`
 - `GuardConfig.hasTargets`, `GuardConfig.hasWhitelist` — the whitelist stage is skipped entirely
   when the latter is `false`
@@ -136,6 +140,14 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   kills on an empty selection *before* looking at the status, so a caller whose status drifts out of
   sync with the settings still fails closed.
 - **`ProcessSnapshot.arguments` stays an array.** A joined command line must never be used for matching.
+- **The pause ceiling is a machine parameter, not an input.** `setPauseCeiling` touches neither
+  the phase nor `pausedSince`; only the `.tick` threshold moves, and the deadline is always
+  `pausedSince + pauseCeiling`. A change therefore applies to the current pause at once: raising
+  it extends the pause, lowering it below the time already paused terminates on the next tick.
+  `UnsafeEvidence.pauseExpired(ceiling:)` carries the ceiling that fired, because the setting may
+  change afterwards and the record must name the number that was in force. Compare by
+  `isPauseExpired`, not `==`: equality now includes the ceiling. The evidence is not serialized —
+  the journal export format did not change.
 
 ## Failure hotspots
 <!-- generated, verify -->

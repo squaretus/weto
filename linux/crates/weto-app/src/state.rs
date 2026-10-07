@@ -73,6 +73,17 @@ impl SharedSettings {
             eprintln!("weto: настройки не сохранились: {error}");
         }
     }
+
+    /// Правка без ревизии — для того, что решения политики не меняет. Ревизия
+    /// обесценивает вердикт, и смена потолка паузы уводила бы охрану
+    /// в «Проверку» с пробой.
+    pub fn edit_untracked(&self, change: impl FnOnce(&mut Settings)) {
+        let mut settings = self.cached.lock().expect("настройки");
+        change(&mut settings);
+        if let Err(error) = settings.save(&self.path) {
+            eprintln!("weto: настройки не сохранились: {error}");
+        }
+    }
 }
 
 /// Обёртка ради правила сирот: и трейт, и `Arc` объявлены не здесь,
@@ -374,8 +385,11 @@ impl KillReporting for JournalWriter {
         // до завершения, входит сюда наравне: запись о ней уже есть, но новость
         // «цели завершены» от этого не исчезает.
         if announce {
-            self.notifier
-                .notify(&Self::targets_summary(killed), &context.reason);
+            self.notifier.notify(
+                &Self::targets_summary(killed),
+                &context.reason,
+                killed.len(),
+            );
         }
 
         if fresh.is_empty() {
@@ -729,6 +743,7 @@ mod tests {
         MatchedProcess {
             pid,
             target_name: "claude".to_string(),
+            target_entry: "claude".to_string(),
             parent_pid: 1,
             executable_path: "/usr/bin/claude".to_string(),
             matched_by: MatchBasis::Rule,
@@ -766,6 +781,107 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "повторившийся id: {ids:?}");
         // Эпизод при этом один: записи объясняются вместе и получают один исход.
         assert!(events.iter().all(|event| event.episode_id == episode.id));
+    }
+
+    /// Что уведомление получило: цели, причина, число завершённых процессов.
+    type Announced = Arc<Mutex<Vec<(Vec<String>, String, usize)>>>;
+
+    struct RecordingNotifier(Announced);
+
+    impl KillNotifying for RecordingNotifier {
+        fn notify(&self, target_names: &[String], reason: &str, killed_count: usize) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((target_names.to_vec(), reason.to_string(), killed_count));
+        }
+
+        fn notify_backgrounded(&self, _target_name: &str) {}
+    }
+
+    fn named(pid: i32, target_name: &str) -> MatchedProcess {
+        MatchedProcess {
+            target_name: target_name.to_string(),
+            ..process(pid)
+        }
+    }
+
+    /// Уведомление о завершении — как на macOS: цели прохода с числом процессов
+    /// там, где их больше одного, и общее число завершённых сейчас. Считаются
+    /// все завершённые, включая стоявших на паузе: запись о них уже есть,
+    /// а новость «процессы завершены» от этого не исчезает.
+    #[test]
+    fn the_kill_notification_counts_every_process_killed_by_the_pass() {
+        let home = std::env::temp_dir().join(format!(
+            "weto-state-notify-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = weto_config::paths::Paths::rooted(home.clone());
+        let announced: Announced = Arc::new(Mutex::new(Vec::new()));
+        let writer = JournalWriter {
+            paths: paths.clone(),
+            journal: Arc::new(Mutex::new(Journal::load(&paths.journal_file()))),
+            episode: Mutex::new(EpisodeLedger::new()),
+            pause_episodes: Mutex::new(PauseEpisodes::default()),
+            notifier: Box::new(RecordingNotifier(announced.clone())),
+        };
+        let context = KillContext {
+            reason: "Страна выхода RU в чёрном списке".to_string(),
+            ..KillContext::default()
+        };
+
+        let killed = [
+            named(10, "claude"),
+            named(11, "claude"),
+            named(12, "codex"),
+            named(13, "claude"),
+        ];
+        // pid 10 уже описан эпизодом паузы: записи не заводит, но в число входит.
+        writer.report(&killed, &killed[1..], &context);
+
+        assert_eq!(
+            *announced.lock().unwrap(),
+            vec![(
+                vec!["claude ×3".to_string(), "codex".to_string()],
+                "Страна выхода RU в чёрном списке".to_string(),
+                4,
+            )]
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Потолок паузы правится мимо ревизии: ревизия обесценивает вердикт,
+    /// и смена потолка уводила бы охрану в «Проверку» с пробой.
+    #[test]
+    fn an_untracked_edit_is_saved_but_does_not_bump_the_revision() {
+        let home = std::env::temp_dir().join(format!(
+            "weto-state-untracked-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = weto_config::paths::Paths::rooted(home.clone());
+        let settings = SharedSettings::load(&paths);
+        let revision = settings.current().revision;
+
+        settings.edit_untracked(|s| s.pause_ceiling_seconds = 600);
+
+        assert_eq!(settings.current().revision, revision);
+        assert_eq!(settings.current().pause_ceiling_seconds, 600);
+        assert_eq!(
+            Settings::load(&paths.settings_file())
+                .unwrap()
+                .pause_ceiling_seconds,
+            600,
+            "правка дошла до файла"
+        );
+        let _ = std::fs::remove_dir_all(home);
     }
 
     /// У разных эпизодов — разные идентификаторы, и счётчик записей у каждого свой:

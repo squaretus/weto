@@ -14,10 +14,13 @@
 //! без причины, лежащей в самой платформе.
 
 pub mod checker;
+pub mod dialog;
 pub mod installer;
 pub mod layout;
 pub mod policy;
+pub mod progress;
 pub mod rollback;
 pub mod scheduler;
 pub mod store;
+pub mod strings;
 pub mod version;

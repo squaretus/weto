@@ -15,11 +15,13 @@ use gtk4::prelude::*;
 use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack};
 
 use weto_config::settings::{GeoListKind, Theme};
-use weto_core::process::TargetKind;
+use weto_core::pause_ceiling::PauseCeiling;
+use weto_core::presentation::{target_description, target_fallback_name};
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 use weto_sys::target_resolver::{
-    applications_dirs, display_name_for, resolve_launch_entry, resolve_launch_target, Resolution,
+    applications_dirs, display_name_for, launch_paths_for, locate_with_launch_paths,
+    resolve_launch_entry, resolve_launch_target, target_kind_for, LaunchTargetResolver, Resolution,
 };
 use weto_ui::components as ui;
 use weto_ui::theme;
@@ -57,7 +59,7 @@ pub fn present(app: &gtk4::Application, state: Arc<AppState>) {
 fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("weto — настройки")
+        .title("Weto — настройки")
         .default_width(ui::WINDOW_WIDTH)
         .default_height(ui::WINDOW_HEIGHT)
         .build();
@@ -123,8 +125,8 @@ fn settings_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWi
         "Белый список",
     ));
     page.append(&appearance_card(state.clone()));
-    page.append(&maintenance_card(state.clone()));
-    page.append(&footer(window, state.clone()));
+    page.append(&maintenance_card(window, state.clone()));
+    page.append(&footer(window));
 
     scroll(&page)
 }
@@ -138,8 +140,19 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let list = GtkBox::new(Orientation::Vertical, 0);
     card.append(&list);
 
-    let add_row = ui::row(false);
+    // Линию над вводом ставит перерисовка: пока целей нет, над ним одна
+    // строка-заглушка, и линия отделяла бы ввод от пустоты.
+    let add_row = ui::row(true);
     let entry = ui::entry("Новая цель");
+    // Формат ввода — значком в конце поля, а не подписью под карточкой: подпись
+    // под карточкой не читалась как относящаяся к полю. Про бандлы здесь
+    // не сказано ни слова — на Linux нет каталога, которым можно накрыть
+    // процессы разом, и вид цели `appBundle` не переносится.
+    ui::entry_hint(
+        &entry,
+        "Имя команды (nano) или путь (/usr/bin/curl). \
+         Дочерние процессы завершаются вместе с родителем.",
+    );
     let add = ui::primary_button("Добавить");
     let pick = ui::muted_button("Выбрать…");
     add_row.append(&entry);
@@ -149,23 +162,21 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 
     holder.append(&card);
 
-    // Подпись под карточкой, а не внутри: так в каноне. Про бандлы здесь
-    // не сказано ни слова — на Linux нет каталога, которым можно накрыть
-    // процессы разом, и вид цели `appBundle` не переносится.
-    let hint = ui::caption(
-        "Имя команды (nano) или путь (/usr/bin/curl). \
-         Дочерние процессы завершаются вместе с родителем.",
-    );
-    hint.set_wrap(true);
-    hint.set_xalign(0.0);
-    holder.append(&hint);
-
+    // Виджеты карточки перерисовка держит слабо: её зовут кнопки внутри той же
+    // строки ввода, и сильная ссылка замкнула бы цикл строка → кнопка →
+    // обработчик → перерисовка → строка. Окно уходит, а карточка вместе
+    // с состоянием приложения оставалась бы в памяти на каждое открытие настроек.
     let redraw = {
         let state = state.clone();
-        let list = list.clone();
+        let list = list.downgrade();
+        let add_row = add_row.downgrade();
         move || {
+            let (Some(list), Some(add_row)) = (list.upgrade(), add_row.upgrade()) else {
+                return;
+            };
             clear(&list);
             let settings = state.settings.current();
+            ui::set_divided(&add_row, ui::input_row_divided(settings.targets.len()));
 
             if settings.targets.is_empty() {
                 let row = ui::row(true);
@@ -194,7 +205,7 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
                     .filter(|r| r.entry == target.entry)
                     .map(|r| r.process_count)
                     .sum();
-                row.append(&ui::value(&count.to_string()));
+                row.append(&ui::data_value(&count.to_string()));
 
                 let remove = ui::icon_button("user-trash-symbolic");
                 remove.set_tooltip_text(Some("Удалить цель"));
@@ -224,10 +235,14 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
 
     let commit = {
         let state = state.clone();
-        let entry = entry.clone();
+        // Поле — слабо: этот же обработчик висит на нём самом.
+        let entry = entry.downgrade();
         let redraw = redraw.clone();
         let window = window.downgrade();
         move || {
+            let Some(entry) = entry.upgrade() else {
+                return;
+            };
             let text = entry.text().to_string();
             let text = text.trim().to_string();
             if text.is_empty() {
@@ -334,14 +349,26 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     holder
 }
 
-/// Описание цели под именем. Вида `appBundle` на Linux нет, поэтому и строки
-/// «приложение:» здесь не бывает.
+/// Описание цели под именем — что стоит за ней сейчас, а не в момент
+/// добавления. Путь спрашивается у границы при каждой перерисовке: обновление
+/// инструмента из версионного каталога меняет развёрнутый путь целиком,
+/// и запомненный путь показывал бы удалённую версию. Чего на диске нет,
+/// то «не найдено» — с подсказкой, что делать, как на macOS. Вид берётся
+/// у файла тем же ответом, что и путь: цель, записанная бинарником до того,
+/// как вид стали различать, подписана «скрипт», как её и узнаёт охрана.
+///
+/// Кандидаты те же, что у охраны (`locate_with_launch_paths`): голое имя,
+/// которого нет в `PATH` приложения, находится по файлу в `PATH`, запомненному
+/// при добавлении, — иначе под целью, которую охрана сторожит, стояло бы
+/// «не найдено».
 fn resolved_description(target: &weto_config::settings::Target) -> String {
-    let kind = match target.kind {
-        TargetKind::Binary => "бинарник",
-        TargetKind::Script => "скрипт",
-    };
-    format!("{kind}: {}", target.path)
+    let found =
+        locate_with_launch_paths(&LaunchTargetResolver, &target.entry, &target.launch_paths);
+    target_description(
+        &target.entry,
+        found.as_ref().map_or(target.kind, |found| found.kind),
+        found.as_ref().map(|found| found.path.as_str()),
+    )
 }
 
 /// Добавление цели с готовым именем.
@@ -365,15 +392,22 @@ fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<Stri
     let resolved = resolve_launch_target(text);
     let name = display_name
         .or_else(|| display_name_for(text))
-        .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
+        .unwrap_or_else(|| target_fallback_name(text));
+    // Голое имя запоминается вместе с файлом в PATH (`~/.local/bin/claude`):
+    // охрана разрешает цель заново, и если голого имени в её PATH не окажется,
+    // она начнёт с него, а не с развёрнутого пути, устаревающего с обновлением.
+    let launch_paths = launch_paths_for(text);
+    // Скрипт с шебангом (`qwen` из npm) ядро запускает интерпретатором,
+    // и по пути `exe` он не совпал бы ни с одним процессом — его узнают по argv.
+    let kind = target_kind_for(text);
 
     state.settings.edit(|s| {
         s.targets.push(weto_config::settings::Target {
             entry: text.to_string(),
             display_name: name,
-            kind: TargetKind::Binary,
+            kind,
             path: resolved,
-            launch_paths: vec![text.to_string()],
+            launch_paths,
         })
     });
 }
@@ -386,31 +420,89 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // VPN-приложение: та же форма, что цель, — команда или путь. Список туннелей
     // здесь стоял раньше и ушёл вместе с самим выбором туннеля: имена вида utun6
     // и wg0 пользователю ничего не говорят и меняются при переподключении.
+    //
+    // Строка в двух состояниях, как `NetworkSettingsCard` на macOS: не выбрано —
+    // «не выбрано», поле и «Выбрать»; выбрано — имя над описанием справа
+    // и корзина. Поле вместо файлового диалога — отступление Linux: команду
+    // и путь здесь вводят руками, как у цели.
     let vpn_row = ui::row(true);
     vpn_row.append(&ui::label("VPN-приложение"));
     vpn_row.append(&ui::spacer());
-    let vpn_value = ui::label("не выбрано");
-    vpn_row.append(&vpn_value);
+
+    let unchosen = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
+    unchosen.append(&ui::faint_value("не выбрано"));
     let vpn_entry = ui::entry("Команда или путь");
     let vpn_set = ui::primary_button("Выбрать");
-    let vpn_clear = ui::muted_button("Снять");
-    vpn_row.append(&vpn_entry);
-    vpn_row.append(&vpn_set);
-    vpn_row.append(&vpn_clear);
+    unchosen.append(&vpn_entry);
+    unchosen.append(&vpn_set);
+    vpn_row.append(&unchosen);
+
+    let chosen = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
+    let chosen_text = GtkBox::new(Orientation::Vertical, 2);
+    chosen_text.set_valign(gtk4::Align::Center);
+    let vpn_name = ui::ink_value("");
+    vpn_name.set_xalign(1.0);
+    let vpn_description = ui::caption("");
+    vpn_description.set_halign(gtk4::Align::End);
+    vpn_description.set_xalign(1.0);
+    vpn_description.set_selectable(true);
+    vpn_description.set_wrap(true);
+    vpn_description.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+    chosen_text.append(&vpn_name);
+    chosen_text.append(&vpn_description);
+    chosen.append(&chosen_text);
+    let vpn_clear = ui::icon_button("user-trash-symbolic");
+    vpn_clear.set_tooltip_text(Some("Снять выбор"));
+    vpn_clear.set_valign(gtk4::Align::Center);
+    chosen.append(&vpn_clear);
+    vpn_row.append(&chosen);
     card.append(&vpn_row);
 
-    {
+    // Состояние строки берётся из настроек при каждом показе: выбор меняют
+    // и кнопки этой же строки, и правка конфига снаружи, а описание обязано
+    // следовать за версионным путём так же, как у целей.
+    //
+    // Виджеты строки замыкание держит слабо: кнопки «Выбрать» и корзина живут
+    // внутри `unchosen` и `chosen` и сами держат это замыкание, и сильная ссылка
+    // отсюда замкнула бы цикл контейнер → кнопка → обработчик → замыкание →
+    // контейнер. Окно при этом уходит, а строка вместе с состоянием приложения
+    // остаётся в памяти навсегда — на каждое открытие настроек.
+    let show: Rc<dyn Fn()> = {
         let state = state.clone();
-        let vpn_value = vpn_value.clone();
-        let show = move || {
-            let chosen = state.settings.current().vpn_app;
-            vpn_value.set_text(&match chosen {
-                Some(app) => format!("{} — {}", app.display_name, resolved_description(&app)),
-                None => "не выбрано".to_string(),
-            });
-        };
-        show();
+        let unchosen = unchosen.downgrade();
+        let chosen = chosen.downgrade();
+        let vpn_name = vpn_name.downgrade();
+        let vpn_description = vpn_description.downgrade();
+        Rc::new(move || {
+            let (Some(unchosen), Some(chosen), Some(vpn_name), Some(vpn_description)) = (
+                unchosen.upgrade(),
+                chosen.upgrade(),
+                vpn_name.upgrade(),
+                vpn_description.upgrade(),
+            ) else {
+                return;
+            };
+            let app = state.settings.current().vpn_app;
+            unchosen.set_visible(app.is_none());
+            chosen.set_visible(app.is_some());
+            if let Some(app) = app {
+                // Текст меняется, только когда изменился: такт идёт дважды
+                // в секунду, а подмена снимала бы выделение с описания,
+                // которое копируют в обращение.
+                let description = resolved_description(&app);
+                if vpn_name.text() != app.display_name {
+                    vpn_name.set_text(&app.display_name);
+                }
+                if vpn_description.text() != description {
+                    vpn_description.set_text(&description);
+                }
+            }
+        })
+    };
+    show();
 
+    {
+        let show = show.clone();
         window_tick(window, std::time::Duration::from_millis(500), move || {
             show();
             gtk4::glib::ControlFlow::Continue
@@ -420,6 +512,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     {
         let state = state.clone();
         let vpn_entry = vpn_entry.clone();
+        let show = show.clone();
         let window = window.downgrade();
         vpn_set.connect_clicked(move |_| {
             // Окно захвачено слабо: обработчик живёт внутри самого окна,
@@ -435,13 +528,12 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
             // невыбранное VPN-приложение не значит ничего, а выбранное
             // и не запущенное — доказательство, то есть завершение всех целей.
             // Ярлык flatpak, принятый молча, устроил бы это на ровном месте.
-            // Строку статуса обновляет свой таймер, поэтому перерисовывать
-            // отсюда нечего.
-            let redraw: Rc<dyn Fn()> = Rc::new(|| {});
+            // Перерисовка — сама строка: выбор переключает её во второе
+            // состояние сразу, а не на следующем такте.
             commit_entry(
                 &window,
                 &state,
-                &redraw,
+                &show,
                 &vpn_entry.text(),
                 Destination::VpnApp,
             );
@@ -453,65 +545,187 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         let state = state.clone();
         vpn_clear.connect_clicked(move |_| {
             state.settings.edit(|s| s.set_vpn_app(None));
+            show();
         });
     }
 
+    // Подписи строк с полем и с сегментами — одна колонка шириной с самую длинную:
+    // поле токена и сегменты таймаута начинаются с одной вертикали. Отступ после
+    // колонки — `space5`, как в каноне и на macOS.
+    let label_column = gtk4::SizeGroup::new(gtk4::SizeGroupMode::Horizontal);
+
     // Токен ipinfo.
     let token_row = ui::row(false);
-    token_row.append(&ui::label("Токен ipinfo"));
+    // Пояснение — после названия: поле обычно заполнено маской, и значок в конце
+    // поля, видный только у пустого поля, его бы не показал.
+    let token_label = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
+    token_label.append(&ui::label("Токен ipinfo"));
+    token_label.append(&ui::hint(
+        "Ключ ipinfo.io — единственного сервиса, который называет адрес выхода. \
+         Без ключа проверять нечем: цели встают на паузу и по таймауту завершаются. \
+         Ключ бесплатный: ipinfo.io → Sign Up → Dashboard → API Token. \
+         Хранится отдельно от настроек и в выгрузку журнала не попадает.",
+    ));
+    token_label.set_margin_end(ui::SPACE5 - ui::SPACE3);
+    label_column.add_widget(&token_label);
+    token_row.append(&token_label);
     let token_entry = ui::entry("Ключ ipinfo.io");
     token_row.append(&token_entry);
     card.append(&token_row);
 
-    let token_error = ui::caption("");
-    token_error.add_css_class("weto-error");
-    token_error.set_wrap(true);
-    token_error.set_xalign(0.0);
-    token_error.set_visible(false);
-    card.append(&token_error);
+    // Ошибка — своей строкой под полем, с паддингом строки, как `WetoRow`
+    // на macOS.
+    let (token_error_row, token_error) = ui::error_row();
+    card.append(&token_error_row);
 
-    let store = FileSecretStore::new(state.paths.token_file());
-    let stored = store.load().ok().flatten().unwrap_or_default();
-    token_entry.set_text(&mask(&stored));
+    // Сохранённый токен помнится здесь, а не перечитывается: маска при уходе
+    // из поля обязана описывать то, что записано сейчас, а не при открытии окна.
+    let path = state.paths.token_file();
+    let stored = Rc::new(RefCell::new(
+        FileSecretStore::new(path.clone())
+            .load()
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+    ));
+    token_entry.set_text(&token_field_text(&stored.borrow(), false));
+
+    // Подмена текста при входе в поле и уходе из него — не ввод. `set_text`
+    // у поля GTK — это стирание и вставка, и `changed` приходит дважды:
+    // первым — с пустой строкой, которую обработчик принял бы за стёртый
+    // ключ и записал.
+    let replacing = Rc::new(std::cell::Cell::new(false));
 
     {
-        let token_error = token_error.clone();
-        let path = state.paths.token_file();
-        let masked = mask(&stored);
+        let stored = stored.clone();
+        let replacing = replacing.clone();
         token_entry.connect_changed(move |entry| {
-            let value = entry.text().to_string();
-            // Маска — не ввод: пока её не тронули, сохранять нечего.
-            if value == masked {
+            if replacing.get() {
                 return;
             }
+            // Маска и показ токена при входе в поле — не ввод: сохранять
+            // нечего. Решает чистый помощник, здесь только запись.
+            let Some(value) = token_to_save(&entry.text(), &stored.borrow()) else {
+                return;
+            };
             // Токен считается сохранённым только после успешной записи:
             // тихая ошибка выдавала бы его за сохранённый.
-            match FileSecretStore::new(path.clone()).save(value.trim()) {
-                Ok(()) => token_error.set_visible(false),
-                Err(error) => {
-                    token_error.set_text(&error.to_string());
-                    token_error.set_visible(true);
+            match FileSecretStore::new(path.clone()).save(&value) {
+                Ok(()) => {
+                    *stored.borrow_mut() = value;
+                    ui::set_error(&token_error, None);
                 }
+                Err(error) => ui::set_error(&token_error, Some(&error.to_string())),
             }
         });
     }
 
-    // Интервал опроса.
+    // В фокусе — сам токен, вне фокуса — маска, как на macOS. Маска, стоявшая
+    // в поле и при правке, уходила в файл вместе с дописанным символом:
+    // токеном из точек, на который ipinfo отвечает отказом.
+    //
+    // Поле берётся у контроллера, а не захватывается: контроллер принадлежит
+    // полю, и сильная ссылка на поле из его же обработчика замкнула бы цикл.
+    let focus = gtk4::EventControllerFocus::new();
+    for focused in [true, false] {
+        let stored = stored.clone();
+        let replacing = replacing.clone();
+        let show = move |controller: &gtk4::EventControllerFocus| {
+            if let Some(entry) = controller.widget().and_downcast::<gtk4::Entry>() {
+                replacing.set(true);
+                entry.set_text(&token_field_text(&stored.borrow(), focused));
+                replacing.set(false);
+            }
+        };
+        if focused {
+            focus.connect_enter(show);
+        } else {
+            focus.connect_leave(show);
+        }
+    }
+    token_entry.add_controller(focus);
+
+    // Таймаут подтверждения: сколько цели стоят на паузе до завершения.
+    // Мимо ревизии: потолок решения политики не меняет, а ревизия обесценила бы
+    // вердикт и увела охрану в «Проверку» с пробой.
+    let timeout_row = ui::row(false);
+    let timeout_label = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
+    timeout_label.append(&ui::label("Таймаут"));
+    timeout_label.append(&ui::hint(
+        "Сколько цели стоят на паузе, если сервисы не подтвердили безопасный выход. \
+         Подтверждение пришло — цели продолжают работу, не пришло за это время — \
+         завершаются. Отсчёт идёт от начала паузы, новое значение действует сразу, \
+         в том числе на текущую паузу.",
+    ));
+    timeout_label.set_margin_end(ui::SPACE5 - ui::SPACE3);
+    label_column.add_widget(&timeout_label);
+    timeout_row.append(&timeout_label);
+    let current = state.settings.current().pause_ceiling();
+    let titles: Vec<String> = PauseCeiling::ALL.iter().map(|c| c.title()).collect();
+    let title_refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+    let selected = PauseCeiling::ALL
+        .iter()
+        .position(|c| *c == current)
+        .unwrap_or(0);
+    let (segments, buttons) = ui::segments(&title_refs, selected);
+    segments.set_hexpand(true);
+    timeout_row.append(&segments);
+    card.append(&timeout_row);
+
+    for (button, ceiling) in buttons.iter().zip(PauseCeiling::ALL) {
+        let state = state.clone();
+        button.connect_toggled(move |button| {
+            if button.is_active() {
+                state
+                    .settings
+                    .edit_untracked(|s| s.pause_ceiling_seconds = ceiling.seconds());
+            }
+        });
+    }
+
     card
 }
 
-/// Показываем хвост токена, а не сам токен: подтвердить «тот ли ключ» так можно,
-/// а подсмотреть через плечо — нет.
+/// Что стоит в поле токена. В фокусе — сам токен: его правят, и правка
+/// маски сохраняла бы точки. Вне фокуса — маска: хвост токена, а не сам
+/// токен, — подтвердить «тот ли ключ» так можно, а подсмотреть через плечо
+/// нет. Порт `onChange(of: isTokenFocused)` из `NetworkSettingsCard`.
+fn token_field_text(stored: &str, focused: bool) -> String {
+    if focused {
+        stored.to_string()
+    } else {
+        mask(stored)
+    }
+}
+
+/// Что сохранить из поля токена, если сохранять есть что.
+///
+/// Точка маски в настоящем токене не встречается, поэтому текст с ней — маска
+/// или её обломок, а не ввод: так маска не уходит в файл ни целой,
+/// ни правленой. Совпавший с записанным текст — показ токена при входе
+/// в поле, а не правка.
+fn token_to_save(text: &str, stored: &str) -> Option<String> {
+    if text.contains(MASK_DOT) {
+        return None;
+    }
+    let value = text.trim();
+    (value != stored).then(|| value.to_string())
+}
+
+/// Знак маски токена.
+const MASK_DOT: char = '•';
+
 fn mask(token: &str) -> String {
     let length = token.chars().count();
     if length == 0 {
         return String::new();
     }
+    let dots = |count: usize| MASK_DOT.to_string().repeat(count);
     if length <= 4 {
-        return "•".repeat(length);
+        return dots(length);
     }
     let tail: String = token.chars().skip(length - 4).collect();
-    format!("{}{tail}", "•".repeat(length - 4))
+    format!("{}{tail}", dots(length - 4))
 }
 
 // --- Списки геоправил -----------------------------------------------------
@@ -524,30 +738,45 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
     let list = GtkBox::new(Orientation::Vertical, 0);
     card.append(&list);
 
-    let add_row = ui::row(false);
+    // Линию над вводом ставит перерисовка: пока список пуст, над ним одна
+    // строка-заглушка, и линия отделяла бы ввод от пустоты.
+    let add_row = ui::row(true);
     let entry = ui::entry("Код страны (RU), IP или CIDR");
+    // Плейсхолдер исчезает при первом символе, поэтому формат повторён значком.
+    ui::entry_hint(
+        &entry,
+        "Код страны из двух букв (RU), IP-адрес (203.0.113.7) \
+         или диапазон CIDR (203.0.113.0/24).",
+    );
     let add = ui::primary_button("Добавить");
     add_row.append(&entry);
     add_row.append(&add);
     card.append(&add_row);
 
-    let error = ui::caption("");
-    error.add_css_class("weto-error");
-    error.set_wrap(true);
-    error.set_xalign(0.0);
-    error.set_visible(false);
-    card.append(&error);
+    // Отказ — своей строкой под вводом, с паддингом строки, как на macOS.
+    let (error_row, error) = ui::error_row();
+    card.append(&error_row);
 
     // Перерисовка через `Rc`, чтобы её могли позвать и кнопки внутри строк,
     // которые она же и создаёт.
+    //
+    // Себя перерисовка помнит слабо, как и виджеты карточки: сильная ссылка на
+    // собственную ячейку — цикл в счётчиках ссылок, который не рвётся никогда,
+    // а виджеты держат кнопки той же строки ввода. Ячейку держат обработчики
+    // ввода — ровно столько, сколько живёт карточка.
     let redraw: Redraw = Rc::new(RefCell::new(None));
     {
         let state = state.clone();
-        let list = list.clone();
-        let self_ref = redraw.clone();
+        let list = list.downgrade();
+        let self_ref = Rc::downgrade(&redraw);
+        let add_row = add_row.downgrade();
         let draw: Rc<dyn Fn()> = Rc::new(move || {
+            let (Some(list), Some(add_row)) = (list.upgrade(), add_row.upgrade()) else {
+                return;
+            };
             clear(&list);
             let entries = state.settings.current().entries(kind);
+            ui::set_divided(&add_row, ui::input_row_divided(entries.len()));
 
             if entries.is_empty() {
                 let row = ui::row(true);
@@ -571,7 +800,8 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
                 let again = self_ref.clone();
                 remove.connect_clicked(move |_| {
                     state.settings.edit(|s| s.remove_entry(&blocked, kind));
-                    if let Some(draw) = again.borrow().clone() {
+                    let draw = again.upgrade().and_then(|slot| slot.borrow().clone());
+                    if let Some(draw) = draw {
                         draw();
                     }
                 });
@@ -601,10 +831,14 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
 
     let commit = {
         let state = state.clone();
-        let entry = entry.clone();
+        // Поле — слабо: этот же обработчик висит на нём самом.
+        let entry = entry.downgrade();
         let error = error.clone();
         let redraw = redraw.clone();
         move || {
+            let Some(entry) = entry.upgrade() else {
+                return;
+            };
             let text = entry.text().to_string();
             // Разбор и проверка живут в настройках: экрану остаётся показать отказ.
             let mut outcome = Ok(());
@@ -613,13 +847,10 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
             match outcome {
                 Ok(()) => {
                     entry.set_text("");
-                    error.set_visible(false);
+                    ui::set_error(&error, None);
                     redraw();
                 }
-                Err(failure) => {
-                    error.set_text(&failure.to_string());
-                    error.set_visible(true);
-                }
+                Err(failure) => ui::set_error(&error, Some(&failure.to_string())),
             }
         }
     };
@@ -671,15 +902,25 @@ fn appearance_card(state: Arc<AppState>) -> GtkBox {
 
 // --- Обслуживание ---------------------------------------------------------
 
-fn maintenance_card(state: Arc<AppState>) -> GtkBox {
+/// Включена ли автоустановка — у механизма обновления, а без него (тест окна)
+/// — в хранилище.
+fn auto_install(state: &AppState) -> bool {
+    match crate::update::shared() {
+        Some(updates) => updates.auto_install(),
+        None => {
+            weto_update::store::UpdateStore::new(state.paths.state_dir.clone())
+                .deferral()
+                .auto_install
+        }
+    }
+}
+
+fn maintenance_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let card = ui::card("Обслуживание");
     let autostart = Autostart::new(&state.paths);
 
-    let error = ui::caption("");
-    error.add_css_class("weto-error");
-    error.set_wrap(true);
-    error.set_xalign(0.0);
-    error.set_visible(false);
+    // Отказ — своей строкой под тумблерами, с паддингом строки, как на macOS.
+    let (error_row, error) = ui::error_row();
 
     // Автозапуск.
     let launch_row = ui::row(true);
@@ -702,11 +943,8 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
             };
 
             match outcome {
-                Ok(()) => error.set_visible(false),
-                Err(failure) => {
-                    error.set_text(&failure.to_string());
-                    error.set_visible(true);
-                }
+                Ok(()) => ui::set_error(&error, None),
+                Err(failure) => ui::set_error(&error, Some(&failure.to_string())),
             }
 
             // Состояние берём из системы, а не из нажатия: отказ не должен
@@ -717,28 +955,45 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
     }
 
     // Автообновление. Та же настройка, что галочка в окне обновления:
-    // хранилище одно, поэтому оба места показывают одно и то же.
-    let auto_row = ui::row(false);
+    // значение одно (`Updates::auto_install`), и оба места сверяются с ним
+    // своим тактом. Включение сразу ставит найденное обновление — как
+    // сеттер `isAutoInstallEnabled` на macOS. Линии между тумблерами нет,
+    // как в `MaintenanceCard` на macOS: два тумблера читаются одной группой.
+    let auto_row = ui::row(true);
     auto_row.append(&ui::label("Обновлять автоматически"));
     auto_row.append(&ui::spacer());
     let auto = ui::toggle();
-    auto.set_active(
-        weto_update::store::UpdateStore::new(state.paths.state_dir.clone())
-            .deferral()
-            .auto_install,
-    );
+    auto.set_active(auto_install(&state));
     auto_row.append(&auto);
     card.append(&auto_row);
 
     {
         let state_dir = state.paths.state_dir.clone();
         auto.connect_state_set(move |_, value| {
-            weto_update::store::UpdateStore::new(state_dir.clone()).set_auto_install(value);
+            match crate::update::shared() {
+                Some(updates) => updates.set_auto_install(value),
+                // Механизм обновления не поднят (тест окна) — пишем в хранилище
+                // напрямую: настройка от этого не перестаёт быть настройкой.
+                None => {
+                    weto_update::store::UpdateStore::new(state_dir.clone()).set_auto_install(value)
+                }
+            }
             gtk4::glib::Propagation::Proceed
         });
     }
+    {
+        let auto = auto.clone();
+        let state = state.clone();
+        window_tick(window, std::time::Duration::from_millis(500), move || {
+            let stored = auto_install(&state);
+            if auto.is_active() != stored {
+                auto.set_active(stored);
+            }
+            gtk4::glib::ControlFlow::Continue
+        });
+    }
 
-    card.append(&error);
+    card.append(&error_row);
 
     let actions = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
     actions.set_margin_top(ui::SPACE3);
@@ -751,26 +1006,7 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
     card.append(&actions);
 
     close.connect_clicked(move |button| {
-        confirm(
-            button,
-            "Закрыть weto?",
-            // Про «до следующего входа в систему» текст обещать не имеет права:
-            // автозапуск по умолчанию выключен, и без него weto не вернётся
-            // никогда. Дословно как на macOS.
-            "Приложение завершится и перестанет охранять цели. Настройки, журнал \
-             и автозапуск сохранятся: если автозапуск включён, weto вернётся \
-             при следующем входе в систему.",
-            "Закрыть",
-            || {
-                // Замороженных целей выход не оставляет: SIGCONT шлёт воронка
-                // `connect_shutdown`, а не эта кнопка — иначе обязательство
-                // держалось бы на трёх кнопках, а закрытие последнего окна
-                // проходило бы мимо него.
-                if let Some(app) = gtk4::gio::Application::default() {
-                    app.quit();
-                }
-            },
-        );
+        ask_to_close(button.root().and_downcast::<gtk4::Window>().as_ref());
     });
 
     {
@@ -781,7 +1017,7 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
             let state = state.clone();
             confirm(
                 button,
-                "Удалить weto?",
+                "Удалить Weto?",
                 "Будут удалены приложение, автозапуск, настройки, журнал и токен ipinfo. \
                  Действие необратимо.",
                 "Удалить",
@@ -813,10 +1049,10 @@ fn maintenance_card(state: Arc<AppState>) -> GtkBox {
                             let error = error.clone();
                             ask_two_ways(
                                 &anchor,
-                                "Эти программы weto поставил на паузу, и они ещё не продолжились:",
+                                "Эти программы Weto поставил на паузу, и они ещё не продолжились:",
                                 &standing_detail(&standing),
                                 "Удалить всё равно",
-                                "Не удалять и закрыть weto",
+                                "Не удалять и закрыть Weto",
                                 move || remove_weto(&error),
                                 || {
                                     // Второй исход — выход, а не «ничего
@@ -883,8 +1119,8 @@ fn confirm_resumed(
 /// не сторожит, — и пользователь узнал бы об этом только по погибшей цели.
 fn standing_detail(standing: &[weto_config::stopped::StoppedProcess]) -> String {
     format!(
-        "{}\n\nОхрана уже остановлена и обратно не включится: weto придётся \
-         запустить заново.\n\nЕсли удалить weto сейчас, вернуть эти программы \
+        "{}\n\nОхрана уже остановлена и обратно не включится: Weto придётся \
+         запустить заново.\n\nЕсли удалить Weto сейчас, вернуть эти программы \
          будет некому — только командой fg в их терминале. Если не удалять, \
          их разберёт следующий запуск: учёт остановленных цел.",
         standing_list(standing)
@@ -921,13 +1157,12 @@ fn remove_weto(error: &gtk4::Label) {
             // а тумблера охраны в продукте нет. Оставить окно с текстом ошибки
             // значило бы оставить иконку в трее у приложения, которое уже
             // ничего не охраняет и молчит об этом.
-            error.set_text(&failure);
-            error.set_visible(true);
+            ui::set_error(error, Some(&failure));
 
             let dialog = gtk4::AlertDialog::builder()
                 .message("Удаление прошло не полностью")
                 .detail(format!(
-                    "{failure}\n\nweto закроется: охрана уже остановлена, и продолжать \
+                    "{failure}\n\nWeto закроется: охрана уже остановлена, и продолжать \
                      он не может. Оставшееся удалите вручную."
                 ))
                 .buttons(["Закрыть"])
@@ -966,7 +1201,8 @@ fn ask_two_ways(
         .detail(detail)
         .buttons([confirm_title, alternative_title])
         .cancel_button(1)
-        .default_button(1)
+        // Enter не нажимает ничего: закрыть или удалить можно только явным нажатием.
+        .default_button(-1)
         .modal(true)
         .build();
 
@@ -984,6 +1220,62 @@ fn ask_two_ways(
     );
 }
 
+thread_local! {
+    /// Диалог закрытия уже на экране. Второй «Выход» из трея поднимал бы
+    /// вторую копию поверх первой, и отвечать пришлось бы дважды.
+    static CLOSE_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// «Закрыть Weto?» — один диалог на оба входа: кнопку «Закрыть приложение»
+/// в «Обслуживании» и пункт «Выход» в трее. На macOS выйти можно только через
+/// него, и «Выход» без вопроса снимал бы охрану одним промахом по меню.
+///
+/// Про «до следующего входа в систему» текст обещать не имеет права:
+/// автозапуск по умолчанию выключен, и без него Weto не вернётся никогда.
+/// Дословно как на macOS (`MaintenanceCard.confirmClose`).
+pub fn close_confirmation() -> gtk4::AlertDialog {
+    confirmation(
+        "Закрыть Weto?",
+        "Приложение завершится и перестанет охранять цели. Настройки, журнал \
+         и автозапуск сохранятся: если автозапуск включён, Weto вернётся \
+         при следующем входе в систему.",
+        "Закрыть",
+    )
+}
+
+/// Спрашивает «Закрыть Weto?» и выходит по согласию. Окна может не быть
+/// вовсе — «Выход» из трея при закрытом окне, — тогда диалог стоит сам по себе.
+pub fn ask_to_close(parent: Option<&gtk4::Window>) {
+    if CLOSE_ASKED.with(|asked| asked.replace(true)) {
+        return;
+    }
+    close_confirmation().choose(parent, gtk4::gio::Cancellable::NONE, |answer| {
+        CLOSE_ASKED.with(|asked| asked.set(false));
+        if answer == Ok(0) {
+            // Замороженных целей выход не оставляет: SIGCONT шлёт воронка
+            // `connect_shutdown`, а не этот диалог — иначе обязательство
+            // держалось бы на каждом входе в выход, а закрытие последнего окна
+            // проходило бы мимо него.
+            quit();
+        }
+    });
+}
+
+/// Диалог подтверждения: «сделать» и «Отмена», Enter и Esc — «Отмена».
+/// Enter по привычке не должен делать необратимое; на macOS так же
+/// (`makeSafeButtonDefault`).
+fn confirmation(title: &str, detail: &str, confirm_title: &str) -> gtk4::AlertDialog {
+    gtk4::AlertDialog::builder()
+        .message(title)
+        .detail(detail)
+        .buttons([confirm_title, "Отмена"])
+        .cancel_button(1)
+        // Enter не нажимает ничего: закрыть или удалить можно только явным нажатием.
+        .default_button(-1)
+        .modal(true)
+        .build()
+}
+
 /// Подтверждение необратимого действия. На macOS это `NSAlert`, здесь —
 /// `AlertDialog`: обе системы просят подтверждение у своего диалога, а не
 /// у самодельного окна.
@@ -994,17 +1286,8 @@ fn confirm(
     confirm_title: &str,
     action: impl Fn() + 'static,
 ) {
-    let dialog = gtk4::AlertDialog::builder()
-        .message(title)
-        .detail(detail)
-        .buttons([confirm_title, "Отмена"])
-        .cancel_button(1)
-        .default_button(1)
-        .modal(true)
-        .build();
-
     let window = anchor.root().and_downcast::<gtk4::Window>();
-    dialog.choose(
+    confirmation(title, detail, confirm_title).choose(
         window.as_ref(),
         gtk4::gio::Cancellable::NONE,
         move |answer| {
@@ -1089,8 +1372,8 @@ fn ask_for_program_path(
     // охраняет, за вторым следит. Общая часть — что без файла не выйдет ни то,
     // ни другое.
     let purpose = match destination {
-        Destination::Target => "weto будет охранять именно его",
-        Destination::VpnApp => "по нему weto и поймёт, запущен ли VPN-клиент",
+        Destination::Target => "Weto будет охранять именно его",
+        Destination::VpnApp => "по нему Weto и поймёт, запущен ли VPN-клиент",
     };
     let dialog = gtk4::AlertDialog::builder()
         .message("Нужен файл программы")
@@ -1134,7 +1417,7 @@ fn ask_for_program_path(
 
 // --- Подвал ---------------------------------------------------------------
 
-fn footer(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
+fn footer(window: &ApplicationWindow) -> GtkBox {
     let footer = GtkBox::new(Orientation::Horizontal, ui::SPACE3);
     footer.set_margin_top(ui::SPACE2);
 
@@ -1146,9 +1429,9 @@ fn footer(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let version = ui::caption(&format!("версия {}", crate::update::current_version()));
     footer.append(&version);
 
-    // Кнопка только проверяет: установка запускается из окна обновления.
-    // Ручная проверка игнорирует пропуск и отсрочку — другого способа вернуть
-    // пропущенную версию нет.
+    // Плитка только проверяет или показывает найденное: установка запускается
+    // из окна обновления. Ручная проверка игнорирует пропуск и отсрочку —
+    // другого способа вернуть пропущенную версию нет.
     let check = ui::tile_button("view-refresh-symbolic");
     check.set_tooltip_text(Some("Проверить обновления"));
     footer.append(&check);
@@ -1161,29 +1444,76 @@ fn footer(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         );
     });
 
+    // Найденная версия открывает окно, а не проверяет заново: на macOS
+    // повторная проверка заканчивается тем же окном, здесь — без похода в сеть.
+    //
+    // Приложение берётся у корня кнопки, а не у захваченного окна: сильная
+    // ссылка на окно в обработчике его же виджета держала бы окно в памяти
+    // после закрытия (`window_release.rs`).
     {
-        let _state = state.clone();
         check.connect_clicked(move |button| {
-            if let Some(updates) = crate::update::shared() {
-                updates.check_now();
-                button.set_sensitive(false);
+            let Some(updates) = crate::update::shared() else {
+                return;
+            };
+            match updates.found() {
+                Some(info) => {
+                    let app = button
+                        .root()
+                        .and_downcast::<gtk4::Window>()
+                        .and_then(|window| window.application());
+                    if let Some(app) = app {
+                        crate::update_window::present(&app, &info);
+                    }
+                }
+                None => {
+                    updates.check_now();
+                    // Неактивна сразу, а не со следующего такта: второе нажатие
+                    // в эти полсекунды начинать нечего.
+                    button.set_sensitive(false);
+                }
             }
         });
     }
 
-    // Кнопка оживает, когда проверка закончилась, и меняет иконку, когда
-    // находка есть: тогда она открывает окно обновления, а не проверяет заново.
+    // Состояние плитки — из исхода проверки, как `SettingsFooter` на macOS:
+    // неактивна, пока идут проверка или установка; подсказка называет исход;
+    // иконка и имя для диктора говорят, что нажатие покажет обновление.
     {
         let check = check.clone();
-        window_tick(window, std::time::Duration::from_millis(500), move || {
-            let updates = crate::update::shared();
-            let pending = updates.as_ref().and_then(|u| u.pending());
-            check.set_sensitive(true);
-            check.set_icon_name(if pending.is_some() {
+        let mut shown: Option<(bool, String)> = None;
+        let mut refresh = move || {
+            let Some(updates) = crate::update::shared() else {
+                return;
+            };
+            // Активность ставится каждый такт: нажатие гасит плитку само,
+            // и проверка, ответившая быстрее такта, иначе оставила бы её
+            // погашенной навсегда.
+            check.set_sensitive(!updates.is_busy());
+
+            let state = updates.state();
+            let installing = updates.progress().as_update_progress().is_in_flight();
+            let offers = crate::update::footer_shows_update(&state, updates.pending().is_some());
+            let view = (offers, crate::update::footer_hint(&state, installing));
+            if shown.as_ref() == Some(&view) {
+                return;
+            }
+            let (offers, hint) = &view;
+            check.set_tooltip_text(Some(hint));
+            check.set_icon_name(if *offers {
                 "software-update-available-symbolic"
             } else {
                 "view-refresh-symbolic"
             });
+            check.update_property(&[gtk4::accessible::Property::Label(if *offers {
+                "Показать обновление"
+            } else {
+                "Проверить обновления"
+            })]);
+            shown = Some(view);
+        };
+        refresh();
+        window_tick(window, std::time::Duration::from_millis(500), move || {
+            refresh();
             gtk4::glib::ControlFlow::Continue
         });
     }
@@ -1200,8 +1530,9 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     let list = GtkBox::new(Orientation::Vertical, 0);
     card.append(&list);
 
-    // Ряд из двух кнопок: выгрузка рядом с очисткой, как на macOS.
-    let buttons = ui::row(false);
+    // Ряд из двух кнопок: выгрузка рядом с очисткой, как на macOS. Линии над
+    // ним нет — его отделяет от записей отступ, а не разделитель строк.
+    let buttons = ui::action_row();
     buttons.set_margin_top(ui::SPACE3);
     let export_button = ui::muted_button("Выгрузить журнал");
     export_button.set_hexpand(true);
@@ -1211,33 +1542,53 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
     buttons.append(&clear_button);
     card.append(&buttons);
 
+    // Слабо по той же причине, что у карточек настроек: перерисовку зовёт
+    // кнопка очистки, которую перерисовка сама прячет и показывает.
     let redraw = {
         let state = state.clone();
-        let list = list.clone();
-        let clear_button = clear_button.clone();
-        let export_button = export_button.clone();
+        let list = list.downgrade();
+        let clear_button = clear_button.downgrade();
         move || {
+            let (Some(list), Some(clear_button)) = (list.upgrade(), clear_button.upgrade()) else {
+                return;
+            };
             clear(&list);
             let journal = state.journal();
+            let entries = journal.entries();
 
-            if journal.entries().is_empty() {
+            // Выгрузка доступна всегда, а не только когда есть завершения:
+            // ради «нажал проверить, и ничего не произошло» журнал проверок
+            // и заведён, а завершений в этом случае нет вовсе. Да и пустая
+            // выгрузка не бесполезна — в ней настройки и версии. Очищать же
+            // пустой журнал нечего.
+            clear_button.set_visible(!entries.is_empty());
+
+            if entries.is_empty() {
                 let row = ui::row(true);
                 row.append(&ui::caption("Срабатываний не было"));
                 list.append(&row);
-                clear_button.set_visible(false);
-                export_button.set_visible(false);
                 return;
             }
 
-            clear_button.set_visible(true);
-            export_button.set_visible(true);
             // Свежие сверху: журнал так и хранится, разворачивать нечего.
-            for event in journal.entries() {
+            // Линия стоит между записями, а не над первой.
+            let visible = entries.iter().take(weto_config::journal::VISIBLE_LIMIT);
+            for (index, event) in visible.enumerate() {
+                if index > 0 {
+                    list.append(&ui::divider());
+                }
                 list.append(&ui::journal_row(
                     &event.title(),
                     &event.summary_text(),
-                    &diagnostics(event),
+                    event.resolution_line().as_deref(),
+                    &event.diagnostics_text(&local_timestamp(event.at)),
                 ));
+            }
+
+            if let Some(text) = weto_config::journal::visible_limit_caption(entries.len()) {
+                let row = ui::row(true);
+                row.append(&ui::caption(&text));
+                list.append(&row);
             }
         }
     };
@@ -1267,50 +1618,60 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
                 return;
             };
             let Some(text) = state.export_journal() else {
+                report_export_failure(&window, "не удалось собрать файл журнала");
                 return;
             };
 
             let dialog = gtk4::FileDialog::builder()
-                .title("Выгрузка журнала weto")
+                .title("Выгрузка журнала Weto")
                 .initial_name(weto_config::export::JournalExport::file_name(&stamp_now()))
                 .build();
 
+            let parent = window.clone();
             dialog.save(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
                 // Отмена — не ошибка: пользователь передумал.
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
                 if let Err(error) = std::fs::write(&path, &text) {
-                    eprintln!("weto: журнал не выгрузился: {error}");
+                    report_export_failure(&parent, &error.to_string());
                 }
             });
         });
     }
 
     page.append(&card);
-    page.append(&footer(window, state));
+    page.append(&footer(window));
     scroll(&page)
 }
 
-fn diagnostics(event: &weto_config::journal::KillEvent) -> String {
-    let mut parts = Vec::new();
-    if let Some(ip) = &event.ip {
-        parts.push(format!("IP: {ip}"));
-    }
-    if let Some(country) = &event.country {
-        parts.push(format!("ipinfo: {country}"));
-    }
-    if let (Some(source), Some(country)) = (&event.confirm_source, &event.confirmed_country) {
-        parts.push(format!("{source}: {country}"));
-    }
-    // Чем процесс попал под охрану: потомок называет родителя, шелл объясняет,
-    // что целью он не был вовсе, а стоял ради её терминала.
-    if let Some(basis) = event.matched_by.detail_text(event.parent_pid) {
-        parts.push(basis);
-    }
-    if let Some(resolution) = &event.resolution_text {
-        parts.push(format!("итог: {resolution}"));
-    }
-    parts.join(" · ")
+/// Местное время записи для строки показаний.
+///
+/// Смещение берётся на момент самой записи, а не на «сейчас»: запись, сделанная
+/// до перевода часов, иначе показывала бы чужой час. Пояс знает GLib, ядро
+/// получает готовое смещение — системы оно не касается.
+fn local_timestamp(at: std::time::SystemTime) -> String {
+    let seconds = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    let offset = gtk4::glib::DateTime::from_unix_local(seconds)
+        .map(|local| local.utc_offset().as_seconds())
+        .unwrap_or_default();
+    weto_core::timestamp::to_local_display(at, offset)
+}
+
+/// Неудавшаяся выгрузка — диалогом, как `NSAlert` на macOS: в терминал,
+/// куда она писалась раньше, пользователь приложения из трея не смотрит,
+/// и выглядело это как «нажал — ничего не произошло».
+fn report_export_failure(window: &ApplicationWindow, failure: &str) {
+    let dialog = gtk4::AlertDialog::builder()
+        .message("Журнал не выгрузился")
+        .detail(failure)
+        .buttons(["OK"])
+        .default_button(0)
+        .modal(true)
+        .build();
+    dialog.show(Some(window));
 }
 
 // --- Общее ----------------------------------------------------------------
@@ -1344,15 +1705,20 @@ fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<Str
     let resolved = resolve_launch_target(text);
     let name = display_name
         .or_else(|| display_name_for(text))
-        .unwrap_or_else(|| resolved.rsplit('/').next().unwrap_or(&resolved).to_string());
+        .unwrap_or_else(|| target_fallback_name(text));
+    // Файл в PATH запоминается по той же причине, что у цели, и вид
+    // определяется так же: VPN-клиент-скрипт, записанный бинарником, читался бы
+    // закрытым всегда — а это завершение целей.
+    let launch_paths = launch_paths_for(text);
+    let kind = target_kind_for(text);
 
     state.settings.edit(|s| {
         s.set_vpn_app(Some(weto_config::settings::Target {
             entry: text.to_string(),
             display_name: name,
-            kind: TargetKind::Binary,
+            kind,
             path: resolved,
-            launch_paths: vec![text.to_string()],
+            launch_paths,
         }))
     });
 }
@@ -1390,4 +1756,48 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod token_field_tests {
+    use super::{token_field_text, token_to_save};
+
+    /// В фокусе поле показывает сам токен — его правят, — а вне фокуса маску:
+    /// подтвердить «тот ли ключ» по хвосту можно, подсмотреть через плечо — нет.
+    /// Как `onChange(of: isTokenFocused)` в `NetworkSettingsCard` на macOS.
+    #[test]
+    fn the_field_shows_the_token_only_while_focused() {
+        assert_eq!(token_field_text("abcd1234efgh", true), "abcd1234efgh");
+        assert_eq!(token_field_text("abcd1234efgh", false), "••••••••efgh");
+        assert_eq!(token_field_text("abc", false), "•••");
+        assert_eq!(token_field_text("", false), "");
+        assert_eq!(token_field_text("", true), "");
+    }
+
+    /// Маска — не ввод: ни она сама, ни правленая маска не сохраняются. Раньше
+    /// маска стояла в поле и в фокусе, и дописанный к ней символ уходил в файл
+    /// токеном из точек — ipinfo отвечал отказом, а цели вставали на паузу.
+    #[test]
+    fn the_mask_is_never_saved() {
+        let stored = "abcd1234efgh";
+        assert_eq!(token_to_save("••••••••efgh", stored), None);
+        assert_eq!(token_to_save("••••••••efghX", stored), None);
+        assert_eq!(token_to_save("••••••••efg", stored), None);
+    }
+
+    /// Сохраняется только настоящая правка: показ токена при входе в поле
+    /// записью не является, а пробелы по краям — частая добыча копирования.
+    #[test]
+    fn only_a_real_edit_is_saved() {
+        let stored = "abcd1234efgh";
+        assert_eq!(token_to_save(stored, stored), None);
+        assert_eq!(
+            token_to_save(" newtoken42 ", stored),
+            Some("newtoken42".to_string())
+        );
+        // Стёртое поле — тоже правка: пользователь убирает ключ.
+        assert_eq!(token_to_save("", stored), Some(String::new()));
+        // Пустое поле при пустом токене — нечего сохранять.
+        assert_eq!(token_to_save("", ""), None);
+    }
 }

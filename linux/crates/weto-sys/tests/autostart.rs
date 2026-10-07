@@ -25,6 +25,22 @@ fn autostart_lives_in_exactly_one_file() {
     assert!(!autostart.is_enabled());
 }
 
+/// Имя ярлыка — текст интерфейса: его показывают «Запуск приложений» и меню.
+/// Пишется «Weto», как везде в интерфейсе; имя файла остаётся `weto.desktop` —
+/// по нему ярлык находят установщик и деинсталлятор.
+#[test]
+fn the_autostart_entry_names_the_app_weto() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("autostart/weto.desktop");
+    Autostart::rooted(file.clone(), "/дом/.local/bin/weto".into())
+        .enable()
+        .unwrap();
+
+    let entry = std::fs::read_to_string(&file).unwrap();
+    assert!(entry.lines().any(|line| line == "Name=Weto"), "{entry}");
+    assert!(entry.lines().any(|line| line == "Icon=weto"), "{entry}");
+}
+
 #[test]
 fn enabling_twice_does_not_multiply_the_file() {
     let tmp = tempfile::tempdir().unwrap();

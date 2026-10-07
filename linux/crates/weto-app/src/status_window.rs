@@ -7,8 +7,9 @@
 //!
 //! Состав повторяет `StatusPopupView` построчно: шапка со щитом, заголовком
 //! и двумя иконками, три строки объяснения (там, где есть что объяснять),
-//! показания гео, баннер обновления и живые цели с бейджем паузы. Карточек
-//! и крупных кнопок в попапе нет — управление живёт в окне настроек.
+//! показания гео, строка отказа прав, баннер обновления и живые цели
+//! с бейджем паузы. Карточек и крупных кнопок в попапе нет — управление
+//! живёт в окне настроек.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,9 +18,12 @@ use std::time::SystemTime;
 use gtk4::prelude::*;
 use gtk4::{Align, ApplicationWindow, Box as GtkBox, Label, Orientation};
 
-use weto_core::presentation::{self, GuardStatusColor};
+use weto_core::presentation::{self, GuardStatusColor, StatusLine};
 use weto_ui::components as ui;
 use weto_ui::theme;
+use weto_update::policy::UpdateInfo;
+use weto_update::progress::{UpdatePhase, UpdateProgress};
+use weto_update::strings::UpdateStrings;
 
 use crate::lifecycle::window_tick;
 use crate::state::AppState;
@@ -27,7 +31,7 @@ use crate::state::AppState;
 pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("weto")
+        .title("Weto")
         .default_width(ui::POPUP_WIDTH)
         .resizable(false)
         .build();
@@ -72,6 +76,17 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
     let readout = GtkBox::new(Orientation::Vertical, 2);
     panel.append(&readout);
 
+    // Отказ ядра в сигнале целям: красная строка сразу под показаниями, как
+    // на macOS. Без неё отказ оставался только в журнале, а цель, которую
+    // weto не смог остановить, выглядела остановленной.
+    let permission_failure = Label::new(None);
+    permission_failure.add_css_class("weto-permission-failure");
+    permission_failure.set_halign(Align::Start);
+    permission_failure.set_xalign(0.0);
+    permission_failure.set_wrap(true);
+    permission_failure.set_visible(false);
+    panel.append(&permission_failure);
+
     // Баннер обновления стоит после показаний и появляется только тогда, когда
     // политика решила показать находку. Тихий исход прячет и его, и окно.
     let banner_slot = GtkBox::new(Orientation::Vertical, 0);
@@ -97,35 +112,36 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
         let state = state.clone();
         let app = app.clone();
         let banner_slot = banner_slot.clone();
-        let mut shown_version: Option<String> = None;
+        let mut shown_banner: Option<BannerView> = None;
+        let mut shown_lines: Vec<StatusLine> = Vec::new();
+        let mut readout_values: Vec<Label> = Vec::new();
         // Терминал стоящей цели спрашивается один раз на pid: ответ стоит
         // обхода `/proc` и полусотни вопросов шине, а такт идёт дважды
         // в секунду. Пока цель стоит, терминала она не меняет.
         let mut terminals: HashMap<i32, bool> = HashMap::new();
+        // Иконка из ярлыка читается один раз на цель: файл ярлыка за время
+        // жизни окна не меняется, а такт идёт дважды в секунду.
+        let mut icons: HashMap<String, Option<String>> = HashMap::new();
         move || {
             let snapshot = state.snapshot();
             let phase = &snapshot.phase;
             let now = SystemTime::now();
 
-            let pending = crate::update::shared().and_then(|updates| updates.pending());
-            let pending_version = pending.as_ref().map(|info| info.latest_version.clone());
-            if pending_version != shown_version {
+            // Баннер пересобирается только на смену того, что он говорит:
+            // кнопка, пересозданная посреди нажатия, нажатия не получила бы.
+            let pending = crate::update::shared().and_then(|updates| {
+                let info = updates.pending()?;
+                Some((info, updates.update_progress()))
+            });
+            let banner_view = pending
+                .as_ref()
+                .map(|(info, progress)| BannerView::new(&info.latest_version, progress));
+            if banner_view != shown_banner {
                 clear(&banner_slot);
-                if let Some(info) = pending.clone() {
-                    let (banner, action) = ui::banner(
-                        ui::BannerTone::News,
-                        &format!("Доступно обновление {}", info.latest_version),
-                        Some("Подробнее"),
-                    );
-                    if let Some(button) = action {
-                        let app = app.clone();
-                        button.connect_clicked(move |_| {
-                            crate::update_window::present(&app, &info);
-                        });
-                    }
-                    banner_slot.append(&banner);
+                if let (Some(view), Some((info, _))) = (&banner_view, pending) {
+                    banner_slot.append(&update_banner(view, &app, info));
                 }
-                shown_version = pending_version;
+                shown_banner = banner_view;
             }
 
             title.set_text(phase.title());
@@ -151,19 +167,32 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
             spinner.set_spinning(probing);
             recheck.set_visible(!probing);
 
-            clear(&readout);
             let lines = match &snapshot.report {
                 Some(report) => presentation::status_lines(report, &local_time(report.checked_at)),
                 None => presentation::status_lines_without_report(),
             };
-            for line in lines {
-                readout.append(&ui::data_row(&line.key, Some(&line.value)));
+            update_readout(&readout, &lines, &shown_lines, &mut readout_values);
+            shown_lines = lines;
+
+            match &snapshot.permission_failure {
+                Some(text) => {
+                    permission_failure.set_text(text);
+                    permission_failure.set_visible(true);
+                }
+                None => permission_failure.set_visible(false),
             }
 
             clear(&targets_slot);
             if !state.settings.current().targets.is_empty() {
                 targets_slot.append(&ui::divider());
-                targets_slot.append(&targets_view(phase, &snapshot, now, &state, &mut terminals));
+                targets_slot.append(&targets_view(
+                    phase,
+                    &snapshot,
+                    now,
+                    &state,
+                    &mut terminals,
+                    &mut icons,
+                ));
             }
         }
     };
@@ -182,6 +211,89 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
     });
 
     window
+}
+
+/// Что баннер обновления говорит сейчас — порт ветки баннера в `StatusPopupView`:
+/// текст фазы из `UpdateStrings.bannerProgress`, тон `Warning` при отказе,
+/// индикатор вместо «Подробнее», пока идёт работа.
+#[derive(Debug, Clone, PartialEq)]
+struct BannerView {
+    text: String,
+    warning: bool,
+    in_flight: bool,
+}
+
+impl BannerView {
+    fn new(version: &str, progress: &UpdateProgress) -> BannerView {
+        BannerView {
+            text: UpdateStrings::new("Weto").banner_progress(progress, version),
+            warning: progress.phase == UpdatePhase::Failed,
+            in_flight: progress.is_in_flight(),
+        }
+    }
+}
+
+fn update_banner(view: &BannerView, app: &gtk4::Application, info: UpdateInfo) -> GtkBox {
+    let tone = if view.warning {
+        ui::BannerTone::Warning
+    } else {
+        ui::BannerTone::News
+    };
+    let action = (!view.in_flight).then_some("Подробнее");
+    let (banner, button) = ui::banner(
+        tone,
+        "software-update-available-symbolic",
+        &view.text,
+        action,
+    );
+    if let Some(button) = button {
+        let app = app.clone();
+        button.connect_clicked(move |_| {
+            crate::update_window::present(&app, &info);
+        });
+    }
+    if view.in_flight {
+        let spinner = gtk4::Spinner::new();
+        spinner.set_spinning(true);
+        spinner.set_valign(Align::Center);
+        banner.append(&spinner);
+    }
+    banner
+}
+
+/// Показания выделяются мышью, поэтому строки не пересоздаются каждый такт:
+/// новая метка теряет выделение, и скопировать адрес не успели бы. Набор
+/// строк тот же — меняется только текст значения, которое и правда сменилось.
+fn update_readout(
+    readout: &GtkBox,
+    lines: &[StatusLine],
+    shown: &[StatusLine],
+    values: &mut Vec<Label>,
+) {
+    let same_keys = lines.len() == shown.len()
+        && lines
+            .iter()
+            .zip(shown)
+            .all(|(line, old)| line.key == old.key)
+        && values.len() == lines.len();
+    if same_keys {
+        for ((line, old), value) in lines.iter().zip(shown).zip(values.iter()) {
+            if line.value != old.value {
+                value.set_text(&line.value);
+            }
+        }
+        return;
+    }
+
+    clear(readout);
+    values.clear();
+    for line in lines {
+        let row = ui::data_row(&line.key, Some(&line.value));
+        if let Some(value) = row.last_child().and_then(|w| w.downcast::<Label>().ok()) {
+            values.push(value);
+        }
+        readout.append(&row);
+    }
 }
 
 /// Строка объяснения статуса: класс задаёт и размер шрифта, и цвет.
@@ -210,6 +322,7 @@ fn targets_view(
     now: SystemTime,
     state: &Arc<AppState>,
     terminals: &mut HashMap<i32, bool>,
+    icons: &mut HashMap<String, Option<String>>,
 ) -> GtkBox {
     let box_ = GtkBox::new(Orientation::Vertical, ui::SPACE2);
 
@@ -237,9 +350,13 @@ fn targets_view(
                 }
                 badge
             });
+            let icon = icons
+                .entry(target.entry.clone())
+                .or_insert_with(|| weto_sys::target_resolver::icon_for(&target.entry));
             box_.append(&ui::process_pill(
                 &target.display_name,
-                Some(&target.path),
+                icon.as_deref(),
+                presentation::is_command_line_target(&target.entry),
                 target.extra_process_count(),
                 accessory.as_ref(),
             ));
@@ -247,7 +364,10 @@ fn targets_view(
         return box_;
     }
 
+    // Значок и текст — цветом щита, как `tone.color` на macOS: в «На страже»
+    // это канонная «зелёная строка», под паузой — янтарная. Совет — `faint`.
     let notice = presentation::idle_targets(phase);
+    let tone = theme::shield_class(presentation::shield_color(phase));
 
     let row = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
     let glyph = gtk4::Image::from_icon_name(if notice.hint.is_some() {
@@ -256,9 +376,13 @@ fn targets_view(
         "action-unavailable-symbolic"
     });
     glyph.set_pixel_size(12);
+    glyph.add_css_class("weto-status-tone");
+    glyph.add_css_class(tone);
     row.append(&glyph);
 
     let text = ui::caption(&notice.text);
+    text.add_css_class("weto-status-tone");
+    text.add_css_class(tone);
     row.append(&text);
 
     if let Some(hint) = notice.hint {

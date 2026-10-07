@@ -123,6 +123,29 @@ fn parent_is_parsed_even_when_the_process_name_contains_spaces_and_brackets() {
     assert_eq!(processes[0].parent_pid, 1234);
 }
 
+/// Обновление инструмента удаляет прежнюю версию, а сеанс, начатый на ней,
+/// живёт дальше — и ядро дописывает к `exe` такого процесса « (deleted)».
+/// Путь с суффиксом не совпал бы ни с одним путём правила, и живой сеанс
+/// молча выпадал бы из-под охраны ровно в момент обновления.
+#[test]
+fn the_deleted_suffix_of_a_replaced_binary_is_stripped() {
+    let tmp = tempfile::tempdir().unwrap();
+    make_process(
+        tmp.path(),
+        200,
+        1,
+        "/home/me/.local/share/claude/versions/228 (deleted)",
+        &["claude"],
+        "claude",
+    );
+
+    let processes = ProcRegistry::rooted(tmp.path().into()).snapshot();
+    assert_eq!(
+        processes[0].executable_path,
+        "/home/me/.local/share/claude/versions/228"
+    );
+}
+
 #[test]
 fn a_missing_proc_root_yields_an_empty_snapshot_instead_of_a_panic() {
     let registry = ProcRegistry::rooted("/несуществующий/proc".into());
@@ -303,6 +326,48 @@ fn the_real_proc_reports_the_process_group() {
         libc::getpgid(child.pid())
     });
     assert!(snapshot.process_group > 0);
+}
+
+/// Суффикс « (deleted)» сверяется с настоящим ядром: бинарник копируется
+/// во временный каталог, запускается и удаляется из-под живого процесса —
+/// ровно то, что делает с прежней версией обновление инструмента.
+#[test]
+fn the_real_proc_reports_a_deleted_binary_by_its_former_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let binary = tmp.path().join("228");
+    fs::copy("/bin/sleep", &binary).unwrap();
+    let binary = fs::canonicalize(&binary).unwrap();
+    let child = Spawned(spawn_freshly_written(
+        std::process::Command::new(&binary).arg("86402"),
+    ));
+    fs::remove_file(&binary).unwrap();
+
+    let snapshot = snapshot_of(child.pid()).expect("реестр обязан видеть потомка");
+
+    assert_eq!(snapshot.executable_path, binary.to_string_lossy());
+}
+
+/// Запуск только что записанного бинарника переживает `ETXTBSY`.
+///
+/// `fs::copy` держит копию открытой на запись, и тесты соседних потоков
+/// в это время порождают свои процессы: `fork` дублирует открытый дескриптор
+/// в потомка, а `O_CLOEXEC` закрывает его лишь на `exec` потомка. Пока чужой
+/// потомок между `fork` и `exec`, у копии есть писатель, и ядро отказывает
+/// в её запуске с `ETXTBSY`, хотя свой дескриптор мы давно закрыли. Окно
+/// короткое и закрывается само, поэтому стандартное лекарство — повторить
+/// запуск (так делают и Go, и cargo); других ошибок повтор не глотает.
+fn spawn_freshly_written(command: &mut std::process::Command) -> std::process::Child {
+    const ATTEMPTS: u32 = 50;
+    for attempt in 1..=ATTEMPTS {
+        match command.spawn() {
+            Ok(child) => return child,
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempt < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => panic!("копия бинарника не запустилась: {error}"),
+        }
+    }
+    unreachable!("последняя попытка возвращает или паникует")
 }
 
 /// Управляющий терминал заводится честным pty через `script`: у процесса

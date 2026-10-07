@@ -6,6 +6,7 @@
 //! и поведение обеих платформ разом. Так и задумано.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use crate::geo::GeoOutcome;
 use crate::ip::IpRange;
@@ -73,7 +74,15 @@ pub enum UnsafeEvidence {
     NotWhitelistedCountry(String),
     /// Потолок паузы: подтверждения не дождались за `pause_ceiling`. Улику
     /// выставляет машина состояний, а не `decide`: решает время, а не сигналы.
-    PauseExpired,
+    /// Несёт потолок, по которому завершили: настройку могут сменить потом,
+    /// а запись обязана назвать то число, что действовало.
+    PauseExpired(Duration),
+}
+
+impl UnsafeEvidence {
+    pub fn is_pause_expired(&self) -> bool {
+        matches!(self, UnsafeEvidence::PauseExpired(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

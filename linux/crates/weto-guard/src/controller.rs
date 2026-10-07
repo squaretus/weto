@@ -44,19 +44,22 @@ use weto_config::settings::Settings;
 use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading};
-use weto_core::guard_machine::{GuardAction, GuardInput, GuardMachine, GuardPhase, PAUSE_CEILING};
+use weto_core::guard_machine::{GuardAction, GuardInput, GuardMachine, GuardPhase};
 use weto_core::network::NetworkSnapshot;
 use weto_core::network::VpnAppStatus;
 use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
 use weto_core::policy::GuardSignals;
 use weto_core::policy::{decide, decide_local, GuardDecision, UnsafeEvidence};
-use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget};
+use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget, TargetRule};
 use weto_sys::background::{BackgroundDispatching, ThreadDispatcher};
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
+use weto_sys::process_signaler::SignalResult;
 use weto_sys::secret_store::SecretStoring;
+use weto_sys::target_resolver::{LaunchTargetResolver, TargetResolving};
 
 use crate::enforcer::{ProcessEnforcer, ResumeOutcome, Scan};
+use crate::rules::RuleCache;
 
 /// Окно коалесценции: несколько событий сети подряд не должны порождать
 /// несколько запросов. У подтверждающего сервиса лимит 60 запросов в минуту.
@@ -78,7 +81,7 @@ const RESUME_RETRY_LIMIT: u32 = 3;
 /// Причина эпизода восстановления. Пробы за этим стоянием нет — и текст обязан
 /// говорить это прямо, а не притворяться вердиктом. Дословно как на macOS.
 pub const RECOVERY_REASON_TEXT: &str =
-    "Найдены остановленными от прошлого запуска weto: пробы за этим стоянием нет";
+    "Найдены остановленными от прошлого запуска Weto: пробы за этим стоянием нет";
 
 /// Сигнал снятой с охраны цели ушёл, а результат ещё не наблюдался. Ровно то же
 /// различие, что у штатного выхода: `kill(SIGCONT)` возвращает 0 и фоновому заданию,
@@ -187,6 +190,9 @@ pub struct GuardSnapshot {
     pub paused: Vec<PausedProcess>,
     /// Когда истекает потолок паузы. `None` — цели не стоят.
     pub pause_deadline: Option<SystemTime>,
+    /// Сигнал не дошёл до целей из-за нехватки прав: экран называет pid
+    /// красной строкой под показаниями. Порт `GuardVM.permissionFailure`.
+    pub permission_failure: Option<String>,
 }
 
 /// Учёт стояния: что уже описано журналом и кому сколько раз досылали SIGCONT.
@@ -243,6 +249,8 @@ struct Inner {
     last_reading: Option<GeoReading>,
     last_network: NetworkSnapshot,
     pause: PauseBook,
+    /// Последний отказ ядра в сигнале целям — до прохода, который его снимет.
+    permission_failure: Option<String>,
     snapshot: GuardSnapshot,
 }
 
@@ -338,6 +346,10 @@ pub struct GuardController {
     /// этого признака второй вызов слал бы SIGCONT по второму разу и заново
     /// сохранял бы уже удалённый файл учёта.
     enforcement: Mutex<bool>,
+    /// Правила целей и VPN-приложения, разрешаемые заново раз в окно, а не
+    /// однажды при добавлении: путь версионного инструмента меняется
+    /// с каждым его обновлением.
+    rules: RuleCache,
     coalesce_window: Duration,
     now: Clock,
 }
@@ -373,10 +385,12 @@ impl GuardController {
                 last_reading: None,
                 last_network: NetworkSnapshot::default(),
                 pause: PauseBook::default(),
+                permission_failure: None,
                 snapshot: GuardSnapshot::default(),
             }),
             probe: ProbeGate::default(),
             enforcement: Mutex::new(false),
+            rules: RuleCache::new(Box::new(LaunchTargetResolver)),
             coalesce_window: COALESCE_WINDOW,
             now: Box::new(SystemTime::now),
         }
@@ -413,6 +427,19 @@ impl GuardController {
     /// То же самое для стенда, который собрал охрану раньше, чем узнал про часы.
     pub fn set_clock(&mut self, now: Clock) {
         self.now = now;
+    }
+
+    /// Разрешение целей задаётся снаружи ради тестов: обновление инструмента
+    /// проверяется перевешенным ответом границы, а не симлинком на диске.
+    /// Приложение берёт настоящее — `LaunchTargetResolver`.
+    pub fn with_resolver(mut self, resolver: Box<dyn TargetResolving>) -> GuardController {
+        self.set_resolver(resolver);
+        self
+    }
+
+    /// То же самое для стенда, собравшего охрану раньше, чем он выбрал границу.
+    pub fn set_resolver(&mut self, resolver: Box<dyn TargetResolving>) {
+        self.rules = RuleCache::new(resolver);
     }
 
     pub fn snapshot(&self) -> GuardSnapshot {
@@ -510,7 +537,7 @@ impl GuardController {
         // наблюдению за учётом и показаниям журнала. Между ним и сигналами лежит
         // только работа редьюсера — в память и без единого syscall; запрос к сети
         // ушёл бы после применения, а не до.
-        let scan = self.enforcer.scan(&settings.target_rules());
+        let scan = self.enforcer.scan(&self.target_rules(&settings));
 
         if !settings.is_enabled || !config.has_targets() {
             self.inner.lock().expect("состояние охраны").announced_loss = None;
@@ -671,7 +698,12 @@ impl GuardController {
             return;
         }
         let moment = (self.now)();
+        // Потолок — параметр машины, источник у него один: настройки. Выставляется
+        // перед каждым входом, поэтому смена действует на текущую паузу ближайшим
+        // тактом, без ревизии и без пробы.
+        let ceiling = self.settings.settings().pause_ceiling().duration();
         let mut inner = self.inner.lock().expect("состояние охраны");
+        inner.machine.set_pause_ceiling(ceiling);
         // Эффект перехода здесь не нужен: применяется действие текущей фазы,
         // и на переходе оно даёт ровно то же самое. Редьюсеру важно, что
         // вход применён, — фаза после этого и есть решение.
@@ -723,6 +755,13 @@ impl GuardController {
             // первым, а не «запуском запрещён».
             let context = self.kill_context(settings, self.safe_outcome_text(&phase), None, scan);
             self.reporter.episode_finished(&context);
+            // Отказ в правах — про сигналы, которых больше нет: цели работают.
+            // Гаснет до продолжения, а не после: отказ в SIGCONT — про сигнал,
+            // который только что не дошёл, и гасить его тем же проходом нельзя.
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .permission_failure = None;
             self.settle_resume(scan, settings, &phase);
         }
 
@@ -762,6 +801,10 @@ impl GuardController {
 
     fn pause_targets(&self, scan: &Scan, settings: &Settings, phase: &GuardPhase) {
         let outcome = self.enforcer.pause(scan);
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .permission_failure = refusal_text("приостановить", &refused_pids(&outcome.results));
 
         // Пилюля с отсчётом описывает то, что стоит сейчас: цель, умершая под
         // паузой сама или снятая с охраны, оставалась бы в списке с живым
@@ -770,7 +813,7 @@ impl GuardController {
 
         // Пилюли мало: цель, снятую с охраны, надо ещё и отпустить. Этим же проходом,
         // а не исходом эпизода — до него процесс стоял бы уже ничьим.
-        self.release_unguarded(&outcome.matched, scan, settings);
+        self.release_unguarded(scan, settings);
 
         // Про pid, уже описанный этим эпизодом, второй записи не бывает.
         // Шеллы идут тем же списком: объяснён обязан быть каждый SIGSTOP,
@@ -855,21 +898,32 @@ impl GuardController {
     /// Цель, снятую с охраны, отпускаем немедленно: weto не держит того, кого больше
     /// не сторожит.
     ///
-    /// Повод стоять у записи учёта ровно один — правило, под которое она попала.
-    /// Правило убрали — повода нет, и ждать исхода эпизода (до минуты потолка)
+    /// Повод стоять у записи учёта ровно один — цель, под которую она попала.
+    /// Цель сняли с охраны — повода нет, и ждать исхода эпизода (до минуты потолка)
     /// значит держать замороженным процесс, про который пользователь уже сказал
     /// «это не моё». Отпускает `ProcessEnforcer::release`: он же решает, можно ли
-    /// отпустить шелл, и шлёт сигналы в обратном стоп-порядке.
+    /// отпустить шелл, и шлёт сигналы в обратном стоп-порядке. Решает запись цели
+    /// в настройках, а не совпадение с правилом: осиротевший потомок и сеанс цели,
+    /// сменившей форму, с правилом не совпадают, а с охраны их никто не снимал.
     ///
     /// Журналу дописывается свой исход, а не эпизодный: стояние этой записи кончилось
     /// раньше эпизода и по другой причине. Исходов два, потому что установлено бывает
     /// разное: сигнал отправлен — это одно, наблюдение показало процесс идущим —
     /// другое. Пока наблюдения нет, запись из учёта не уходит, и обязательство
     /// исполняет следующий проход.
-    fn release_unguarded(&self, guarded: &[MatchedProcess], scan: &Scan, settings: &Settings) {
-        let outcome = self.enforcer.release(guarded, Some(scan));
+    fn release_unguarded(&self, scan: &Scan, settings: &Settings) {
+        let outcome = self
+            .enforcer
+            .release(&guarded_entries(settings), Some(scan));
         if outcome.is_empty() {
             return;
+        }
+        if let Some(text) = refusal_text("возобновить", &refused_pids(&outcome.results))
+        {
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .permission_failure = Some(text);
         }
 
         let observed: HashSet<i32> = outcome.released.iter().copied().collect();
@@ -947,12 +1001,13 @@ impl GuardController {
         };
 
         let outcome = self.enforcer.resume(Some(scan), &abandoned);
-        let refused: Vec<i32> = outcome
-            .results
-            .iter()
-            .filter(|result| !result.is_delivered())
-            .map(|result| result.pid)
-            .collect();
+        let refused = refused_pids(&outcome.results);
+        if let Some(text) = refusal_text("возобновить", &refused) {
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .permission_failure = Some(text);
+        }
 
         let answered: Vec<i32> = outcome
             .unresolved
@@ -1089,9 +1144,13 @@ impl GuardController {
     }
 
     fn terminate_targets(&self, scan: &Scan, settings: &Settings, evidence: &UnsafeEvidence) {
-        let outcome = self.enforcer.terminate(scan);
+        let outcome = self.enforcer.terminate(scan, &guarded_entries(settings));
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .permission_failure = refusal_text("завершить", &outcome.refused);
         let reason = evidence.display_text();
-        let cause = if *evidence == UnsafeEvidence::PauseExpired {
+        let cause = if evidence.is_pause_expired() {
             "по потолку"
         } else {
             "по доказательству"
@@ -1170,17 +1229,19 @@ impl GuardController {
             );
         }
 
-        let rules = settings.target_rules();
+        let rules = self.target_rules(&settings);
         let (outcome, scan) = self.enforcer.resume_orphans(&rules);
         if outcome.unresolved.is_empty() {
             return;
         }
 
         let mut names: HashMap<i32, String> = HashMap::new();
+        let mut entries: HashMap<i32, String> = HashMap::new();
         let mut bases: HashMap<i32, MatchBasis> = HashMap::new();
         if !scan.is_empty() {
             for process in weto_core::process::matches(&scan.processes, &scan.rules) {
                 names.insert(process.pid, process.target_name.clone());
+                entries.insert(process.pid, process.target_entry.clone());
                 bases.insert(process.pid, process.matched_by);
             }
         }
@@ -1207,6 +1268,11 @@ impl GuardController {
                             .unwrap_or_default()
                             .to_string()
                     }),
+                    target_entry: entry
+                        .target_entry
+                        .clone()
+                        .or_else(|| entries.get(&entry.pid).cloned())
+                        .unwrap_or_default(),
                     parent_pid: parents.get(&entry.pid).copied().unwrap_or_default(),
                     executable_path: entry.executable_path.clone(),
                     // Шеллом запись сделал не текущий разбор, а учёт: ради терминала
@@ -1312,7 +1378,7 @@ impl GuardController {
     /// последний сигнал получают и те записи, которым такт досылать перестал
     /// (`RESUME_RETRY_LIMIT`): обязательство исполняют завершение и выход.
     fn resume_from_ledger(&self, settings: &Settings) -> (Scan, ResumeOutcome) {
-        let scan = self.enforcer.scan(&settings.target_rules());
+        let scan = self.enforcer.scan(&self.target_rules(settings));
         let outcome = self.enforcer.resume(Some(&scan), &HashSet::new());
         (scan, outcome)
     }
@@ -1335,7 +1401,7 @@ impl GuardController {
         } else {
             format!(
                 "не подтверждено: сигнал продолжения отправлен процессам {standing:?}, \
-                 а охрана остановлена — результат наблюдать нечем, weto проверит их \
+                 а охрана остановлена — результат наблюдать нечем, Weto проверит их \
                  при следующем запуске"
             )
         }
@@ -1375,7 +1441,10 @@ impl GuardController {
         inner.snapshot.phase = phase.clone();
         inner.snapshot.running = running;
         inner.snapshot.paused = inner.pause.paused.clone();
-        inner.snapshot.pause_deadline = phase.paused_since().map(|since| since + PAUSE_CEILING);
+        inner.snapshot.pause_deadline = phase
+            .paused_since()
+            .map(|since| since + inner.machine.pause_ceiling());
+        inner.snapshot.permission_failure = inner.permission_failure.clone();
     }
 
     /// Текст, с которым закрывается эпизод у работающих целей.
@@ -1732,7 +1801,7 @@ impl GuardController {
         // Пока проба летела, целей могло не остаться вовсе: настройки читаются
         // непосредственно перед применением, а не на старте запроса.
         // Проход ответа — такой же проход: обход у него свой и один.
-        let scan = self.enforcer.scan(&settings.target_rules());
+        let scan = self.enforcer.scan(&self.target_rules(&settings));
 
         let config = settings.guard_config();
         if !settings.is_enabled || !config.has_targets() {
@@ -1746,13 +1815,22 @@ impl GuardController {
         self.enforce(&settings, &scan);
     }
 
+    /// Правила целей этого прохода — из кэша, разрешаемого заново раз в окно.
+    /// Путь из настроек тут лишь отправная точка: у версионного инструмента
+    /// он устаревает с первым обновлением, и новый сеанс выпадал бы из-под охраны.
+    fn target_rules(&self, settings: &Settings) -> Vec<TargetRule> {
+        self.rules.targets(settings, (self.now)())
+    }
+
     /// Запущено ли выбранное VPN-приложение.
     ///
-    /// Обход `/proc` буквально тот же, что у целей: правило приложения приходит
-    /// из настроек уже разрешённым, а в список целей не попадает никогда —
-    /// завершать свой источник защиты охрана не имеет права.
+    /// Обход `/proc` буквально тот же, что у целей, а правило приложения —
+    /// из того же кэша и разрешается заново тем же порядком: клиент,
+    /// обновившийся своим апдейтером, живёт на новом пути, и правило,
+    /// разрешённое однажды, объявило бы его закрытым. В список целей оно
+    /// не попадает никогда — завершать свой источник защиты охрана не имеет права.
     fn vpn_app_status(&self, settings: &Settings, scan: &Scan) -> VpnAppStatus {
-        let Some(rule) = settings.vpn_app_rule() else {
+        let Some(rule) = self.rules.vpn_app(settings, (self.now)()) else {
             return VpnAppStatus::NotChosen;
         };
         if self.enforcer.is_running_in(&rule, scan) {
@@ -1812,6 +1890,34 @@ impl GuardController {
         inner.last_report = None;
         inner.last_reading = None;
     }
+}
+
+/// Кому ядро отказало в сигнале.
+/// Записи целей в настройках: то, что пользователь охранять не переставал.
+/// Отпустить стоящий процесс как снятый с охраны можно, только когда его цели
+/// здесь нет, — а не когда он перестал совпадать с правилом.
+fn guarded_entries(settings: &Settings) -> HashSet<String> {
+    settings
+        .targets
+        .iter()
+        .map(|target| target.entry.clone())
+        .collect()
+}
+
+fn refused_pids(results: &[SignalResult]) -> Vec<i32> {
+    results
+        .iter()
+        .filter(|result| !result.is_delivered())
+        .map(|result| result.pid)
+        .collect()
+}
+
+/// Строка отказа прав для экрана — текстом `GuardVM` с macOS дословно; список
+/// pid печатается так же, как массив Swift: `[200, 201]`. Отказов нет — нет
+/// и строки.
+fn refusal_text(action: &str, refused: &[i32]) -> Option<String> {
+    (!refused.is_empty())
+        .then(|| format!("Не удалось {action} процессы {refused:?} — недостаточно прав"))
 }
 
 fn standing_pids(entries: &[weto_config::stopped::StoppedProcess]) -> Vec<i32> {

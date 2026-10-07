@@ -40,7 +40,7 @@ fn every_control_of_a_row_stands_at_one_height() {
     window.set_child(Some(&row));
 
     let update = ui::primary_button("Обновить");
-    let skip = ui::muted_button("Пропустить эту версию");
+    let skip = ui::muted_button("Пропустить версию");
     let clear = ui::destructive_button("Очистить журнал");
     let picker = ui::dropdown();
     let field = ui::entry("Код страны (RU), IP или CIDR");

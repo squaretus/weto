@@ -56,6 +56,13 @@ public struct WetoPauseBadge: View {
     public static func countdown(until deadline: Date?, at now: Date) -> String {
         guard let deadline else { return "пауза" }
         let seconds = max(0, Int(deadline.timeIntervalSince(now).rounded(.up)))
-        return "\(seconds) с"
+        return remainingText(seconds: seconds)
+    }
+
+    /// Больше минуты — «4:59», последняя минута — «43 с». Тот же формат — у строки
+    /// объяснения паузы в попапе и у Linux (`pause_ceiling::countdown_text`).
+    public static func remainingText(seconds: Int) -> String {
+        guard seconds > 60 else { return "\(max(0, seconds)) с" }
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 }

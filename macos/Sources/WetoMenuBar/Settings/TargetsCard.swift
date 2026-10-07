@@ -9,16 +9,13 @@ struct TargetsCard: View {
 
     @State private var newTarget = ""
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: WetoTokens.space2) {
-            card
+    /// Формат ввода — значком в конце поля, а не подписью под карточкой:
+    /// подпись под карточкой не читалась как относящаяся к полю.
+    private static let inputHint =
+        "Имя команды (nano), путь (/usr/bin/curl) или бандл (com.openai.chat). Дочерние процессы завершаются вместе с родителем."
 
-            Text("Имя команды (nano), путь (/usr/bin/curl) или бандл (com.openai.chat). Дочерние процессы завершаются вместе с родителем.")
-                .font(WetoTokens.diagnostics)
-                .foregroundStyle(WetoTokens.faint.resolve(scheme))
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, WetoTokens.space2)
-        }
+    var body: some View {
+        card
     }
 
     private var card: some View {
@@ -48,6 +45,7 @@ struct TargetsCard: View {
                     )
                     .textFieldStyle(WetoFieldStyle())
                     .labelsHidden()
+                    .wetoFieldHint(Self.inputHint, fieldText: newTarget)
                     .onSubmit { add() }
 
                     Button("Добавить") { add() }

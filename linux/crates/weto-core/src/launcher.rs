@@ -23,11 +23,27 @@ const SHELL_NAMES: [&str; 3] = ["sh", "bash", "zsh"];
 /// из текста ярлыка не следует ни при каком разборе.
 const FOREIGN_LAUNCHERS: [&str; 2] = ["steam", "flatpak"];
 
+/// Интерпретаторы, которым скрипт передают файлом: `node /opt/app/cli.js`.
+///
+/// Процессом окажется сам интерпретатор, и цель `/usr/bin/node` увела бы
+/// под охрану все Node-процессы машины разом. Имя сравнивается без хвоста
+/// версии: `python3.12`, `lua5.4` и `php8.2` — те же интерпретаторы.
+const INTERPRETERS: [&str; 10] = [
+    "node", "nodejs", "python", "ruby", "perl", "php", "lua", "deno", "bun", "java",
+];
+
+/// Интерпретаторы с подкомандой перед файлом: `deno run main.ts`, `bun run index.ts`.
+const RUN_SUBCOMMAND: [&str; 2] = ["deno", "bun"];
+
 /// К чему сводится строка `Exec` из ярлыка.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopCommand {
     /// Команда или путь — цепочку можно продолжать.
     Command(String),
+    /// Файл, который читает интерпретатор (`node /opt/app/cli.js`). Процессом
+    /// окажется интерпретатор, а файл встретится только в его argv, поэтому
+    /// цель — файл, и узнавать её по пути нельзя.
+    Script(String),
     /// Запускает что-то за себя: чужой запускатор или неразвёрнутая оболочка.
     /// Что именно запустится, из текста не следует.
     Indirect { launcher: String },
@@ -100,6 +116,29 @@ pub fn name_from_desktop_entry(text: &str, locale: Option<&str>) -> Option<Strin
     }
 
     localized.or(plain)
+}
+
+/// Иконка приложения из ярлыка — `Icon=` секции `[Desktop Entry]`: имя
+/// из темы иконок или абсолютный путь к файлу. Пилюля цели показывает её,
+/// как macOS показывает иконку бандла.
+pub fn icon_from_desktop_entry(text: &str) -> Option<String> {
+    let mut in_entry_section = false;
+    let mut icon = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+
+        if line.starts_with('[') {
+            in_entry_section = line == "[Desktop Entry]";
+            continue;
+        }
+        if in_entry_section {
+            if let Some(value) = line.strip_prefix("Icon=") {
+                icon = non_empty(value);
+            }
+        }
+    }
+    icon
 }
 
 /// Разбор одной строки `Exec` до настоящей программы.
@@ -185,7 +224,53 @@ fn verdict(words: &[String]) -> Option<DesktopCommand> {
             launcher: name.to_string(),
         });
     }
+
+    // Интерпретатор и оболочка с файлом скрипта: целью становится файл.
+    // Без файла оболочка остаётся целью, как раньше (`/bin/sh --login`
+    // у ярлыка терминала), а интерпретатор — нет: голый `node` или
+    // `python3 -m http.server` до файла программы не доводят, и путь спросят
+    // у пользователя.
+    let interpreter = is_interpreter(name);
+    if interpreter || SHELL_NAMES.contains(&name) {
+        if let Some(script) = script_argument(name, &words[1..]) {
+            return Some(DesktopCommand::Script(script.to_string()));
+        }
+        if interpreter {
+            return Some(DesktopCommand::Indirect {
+                launcher: name.to_string(),
+            });
+        }
+    }
     Some(DesktopCommand::Command(first.to_string()))
+}
+
+/// Интерпретатор ли это — имя без хвоста версии (`python3.12` → `python`).
+fn is_interpreter(name: &str) -> bool {
+    let bare = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    INTERPRETERS.contains(&bare)
+}
+
+/// Файл скрипта при интерпретаторе, если строка называет его честно.
+///
+/// Пропускаются только длинные флаги (`--no-warnings`, `--allow-net`)
+/// и подкоманда `run` у deno и bun. Короткий флаг останавливает разбор:
+/// за `-m`, `-e`, `-c`, `-jar` идёт модуль, код или архив, а не файл программы,
+/// и гадать про них нельзя. Длинный флаг с отдельным значением
+/// (`--require /opt/a.js /opt/b.js`) может подсунуть значение вместо скрипта —
+/// но и такое правило совпадает с этим процессом: скрипт ищется по argv
+/// поэлементно, а значение лежит там же.
+///
+/// Скрипт обязан быть абсолютным путём: каталог запуска ярлыка неизвестен,
+/// и относительный `cli.js` ни к какому файлу не ведёт.
+fn script_argument<'a>(name: &str, arguments: &'a [String]) -> Option<&'a str> {
+    let mut rest = arguments;
+    if RUN_SUBCOMMAND.contains(&name) && rest.first().is_some_and(|word| word == "run") {
+        rest = &rest[1..];
+    }
+    rest.iter()
+        .find(|word| !word.starts_with("--"))
+        .filter(|word| word.starts_with('/'))
+        .map(String::as_str)
 }
 
 /// Отбрасывает ведущие обёртки: `exec` оболочки и `env` с назначениями
@@ -318,6 +403,29 @@ pub fn sibling_binary_from_launcher(script: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Иконка пилюли — из `Icon=` секции `[Desktop Entry]`: имя из темы или
+    /// абсолютный путь. Ключи секций `[Desktop Action …]` и пустое значение
+    /// иконкой не являются.
+    #[test]
+    fn the_icon_comes_from_the_entry_section() {
+        let entry = "[Desktop Entry]\nName=Firefox\nIcon=firefox\nExec=firefox %u\n\
+                     [Desktop Action new-window]\nIcon=window-new\n";
+        assert_eq!(icon_from_desktop_entry(entry).as_deref(), Some("firefox"));
+
+        let path = "[Desktop Entry]\nIcon=/opt/app/icon.png\n";
+        assert_eq!(
+            icon_from_desktop_entry(path).as_deref(),
+            Some("/opt/app/icon.png")
+        );
+
+        assert_eq!(icon_from_desktop_entry("[Desktop Entry]\nIcon=\n"), None);
+        assert_eq!(icon_from_desktop_entry("[Desktop Entry]\nName=X\n"), None);
+        assert_eq!(
+            icon_from_desktop_entry("[Desktop Action a]\nIcon=window-new\n"),
+            None
+        );
+    }
 
     #[test]
     fn the_command_comes_from_the_main_section_without_its_arguments() {
@@ -591,6 +699,55 @@ Exec=claude --new-window
     /// Имя оболочки из строки `Exec` — для ожидания в тесте выше.
     fn basename_of(exec: &str) -> &str {
         exec.split_whitespace().next().unwrap_or(exec)
+    }
+
+    /// `Exec=node /opt/x/cli.js`: процессом окажется `node`, и цель `/usr/bin/node`
+    /// увела бы под охрану все Node-процессы машины разом — а падение VPN
+    /// закрывало бы их все. Цель — файл скрипта; обёртки снимаются, как всегда.
+    #[test]
+    fn an_interpreter_is_not_the_target_its_script_is() {
+        for (exec, script) in [
+            ("node /opt/x/cli.js %U", "/opt/x/cli.js"),
+            ("python3 /opt/y/app.py", "/opt/y/app.py"),
+            ("/usr/bin/python3.12 /opt/y/app.py", "/opt/y/app.py"),
+            ("env LANG=C ruby /opt/r/app.rb", "/opt/r/app.rb"),
+            ("perl /opt/p/tool.pl", "/opt/p/tool.pl"),
+            ("deno run --allow-net /opt/d/main.ts", "/opt/d/main.ts"),
+            ("bun run /opt/b/index.ts", "/opt/b/index.ts"),
+            ("node --no-warnings /opt/x/cli.js", "/opt/x/cli.js"),
+            ("sh -c \"exec node /opt/x/cli.js\"", "/opt/x/cli.js"),
+            // Оболочка, которой скрипт передан файлом, а не строкой: целью был бы
+            // `/bin/bash` — половина машины.
+            ("bash /opt/app/start.sh", "/opt/app/start.sh"),
+        ] {
+            assert_eq!(
+                command_from_desktop_entry(&format!("[Desktop Entry]\nExec={exec}\n")),
+                Some(DesktopCommand::Script(script.to_string())),
+                "разбор {exec}"
+            );
+        }
+    }
+
+    /// Интерпретатор, при котором файл скрипта не назван абсолютным путём, честно
+    /// отвечает «не знаю»: `python3 -m http.server`, `java -jar …` и относительный
+    /// `cli.js` до файла не доводят, а сам интерпретатор целью не бывает.
+    #[test]
+    fn an_interpreter_without_a_script_path_asks_for_it() {
+        for (exec, launcher) in [
+            ("node", "node"),
+            ("node cli.js", "node"),
+            ("python3 -m http.server", "python3"),
+            ("java -jar /opt/j/app.jar", "java"),
+            ("/usr/bin/nodejs -e \"1\"", "nodejs"),
+        ] {
+            assert_eq!(
+                command_from_desktop_entry(&format!("[Desktop Entry]\nExec={exec}\n")),
+                Some(DesktopCommand::Indirect {
+                    launcher: launcher.to_string()
+                }),
+                "разбор {exec}"
+            );
+        }
     }
 
     #[test]

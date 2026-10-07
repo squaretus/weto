@@ -100,15 +100,16 @@ struct MaintenanceCard: View {
         let alert = NSAlert()
         alert.messageText = "Закрыть Weto?"
         // Про «до следующего входа в систему» текст обещать не имеет права:
-        // автозапуск по умолчанию выключен, и без него weto не вернётся никогда.
+        // автозапуск по умолчанию выключен, и без него Weto не вернётся никогда.
         // Дословно как на Linux.
         alert.informativeText = """
             Приложение завершится и перестанет охранять цели. Настройки, журнал и автозапуск \
-            сохранятся: если автозапуск включён, weto вернётся при следующем входе в систему.
+            сохранятся: если автозапуск включён, Weto вернётся при следующем входе в систему.
             """
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Закрыть")
         alert.addButton(withTitle: "Отмена")
+        alert.makeConfirmationButtons()
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
@@ -131,6 +132,7 @@ struct MaintenanceCard: View {
         alert.alertStyle = .critical
         alert.addButton(withTitle: "Удалить")
         alert.addButton(withTitle: "Отмена")
+        alert.makeConfirmationButtons()
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
@@ -190,20 +192,21 @@ struct MaintenanceCard: View {
     /// (`settings_window.rs`, `standing_detail`): диалоги у платформ общие.
     private func askToUninstallAnyway(_ standing: [StoppedProcess]) -> Bool {
         let alert = NSAlert()
-        alert.messageText = "Эти программы weto поставил на паузу, и они ещё не продолжились:"
+        alert.messageText = "Эти программы Weto поставил на паузу, и они ещё не продолжились:"
         alert.informativeText = """
             \(standingList(standing))
 
-            Охрана уже остановлена и обратно не включится: weto придётся \
+            Охрана уже остановлена и обратно не включится: Weto придётся \
             запустить заново.
 
-            Если удалить weto сейчас, вернуть эти программы \
+            Если удалить Weto сейчас, вернуть эти программы \
             будет некому — только командой fg в их терминале. Если не удалять, \
             их разберёт следующий запуск: учёт остановленных цел.
             """
         alert.alertStyle = .critical
         alert.addButton(withTitle: "Удалить всё равно")
-        alert.addButton(withTitle: "Не удалять и закрыть weto")
+        alert.addButton(withTitle: "Не удалять и закрыть Weto")
+        alert.makeConfirmationButtons()
 
         return alert.runModal() == .alertFirstButtonReturn
     }
@@ -237,7 +240,7 @@ struct MaintenanceCard: View {
         report.informativeText = """
             \(failureText)
 
-            weto закроется: охрана уже остановлена, и продолжать он не может. \
+            Weto закроется: охрана уже остановлена, и продолжать он не может. \
             Оставшееся удалите вручную.
             """
         report.alertStyle = .critical

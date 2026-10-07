@@ -48,8 +48,9 @@ fn the_settings_window_is_released_after_closing() {
     std::fs::create_dir_all(&home).expect("временный дом не создался");
     let state: Arc<AppState> = AppState::new(Paths::rooted(home.clone()));
 
+    let baseline = Arc::strong_count(&state);
     let weak = {
-        settings_window::present(&application, state);
+        settings_window::present(&application, state.clone());
         let window = application
             .active_window()
             .expect("окно настроек не открылось");
@@ -72,6 +73,17 @@ fn the_settings_window_is_released_after_closing() {
         weak.upgrade().is_none(),
         "закрытое окно настроек осталось в памяти: каждое открытие настроек \
          оставляет дерево виджетов навсегда"
+    );
+    // Окно может уйти, а поддерево остаться: цикл между замыканием и виджетами,
+    // которые оно держит, живёт и без окна. Состояние приложения захватывают
+    // обработчики всех карточек, поэтому по его счётчику видно любое такое
+    // поддерево — включая строку VPN-приложения, замыкание показа которой держало
+    // свои же контейнеры, а кнопки внутри них держали замыкание.
+    assert_eq!(
+        Arc::strong_count(&state),
+        baseline,
+        "после закрытия настроек состояние приложения кто-то держит: часть \
+         дерева виджетов осталась в памяти вместе с ним"
     );
 }
 

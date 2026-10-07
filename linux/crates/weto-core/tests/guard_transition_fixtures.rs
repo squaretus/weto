@@ -33,13 +33,17 @@ fn every_fixture_case_matches_the_machine() {
 
     let reading = suite.reading.as_reading();
     for fixture in &suite.cases {
+        // Улика `pauseExpired` несёт потолок случая: в файле он не повторяется.
+        let ceiling = Duration::from_secs_f64(fixture.ceiling_seconds);
         let mut machine = GuardMachine::new(
-            fixture.start.as_start_phase(&fixture.name, &reading),
-            Duration::from_secs_f64(fixture.ceiling_seconds),
+            fixture
+                .start
+                .as_start_phase(&fixture.name, &reading, ceiling),
+            ceiling,
         );
         for step in &fixture.steps {
             let effect = machine.apply(
-                step.input.as_input(&fixture.name, &reading),
+                step.input.as_input(&fixture.name, &reading, ceiling),
                 moment(step.at),
             );
             assert_eq!(
@@ -50,7 +54,7 @@ fn every_fixture_case_matches_the_machine() {
                 step.at
             );
             assert!(
-                step.phase.matches(machine.phase()),
+                step.phase.matches(machine.phase(), ceiling),
                 "«{}» @{}: фаза {:?}",
                 fixture.name,
                 step.at,
@@ -81,19 +85,26 @@ fn the_runner_rejects_a_phase_that_differs() {
             observed: None,
         }),
     };
-    assert!(expected.matches(&GuardPhase::Paused {
-        since: UNIX_EPOCH,
-        reason: UnprovenReason::ConfirmationUnavailable,
-    }));
-    assert!(
-        !expected.matches(&GuardPhase::Paused {
+    let ceiling = Duration::from_secs(60);
+    assert!(expected.matches(
+        &GuardPhase::Paused {
             since: UNIX_EPOCH,
-            reason: UnprovenReason::GeoUnavailable("таймаут запроса".to_string()),
-        }),
+            reason: UnprovenReason::ConfirmationUnavailable,
+        },
+        ceiling
+    ));
+    assert!(
+        !expected.matches(
+            &GuardPhase::Paused {
+                since: UNIX_EPOCH,
+                reason: UnprovenReason::GeoUnavailable("таймаут запроса".to_string()),
+            },
+            ceiling
+        ),
         "другая причина паузы — расхождение"
     );
     assert!(
-        !expected.matches(&GuardPhase::Disabled),
+        !expected.matches(&GuardPhase::Disabled, ceiling),
         "другая фаза — расхождение"
     );
     assert_eq!(
@@ -190,7 +201,7 @@ impl Phase {
     /// постановки, а он в файле не задаётся — такие случаи начинаются с шага,
     /// который на паузу и ставит. У `verifying` момента нет вовсе (цели в ней
     /// работают, и считать от неё нечего), поэтому стартовой она быть может.
-    fn as_start_phase(&self, case: &str, reading: &GeoReading) -> GuardPhase {
+    fn as_start_phase(&self, case: &str, reading: &GeoReading, ceiling: Duration) -> GuardPhase {
         match self.kind.as_str() {
             "disabled" => GuardPhase::Disabled,
             "verifying" => GuardPhase::Verifying {
@@ -209,7 +220,7 @@ impl Phase {
                 self.evidence
                     .as_ref()
                     .unwrap_or_else(|| panic!("«{case}»: стартовая фаза danger без улики"))
-                    .as_evidence(case),
+                    .as_evidence(case, ceiling),
             ),
             other => panic!("«{case}»: фаза «{other}» стартовой быть не может"),
         }
@@ -223,7 +234,7 @@ impl Phase {
         parse_cause(case, raw)
     }
 
-    fn matches(&self, actual: &GuardPhase) -> bool {
+    fn matches(&self, actual: &GuardPhase, ceiling: Duration) -> bool {
         match (self.kind.as_str(), actual) {
             ("disabled", GuardPhase::Disabled) => true,
             ("verifying", GuardPhase::Verifying { cause }) => match self.cause.as_deref() {
@@ -241,7 +252,7 @@ impl Phase {
             },
             ("danger", GuardPhase::Danger(evidence)) => match &self.evidence {
                 None => true,
-                Some(expected) => expected.as_evidence("ожидаемая фаза") == *evidence,
+                Some(expected) => expected.as_evidence("ожидаемая фаза", ceiling) == *evidence,
             },
             _ => false,
         }
@@ -268,7 +279,7 @@ struct Input {
 }
 
 impl Input {
-    fn as_input(&self, case: &str, reading: &GeoReading) -> GuardInput {
+    fn as_input(&self, case: &str, reading: &GeoReading, ceiling: Duration) -> GuardInput {
         match self.kind.as_str() {
             "tick" => GuardInput::Tick,
             "disarmed" => GuardInput::Disarmed,
@@ -282,14 +293,14 @@ impl Input {
                 self.evidence
                     .as_ref()
                     .unwrap_or_else(|| panic!("«{case}»: вход evidence без улики"))
-                    .as_evidence(case),
+                    .as_evidence(case, ceiling),
             ),
             "verdict" => GuardInput::Verdict {
                 decision: self
                     .decision
                     .as_ref()
                     .unwrap_or_else(|| panic!("«{case}»: вход verdict без решения"))
-                    .as_decision(case),
+                    .as_decision(case, ceiling),
                 geo: self
                     .geo
                     .as_ref()
@@ -301,7 +312,7 @@ impl Input {
                     .decision
                     .as_ref()
                     .unwrap_or_else(|| panic!("«{case}»: вход reassessment без решения"))
-                    .as_decision(case),
+                    .as_decision(case, ceiling),
                 reading: reading.clone(),
             },
             other => panic!("«{case}»: неизвестный вход «{other}»"),
@@ -317,7 +328,7 @@ struct Decision {
 }
 
 impl Decision {
-    fn as_decision(&self, case: &str) -> GuardDecision {
+    fn as_decision(&self, case: &str, ceiling: Duration) -> GuardDecision {
         match self.kind.as_str() {
             "safe" => GuardDecision::Safe,
             "unproven" => GuardDecision::Unproven(
@@ -330,7 +341,7 @@ impl Decision {
                 self.evidence
                     .as_ref()
                     .unwrap_or_else(|| panic!("«{case}»: kill без улики"))
-                    .as_evidence(case),
+                    .as_evidence(case, ceiling),
             ),
             other => panic!("«{case}»: неизвестное решение «{other}»"),
         }
@@ -410,7 +421,7 @@ struct Evidence {
 }
 
 impl Evidence {
-    fn as_evidence(&self, case: &str) -> UnsafeEvidence {
+    fn as_evidence(&self, case: &str, ceiling: Duration) -> UnsafeEvidence {
         match self.kind.as_str() {
             "vpnAppNotRunning" => UnsafeEvidence::VpnAppNotRunning,
             "blacklistedIP" => UnsafeEvidence::BlacklistedIp(
@@ -447,7 +458,7 @@ impl Evidence {
                     .clone()
                     .unwrap_or_else(|| panic!("«{case}»: notWhitelistedCountry без страны")),
             ),
-            "pauseExpired" => UnsafeEvidence::PauseExpired,
+            "pauseExpired" => UnsafeEvidence::PauseExpired(ceiling),
             other => panic!("«{case}»: неизвестная улика «{other}»"),
         }
     }

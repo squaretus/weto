@@ -212,7 +212,7 @@ fn the_ceiling_terminates_what_the_pause_could_not_confirm() {
 
     assert_eq!(
         expired,
-        GuardPhase::Danger(UnsafeEvidence::PauseExpired),
+        GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60))),
         "потолок — это доказательство, а не ещё одна пауза"
     );
     assert_eq!(s.world.signalled(Kill), vec![200, 201]);
@@ -225,6 +225,50 @@ fn the_ceiling_terminates_what_the_pause_could_not_confirm() {
         "{:?}",
         s.reporter.resolutions()
     );
+}
+
+/// Потолок выбран в настройках: пять минут — на второй минуте цели стоят,
+/// а дедлайн на экране отсчитан от начала стояния по выбранному потолку.
+#[test]
+fn the_chosen_ceiling_is_what_the_pause_waits_for() {
+    let s = stand();
+    s.settings.0.lock().unwrap().pause_ceiling_seconds = 300;
+    guarded(&s);
+    services_go_silent(&s);
+
+    s.hands.advance(120);
+    let phase = s.tick();
+    assert_eq!(phase.action(), GuardAction::Pause);
+    assert!(s.world.signalled(Kill).is_empty());
+
+    let since = phase.paused_since().expect("стоим");
+    assert_eq!(
+        s.controller.snapshot().pause_deadline,
+        Some(since + Duration::from_secs(300))
+    );
+}
+
+/// Урезали потолок ниже простоянного — цели завершаются ближайшим тактом,
+/// и улика называет новый потолок.
+#[test]
+fn a_ceiling_cut_below_the_time_already_paused_terminates_at_once() {
+    let s = stand();
+    s.settings.0.lock().unwrap().pause_ceiling_seconds = 600;
+    guarded(&s);
+    services_go_silent(&s);
+    s.hands.advance(180);
+    assert_eq!(s.tick().action(), GuardAction::Pause);
+
+    // Мимо ревизии — так правит окно настроек (`edit_untracked`).
+    s.settings.0.lock().unwrap().pause_ceiling_seconds = 60;
+    s.hands.advance(1);
+    let phase = s.tick();
+
+    assert_eq!(
+        phase,
+        GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
+    );
+    assert_eq!(s.world.signalled(Kill), vec![200, 201]);
 }
 
 /// Потерю вердикта под паузой объявляют каждый такт, и отсчёт от неё
@@ -245,7 +289,7 @@ fn a_repeated_staleness_announcement_does_not_restart_the_ceiling() {
 
     assert_eq!(
         s.controller.phase(),
-        GuardPhase::Danger(UnsafeEvidence::PauseExpired),
+        GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60))),
         "потолок считается от плохого результата, а не от последней новости"
     );
 }
@@ -385,6 +429,89 @@ fn a_refused_resume_is_named_as_a_refusal() {
         s.reporter.resolutions()
     );
     assert!(ledger_pids(&s).contains(&200));
+}
+
+// --- отказ в правах на экране ----------------------------------------------
+
+/// Отказ ядра в SIGSTOP виден не только журналу: экран называет pid красной
+/// строкой под показаниями — текстом macOS дословно (`GuardVM.pauseTargets`).
+/// Цели снова работают — строка гаснет: она про сигналы, которых больше нет.
+#[test]
+fn a_refused_pause_is_shown_until_the_targets_run_again() {
+    let s = stand();
+    guarded(&s);
+    assert_eq!(s.controller.snapshot().permission_failure, None);
+
+    s.world.refuses(200);
+    services_go_silent(&s);
+
+    assert_eq!(
+        s.controller.snapshot().permission_failure.as_deref(),
+        Some("Не удалось приостановить процессы [200] — недостаточно прав")
+    );
+
+    s.geo.everything_answers_again();
+    s.probe_now();
+    s.tick();
+
+    assert_eq!(s.controller.snapshot().permission_failure, None);
+}
+
+/// Отказ в SIGCONT гасить тем же проходом нельзя: строка — про сигнал,
+/// который только что не дошёл, а цель так и стоит.
+#[test]
+fn a_refused_resume_is_shown_on_the_screen() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+    assert_eq!(s.controller.snapshot().permission_failure, None);
+
+    s.world.refuses(200);
+    s.geo.everything_answers_again();
+    s.probe_now();
+
+    assert_eq!(
+        s.controller.snapshot().permission_failure.as_deref(),
+        Some("Не удалось возобновить процессы [200] — недостаточно прав")
+    );
+}
+
+/// Отказ в SIGKILL по доказательству называется так же — своим глаголом.
+#[test]
+fn a_refused_termination_is_shown_on_the_screen() {
+    let s = stand();
+    guarded(&s);
+    s.world.refuses(200);
+
+    s.world.vpn_app_closes();
+    let phase = s.tick();
+
+    assert_eq!(phase, GuardPhase::Danger(UnsafeEvidence::VpnAppNotRunning));
+    assert_eq!(
+        s.controller.snapshot().permission_failure.as_deref(),
+        Some("Не удалось завершить процессы [200] — недостаточно прав")
+    );
+}
+
+/// Цель, снятая с охраны под паузой, отпускается сразу — и отказ в этом
+/// SIGCONT называется тем же текстом, что отказ в возобновлении.
+#[test]
+fn a_refused_release_is_shown_on_the_screen() {
+    let mut world = terminal_session();
+    world.push(detached(300, 1, NANO));
+    let s = stand_guarding(&[CLAUDE, NANO], World::of(world), &[]);
+    guarded(&s);
+    services_go_silent(&s);
+
+    s.world.refuses(300);
+    s.settings
+        .edit(|settings| settings.targets.retain(|target| target.entry != NANO));
+    s.controller.tick();
+
+    assert_eq!(
+        s.controller.snapshot().permission_failure.as_deref(),
+        Some("Не удалось возобновить процессы [300] — недостаточно прав")
+    );
 }
 
 // --- журнал стояния ---------------------------------------------------------
@@ -796,6 +923,73 @@ fn the_shell_is_released_only_when_the_last_guarded_entry_is_gone() {
     );
 }
 
+/// Корень цели умер под паузой (пользователь добил стоящий claude), а его
+/// стоящий потомок осиротел и под правило больше не подпадает. Целью он от этого
+/// быть не перестал: claude никто с охраны не снимал. Прежде «не совпадает
+/// с правилом» читалось как «снят с охраны» — потомок и шелл получали SIGCONT
+/// посреди паузы, а журнал писал про снятие, которого не было.
+#[test]
+fn an_orphaned_descendant_stays_held_while_its_target_is_guarded() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+    assert_eq!(s.world.signalled(Stop), vec![100, 200, 201]);
+    s.world.forget_signals();
+
+    s.world.remove(200);
+    s.tick();
+
+    assert!(
+        s.world.signalled(Resume).is_empty(),
+        "осиротевший потомок отпущен посреди паузы: {:?}",
+        s.world.signals()
+    );
+    assert!(s.world.is_stopped(201));
+    assert!(
+        s.world.is_stopped(100),
+        "и шелл держит терминал по-прежнему"
+    );
+    assert!(
+        s.reporter.recorded().released.is_empty(),
+        "журнал пишет «снята с охраны» про цель, которую никто не снимал"
+    );
+    assert_eq!(s.controller.phase().action(), GuardAction::Pause);
+
+    // Исход эпизода отпускает его как всех: стояние кончилось безопасным выходом.
+    s.geo.everything_answers_again();
+    s.probe_now();
+    assert_eq!(s.world.signalled(Resume), vec![201, 100]);
+}
+
+/// Тот же сирота при доказательстве: он часть стоящей цели, и опасный выход
+/// завершает его вместе с ней, а не возвращает к работе.
+#[test]
+fn an_orphaned_descendant_is_killed_by_evidence_not_resumed() {
+    let s = stand();
+    guarded(&s);
+    services_go_silent(&s);
+    s.world.remove(200);
+    s.tick();
+    s.world.forget_signals();
+
+    s.geo.everything_answers_again();
+    s.geo.now_reports("RU");
+    let phase = s.probe_now();
+
+    assert!(matches!(phase, GuardPhase::Danger(_)), "{phase:?}");
+    assert_eq!(s.world.signalled(Kill), vec![201]);
+    assert_eq!(
+        s.world.signalled(Resume),
+        vec![100],
+        "шелл — не цель: ему возвращают терминал"
+    );
+    assert_eq!(
+        ledger_pids(&s),
+        vec![100],
+        "завершённый уходит из учёта, шелл — по наблюдению следующим проходом"
+    );
+}
+
 // --- восстановление после падения -------------------------------------------
 
 fn standing_entry(pid: i32, path: &str, is_shell: bool) -> StoppedProcess {
@@ -804,6 +998,7 @@ fn standing_entry(pid: i32, path: &str, is_shell: bool) -> StoppedProcess {
         executable_path: path.to_string(),
         stopped_at: UNIX_EPOCH + Duration::from_secs(999_000),
         is_shell,
+        target_entry: None,
     }
 }
 
@@ -843,7 +1038,7 @@ fn processes_found_standing_at_startup_are_resumed_and_explained() {
     let recorded = s.reporter.recorded();
     assert_eq!(recorded.recovered.len(), 2);
     assert!(recorded.recovered.iter().all(|entry| entry.reason
-        == "Найдены остановленными от прошлого запуска weto: пробы за этим стоянием нет"));
+        == "Найдены остановленными от прошлого запуска Weto: пробы за этим стоянием нет"));
     assert_eq!(
         recorded
             .recovered

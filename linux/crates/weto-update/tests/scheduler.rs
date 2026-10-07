@@ -4,14 +4,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use weto_update::policy::{UpdateDeferral, UpdateInfo};
-use weto_update::scheduler::{DeferralReading, Finding, ReleaseLooking, UpdateScheduler};
+use weto_update::checker::CheckError;
+use weto_update::policy::{RemindInterval, UpdateDeferral, UpdateInfo, MAXIMUM_REMIND_INTERVAL};
+use weto_update::scheduler::{
+    CheckState, DeferralReading, Examination, Finding, ReleaseLooking, UpdateScheduler,
+};
 use weto_update::store::UpdateStore;
 use weto_update::version::Version;
 
 #[derive(Clone)]
 struct FakeReleases {
     latest: String,
+    /// Ответ вместо релиза: нет релизов вовсе или отказ сети.
+    failure: Option<fn() -> CheckError>,
     calls: Arc<AtomicUsize>,
 }
 
@@ -19,22 +24,37 @@ impl FakeReleases {
     fn at(version: &str) -> FakeReleases {
         FakeReleases {
             latest: version.to_string(),
+            failure: None,
             calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn failing(failure: fn() -> CheckError) -> FakeReleases {
+        FakeReleases {
+            failure: Some(failure),
+            ..FakeReleases::at("0.0.0")
         }
     }
 }
 
 impl ReleaseLooking for FakeReleases {
-    fn latest(&self, current: &Version) -> Option<UpdateInfo> {
+    fn latest(&self, current: &Version) -> Result<UpdateInfo, CheckError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(failure) = self.failure {
+            return Err(failure());
+        }
         let latest = Version::parse(&self.latest).unwrap();
-        Some(UpdateInfo {
+        Ok(UpdateInfo {
+            current_version: current.to_string(),
             latest_version: self.latest.clone(),
+            release_url: format!(
+                "https://github.com/squaretus/weto/releases/tag/v{}",
+                self.latest
+            ),
             download_url: format!(
                 "https://github.com/squaretus/weto/releases/download/v{}/weto-{}-x86_64-linux.tar.zst",
                 self.latest, self.latest
             ),
-            release_notes: Some("Заметки".to_string()),
             is_newer: latest > *current,
         })
     }
@@ -110,6 +130,134 @@ fn auto_install_turns_the_finding_into_an_install() {
     assert!(matches!(finding, Some(Finding::Install(_))));
 }
 
+// --- исход проверки для подвала ---------------------------------------------
+
+/// Подсказка плитки в подвале называет исход проверки, как `UpdateController.State`
+/// на macOS: свежая версия, релизов нет, отказ — каждый своим состоянием.
+#[test]
+fn the_same_version_reads_as_up_to_date() {
+    let examination =
+        scheduler(FakeReleases::at("1.1.0"), FakeDeferrals::default(), "1.1.0").examine(true);
+
+    assert_eq!(
+        examination,
+        Examination {
+            state: CheckState::UpToDate("1.1.0".to_string()),
+            finding: None,
+        }
+    );
+}
+
+#[test]
+fn a_repository_without_releases_says_so() {
+    let examination = scheduler(
+        FakeReleases::failing(|| CheckError::NoReleases),
+        FakeDeferrals::default(),
+        "1.1.0",
+    )
+    .examine(true);
+
+    assert_eq!(examination.state, CheckState::NoReleases);
+    assert_eq!(examination.finding, None);
+}
+
+#[test]
+fn a_failed_request_carries_its_reason() {
+    let examination = scheduler(
+        FakeReleases::failing(|| CheckError::Request("нет сети".to_string())),
+        FakeDeferrals::default(),
+        "1.1.0",
+    )
+    .examine(true);
+
+    assert_eq!(
+        examination.state,
+        CheckState::Failed("не спросить о релизах: нет сети".to_string())
+    );
+    assert_eq!(examination.finding, None);
+}
+
+/// Пропущенная версия молчит, но подвал о ней знает: нажатие на плитку
+/// открывает окно — так на macOS ручная проверка возвращает пропуск.
+#[test]
+fn a_silent_finding_is_still_available_to_the_footer() {
+    let deferrals = FakeDeferrals::default();
+    deferrals.0.lock().unwrap().skipped_version = Some("1.2.0".to_string());
+
+    let examination = scheduler(FakeReleases::at("1.2.0"), deferrals, "1.1.0").examine(false);
+
+    assert!(
+        matches!(&examination.state, CheckState::Available(info) if info.latest_version == "1.2.0")
+    );
+    assert_eq!(examination.finding, None);
+}
+
+#[test]
+fn a_prompt_is_available_too() {
+    let examination =
+        scheduler(FakeReleases::at("1.2.0"), FakeDeferrals::default(), "1.1.0").examine(false);
+
+    assert!(matches!(examination.state, CheckState::Available(_)));
+    assert!(matches!(examination.finding, Some(Finding::Prompt(_))));
+}
+
+// --- сроки отсрочки ----------------------------------------------------------
+
+/// Пункты меню «Напомнить позже» — те же три срока, что `RemindInterval`
+/// на macOS, а крестик окна — три часа.
+#[test]
+fn the_remind_intervals_are_one_three_and_six_hours() {
+    assert_eq!(
+        RemindInterval::ALL.map(RemindInterval::duration),
+        [
+            Duration::from_secs(3600),
+            Duration::from_secs(3 * 3600),
+            Duration::from_secs(6 * 3600),
+        ]
+    );
+    assert_eq!(RemindInterval::ON_CLOSE, RemindInterval::ThreeHours);
+}
+
+/// Самый долгий срок меню обязан помещаться под потолок отсрочки: иначе
+/// «через 6 часов» читалось бы как испорченная дата и окно всплывало сразу.
+#[test]
+fn every_remind_interval_fits_under_the_ceiling() {
+    for interval in RemindInterval::ALL {
+        assert!(interval.duration() <= MAXIMUM_REMIND_INTERVAL);
+    }
+}
+
+/// Отсрочка из меню молчит до срока у настоящего хранилища и настоящей
+/// проверки — каждым из трёх сроков, включая самый долгий.
+#[test]
+fn each_remind_interval_silences_the_next_scheduled_check() {
+    for interval in RemindInterval::ALL {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(UpdateStore::new(tmp.path().into()));
+        store.remind_later(interval.duration());
+
+        let scheduled = UpdateScheduler::new(
+            Version::parse("1.1.0").unwrap(),
+            Arc::new(FakeReleases::at("1.2.0")),
+            Arc::new(StoreReader(store.clone())),
+        );
+
+        assert_eq!(scheduled.check(false), None, "{interval:?} не отложил окно");
+        assert!(
+            matches!(scheduled.check(true), Some(Finding::Prompt(_))),
+            "ручная проверка обязана пройти сквозь отсрочку {interval:?}"
+        );
+    }
+}
+
+struct StoreReader(Arc<UpdateStore>);
+
+impl DeferralReading for StoreReader {
+    fn deferral(&self) -> UpdateDeferral {
+        self.0.deferral()
+    }
+}
+
 #[test]
 fn the_check_runs_at_start_and_then_on_the_interval() {
     let releases = FakeReleases::at("1.2.0");
@@ -120,7 +268,10 @@ fn the_check_runs_at_start_and_then_on_the_interval() {
         .start();
 
     // Первая находка приходит сразу, не дожидаясь интервала.
-    assert!(receiver.recv_timeout(Duration::from_secs(2)).is_ok());
+    let first = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("первой проверки не было");
+    assert!(matches!(first.finding, Some(Finding::Prompt(_))));
     std::thread::sleep(Duration::from_millis(180));
 
     assert!(

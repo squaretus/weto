@@ -15,12 +15,12 @@
 //! пересобирает то, чего давно никто не видит. Поэтому такт окна заводят
 //! только через `window_tick`.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gtk4::gio::ApplicationHoldGuard;
-use gtk4::glib::ControlFlow;
+use gtk4::glib::{ControlFlow, SourceId};
 use gtk4::prelude::*;
 use gtk4::ApplicationWindow;
 
@@ -67,6 +67,10 @@ pub fn hold_if_tray(
 /// Своё `ControlFlow::Break` такт при этом не теряет: помощник добавляет
 /// условие окна, а не подменяет условие самого такта.
 ///
+/// Снимается такт тем же мигом, а не своим следующим тиком: его замыкание держит
+/// виджеты и состояние приложения, и проверка утечек (`window_release.rs`)
+/// видела бы их живыми ещё до секунды после закрытия.
+///
 /// Конец окна ловится по `unrealize`, и это не вкусовщина, а проверено
 /// в контейнере. `destroy` у GTK4 — сигнал не закрытия, а разрушения объекта:
 /// `gtk_window_destroy` его не шлёт вовсе, он приходит из `dispose`, то есть
@@ -81,18 +85,29 @@ pub fn window_tick(
     interval: Duration,
     mut tick: impl FnMut() -> ControlFlow + 'static,
 ) {
-    // Признак жизни отдельной ячейкой, а не ссылкой на окно: замыкание такта
-    // не должно держать окно вовсе — иначе помощник сам заводил бы тот самый
-    // цикл, от которого спасается.
-    let alive = Rc::new(Cell::new(true));
-    {
-        let alive = alive.clone();
-        window.connect_unrealize(move |_| alive.set(false));
-    }
-    gtk4::glib::timeout_add_local(interval, move || {
-        if !alive.get() {
-            return ControlFlow::Break;
+    // Источник снимается в самом `unrealize`, а не следующим тактом: замыкание
+    // такта держит виджеты окна и состояние приложения, и до следующего такта —
+    // до секунды — закрытое окно оставалось бы в памяти вместе с ними. Ссылки
+    // на окно здесь нет вовсе — иначе помощник сам заводил бы тот самый цикл,
+    // от которого спасается.
+    let source: Rc<RefCell<Option<SourceId>>> = Rc::new(RefCell::new(None));
+    let id = {
+        let source = source.clone();
+        gtk4::glib::timeout_add_local(interval, move || {
+            let flow = tick();
+            if flow == ControlFlow::Break {
+                // Источник снимает сам GLib: идентификатор забывается, иначе
+                // `unrealize` снимал бы его второй раз, а `SourceId::remove`
+                // на снятом источнике паникует.
+                source.borrow_mut().take();
+            }
+            flow
+        })
+    };
+    *source.borrow_mut() = Some(id);
+    window.connect_unrealize(move |_| {
+        if let Some(id) = source.borrow_mut().take() {
+            id.remove();
         }
-        tick()
     });
 }

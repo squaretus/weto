@@ -59,6 +59,36 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(makeStore().appTheme, .light)
     }
 
+    func test_pause_ceiling_defaults_to_one_minute_on_a_fresh_install() {
+        XCTAssertEqual(makeStore().pauseCeiling, .oneMinute)
+    }
+
+    func test_pause_ceiling_survives_a_restart() {
+        makeStore().pauseCeiling = .fiveMinutes
+        XCTAssertEqual(makeStore().pauseCeiling, .fiveMinutes)
+        XCTAssertEqual(defaults.integer(forKey: "pauseCeilingSeconds"), 300)
+    }
+
+    func test_an_unknown_stored_pause_ceiling_reads_as_one_minute() {
+        defaults.set(42, forKey: "pauseCeilingSeconds")
+        XCTAssertEqual(makeStore().pauseCeiling, .oneMinute)
+    }
+
+    /// Потолок решения политики не меняет: «правкой настроек» для охраны
+    /// он не является и пробу не просит.
+    func test_changing_the_pause_ceiling_is_not_a_guard_configuration_change() {
+        let store = makeStore()
+        var guardChanges: [GuardConfigurationChange] = []
+        var ceilings: [PauseCeiling] = []
+        store.onGuardConfigurationChange { guardChanges.append($0) }
+        store.onPauseCeilingChange { ceilings.append($0) }
+
+        store.pauseCeiling = .tenMinutes
+
+        XCTAssertTrue(guardChanges.isEmpty)
+        XCTAssertEqual(ceilings, [.tenMinutes])
+    }
+
     /// Частота опроса больше не настройка: опрос системы бесплатный, а платит
     /// за частоту расписание гео, и крутить его пользователю незачем.
     func test_polling_is_a_constant_not_a_setting() {

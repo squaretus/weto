@@ -37,10 +37,12 @@ impl ProcRegistry {
         // Порядок важен: cmdline читается до exe, потому что у процессов ядра
         // cmdline пуст, и такие отсеиваются раньше, чем мы трогаем симлинк.
         let arguments = read_cmdline(&dir.join("cmdline"))?;
-        let executable_path = fs::read_link(dir.join("exe"))
-            .ok()?
-            .to_string_lossy()
-            .into_owned();
+        let executable_path = strip_deleted(
+            fs::read_link(dir.join("exe"))
+                .ok()?
+                .to_string_lossy()
+                .into_owned(),
+        );
         let stat = read_stat(&dir.join("stat"))?;
 
         Some(ProcessSnapshot {
@@ -75,6 +77,15 @@ impl ProcessRegistryReading for ProcRegistry {
             .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
             .filter_map(|pid| self.read_process(pid))
             .collect()
+    }
+}
+
+/// Путь процесса, чей бинарник удалён, — тот, по которому он запускался:
+/// правило помнит прежние пути запуска как раз ради таких сеансов.
+fn strip_deleted(path: String) -> String {
+    match path.strip_suffix(weto_core::process::DELETED_SUFFIX) {
+        Some(former) => former.to_string(),
+        None => path,
     }
 }
 

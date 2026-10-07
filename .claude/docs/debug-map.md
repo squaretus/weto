@@ -17,8 +17,8 @@ anything, and belongs in the section below instead.
 - **A lost verdict (no evidence yet, `GuardPhase.verifying`, «Проверяю выход»)** — the previous
   verdict was declared stale by a fingerprint or revision change. Targets keep running here (this
   is the whole point of the 2026-09-09 re-spec — see `decisions/pause-instead-of-kill.md`); if
-  something died anyway, the bad actor is a `.paused` episode's ceiling (60 s with no answer,
-  `UnsafeEvidence.pauseExpired`) or actual proof, not the lost verdict itself. Suspect the
+  something died anyway, the bad actor is a `.paused` episode's ceiling (the chosen 1–10 min with no answer,
+  `UnsafeEvidence.pauseExpired(ceiling:)`) or actual proof, not the lost verdict itself. Suspect the
   freshness pair: `GuardController.evaluate`/`applyLatestNetworkOutcome` and
   `NetworkSnapshot.verdictFingerprint` (Linux: `controller.rs::run`,
   `network.rs::verdict_fingerprint`). Anything entering the fingerprint that the verdict does
@@ -37,7 +37,7 @@ anything, and belongs in the section below instead.
 - **A lost verdict right after the tunnel came up or went down** — the traffic carrier changed,
   so the fingerprint changed. Suspects: `KernelRouteProbe` (is the ipinfo host resolved? `out=-`
   means it is not) and the `PF_ROUTE` subscription. This alone only re-enters `verifying` (targets
-  keep running); it becomes a kill only via a `.paused` episode's 60 s ceiling.
+  keep running); it becomes a kill only via a `.paused` episode's pause ceiling.
 - **`notWhitelistedIP` / `notWhitelistedCountry` («… не входит в белый список»)** — not a
   malfunction: a non-empty whitelist is in the settings and the exit matched none of it. The list
   lives under `allowedCountryCodes` / `allowedIPRangeTexts` (Linux: `allowed_countries` /
@@ -102,6 +102,20 @@ Both are the same class: something named the binary by a path that is not stable
 one is `~/.local/bin/weto` (`Paths::launcher`) — `bugs/launch-path-is-the-symlink-not-the-version.md`.
 Check `~/.config/autostart/weto.desktop`'s `Exec=` (a versioned path there is the bug) and the kill
 loop in `linux/scripts/uninstall.sh` (it must match on the process name plus `/proc/<pid>/exe`).
+
+## If a Linux target stops being guarded after it updates, or the VPN app reads as closed
+
+The guard's rules come from `weto_guard::rules::RuleCache`, re-resolved every 2 s — not from the
+path stored at add time. Compare the target's `/proc/<pid>/exe` with what `locate_target(entry)`
+returns now; a ` (deleted)` suffix must not reach the matcher (`ProcRegistry` strips it).
+`bugs/linux-rules-resolved-once.md`.
+
+## If a Linux script target (npm/pip tool, `Exec=node …`) is never guarded
+
+`/proc/<pid>/exe` of a script is its interpreter, so the rule must be `Script` and match argv.
+Check `locate_target_with_kind(entry).kind` and that `cmdline` carries the script by an absolute
+path — bare names in `launch_paths` are ignored on purpose. A `.desktop` target equal to an
+interpreter (`/usr/bin/node`) is the bug. `bugs/linux-script-targets-matched-as-binary.md`.
 
 Past failures worth reading before guessing: `bugs/tunnel-without-network-service.md`
 (a healthy tunnel reported as bypassed, and third-party 429s killing targets),

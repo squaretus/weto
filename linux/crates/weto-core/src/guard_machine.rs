@@ -17,11 +17,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::diagnostics::StalenessCause;
 use crate::geo::{GeoOutcome, GeoReading};
+use crate::pause_ceiling::PauseCeiling;
 use crate::policy::{GuardDecision, UnprovenReason, UnsafeEvidence};
-
-/// Сколько цели могут стоять до завершения. Текст улики `PauseExpired`
-/// («Подтверждение не получено за 60 с») называет то же число словами.
-pub const PAUSE_CEILING: Duration = Duration::from_secs(60);
 
 /// Что охрана делает с целями. Выводится из фазы, а не хранится рядом с ней:
 /// две оси спеки — знание о выходе и действие над целями — связаны детерминированно.
@@ -155,7 +152,7 @@ impl Default for GuardMachine {
     /// Умолчания — не украшение конструктора: боевой код идёт именно через них,
     /// а все тесты и фикстуры передают числа явно.
     fn default() -> GuardMachine {
-        GuardMachine::new(GuardPhase::Disabled, PAUSE_CEILING)
+        GuardMachine::new(GuardPhase::Disabled, PauseCeiling::default().duration())
     }
 }
 
@@ -173,6 +170,13 @@ impl GuardMachine {
 
     pub fn pause_ceiling(&self) -> Duration {
         self.pause_ceiling
+    }
+
+    /// Параметр, а не вход: фаза и момент постановки не меняются, меняется
+    /// только порог `Tick`. Урезанный ниже простоянного потолок завершит цели
+    /// на ближайшем такте.
+    pub fn set_pause_ceiling(&mut self, ceiling: Duration) {
+        self.pause_ceiling = ceiling;
     }
 
     pub fn remaining_pause(&self, now: SystemTime) -> Option<Duration> {
@@ -224,7 +228,7 @@ impl GuardMachine {
                 if elapsed(now, since) < self.pause_ceiling {
                     return GuardEffect::None;
                 }
-                self.phase = GuardPhase::Danger(UnsafeEvidence::PauseExpired);
+                self.phase = GuardPhase::Danger(UnsafeEvidence::PauseExpired(self.pause_ceiling));
                 GuardEffect::Terminate
             }
 
@@ -245,7 +249,7 @@ impl GuardMachine {
                         // Снимается только доказательство, которое переоценка способна
                         // опровергнуть: истёкший потолок опровергается лишь настоящей пробой.
                         if let GuardPhase::Danger(evidence) = &self.phase {
-                            if *evidence != UnsafeEvidence::PauseExpired {
+                            if !evidence.is_pause_expired() {
                                 self.phase = GuardPhase::Protected(reading);
                             }
                         }
@@ -398,8 +402,8 @@ mod tests {
     fn the_default_machine_carries_the_project_constants() {
         let machine = GuardMachine::default();
         assert_eq!(machine.phase(), &GuardPhase::Disabled);
-        assert_eq!(machine.pause_ceiling(), PAUSE_CEILING);
-        assert_eq!(PAUSE_CEILING, Duration::from_secs(60));
+        assert_eq!(machine.pause_ceiling(), PauseCeiling::default().duration());
+        assert_eq!(machine.pause_ceiling(), Duration::from_secs(60));
     }
 
     // Вердикта нет: цели работают, пока не пришёл плохой результат.
@@ -553,7 +557,7 @@ mod tests {
         );
         assert_eq!(
             machine.phase(),
-            &GuardPhase::Danger(UnsafeEvidence::PauseExpired)
+            &GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
         );
     }
 
@@ -574,7 +578,7 @@ mod tests {
         );
         assert_eq!(
             at_ceiling.phase(),
-            &GuardPhase::Danger(UnsafeEvidence::PauseExpired)
+            &GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
         );
 
         let mut past_ceiling = paused_machine(0);
@@ -587,6 +591,57 @@ mod tests {
             past_ceiling.apply(GuardInput::Tick, at(61)),
             GuardEffect::Terminate
         );
+    }
+
+    /// Длиннее потолок — дольше стоим: на прежнем пороге завершения нет.
+    #[test]
+    fn raising_the_ceiling_mid_pause_extends_the_current_pause() {
+        let mut machine = paused_machine(0);
+        machine.set_pause_ceiling(Duration::from_secs(300));
+
+        assert_eq!(machine.apply(GuardInput::Tick, at(60)), GuardEffect::None);
+        assert_eq!(
+            machine.remaining_pause(at(60)),
+            Some(Duration::from_secs(240))
+        );
+        assert_eq!(
+            machine.apply(GuardInput::Tick, at(300)),
+            GuardEffect::Terminate
+        );
+        assert_eq!(
+            machine.phase(),
+            &GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(300)))
+        );
+    }
+
+    /// Урезали ниже простоянного — завершение на ближайшем такте, улика
+    /// называет новый потолок.
+    #[test]
+    fn lowering_the_ceiling_below_the_time_already_paused_terminates_on_the_next_tick() {
+        let mut machine = paused_machine(0);
+        machine.set_pause_ceiling(Duration::from_secs(600));
+        assert_eq!(machine.apply(GuardInput::Tick, at(180)), GuardEffect::None);
+
+        machine.set_pause_ceiling(Duration::from_secs(60));
+
+        assert_eq!(machine.remaining_pause(at(180)), Some(Duration::ZERO));
+        assert_eq!(
+            machine.apply(GuardInput::Tick, at(181)),
+            GuardEffect::Terminate
+        );
+        assert_eq!(
+            machine.phase(),
+            &GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
+        );
+    }
+
+    /// Смена потолка — не вход: фаза и момент постановки не трогаются.
+    #[test]
+    fn setting_the_ceiling_does_not_touch_the_phase() {
+        let mut machine = paused_machine(5);
+        let before = machine.phase().clone();
+        machine.set_pause_ceiling(Duration::from_secs(120));
+        assert_eq!(machine.phase(), &before);
     }
 
     /// Неответ в проверке — тот самый плохой результат: вот здесь цели и встают.
@@ -716,7 +771,7 @@ mod tests {
         );
         assert_eq!(
             machine.phase(),
-            &GuardPhase::Danger(UnsafeEvidence::PauseExpired)
+            &GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
         );
     }
 
@@ -967,7 +1022,7 @@ mod tests {
         machine.apply(GuardInput::Tick, at(70));
         assert_eq!(
             machine.phase(),
-            &GuardPhase::Danger(UnsafeEvidence::PauseExpired)
+            &GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
         );
         assert_eq!(
             machine.apply(reassessment(GuardDecision::Safe), at(71)),
@@ -975,7 +1030,7 @@ mod tests {
         );
         assert_eq!(
             machine.phase(),
-            &GuardPhase::Danger(UnsafeEvidence::PauseExpired)
+            &GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
         );
     }
 
@@ -1123,7 +1178,7 @@ mod tests {
             GuardAction::Pause
         );
         assert_eq!(
-            GuardPhase::Danger(UnsafeEvidence::PauseExpired).action(),
+            GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60))).action(),
             GuardAction::Terminate
         );
     }
@@ -1156,7 +1211,7 @@ mod tests {
             None
         );
         assert_eq!(
-            GuardPhase::Danger(UnsafeEvidence::PauseExpired).reading(),
+            GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60))).reading(),
             None
         );
 
@@ -1187,7 +1242,8 @@ mod tests {
             None
         );
         assert_eq!(
-            GuardPhase::Danger(UnsafeEvidence::PauseExpired).paused_since(),
+            GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
+                .paused_since(),
             None
         );
     }
@@ -1223,7 +1279,7 @@ mod tests {
             "Выход не подтверждён"
         );
         assert_eq!(
-            GuardPhase::Danger(UnsafeEvidence::PauseExpired).title(),
+            GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60))).title(),
             "Небезопасно"
         );
     }

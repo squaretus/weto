@@ -15,7 +15,8 @@ pub mod service;
 
 use std::sync::mpsc::Sender;
 
-use weto_core::presentation::GuardStatusColor;
+use weto_core::guard_machine::GuardPhase;
+use weto_core::presentation::{shield_color, GuardStatusColor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayEvent {
@@ -35,10 +36,11 @@ pub struct WetoTray {
 impl WetoTray {
     pub fn new(events: Sender<TrayEvent>) -> WetoTray {
         WetoTray {
-            // Ни вердикта, ни целей ещё нет — тот же серый, что у выключенной
-            // охраны и у «Проверяю выход» (`GuardStatusColor::Grey`).
-            state: GuardStatusColor::Grey,
-            title: "Проверка подключения".to_string(),
+            // До первого снимка трей говорит то же, что окно статуса до него:
+            // исходную фазу охраны. Своего «проверка подключения» у трея нет —
+            // такой фазы нет и у охраны.
+            state: shield_color(&GuardPhase::default()),
+            title: GuardPhase::default().title().to_string(),
             events,
         }
     }
@@ -68,7 +70,7 @@ impl ksni::Tray for WetoTray {
     /// и это единственное место, где текст статуса виден без открытия окна.
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "weto".to_string(),
+            title: "Weto".to_string(),
             description: self.title.clone(),
             icon_name: String::new(),
             icon_pixmap: Vec::new(),
@@ -112,5 +114,32 @@ impl ksni::Tray for WetoTray {
             }
             .into(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// До первого снимка трей называет исходную фазу охраны, а не состояние,
+    /// которого у охраны нет: фазы «Проверка подключения» не существует.
+    #[test]
+    fn the_initial_title_names_the_initial_phase() {
+        let (events, _receiver) = std::sync::mpsc::channel();
+        let tray = WetoTray::new(events);
+
+        assert_eq!(tray.title, GuardPhase::default().title());
+        assert_eq!(tray.state, shield_color(&GuardPhase::default()));
+    }
+
+    /// Подсказка при наведении называет приложение так же, как весь интерфейс:
+    /// «Weto». Идентификатор элемента трея — не текст и остаётся `com.weto.app`.
+    #[test]
+    fn the_tooltip_names_the_app_weto() {
+        let (events, _receiver) = std::sync::mpsc::channel();
+        let tray = WetoTray::new(events);
+
+        assert_eq!(ksni::Tray::tool_tip(&tray).title, "Weto");
+        assert_eq!(ksni::Tray::id(&tray), "com.weto.app");
     }
 }

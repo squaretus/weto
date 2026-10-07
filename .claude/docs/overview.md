@@ -7,7 +7,7 @@
 `GuardPolicy.decide` answers `safe` / `unproven(reason)` / `kill(evidence)`; only `kill` is
 positive proof of a leak. Everything else runs through the pure reducer `GuardMachine`, which
 turns a decision into one of six phases and either keeps targets running, pauses them
-(`SIGSTOP`, with a 60 s ceiling), or terminates them. There is no state left that kills on
+(`SIGSTOP`, with a ceiling the user picks — 1, 2, 5 or 10 min, default 1), or terminates them. There is no state left that kills on
 "no verdict yet" — that case runs the targets and waits for an answer.
 
 1. **Trigger.** `macos/Sources/WetoSystem/NetworkEventSource.swift` emits `.networkPath`
@@ -93,7 +93,9 @@ turns a decision into one of six phases and either keeps targets running, pauses
    for both `.pause` and `.terminate` and cancels it on `.run`. While paused, the watchdog's
    `applyCurrentAction` re-runs `pauseTargets()` to sweep up newborn descendants; the probe keeps
    its normal rhythm regardless, and the countdown is `GuardVM.pauseDeadline`
-   (`pausedSince + pauseCeilingSeconds`, 60 s), read by the popup's `WetoPauseBadge` and by
+   (`pausedSince + controller.pauseCeiling` — the machine's parameter, set from
+   `SettingsStore.pauseCeiling` via `onPauseCeilingChange`, never a settings-change trigger),
+   formatted «4:59» / «43 с» by `WetoPauseBadge.remainingText`, read by the popup's badge and by
    `StatusPresentation.explanation`'s third line off the same `TimelineView` clock. Under
    `.terminate`, the same watchdog instead re-runs `terminateTargets(evidence)` — `ProcessMatcher.
    matches` (rule hit plus `ProcessTree` descendants, which inherit the root's target name) →
@@ -114,7 +116,7 @@ turns a decision into one of six phases and either keeps targets running, pauses
    instead kills whatever still matches the rules and resumes (never leaves stopped) anyone in the
    ledger that no longer does, so nothing is left frozen past the point where it stops being
    watched; reaching the pause ceiling with no answer resolves the same way, with
-   `UnsafeEvidence.pauseExpired` as the evidence.
+   `UnsafeEvidence.pauseExpired(ceiling:)` as the evidence (it names the ceiling that fired).
 10. **Record.** `EventLogStore` (`journal.json`, 100-entry ring buffer) holds one `KillEvent` per
     process actually stopped or terminated, deduplicated by *both* pid and reason within an
     episode — a repeat reason with a new pid writes `.launchBlocked` rather than a fresh

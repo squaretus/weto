@@ -8,6 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::layout::{staging_dir, Layout};
 use crate::version::Version;
@@ -150,10 +151,36 @@ fn harden(directory: &Path) {
     let _ = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700));
 }
 
+/// Сколько ждать соединения с сервером загрузки.
+pub const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Сколько ждать очередной порции байтов. Предел — на молчание, а не на всю
+/// загрузку: архив весит мегабайты, и общий предел обрывал бы честную загрузку
+/// на медленном канале. А без предела вовсе повисшее соединение держало бы
+/// установку «Загрузка…» навсегда, и повторить её было бы нечем.
+pub const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn download_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(DOWNLOAD_CONNECT_TIMEOUT)
+        .timeout_read(DOWNLOAD_READ_TIMEOUT)
+        .build()
+}
+
 fn download(url: &str, into: &Path, progress: Option<&AtomicU64>) -> std::io::Result<()> {
+    download_with(&download_agent(), url, into, progress)
+}
+
+fn download_with(
+    agent: &ureq::Agent,
+    url: &str,
+    into: &Path,
+    progress: Option<&AtomicU64>,
+) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let response = ureq::get(url)
+    let response = agent
+        .get(url)
         .call()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
@@ -194,4 +221,66 @@ fn unpack(archive: &Path, into: &Path) -> std::io::Result<()> {
     let file = std::fs::File::open(archive)?;
     let decoder = zstd::Decoder::new(file)?;
     tar::Archive::new(decoder).unpack(into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    /// Сервер отдаёт заголовки с длиной архива и замолкает посреди тела:
+    /// так выглядит соединение, повисшее на середине загрузки.
+    fn serve_headers_then_silence() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    line.clear();
+                }
+                let mut stream = stream;
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nzst");
+                held.push(stream);
+            }
+        });
+        format!("http://127.0.0.1:{port}/weto.tar.zst")
+    }
+
+    /// Загрузка, у которой канал замолчал, кончается отказом, а не висит:
+    /// иначе окно обновления оставалось бы «Загрузка…» навсегда.
+    #[test]
+    fn a_download_that_stops_receiving_bytes_fails() {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_millis(300))
+            .timeout_read(Duration::from_millis(300))
+            .build();
+        let url = serve_headers_then_silence();
+        let tmp = std::env::temp_dir().join(format!("weto-download-{}", std::process::id()));
+
+        let (done, answer) = std::sync::mpsc::channel();
+        let into = tmp.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(download_with(&agent, &url, &into, None).is_err());
+        });
+        let failed = answer
+            .recv_timeout(Duration::from_secs(10))
+            .expect("загрузка повисла на замолчавшем сервере");
+        let _ = std::fs::remove_file(&tmp);
+
+        assert!(failed, "оборванная загрузка выдана за успех");
+    }
+
+    /// Предел у продукта — на соединение и на молчание, а не на всю загрузку.
+    #[test]
+    fn the_download_agent_bounds_silence_not_the_whole_transfer() {
+        assert_eq!(DOWNLOAD_CONNECT_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(DOWNLOAD_READ_TIMEOUT, Duration::from_secs(60));
+    }
 }

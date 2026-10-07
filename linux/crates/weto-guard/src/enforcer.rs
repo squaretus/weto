@@ -37,6 +37,8 @@ impl Scan {
 pub struct EnforcementResult {
     pub killed: Vec<MatchedProcess>,
     pub running: Vec<RunningTarget>,
+    /// Кому ядро отказало в SIGKILL: экран называет их строкой отказа прав.
+    pub refused: Vec<i32>,
 }
 
 /// Итог паузы одного прохода.
@@ -247,6 +249,12 @@ impl ProcessEnforcer {
             .map(|result| result.pid)
             .collect();
 
+        // Запись цели едет в учёт вместе с pid: отпустить запись как снятую
+        // с охраны можно, только когда этой цели в настройках больше нет.
+        let entry_by_pid: HashMap<i32, &str> = pending
+            .iter()
+            .map(|process| (process.pid, process.target_entry.as_str()))
+            .collect();
         let moment = SystemTime::now();
         let additions: Vec<StoppedProcess> = order
             .iter()
@@ -259,6 +267,11 @@ impl ProcessEnforcer {
                     .unwrap_or_default(),
                 stopped_at: moment,
                 is_shell: plan.shells.contains(pid),
+                target_entry: if plan.shells.contains(pid) {
+                    None
+                } else {
+                    entry_by_pid.get(pid).map(|entry| entry.to_string())
+                },
             })
             .collect();
         self.remember(&additions);
@@ -273,6 +286,7 @@ impl ProcessEnforcer {
             .map(|pid| MatchedProcess {
                 pid: *pid,
                 target_name: plan.shell_targets.get(pid).cloned().unwrap_or_default(),
+                target_entry: String::new(),
                 parent_pid: by_pid.get(pid).map(|p| p.parent_pid).unwrap_or_default(),
                 executable_path: by_pid
                     .get(pid)
@@ -356,8 +370,15 @@ impl ProcessEnforcer {
     ///
     /// Пользователь сказал «это больше не моё» — держать процесс weto не за чем,
     /// и ждать до потолка паузы нельзя: до тех пор он стоял бы уже ничьим.
-    /// `guarded` — всё, что под правилами прямо сейчас; запись учёта, которой там
-    /// нет, своё основание потеряла.
+    /// `guarded` — записи целей в настройках; запись учёта, чьей цели там нет,
+    /// своё основание потеряла.
+    ///
+    /// Спрашивается именно настройки, а не совпадение с правилом сейчас.
+    /// С правилом перестают совпадать и те, кого никто не отпускал: потомок,
+    /// осиротевший после смерти стоящего корня, и сеанс цели, сменившей форму.
+    /// По несовпадению они получали SIGCONT посреди паузы, а журнал писал
+    /// «цель снята с охраны» про цель, которая под охраной. Запись прежней
+    /// версии, у которой цели нет вовсе, держится до исхода эпизода.
     ///
     /// Шелл считается иначе, и это не послабление, а тот же контракт порядка
     /// сигналов: целью он не был никогда, стоит он ради терминала цели, с которой
@@ -367,7 +388,7 @@ impl ProcessEnforcer {
     /// все живые записи учёта, кроме шеллов, уходят этим же проходом (или их
     /// не осталось вовсе). Внутри прохода порядок обратный стоп-порядку, так что
     /// шелл получает сигнал последним — после своей цели, как и на пути снятия паузы.
-    pub fn release(&self, guarded: &[MatchedProcess], scan: Option<&Scan>) -> ReleaseOutcome {
+    pub fn release(&self, guarded: &HashSet<String>, scan: Option<&Scan>) -> ReleaseOutcome {
         let entries = self.entries();
         if entries.is_empty() {
             return ReleaseOutcome::default();
@@ -387,13 +408,18 @@ impl ProcessEnforcer {
                     .is_some_and(|process| process.executable_path == entry.executable_path)
             })
             .collect();
-        let guarded_pids: HashSet<i32> = guarded.iter().map(|process| process.pid).collect();
+        let unguarded = |entry: &StoppedProcess| {
+            entry
+                .target_entry
+                .as_ref()
+                .is_some_and(|target| !guarded.contains(target))
+        };
         let targets = living.iter().filter(|entry| !entry.is_shell).count();
-        let unguarded = living
+        let released_targets = living
             .iter()
-            .filter(|entry| !entry.is_shell && !guarded_pids.contains(&entry.pid))
+            .filter(|entry| !entry.is_shell && unguarded(entry))
             .count();
-        let frees_shells = unguarded == targets;
+        let frees_shells = released_targets == targets;
 
         let freed: Vec<StoppedProcess> = living
             .into_iter()
@@ -401,7 +427,7 @@ impl ProcessEnforcer {
                 if entry.is_shell {
                     frees_shells
                 } else {
-                    !guarded_pids.contains(&entry.pid)
+                    unguarded(entry)
                 }
             })
             .collect();
@@ -464,23 +490,64 @@ impl ProcessEnforcer {
         )
     }
 
-    /// Завершение целей: SIGKILL тем, кто под правилом, SIGCONT всем остальным
-    /// из учёта — шеллу, стоявшему ради терминала цели, и любому, кто перестал
-    /// совпадать с правилом между паузой и завершением. Оставить его стоять
-    /// значило бы заморозить процесс до следующего запуска weto.
+    /// Завершение целей: SIGKILL тем, кто под правилом, и стоящим записям учёта,
+    /// чья цель по-прежнему под охраной (`guarded` — записи целей в настройках),
+    /// SIGCONT всем остальным из учёта — шеллу, стоявшему ради терминала цели,
+    /// и записи цели, снятой с охраны между паузой и завершением. Оставить их
+    /// стоять значило бы заморозить процесс до следующего запуска weto.
+    ///
+    /// Стоящая запись охраняемой цели завершается, даже если под правило она
+    /// больше не подпадает: потомок, осиротевший после смерти корня, — часть
+    /// той же цели, и SIGCONT при доказанно опасном выходе вернул бы его
+    /// к работе ровно тогда, когда работать ему нельзя.
     ///
     /// SIGKILL, а не SIGTERM: стоящий процесс обработчика не исполняет,
     /// и SIGTERM просто встал бы в очередь до продолжения — цель осталась бы
     /// жива и заморожена. Канон называет здесь SIGKILL для обеих платформ.
-    pub fn terminate(&self, scan: &Scan) -> EnforcementResult {
+    pub fn terminate(&self, scan: &Scan, guarded: &HashSet<String>) -> EnforcementResult {
         if scan.is_empty() {
             return EnforcementResult {
                 killed: Vec::new(),
                 running: Vec::new(),
+                refused: Vec::new(),
             };
         }
 
-        let matched = weto_core::process::matches(&scan.processes, &scan.rules);
+        let mut matched = weto_core::process::matches(&scan.processes, &scan.rules);
+        let by_pid: HashMap<i32, &ProcessSnapshot> =
+            scan.processes.iter().map(|p| (p.pid, p)).collect();
+        let matched_pids: HashSet<i32> = matched.iter().map(|m| m.pid).collect();
+        let held: Vec<MatchedProcess> = self
+            .entries()
+            .into_iter()
+            .filter(|entry| !entry.is_shell && !matched_pids.contains(&entry.pid))
+            .filter_map(|entry| {
+                let target = entry.target_entry.as_ref()?;
+                if !guarded.contains(target) {
+                    return None;
+                }
+                // Тот же процесс, а не его pid, доставшийся другому.
+                let process = by_pid
+                    .get(&entry.pid)
+                    .filter(|process| process.executable_path == entry.executable_path)?;
+                Some(MatchedProcess {
+                    pid: entry.pid,
+                    target_name: scan
+                        .rules
+                        .iter()
+                        .find(|rule| rule.entry == *target)
+                        .map_or_else(|| target.clone(), |rule| rule.display_name.clone()),
+                    target_entry: target.clone(),
+                    parent_pid: process.parent_pid,
+                    executable_path: entry.executable_path.clone(),
+                    // Под правило он не подпадает, значит держит его не правило,
+                    // а корень, ради которого он встал. Запись о нём эпизод паузы
+                    // уже завёл, и новой не будет: основание здесь — для полноты.
+                    matched_by: MatchBasis::Descendant,
+                })
+            })
+            .collect();
+        matched.extend(held);
         let pids: Vec<i32> = matched.iter().map(|m| m.pid).collect();
         // Процесс, умерший сам за миг до сигнала, доставкой считается: журнал
         // объясняет цель, которой больше нет, а не отказ ядра.
@@ -523,6 +590,11 @@ impl ProcessEnforcer {
                 .filter(|m| killed.contains(&m.pid))
                 .collect(),
             running: running_targets(&scan.processes, &scan.rules),
+            refused: results
+                .iter()
+                .filter(|result| !result.is_delivered())
+                .map(|result| result.pid)
+                .collect(),
         }
     }
 

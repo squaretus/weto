@@ -89,7 +89,7 @@ struct JournalCard: View {
         panel.nameFieldStringValue = JournalExport.fileName(at: moment)
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true
-        panel.title = "Выгрузка журнала weto"
+        panel.title = "Выгрузка журнала Weto"
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {

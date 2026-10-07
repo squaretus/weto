@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use weto_core::process::without_deleted_suffix;
 
 /// Процесс, которому weto послал SIGSTOP. Путь хранится ради защиты
 /// от переиспользования pid: после падения weto по этому же pid может жить
@@ -29,6 +30,14 @@ pub struct StoppedProcess {
     pub stopped_at: SystemTime,
     /// Шелл переднего задания — остановлен ради терминала цели, целью не является.
     pub is_shell: bool,
+    /// Запись цели в настройках, под которую процесс встал (у потомка — запись
+    /// его корня); у шелла её нет. Отпустить запись как «снятую с охраны» можно,
+    /// только когда этой цели в настройках больше нет: несовпадение с правилом
+    /// само по себе ничего не говорит — осиротевший потомок и сеанс на прежней
+    /// форме цели под правило не подпадают, а пользователь их не отпускал.
+    /// У записей прежних версий поля нет: такие держатся до исхода эпизода.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_entry: Option<String>,
 }
 
 /// Итог чтения учёта с диска. Различает «файла нет или он пуст» и «файл был,
@@ -50,7 +59,21 @@ impl StoppedLedgerReadout {
             return StoppedLedgerReadout::Entries(Vec::new());
         };
         match serde_json::from_str::<Vec<StoppedProcess>>(&text) {
-            Ok(entries) => StoppedLedgerReadout::Entries(entries),
+            // Версия до среза « (deleted)» писала путь как его отдало ядро,
+            // а обход теперь отдаёт его без суффикса: запись сравнивается
+            // с обходом по паре «pid + путь», и разойтись им нельзя.
+            Ok(entries) => StoppedLedgerReadout::Entries(
+                entries
+                    .into_iter()
+                    .map(|mut entry| {
+                        let path = without_deleted_suffix(&entry.executable_path);
+                        if path.len() != entry.executable_path.len() {
+                            entry.executable_path = path.to_string();
+                        }
+                        entry
+                    })
+                    .collect(),
+            ),
             Err(_) => StoppedLedgerReadout::Corrupted,
         }
     }

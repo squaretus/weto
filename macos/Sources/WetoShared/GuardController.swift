@@ -104,6 +104,13 @@ final class GuardController {
         self.onReport = onReport
         self.onCheck = onCheck
 
+        // Источник потолка один — настройки, в том числе для машины, переданной
+        // тестом: иначе дедлайн на экране и порог такта могли бы разойтись.
+        self.machine.setPauseCeiling(settings.pauseCeiling.seconds)
+        settings.onPauseCeilingChange { [weak self] ceiling in
+            self?.machine.setPauseCeiling(ceiling.seconds)
+        }
+
         // Подписка живёт с момента создания, а не со `start()`: настройка, изменённая
         // до старта охраны, обязана быть учтена в первом же решении.
         settings.onGuardConfigurationChange { [weak self] _ in
@@ -112,6 +119,8 @@ final class GuardController {
     }
 
     var phase: GuardPhase { machine.phase }
+
+    var pauseCeiling: TimeInterval { machine.pauseCeiling }
 
     func remainingPause() -> TimeInterval? { machine.remainingPause(at: now()) }
 

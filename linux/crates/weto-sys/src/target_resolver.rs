@@ -19,9 +19,16 @@
 
 use std::path::{Path, PathBuf};
 
+use weto_core::process::TargetKind;
+
 /// Сколько звеньев цепочки проходим. Больше не нужно ни одному известному
 /// случаю, а ограничение спасает от кольца из симлинков.
 const MAX_HOPS: usize = 4;
+
+/// Крупнее этого скрипт-запускатор не бывает: он из нескольких строк.
+/// Предел не даёт читать целиком бинарник — у инструментов он весит сотни
+/// мегабайт, а описание цели в настройках спрашивает границу каждую секунду.
+const LAUNCHER_SIZE_LIMIT: u64 = 256 * 1024;
 
 /// Каталоги с ярлыками приложений — местный аналог `/Applications`.
 ///
@@ -52,18 +59,51 @@ pub enum Resolution {
 /// Нерасходящаяся цель возвращается как есть: команда, которой нет на машине,
 /// — не ошибка, а цель, которую ещё не установили.
 pub fn resolve_launch_entry(entry: &str) -> Resolution {
+    walk(entry).resolution
+}
+
+/// Конец цепочки и то, как до него дошли.
+struct Walk {
+    resolution: Resolution,
+    /// Последнее звено передал интерпретатор (`Exec=node /opt/app/cli.js`):
+    /// файл запустится не сам, и в `exe` процесса его не будет никогда.
+    interpreted: bool,
+}
+
+fn walk(entry: &str) -> Walk {
     let mut current = entry.to_string();
+    let mut interpreted = false;
 
     for _ in 0..MAX_HOPS {
         let path = canonical(&current).unwrap_or_else(|| current.clone());
 
         match next_hop(&path) {
-            Hop::Next(next) => current = next,
-            Hop::Foreign(launcher) => return Resolution::NeedsPath { launcher },
-            Hop::Stop => return Resolution::Resolved(path),
+            Hop::Next(next) => {
+                current = next;
+                interpreted = false;
+            }
+            Hop::Interpreted(script) => {
+                current = script;
+                interpreted = true;
+            }
+            Hop::Foreign(launcher) => {
+                return Walk {
+                    resolution: Resolution::NeedsPath { launcher },
+                    interpreted: false,
+                }
+            }
+            Hop::Stop => {
+                return Walk {
+                    resolution: Resolution::Resolved(path),
+                    interpreted,
+                }
+            }
         }
     }
-    Resolution::Resolved(current)
+    Walk {
+        resolution: Resolution::Resolved(current),
+        interpreted,
+    }
 }
 
 /// Строковый фасад для тех, кому нужен один только путь.
@@ -78,6 +118,193 @@ pub fn resolve_launch_target(entry: &str) -> String {
     }
 }
 
+/// Где цель лежит сейчас — или `None`, если на диске за ней ничего нет.
+///
+/// Для описания цели в настройках, а не для охраны: охране ненайденная цель
+/// не ошибка, а экрану нужен ответ «не найдено», и `resolve_launch_target`
+/// его не даёт — запись, за которой ничего нет, он возвращает как есть.
+/// Спрашивается при каждой перерисовке: обновление инструмента
+/// из версионного каталога меняет развёрнутый путь целиком. Чужой
+/// запускатор — тоже «не найдено»: файла программы ярлык не называет.
+pub fn locate_target(entry: &str) -> Option<String> {
+    locate_target_with_kind(entry).map(|found| found.path)
+}
+
+/// Файл цели и то, как её узнавать среди процессов.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedTarget {
+    pub path: String,
+    pub kind: TargetKind,
+}
+
+/// Где цель лежит сейчас и какого она вида — порт макосного
+/// `TargetResolver.rule(forEntry:at:)`.
+///
+/// Вид решает сам файл, а не то, как его назвали: скрипт ядро запускает
+/// интерпретатором, `/proc/<pid>/exe` называет `node`, и цель вида «бинарник»
+/// не совпала бы ни с одним процессом — `qwen` из npm оставался без охраны
+/// молча. Файл, который ярлык передаёт интерпретатору, — скрипт, даже
+/// без шебанга.
+pub fn locate_target_with_kind(entry: &str) -> Option<LocatedTarget> {
+    let walk = walk(entry);
+    match walk.resolution {
+        Resolution::Resolved(path) if Path::new(&path).is_file() => {
+            // Файл, вид которого не прочитать, — не ответ, а «нового знания нет»:
+            // так выглядит переустановка пакета, пока файл пуст или недописан.
+            // Догадка «бинарник» здесь меняла бы вид живого скрипта на две
+            // секунды — и под паузой его сеанс получал бы SIGCONT как снятый
+            // с охраны.
+            let kind = if walk.interpreted {
+                TargetKind::Script
+            } else {
+                kind_of_file(&path)?
+            };
+            Some(LocatedTarget { path, kind })
+        }
+        _ => None,
+    }
+}
+
+/// Вид цели для записи в настройки. Цели, которой на диске нет, вид узнать
+/// не из чего — она записывается бинарником, а охрана выведет вид заново,
+/// когда файл появится.
+pub fn target_kind_for(entry: &str) -> TargetKind {
+    locate_target_with_kind(entry).map_or(TargetKind::Binary, |found| found.kind)
+}
+
+/// Вид по первым байтам файла — целиком не читается: бинарник инструмента
+/// весит сотни мегабайт, а охрана спрашивает раз в две секунды.
+///
+/// Шебанг — скрипт, как на macOS. Но на Linux мерило шире: ядро исполняет
+/// напрямую только ELF, всё прочее — шебанг-скрипт или формат binfmt_misc —
+/// запускает интерпретатором, и `exe` у такого процесса — интерпретатор.
+/// Поэтому не-ELF с содержимым узнаётся по argv: по пути он не совпал бы
+/// никогда.
+///
+/// Нечитаемый файл и файл короче сигнатуры ELF ответа не дают (`None`):
+/// пакетный менеджер переустанавливает инструмент, и на миг файл пуст или
+/// недописан. Прежде такой файл считался бинарником, вид живого скрипта
+/// менялся на одно разрешение — и охрана переставала узнавать его сеансы.
+pub fn kind_of_file(path: &str) -> Option<TargetKind> {
+    use std::io::Read;
+
+    const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
+    let mut head = [0u8; ELF_MAGIC.len()];
+    let mut filled = 0;
+    let mut file = std::fs::File::open(path).ok()?;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(_) => return None,
+        }
+    }
+    let head = &head[..filled];
+    if head.starts_with(b"#!") {
+        Some(TargetKind::Script)
+    } else if filled < ELF_MAGIC.len() {
+        None
+    } else if head == ELF_MAGIC {
+        Some(TargetKind::Binary)
+    } else {
+        Some(TargetKind::Script)
+    }
+}
+
+/// Граница разрешения цели для охраны. Порт макосного `TargetResolving`.
+///
+/// Охране мало пути, запомненного при добавлении: у инструментов из версионного
+/// каталога (`~/.local/share/claude/versions/2.1.228`) обновление меняет
+/// развёрнутый путь целиком, и правило, разрешённое однажды, молча переставало
+/// совпадать с новым процессом. Поэтому охрана спрашивает заново — а тесту
+/// нужно подменить ответ, не трогая диск.
+pub trait TargetResolving: Send + Sync {
+    /// Файл, который запустится по записи сейчас, или `None`, если ответа нет:
+    /// файла на диске нет (его как раз подменяет обновление) или ярлык ведёт
+    /// к чужому запускатору. `None` — не «цели больше нет», а «нового знания нет».
+    fn locate(&self, entry: &str) -> Option<LocatedTarget>;
+
+    /// Вид файла по его первым байтам, без разворота цепочки, — или `None`,
+    /// если ответа нет: файла нет или он пуст. Нужен правилу скрипта: путь
+    /// ELF-файла (интерпретатор, записанный старым конфигом) скриптом не бывает.
+    fn kind_of(&self, path: &str) -> Option<TargetKind>;
+}
+
+/// Настоящее разрешение — та же цепочка, что у описания цели в настройках.
+/// Голые имена ищутся по `PATH` самого процесса: на Linux его даёт сессия
+/// рабочего стола, а не launchd, как на macOS.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LaunchTargetResolver;
+
+impl TargetResolving for LaunchTargetResolver {
+    fn locate(&self, entry: &str) -> Option<LocatedTarget> {
+        locate_target_with_kind(entry)
+    }
+
+    fn kind_of(&self, path: &str) -> Option<TargetKind> {
+        kind_of_file(path)
+    }
+}
+
+/// Где цель лежит сейчас — по цепочке кандидатов из настроек: сперва сама
+/// запись, затем абсолютные пути запуска, запомненные при добавлении.
+///
+/// Цепочка одна на двоих — охрану и описание цели в окне настроек. Голое имя,
+/// не найденное в `PATH` процесса (`claude` добавляли из терминала с
+/// `~/.local/bin`, а приложение подняла сессия без него), находится по файлу
+/// в `PATH`, запомненному при добавлении. Спроси окно одну запись, а охрана
+/// цепочку — под целью, которую охрана находит и сторожит, стояло бы
+/// «не найдено».
+pub fn locate_with_launch_paths(
+    resolver: &dyn TargetResolving,
+    entry: &str,
+    launch_paths: &[String],
+) -> Option<LocatedTarget> {
+    std::iter::once(entry)
+        .chain(
+            launch_paths
+                .iter()
+                .map(String::as_str)
+                .filter(|path| path.starts_with('/') && *path != entry),
+        )
+        .find_map(|candidate| resolver.locate(candidate))
+}
+
+/// Пути запуска, которые стоит запомнить вместе с целью при добавлении:
+/// сама запись и, для голого имени, файл в `PATH`, на котором она нашлась
+/// (`~/.local/bin/claude`), — без разворота симлинков.
+///
+/// Нужен тот, что до разворота: симлинк в `PATH` переживает обновление,
+/// а развёрнутый путь — нет. Если позже охрана не найдёт голое имя (её `PATH`
+/// не тот, что у терминала, где цель добавляли), разрешение начнётся с него.
+pub fn launch_paths_for(entry: &str) -> Vec<String> {
+    launch_paths_in(entry, std::env::var_os("PATH").as_deref())
+}
+
+/// То же с явно заданным `PATH`: переменная процесса одна на все потоки,
+/// и тесты, меняющие её параллельно, затирали бы её друг у друга.
+pub fn launch_paths_in(entry: &str, search_path: Option<&std::ffi::OsStr>) -> Vec<String> {
+    let mut paths = vec![entry.to_string()];
+    if let Some(found) = search_path.and_then(|value| path_entry(entry, value)) {
+        let found = found.to_string_lossy().into_owned();
+        if !paths.contains(&found) {
+            paths.push(found);
+        }
+    }
+    paths
+}
+
+/// Файл голой команды в `PATH` как он там лежит — без разворота симлинков.
+fn path_entry(command: &str, search_path: &std::ffi::OsStr) -> Option<PathBuf> {
+    if command.is_empty() || command.contains('/') {
+        return None;
+    }
+    std::env::split_paths(search_path)
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(command))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Имя приложения из ярлыка — то, которое пользователь видел в диалоге выбора.
 ///
 /// Последний сегмент пути именем не является: у инструментов из версионного
@@ -89,6 +316,16 @@ pub fn display_name_for(entry: &str) -> Option<String> {
     }
     let text = std::fs::read_to_string(entry).ok()?;
     weto_core::launcher::name_from_desktop_entry(&text, ui_locale().as_deref())
+}
+
+/// Иконка приложения из ярлыка — для пилюли цели. Как и имя: файл читает
+/// граница, текст разбирает ядро. У цели, заданной не ярлыком, иконки нет.
+pub fn icon_for(entry: &str) -> Option<String> {
+    if !entry.ends_with(".desktop") {
+        return None;
+    }
+    let text = std::fs::read_to_string(entry).ok()?;
+    weto_core::launcher::icon_from_desktop_entry(&text)
 }
 
 /// Язык интерфейса — первые две буквы из `LANG` или `LC_MESSAGES`.
@@ -114,6 +351,9 @@ fn canonical(text: &str) -> Option<String> {
 enum Hop {
     /// Следующее звено цепочки.
     Next(String),
+    /// Файл, который ярлык передаёт интерпретатору: процессом станет
+    /// интерпретатор, а файл — его аргументом.
+    Interpreted(String),
     /// Чужой запускатор: дальше цепочки нет и быть не может.
     Foreign(String),
     /// Дальше идти некуда — это и есть цель.
@@ -130,6 +370,7 @@ fn next_hop(path: &str) -> Hop {
         };
         return match weto_core::launcher::command_from_desktop_entry(&text) {
             Some(weto_core::launcher::DesktopCommand::Command(command)) => Hop::Next(command),
+            Some(weto_core::launcher::DesktopCommand::Script(script)) => Hop::Interpreted(script),
             Some(weto_core::launcher::DesktopCommand::Indirect { launcher }) => {
                 Hop::Foreign(launcher)
             }
@@ -138,8 +379,12 @@ fn next_hop(path: &str) -> Hop {
     }
 
     // Скрипт читается как текст; на бинарнике чтение просто не сложится.
-    let neighbour = std::fs::read_to_string(file)
-        .ok()
+    // Но сперва размер: чтобы «не сложиться», `read_to_string` прочёл бы
+    // бинарник целиком.
+    let small = std::fs::metadata(file).is_ok_and(|meta| meta.len() <= LAUNCHER_SIZE_LIMIT);
+    let neighbour = small
+        .then(|| std::fs::read_to_string(file).ok())
+        .flatten()
         .and_then(|text| weto_core::launcher::sibling_binary_from_launcher(&text));
     let Some(neighbour) = neighbour else {
         return Hop::Stop;

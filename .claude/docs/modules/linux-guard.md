@@ -12,7 +12,8 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
 | `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
 | `weto-core` | `ip.rs` | address validation and CIDR |
-| `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the 60 s ceiling |
+| `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the pause ceiling as a parameter (`set_pause_ceiling`) |
+| `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText` |
 | `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `PausedProcess`, `RecoveredProcess` |
 | `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation`/`should_explain`, `status_lines`, `idle_targets` |
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic |
@@ -23,7 +24,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `background.rs` | the background track: one thread per probe, so a pass never waits for a request |
 | `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
 | `weto-core` | `launcher.rs` | `.desktop` text: `DesktopCommand`, `name_from_desktop_entry`, wrapper stripping |
-| `weto-sys` | `target_resolver.rs` | the same chain on disk: `Resolution`, `display_name_for` |
+| `weto-sys` | `target_resolver.rs` | the same chain on disk: `Resolution`, `display_name_for`; `TargetResolving` / `LaunchTargetResolver` for the guard; `launch_paths_for` (the `PATH` file stored on add) |
 | `weto-sys` | `desktop_entries.rs` | the `.desktop` index over the XDG application directories |
 | `weto-sys` | `terminal.rs` | raises it: `org.freedesktop.Application.Activate` over the session bus |
 | `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
@@ -33,6 +34,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping |
 | `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger |
+| `weto-guard` | `rules.rs` | `RuleCache`: target and VPN-app rules re-resolved on a target-list change or every `TARGET_RULE_REFRESH` (2 s), never narrowed |
 | `weto-app` | `lifecycle.rs` | whether the process outlives its windows (`holds_application`) |
 | `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
 
@@ -55,26 +57,50 @@ Verified against `ip route get` in `policy-routing-contract.sh`.
 
 ## The UI is a port, not a redesign
 
-Both windows mirror their macOS counterparts element for element, and the list below is
-the whole of what the Linux side is allowed to differ in:
+Both windows mirror their macOS counterparts element for element, with the same texts word for
+word — the app is «Weto» in window titles, dialogs, notifications, the tray tooltip and `Name=` of
+both desktop entries. The table is the whole list of what the Linux side differs in; a difference
+missing from it is a bug, not a platform trait.
 
 | macOS | Linux | Why |
 |---|---|---|
-| popup anchored to the menu bar icon | ordinary window | SNI reports no coordinates; Wayland forbids self-positioning |
+| popup anchored to the menu bar icon | ordinary window «Weto», fixed size | SNI reports no coordinates; Wayland forbids self-positioning |
+| hidden title bar: three system circles, no title | the system GTK header bar with a title («Weto», «Weto — настройки», «Обновление Weto»); `.weto-panel` inside it is fill and padding only, no frame of its own | owner decision, 2026-10-06 |
+| settings window 500 × 640, not resizable | resizable, floor 500 × 480; the content column stays 500 wide | a tiling compositor hands the window its whole cell whatever `resizable(false)` says — see "The settings window holds its own width" |
+| SF Symbols | symbolic icons of the icon theme (`security-high-symbolic`, `view-refresh-symbolic`, `emblem-system-symbolic`, `user-trash-symbolic`, `dialog-question-symbolic`, …) | SF Symbols exist on macOS only; colour comes from our CSS, the shape from Adwaita/Breeze |
+| SF Pro | `font-family: sans-serif` — whatever the system resolves; sizes, weights and `tnum` still come from the tokens | SF ships with macOS only |
 | target hint mentions bundles | hint mentions command and path only | `appBundle` does not exist here |
-| `NSAlert` for destructive confirmations | `Gtk.AlertDialog` | each platform asks its own dialog |
-| — | tray context menu (check / settings / quit) | SNI needs one; the popup carries the same actions |
-| country flag in the menu bar | country name as text | no flag rendering here yet; the set ships with macOS only |
-| app picker via `NSOpenPanel` | command or path typed into a field | no equivalent panel; targets are added the same way |
+| `NSAlert` for destructive confirmations | `Gtk.AlertDialog`; in close/uninstall confirmations Enter presses nothing (no default button) and Esc presses the safe button, as on macOS | each platform asks its own dialog |
+| — | tray context menu: «Проверить сейчас», «Настройки», «Выход»; «Выход» asks the same «Закрыть Weto?» as «Закрыть приложение» (`settings_window::ask_to_close`) | SNI needs a menu; on macOS that dialog is the only way out, so a menu item must not bypass it |
+| country flag and status dot in the menu bar | the app's grid glyph tinted with the status colour, the phase title in the tooltip; no country | flags ship with the macOS bundle only |
+| target picker: `NSOpenPanel` in `/Applications` | «Выбрать…» opens `Gtk.FileDialog` in the first XDG applications directory; a `.desktop` entry stands in for a bundle | the platform's own picker and its own notion of an app |
+| VPN app: «не выбрано» + «Выбрать…» with a file panel; chosen → name over description and a trash «Снять выбор» | the same two states, but the unchosen one is «не выбрано», a «Команда или путь» field and «Выбрать» | deliberate (2026-10-06): the client is named the way a target is typed, by command or path |
+| pill icon: app, brand or Terminal.app icon | `Icon=` of the target's `.desktop` entry (theme name or absolute file), else `utilities-terminal-symbolic`; the `terminal` label on every target not added through a `.desktop` entry (`presentation::is_command_line_target`) | no bundles: whether a target is an app is known only from what the user picked |
 | the "Показать терминал" button raises any terminal | the button is there only for an emulator that comes out on the session bus | raising a window means asking the application itself (`org.freedesktop.Application.Activate`); an emulator that owns no bus name — xterm, alacritty, kitty, foot, xfce4-terminal, mate-terminal, terminator — cannot be asked, and nothing short of `wmctrl`/`xdotool` would change that. The `(i)` hint stays: it is the answer the user needs. See "Raising the terminal" below |
 | tapping the notification always opens the popup | tapping opens the status window when the notification server announces `actions` | the capability is the server's, not ours (`GetCapabilities`); without it the notification is still delivered, just not clickable |
 | — | a second dialog asks for the program file when the picked entry launches through Steam or flatpak | a `.app` always *is* the program; a `.desktop` entry need not name one at all, and guessing would guard the launcher — see the `appBundle` row under "Contracts that differ from macOS" |
+| «Автозапуск указывает на другую копию…» in Maintenance | no such line | the autostart entry always names the one launcher path, `~/.local/bin/weto` (`Paths::launcher`), so there is no other copy to point at |
+| update window as `UpdateDialogView` | the same window minus the daemon texts and the «release has no package» case, plus three behaviour differences | listed under "Self-update" |
 
-Everything else matches, including every wording that does not depend on the unported screen: the
-settings window is the same six cards in the same order
-(`Цели`, `Сеть и гео`, `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same
-footer (github link, version, update tile), and the status popup is shield + title +
-two icon buttons, then the geo readout, the update banner, and live targets.
+The settings window is the same six cards in the same order (`Цели`, `Сеть и гео`,
+`Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same footer (github link,
+version, update tile); the «Журнал» tab shows the latest 20 records with «Показаны последние 20 из N
+— выгрузите журнал целиком» when there are more. The status window, top to bottom:
+
+1. shield, title, «Проверить сейчас» (a spinner in its place while a probe flies), settings;
+2. the three explanation lines — what weto did, why, what next — hidden in `Disabled` and
+   `Protected` (`presentation::should_explain`);
+3. the geo readout, selectable;
+4. the red permission-failure line while the kernel refuses a signal to a target — «Не удалось
+   приостановить/возобновить/завершить процессы [pid] — недостаточно прав»
+   (`GuardSnapshot::permission_failure`), gone once the targets run again;
+5. the update banner, worded by the install phase (`UpdateStrings::banner_progress`: «Проверка
+   релиза…», «Загрузка X… N %», «Установка…», the failure in the Warning tone, otherwise
+   «Доступно обновление X» with «Подробнее»; a spinner replaces the button while in flight);
+6. a divider and the live targets: one single-line pill each — name ellipsised in the middle,
+   `terminal` label, the pause badge with its countdown, `(i)` outside the amber capsule,
+   «Показать терминал» where it can work, `+N`; with nothing running, the idle line in the shield
+   colour; with no targets configured, neither the divider nor the list.
 
 **There is no guard on/off switch, and that is deliberate.** `is_enabled` exists in the
 settings model on both platforms and is exposed by neither. The same goes for a
@@ -147,17 +173,82 @@ Everything the policy decides is shared. What the system dictates is not:
   Locked down by `netlink-events-contract.sh`.
 - **The poll stays** (1 s while safe, 250 ms while unsafe). Catching launches through the netlink
   connector needs `CAP_NET_ADMIN`, and the whole installation is designed to be unprivileged.
-- **Two macOS traps are solved by the kernel:** `readlink /proc/<pid>/exe` returns an
-  already-resolved path, so the `nano`→`pico` symlink never appears; argv arrives as a
-  ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is needed.
-- **`appBundle` targets do not exist here.** A `.desktop` entry points at an ordinary
-  binary, so it is a `Binary` target — but getting from the entry to that binary is a chain, not
-  a field. `weto_core::launcher::command_from_desktop_entry` walks the `Exec` line and answers
-  with a `DesktopCommand`: wrappers are dropped (a leading `env` with its assignments, one level
+- **The kernel solves the plumbing of two macOS traps, not the traps themselves.**
+  `readlink /proc/<pid>/exe` returns an already-resolved path, so the `nano`→`pico` symlink never
+  appears; argv arrives as a ready-made array in `cmdline`, so no `KERN_PROCARGS2` parsing is
+  needed. The script trap stays: for a shebang file (`qwen` from npm → `cli.js` with
+  `#!/usr/bin/env node`) `exe` is `/usr/bin/node`, so the target must be a `Script` matched by
+  argv, exactly as on macOS. The kind comes from the file: `target_resolver::locate_target_with_kind`
+  reads at most four bytes of the canonical file — `#!` → `Script`, ELF magic → `Binary`, any
+  other readable content → `Script` (the kernel executes only ELF directly; everything else, a
+  shebang script or a binfmt_misc format, runs under an interpreter whose path is `exe`). An
+  unreadable file or one shorter than the ELF magic gives **no answer** (`kind_of_file` → `None`,
+  `locate` → `None`): that is a package reinstall caught mid-write, and guessing `Binary` there
+  flipped a live script's kind for one refresh. The settings window stores that kind on add
+  (`target_kind_for`, `Binary` when there is no answer), and `RuleCache` re-derives it with the
+  fresh path on every refresh, so a config saved before the fix (everything was `Binary`) heals by
+  itself. `Script` matching looks at **the script position only**: the process must be an
+  interpreter (`exe` or `argv[0]` basename, version suffix stripped, in
+  `weto_core::process::INTERPRETER_NAMES` or `pause_plan::SHELL_NAMES`), and the script is its
+  first argument after `argv[0]` that does not start with `-` (`node /p`, `node --inspect /p`,
+  `/usr/bin/node --harmony /p` from shebang options, `python3 -u /p`). Any-element matching took
+  `vim /p/qwen`, `less /p/qwen` and `code /p/qwen` with their trees, and an old config storing
+  `/usr/bin/node` as a script path caught every `#!/usr/bin/node` script through `argv[0]`. The
+  price is the same as with `SHELL_NAMES`: a script under an unknown interpreter is not matched.
+  The script must also be an **absolute** path: the window stores the typed bare name (`qwen`)
+  among `launch_paths`; that filter sits in `matches_rule` because rules are assembled in two
+  places (`Target::rule`, `RuleCache` memory). `RuleCache` additionally drops ELF files from the
+  script paths it builds (`TargetResolving::kind_of`): an interpreter stored by an old config is
+  never a script, and `python3 /usr/bin/node` must not match.
+  [bugs/linux-script-targets-matched-as-binary](../bugs/linux-script-targets-matched-as-binary.md).
+- **Rules are re-resolved by the guard, not once by the settings window** — the macOS rule cache
+  (`ProcessEnforcer.rules()`), ported as `weto_guard::rules::RuleCache`. The resolved path of a
+  versioned tool (`~/.local/share/claude/versions/2.1.228`) changes with every update; a rule
+  copied from `config.toml` on every pass silently stopped matching the new session, and a
+  self-updated VPN client read as closed → `Kill(VpnAppNotRunning)` every pass. The cache asks
+  `TargetResolving` (real: `LaunchTargetResolver` = `locate_target_with_kind`, path plus kind;
+  bare names go through the process's own `PATH`, which the desktop session provides) when the
+  `targets` / `vpn_app` value
+  changed or `TARGET_RULE_REFRESH` (2 s, = `Constants.targetRuleRefreshSeconds`) elapsed on the
+  guard clock — never per 250 ms pass, and it never walks `/proc`, so the pass keeps its single
+  walk. Re-resolution never narrows the guard: the new rule is the fresh path plus every launch
+  path seen before (seeded from the stored `path`/`launch_paths`), a failed resolution (the file
+  is mid-replacement or empty, `NeedsPath`) keeps the last known rule, and memory of removed
+  entries is dropped. A **kind change keeps the previous kind**: a tool that moved npm ↔ native
+  leaves sessions on the old form, so paths seen under the previous kind stay in
+  `TargetRule::other_kind_paths` and match by that kind's rules (`matches_rule` checks both
+  lists). Only an *observed* kind counts as previous: the kind stored in `config.toml` is
+  reinterpreted in the fresh one, and an unresolved entry is not remembered at all — otherwise an
+  old config with `/usr/bin/node` as a `Binary` would catch every Node process. The entry is
+  tried first, then the absolute stored launch paths: on add the settings window stores the
+  `PATH` file a bare name was found at (`~/.local/bin/claude`, unresolved — the symlink survives
+  updates), so a guard whose `PATH` lacks it still finds the target. The chain is one function,
+  `target_resolver::locate_with_launch_paths`, shared with the settings window's target
+  description, so a target the guard finds is never described as «не найдено». All
+  five controller call sites (`run`, `recover_stopped`, `resume_from_ledger`, `apply_probe`,
+  `vpn_app_status`) read the cache; `Settings::target_rules()` stays only as the seed and for
+  tests. The registry strips the kernel's ` (deleted)` suffix from `exe`, so a session on a
+  version the update has removed still matches its remembered path; the stopped ledger strips it
+  on read too (`weto_core::process::without_deleted_suffix`), because a ledger written before the
+  registry did would otherwise never match its `(pid, path)` pair and stay frozen. Pinned by
+  `weto-guard/tests/rules.rs`. [bugs/linux-rules-resolved-once](../bugs/linux-rules-resolved-once.md).
+- **`appBundle` targets do not exist here.** A `.desktop` entry points at a file — an ordinary
+  binary or a script handed to an interpreter — and the file decides the kind, as above; getting
+  from the entry to that file is a chain, not a field.
+  `weto_core::launcher::command_from_desktop_entry` walks the `Exec` line and answers with a
+  `DesktopCommand`: wrappers are dropped (a leading `env` with its assignments, one level
   of `sh -c "…"` — taking the first word would have guarded `/usr/bin/env` or `/bin/sh`, i.e. half
   the machine), and `steam` / `flatpak` come back as `Indirect { launcher }` because they start the
   program themselves and the entry does not say what the process will be. Guessing there would
   have made `/usr/bin/steam` the target, so a VPN drop closed every game at once.
+  An interpreter followed by a script file (`node /opt/app/cli.js`, `python3.12 /opt/app/app.py`,
+  `deno run --allow-net /opt/app/main.ts`, and a shell given a file: `bash /opt/app/start.sh`)
+  comes back as `Script(path)`: the target is the file, and the resolver marks it `Script` even
+  without a shebang — otherwise `/usr/bin/node` would have been the target and a VPN drop would
+  have killed every Node process. Only long flags and deno/bun's `run` are skipped; a short flag
+  (`-m`, `-e`, `-jar`) or a non-absolute script stops the parse, and an interpreter then answers
+  `Indirect { launcher }` (→ `NeedsPath`), while a shell without a file stays a target as before
+  (`/bin/sh --login`).
   `target_resolver::resolve_launch_entry` carries that verdict to disk as a `Resolution`:
   `NeedsPath { launcher }` is the honest answer, and the settings window asks the user for the
   program file with a second dialog (`ask_for_program_path`). `resolve_launch_target` stays as the
@@ -176,9 +267,9 @@ Everything the policy decides is shared. What the system dictates is not:
   therefore takes `app.hold()` when `tray::install` reports success (`lifecycle::holds_application`),
   and the hold guard is kept in a thread-local — dropped on the spot it would hold nothing. Without
   a tray (vanilla GNOME) the old behaviour stays, because a held windowless app could only be closed
-  with `kill`. The exit funnel is untouched: `app.quit()` from the tray item and from «Закрыть
-  приложение» still goes through `connect_shutdown`. The cost of holding is that per-window timers
-  now have to end with their window — `status_window.rs` breaks its 500 ms refresh on
+  with `kill`. The exit funnel is untouched: the tray's «Выход» and «Закрыть приложение» both ask
+  «Закрыть Weto?» (`settings_window::ask_to_close`) and only then quit, through `connect_shutdown`.
+  The cost of holding is that per-window timers now have to end with their window — `status_window.rs` breaks its 500 ms refresh on
   `connect_destroy`, or every reopen would leave another one running.
 - **The settings window holds its own width.** A tiling compositor hands the window the whole cell
   and ignores `default_width`, so card rows (label, `spacer()` with `hexpand`, control) spread to
@@ -220,6 +311,15 @@ Everything the policy decides is shared. What the system dictates is not:
   same reason — a second copy of the parse-and-dedupe algorithm would drift silently.
   `allowed_countries` / `allowed_ip_ranges` are `serde(default)`, so a config written before the
   whitelist existed loads as an empty one.
+- **The pause ceiling is saved past the revision.** `Settings.pause_ceiling_seconds` in
+  `config.toml` (a config without the key loads as 60; an unknown number reads as one minute via
+  `Settings::pause_ceiling()`, not at load time). the «Таймаут» row of `network_card` saves it with
+  `SharedSettings::edit_untracked`, which does not bump `revision`: the revision invalidates the
+  verdict, so a ceiling change would have sent the guard into «Проверка» with a probe — the macOS
+  counterpart is the separate `onPauseCeilingChange` bus. There is no subscriber here:
+  `GuardController::feed` sets the machine's ceiling from the settings before every input, so a
+  change reaches the current pause on the next tick, and `pause_deadline` in the snapshot is
+  `paused_since + machine.pause_ceiling()` — screen and threshold share one source.
 - **The journal keeps one record per killed process and one `episode_id` per pass**, same
   contract as `WetoShared`. `KillReporting` carries a `KillContext` — reason, geo readout,
   diagnostics — instead of a bare `&str`. `Journal::refine_episode` rewrites every record of the
@@ -277,6 +377,25 @@ points at the new version.
   there the system installer validates the package.
 - **A manual check ignores skip and deferral** — the only and sufficient way to bring back
   a skipped version, which is why there is no "unskip" button.
+- **Every request is bounded.** The release check has an overall timeout of 30 s
+  (`checker::CHECK_TIMEOUT`, ureq agent `timeout`): without it a channel that accepted the
+  connection and went silent kept the footer tile «Проверка…» and insensitive until restart,
+  since `check_now` refuses to start a second check while one is running. The archive download
+  is bounded per connection (30 s) and per silence between reads (60 s), not in total — a total
+  would cut an honest download on a slow link.
+- **The update window is a port of `UpdateDialogView`** (`weto-app/src/update_window.rs`): what
+  it shows is decided by `weto_update::dialog::UpdateDialogModel` (port of the macOS model, same
+  tests), texts by `weto_update::strings::UpdateStrings`, the width by measuring the three live
+  buttons (`dialog_width`, port of `minimumWidth`). A prompt opens it by itself; the close button
+  postpones for 3 h (`RemindInterval::ON_CLOSE`). The checkbox and the Maintenance toggle are one
+  value (`Updates::auto_install`), and turning it on installs the found version at once, as on
+  macOS. No release notes (owner decision, 2026-10-06). Not ported: the texts about the helper
+  daemon and about a release without a package (there is no daemon, and a release without a Linux
+  archive is not a finding). Behaviour deviations, each forced or deliberate: the footer tile
+  opens the window for an already found version instead of fetching again (same outcome, no
+  network round-trip); a new prompt forgets a previous install failure — on macOS the window keeps
+  only «Открыть страницу релиза» until restart; the `Checking` phase marks the manual check (the
+  tile is insensitive until it answers), not an install-time re-check, which Linux does not have.
 - **The stable path is the launch symlink, `~/.local/bin/weto`** (`Paths::launcher`, written
   literally the way `install.sh` writes it). Anything outside the running process that has to name
   the binary means that symlink, never the versioned directory: the autostart entry writes
@@ -307,7 +426,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-404 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+528 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
@@ -323,6 +442,15 @@ once — the app outlives its last window, `active_window` is then empty so a tr
 "build a new one" branch, and `quit` still arrives at `connect_shutdown`, where the resume lives.
 It is a separate file because it is a separate process: GTK initialises once, from one thread, and
 the runner is parallel.
+
+The settings window is rebuilt on every open, so anything a closure keeps strongly outlives it.
+A handler living inside a widget must hold that widget's ancestors (and the widget itself)
+**weakly**: the VPN-app row's `show` held its own containers while their buttons held `show`, and
+the target, geo-list and journal redraws did the same with their rows (the geo redraw also held its
+own `Rc` slot) — the window went away, the cards and `Arc<AppState>` stayed, once per open.
+`window_tick` removes its source in `unrealize` itself rather than on its next tick, so a closed
+window frees its tick closures at once. `weto-app/tests/window_release.rs` checks both the window
+and that `Arc::strong_count` of the state returns to its baseline after closing.
 
 ## Sibling crates
 
@@ -391,9 +519,14 @@ one record the journal is kept for out of its fifty.
    re-application **is** the launch ban: `terminate_targets` runs each pass and kills whatever now
    matches, with the episode's evidence as the reason.
    Each such pass also asks whether the ledger still has a reason to hold what it holds:
-   `ProcessEnforcer::release` frees every live entry that matches nothing under the current rules —
-   the user removed its target, and weto has no business holding a process it no longer guards, let
-   alone until the ceiling. A shell is released only when no non-shell entry is still guarded (it
+   `ProcessEnforcer::release` frees every live entry whose target (`StoppedProcess::target_entry`,
+   the settings entry it was stopped under; a descendant carries its root's) is no longer among the
+   settings targets — the user removed it, and weto has no business holding a process it no longer
+   guards, let alone until the ceiling. It is the settings entry, not "matches no rule now": an
+   orphaned descendant whose standing root was killed, or a session of a target that changed form,
+   matches nothing and was still never released by the user; the old test freed them mid-pause
+   with a false «цель снята с охраны». An entry written by an older version has no target and is
+   held until the episode outcome. A shell is released only when no non-shell entry is still guarded (it
    stands for its target's terminal; freeing it first hands the terminal back and the target lands
    on `SIGTTIN`), signals go in the same reverse stop order, and the entry leaves the ledger by
    observation like any other. The record gets its own outcome — `RELEASE_SIGNALLED_TEXT` when the
@@ -401,7 +534,13 @@ one record the journal is kept for out of its fifty.
    `pause_resolved` skips those pids so the episode's outcome cannot overwrite them.
 2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the bad
    result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
-   restart it. At 60 s the phase becomes `Danger(PauseExpired)` and the targets are killed.
+   restart it. At the ceiling (the user's setting, 1 min by default) the phase becomes
+   `Danger(PauseExpired(ceiling))` and the targets are killed; the evidence names the ceiling that
+   fired («Подтверждение не получено за 5 мин»). `ProcessEnforcer::terminate` kills what matches
+   **and** every live non-shell ledger entry whose target is still in settings: an orphaned
+   descendant is part of that target, and the old `SIGCONT` to "everything that does not match"
+   sent it back to work exactly when the exit was proven unsafe. Shells and entries of removed
+   targets get `SIGCONT` as before.
 3. A good answer moves the phase back to a `Run` action — but the obligation is discharged by observation,
    not by delivery. `settle_resume` runs on **every** pass with running targets while the ledger is
    non-empty: it sends `SIGCONT` bottom-up and strikes an entry off only once the kernel shows the
@@ -413,7 +552,7 @@ one record the journal is kept for out of its fifty.
    pids get reused), a `startupRecovery` / `standingProcessesRemain` record in the checks journal,
    and its own kill-journal episode. An unreadable ledger leaves a `ledgerUnreadable` record.
 5. `shutdown()` resumes everything on a clean exit and admits it cannot observe the result: the
-   outcome is «не подтверждено …, weto проверит их при следующем запуске». It hangs off one funnel —
+   outcome is «не подтверждено …, Weto проверит их при следующем запуске». It hangs off one funnel —
    `application.connect_shutdown` in `main.rs` — because buttons are not an exit path: GApplication
    quits by itself once the last window is gone, and that route left the targets standing. A
    `SIGTERM` handler turns the session logout into the same `quit`, so it goes through the funnel
@@ -446,13 +585,15 @@ one record the journal is kept for out of its fifty.
 
 ## Not here yet
 
-Secret Service over D-Bus — the token lives in a `0600` file. Country flags and
-per-target icons are not fetched, so the status window shows generic glyphs.
+Secret Service over D-Bus — the token lives in a `0600` file. Country flags are not shipped, so
+neither the tray nor the readout shows one. A target's pill icon comes only from its `.desktop`
+entry; a command or path target keeps the terminal glyph.
 
 **The pause has a face now.** The status window builds its title, shield colour and the
 three explanation lines straight from `GuardPhase` (`weto_core::presentation::shield_color`,
 `explanation`, `should_explain` — the same texts as macOS `GuardVM.statusColor` and
 `StatusPresentation.explanation`, word for word), and every standing target gets a pause
-badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`),
+badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`; «4:59»
+above a minute, «43 с» in the last one — same as macOS),
 the `fg` hint and the "Показать терминал" button where the emulator can be raised —
 see "Raising the terminal" above.

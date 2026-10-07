@@ -62,7 +62,7 @@ impl FakeNotifications {
 }
 
 #[test]
-fn the_backgrounded_notification_carries_its_text_and_opens_weto_on_click() {
+fn notifications_carry_the_macos_texts_and_open_weto_on_click() {
     let Some(mut daemon) = start_session_bus() else {
         eprintln!("dbus-daemon не найден — уведомления проверить нечем, пропускаю");
         return;
@@ -96,7 +96,9 @@ fn the_backgrounded_notification_carries_its_text_and_opens_weto_on_click() {
     })
     .expect("уведомление не дошло до сервера");
 
-    assert_eq!(call.app, "weto");
+    // Имя приложения сервер показывает в шапке уведомления: это текст
+    // интерфейса, а не идентификатор, и пишется он «Weto», как на macOS.
+    assert_eq!(call.app, "Weto");
     assert_eq!(
         call.summary, "Weto: nano вернулся в фон",
         "заголовок обязан совпадать с macOS слово в слово"
@@ -107,7 +109,7 @@ fn the_backgrounded_notification_carries_its_text_and_opens_weto_on_click() {
     );
     assert_eq!(
         call.actions,
-        vec!["default".to_string(), "Открыть weto".to_string()],
+        vec!["default".to_string(), "Открыть Weto".to_string()],
         "сервер объявил, что умеет действия, — значит нажатие обязано быть"
     );
 
@@ -129,6 +131,30 @@ fn the_backgrounded_notification_carries_its_text_and_opens_weto_on_click() {
     assert!(
         fired.is_some(),
         "нажатие на уведомление обязано открывать окно статуса"
+    );
+
+    // Завершение целей: заголовок и текст — дословно `UserNotificationGuardNotifier`
+    // с macOS. Число — завершённые процессы прохода, а не цели: «claude ×34, codex»
+    // это тридцать пять процессов.
+    notifier.notify(
+        &["claude ×34".to_string(), "codex".to_string()],
+        "Страна выхода RU в чёрном списке",
+        35,
+    );
+
+    let kill = wait_for(Duration::from_secs(5), || {
+        calls.lock().expect("вызовы").get(1).cloned()
+    })
+    .expect("уведомление о завершении не дошло до сервера");
+
+    assert_eq!(kill.app, "Weto");
+    assert_eq!(
+        kill.summary, "Weto: процессы завершены",
+        "заголовок обязан совпадать с macOS слово в слово"
+    );
+    assert_eq!(
+        kill.body, "claude ×34, codex: Страна выхода RU в чёрном списке. Завершено процессов: 35.",
+        "текст обязан совпадать с macOS слово в слово"
     );
 
     let _ = daemon.kill();

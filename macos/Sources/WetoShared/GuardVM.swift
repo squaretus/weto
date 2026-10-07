@@ -54,7 +54,7 @@ public final class GuardVM {
 
     /// Когда истечёт потолок паузы. `nil` — цели не стоят.
     public var pauseDeadline: Date? {
-        phase.pausedSince.map { $0.addingTimeInterval(Constants.pauseCeilingSeconds) }
+        phase.pausedSince.map { $0.addingTimeInterval(controller.pauseCeiling) }
     }
 
     @ObservationIgnored private let settings: SettingsStore
@@ -299,7 +299,7 @@ public final class GuardVM {
         }
         return "не подтверждено: сигнал продолжения отправлен процессам "
             + "\(outcome.unresolved.map(\.pid)), а охрана остановлена — "
-            + "результат наблюдать нечем, weto проверит их при следующем запуске"
+            + "результат наблюдать нечем, Weto проверит их при следующем запуске"
     }
 
     /// Досылает SIGCONT оставшимся записям учёта и возвращает тех, кого обход всё
@@ -891,7 +891,7 @@ public final class GuardVM {
     /// рассказывает эпизод прошлой жизни weto, а этот отвечает за то, что они
     /// пережили перезапуск.
     static let recoveryReasonText =
-        "Найдены остановленными от прошлого запуска weto: пробы за этим стоянием нет"
+        "Найдены остановленными от прошлого запуска Weto: пробы за этим стоянием нет"
 
     /// Эпизод про то, что weto застал стоящим на старте. Записи те же, что у паузы
     /// (`kind: paused`), и исход им дописывает общий `resolvePauseEpisode`:
@@ -1052,7 +1052,7 @@ public final class GuardVM {
 
         // Исход эпизода паузы: те же pid новых записей не заводят.
         let skip = pausedEpisodePIDs
-        let cause = evidence == .pauseExpired ? "по потолку" : "по доказательству"
+        let cause = evidence.isPauseExpired ? "по потолку" : "по доказательству"
         // Шелл под доказательство не попадает: `ProcessEnforcer.terminate` возвращает
         // ему SIGCONT, а не SIGKILL, — «завершено» в его записи было бы неправдой.
         resolvePauseEpisode(

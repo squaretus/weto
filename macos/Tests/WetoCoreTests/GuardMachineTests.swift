@@ -34,7 +34,7 @@ final class GuardMachineTests: XCTestCase {
     func test_the_default_machine_carries_the_project_constants() {
         let machine = GuardMachine()
         XCTAssertEqual(machine.phase, .disabled)
-        XCTAssertEqual(machine.pauseCeiling, Constants.pauseCeilingSeconds)
+        XCTAssertEqual(machine.pauseCeiling, PauseCeiling.standard.seconds)
     }
 
     // MARK: - Вердикта нет: цели работают, пока не пришёл плохой результат
@@ -98,7 +98,7 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertEqual(machine.apply(.tick, at: at(64)), .none, "потолок ещё не истёк")
         XCTAssertEqual(machine.remainingPause(at: at(64)), 1)
         XCTAssertEqual(machine.apply(.tick, at: at(65)), .terminate)
-        XCTAssertEqual(machine.phase, .danger(.pauseExpired))
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired(ceiling: 60)))
     }
 
     // Неответ в проверке — тот самый плохой результат: вот здесь цели и встают.
@@ -141,7 +141,48 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertEqual(machine.phase, .paused(since: at(5), reason: .geoUnavailable("таймаут запроса")))
         XCTAssertEqual(machine.remainingPause(at: at(20)), 45)
         XCTAssertEqual(machine.apply(.tick, at: at(65)), .terminate)
-        XCTAssertEqual(machine.phase, .danger(.pauseExpired))
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired(ceiling: 60)))
+    }
+
+    // MARK: - Потолок выбирают в настройках
+
+    /// Длиннее потолок — дольше стоим: на прежнем пороге завершения нет.
+    func test_raising_the_ceiling_mid_pause_extends_the_current_pause() {
+        var machine = pausedMachine(at: 0)
+        machine.setPauseCeiling(300)
+
+        XCTAssertEqual(machine.apply(.tick, at: at(60)), .none)
+        XCTAssertEqual(machine.remainingPause(at: at(60)), 240)
+        XCTAssertEqual(machine.apply(.tick, at: at(300)), .terminate)
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired(ceiling: 300)))
+    }
+
+    /// Урезали ниже простоянного — завершение на ближайшем такте, и улика
+    /// называет новый потолок: по нему и завершили.
+    func test_lowering_the_ceiling_below_the_time_already_paused_terminates_on_the_next_tick() {
+        var machine = GuardMachine(pauseCeiling: 600)
+        _ = machine.apply(.verdict(.safe, geo: .resolved(kz)), at: t0)
+        _ = machine.apply(.verdict(silence, geo: silentGeo), at: at(0))
+        XCTAssertEqual(machine.apply(.tick, at: at(180)), .none)
+
+        machine.setPauseCeiling(60)
+
+        XCTAssertEqual(machine.remainingPause(at: at(180)), 0)
+        XCTAssertEqual(machine.apply(.tick, at: at(181)), .terminate)
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired(ceiling: 60)))
+    }
+
+    /// Смена потолка — не вход: фаза и момент постановки не трогаются.
+    func test_setting_the_ceiling_does_not_touch_the_phase() {
+        var machine = pausedMachine(at: 5)
+        let before = machine.phase
+        machine.setPauseCeiling(120)
+        XCTAssertEqual(machine.phase, before)
+    }
+
+    func test_the_expired_evidence_names_its_own_ceiling() {
+        XCTAssertEqual(UnsafeEvidence.pauseExpired(ceiling: 300).displayText, "Подтверждение не получено за 5 мин")
+        XCTAssertEqual(UnsafeEvidence.pauseExpired(ceiling: 60).displayText, "Подтверждение не получено за 1 мин")
     }
 
     // MARK: - Выход из паузы: safe возвращает, доказательство завершает
@@ -263,9 +304,9 @@ final class GuardMachineTests: XCTestCase {
     func test_reassessment_cannot_lift_an_expired_pause() {
         var machine = pausedMachine(at: 5)
         _ = machine.apply(.tick, at: at(70))
-        XCTAssertEqual(machine.phase, .danger(.pauseExpired))
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired(ceiling: 60)))
         XCTAssertEqual(machine.apply(.reassessment(.safe, reading: kz), at: at(71)), .none)
-        XCTAssertEqual(machine.phase, .danger(.pauseExpired))
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired(ceiling: 60)))
     }
 
     // Паузу снимает ответ пробы, а не пересчёт по прошлому чтению.
@@ -340,7 +381,7 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertEqual(GuardPhase.protected(kz).action, .run)
         XCTAssertEqual(GuardPhase.interference(kz, reason: .confirmationUnavailable).action, .run)
         XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).action, .pause)
-        XCTAssertEqual(GuardPhase.danger(.pauseExpired).action, .terminate)
+        XCTAssertEqual(GuardPhase.danger(.pauseExpired(ceiling: 60)).action, .terminate)
     }
 
     func test_only_running_phases_carry_a_reading_and_only_the_pause_a_moment() {
@@ -349,14 +390,14 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertNil(GuardPhase.disabled.reading)
         XCTAssertNil(GuardPhase.verifying(cause: .coldStart).reading)
         XCTAssertNil(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).reading)
-        XCTAssertNil(GuardPhase.danger(.pauseExpired).reading)
+        XCTAssertNil(GuardPhase.danger(.pauseExpired(ceiling: 60)).reading)
 
         XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).pausedSince, t0)
         XCTAssertNil(GuardPhase.disabled.pausedSince)
         XCTAssertNil(GuardPhase.verifying(cause: .coldStart).pausedSince, "в проверке цели работают")
         XCTAssertNil(GuardPhase.protected(kz).pausedSince)
         XCTAssertNil(GuardPhase.interference(kz, reason: .confirmationUnavailable).pausedSince)
-        XCTAssertNil(GuardPhase.danger(.pauseExpired).pausedSince)
+        XCTAssertNil(GuardPhase.danger(.pauseExpired(ceiling: 60)).pausedSince)
     }
 
     // «На страже» у protected и interference — не опечатка: заголовок отвечает
@@ -367,6 +408,6 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertEqual(GuardPhase.protected(kz).title, "На страже")
         XCTAssertEqual(GuardPhase.interference(kz, reason: .confirmationUnavailable).title, "На страже")
         XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Выход не подтверждён")
-        XCTAssertEqual(GuardPhase.danger(.pauseExpired).title, "Небезопасно")
+        XCTAssertEqual(GuardPhase.danger(.pauseExpired(ceiling: 60)).title, "Небезопасно")
     }
 }

@@ -20,7 +20,7 @@ final class StatusPresentationTests: XCTestCase {
     private var allEvidence: [UnsafeEvidence] {
         [.vpnAppNotRunning, .blacklistedIP("203.0.113.28"), .blockedCountry(code: "RU", source: "ipinfo"),
          .countryConflict(primary: "KZ", confirmed: "DE"), .notWhitelistedIP("203.0.113.28"),
-         .notWhitelistedCountry("KZ"), .pauseExpired]
+         .notWhitelistedCountry("KZ"), .pauseExpired(ceiling: 60)]
     }
 
     /// Заголовок статуса — это состояние охраны, а не причина: шесть слов из `GuardPhase`,
@@ -35,7 +35,7 @@ final class StatusPresentationTests: XCTestCase {
             "тот же заголовок, что у protected — разница в улике строкой ниже и в цвете щита"
         )
         XCTAssertEqual(GuardPhase.paused(since: t0, reason: .confirmationUnavailable).title, "Выход не подтверждён")
-        XCTAssertEqual(GuardPhase.danger(.pauseExpired).title, "Небезопасно")
+        XCTAssertEqual(GuardPhase.danger(.pauseExpired(ceiling: 60)).title, "Небезопасно")
     }
 
     // MARK: - Объяснение тремя строками (что сделано, почему, что дальше)
@@ -142,6 +142,9 @@ final class StatusPresentationTests: XCTestCase {
         let sixty = StatusPresentation.explanation(for: .paused(since: t0, reason: .confirmationUnavailable), remainingPause: 60)
         XCTAssertEqual(sixty.next, "Ждём ответа сервисов, 60 с до завершения; возобновятся при подтверждении безопасного выхода")
 
+        let five = StatusPresentation.explanation(for: .paused(since: t0, reason: .confirmationUnavailable), remainingPause: 299)
+        XCTAssertEqual(five.next, "Ждём ответа сервисов, 4:59 до завершения; возобновятся при подтверждении безопасного выхода")
+
         let one = StatusPresentation.explanation(for: .paused(since: t0, reason: .confirmationUnavailable), remainingPause: 1)
         XCTAssertEqual(one.next, "Ждём ответа сервисов, 1 с до завершения; возобновятся при подтверждении безопасного выхода")
 
@@ -168,7 +171,7 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertTrue(StatusPresentation.shouldExplain(.verifying(cause: .coldStart)))
         XCTAssertTrue(StatusPresentation.shouldExplain(.interference(reading, reason: .confirmationUnavailable)))
         XCTAssertTrue(StatusPresentation.shouldExplain(.paused(since: t0, reason: .confirmationUnavailable)))
-        XCTAssertTrue(StatusPresentation.shouldExplain(.danger(.pauseExpired)))
+        XCTAssertTrue(StatusPresentation.shouldExplain(.danger(.pauseExpired(ceiling: 60))))
     }
 
     // MARK: - Подсказка про незапущенные цели

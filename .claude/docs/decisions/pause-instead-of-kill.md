@@ -40,10 +40,13 @@ a timeout means a black hole, not a leak.
    ipinfo silent while the fallback names our *previous* address is an answer, not silence, so
    the targets run. A changed address from the fallback is not such an answer and pauses on the
    first probe.
-4. **Pause ceiling 60 s**, counted from the moment the pause began. Safe verdict → SIGCONT;
-   proof → SIGKILL; nothing within 60 s → SIGKILL with «подтверждение не получено». Nothing can
-   extend it: «no verdict for this path» is not a result, and a path change under the pause
-   neither resumes the targets nor restarts the countdown. Probes keep their rhythm.
+4. **Pause ceiling** — 60 s originally; later made a user setting (1, 2, 5 or 10 min, default
+   1 min), see `features/pause-ceiling-setting.md`. Counted from the moment the pause began. Safe
+   verdict → SIGCONT; proof → SIGKILL; nothing within the ceiling → SIGKILL with «подтверждение
+   не получено за <ceiling>». Nothing on the guard's side can extend it: «no verdict for this
+   path» is not a result, and a path change under the pause neither resumes the targets nor
+   restarts the countdown. Only the user's setting moves the threshold, still from the same start.
+   Probes keep their rhythm.
 5. **Pause is tree-wide, parent first; children born later are caught by the next sweep;
    processes already stopped (`T`) are never touched.** For a terminal target that is the
    foreground job of an interactive shell, the shell is stopped too — **shell first, then the
@@ -67,7 +70,7 @@ a timeout means a black hole, not a leak.
   *without any verdict at all* for two probes (≈10 s), which is longer than the window it saved.
 - Strict fail-closed is preserved in the knowledge axis: no confirmation never yields *safe*.
   What changed is the action: a stopped process leaks nothing either, and it can be resumed.
-- The ceiling turns an unresolved pause into the old behaviour after 60 s.
+- The ceiling turns an unresolved pause into the old behaviour after 60 s (or the chosen ceiling).
 - «Опасно» is left only by a real probe result. Previously a path change moved it into
   «Проверка», which was a de-escalation while that phase was standing; now it would permit
   launching targets with no evidence at all, so no staleness cause lifts a proof.

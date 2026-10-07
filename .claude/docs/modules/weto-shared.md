@@ -19,7 +19,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   answered with a stop `Constants.resumeRetryLimit` times stops being poked (zsh's `notify` would
   print `suspended (tty input)` to the user once a second) — it stays on the books, and
   `terminate`/`stop` still signal it. `stop()` cannot observe anything after its own SIGCONT,
-  so its outcome is «не подтверждено: … weto проверит их при следующем запуске» — neither the
+  so its outcome is «не подтверждено: … Weto проверит их при следующем запуске» — neither the
   optimistic nor the pessimistic lie. `confirmResumed()` is the one exception to that promise and
   belongs to uninstall alone: there is no next launch to keep it, so the obligation is discharged by
   observation instead (see invariants). Both it and `stop()` go through `resumeFromLedger()` with an
@@ -28,8 +28,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   what it actually signalled, so a target that never came back up keeps its original `since`,
   which is the truth about it. `PausedProcess.since` records when weto stopped that pid; the
   countdown the badge shows is not read from it but from the reducer's phase
-  (`pauseDeadline` → `phase.pausedSince`), because the 60 s ceiling belongs to the episode, not to
-  one target. Only `isBackgrounded` is inherited across episodes — that one was written by
+  (`pauseDeadline` → `phase.pausedSince` + `controller.pauseCeiling`), because the ceiling belongs
+  to the episode, not to one target. Only `isBackgrounded` is inherited across episodes — that one was written by
   observation, not by the plan's guess.
 - `macos/Sources/WetoShared/GuardController.swift` — owns the one live `GuardMachine` (the reducer
   lives in `WetoCore`, see `weto-core.md`) plus the network probe: turns triggers into
@@ -57,7 +57,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   `release(guarded:observing:)` is the third caller of that same settle: a live ledger entry that
   matches nothing in the current scan lost its only reason to stand — the user removed its rule —
   and it gets `SIGCONT` on that very pass instead of waiting for the episode's outcome, i.e. up to
-  the 60 s ceiling after the user said «this is no longer mine». A shell is the exception, for the
+  the pause ceiling (1–10 min) after the user said «this is no longer mine». A shell is the exception, for the
   same reason it joins the plan at all: it is released only when no non-shell entry is still
   guarded, otherwise it takes the terminal back and its target lands on `SIGTTIN`. Signals go in
   the same reverse stop order, and the obligation is still discharged by observation —
@@ -75,7 +75,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   and needs the explanation
 - `macos/Sources/WetoShared/PopupPresenting.swift` — the one-method boundary `MenuBarPopupPresenter`
   needs to open the popup from a notification tap, without pulling `WetoMenuBar` into this module
-- `macos/Sources/WetoShared/SettingsStore.swift` — `UserDefaults` + Keychain, guard-config change bus
+- `macos/Sources/WetoShared/SettingsStore.swift` — `UserDefaults` + Keychain, guard-config change bus;
+  the pause ceiling (`pauseCeiling`, key `pauseCeilingSeconds`) has its own bus, `onPauseCeilingChange`
 - `macos/Sources/WetoShared/EventLogStore.swift` — 100-entry ring buffer of `KillEvent`, one per killed process
 - `macos/Sources/WetoShared/CheckLogStore.swift` — 50-entry ring buffer of `CheckEvent` (the second
   journal: every connectivity-check attempt, not just the ones that killed something).
@@ -111,6 +112,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   `entries(of:)` — one path for both geo lists; the `…Blocked…` / `…Allowed…` trio of each list is a
   delegating wrapper kept for UI bindings,
   `migrateLegacyVPNSelection(in:)`, `onGuardConfigurationChange(_)`, `guardConfig`
+- `SettingsStore.pauseCeiling` (`PauseCeiling`), `onPauseCeilingChange(_)`;
+  `GuardController.pauseCeiling` — the machine's current value, read by `GuardVM.pauseDeadline`
 - `EventLogStore.record(_ batch: [KillEvent])`, `refine(episodeID:reasonText:resolutionText:…)`, `clear()`
 - `JournalExporter.make(settings:events:at:osVersion:) → JournalExport`; `JournalExport.encoded()`,
   `JournalExport.fileName(at:)`
@@ -134,7 +137,9 @@ this layer decides *when* to ask and *what to do* with the answer.
   `UserNotificationGuardNotifier.activate()`, `.onOpen` (tap → open popup)
 
 ## Dependencies
-- `WetoCore`: `GuardPolicy`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`
+- `WetoCore`: `GuardPolicy`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`, `PauseCeiling`
+- `WetoDesign`: `StatusPresentation` formats the pause countdown with `WetoPauseBadge.remainingText`,
+  so the popup's explanation line and the badge read the same («4:59» / «43 с»)
 - `WetoSystem` protocols (injected, mocked in tests): `NetworkSnapshotReading`, `NetworkEventSourcing`,
   `GeoProbing`, `ProcessLocating`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`,
   `TargetResolving`, `SecretStoring`, `HTTPFetching`
@@ -187,6 +192,13 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Invariants / assumptions
 <!-- generated, verify -->
+- **The pause ceiling is not a `GuardConfigurationChange`.** It does not change any policy
+  decision, and a configuration change would ask for a probe and write a check-log entry
+  («правка настроек»). `SettingsStore.pauseCeiling` fans out to `onPauseCeilingChange`
+  instead; its one subscriber is `GuardController`, which also sets the machine's ceiling at
+  `init` — including for a machine injected by a test, so the on-screen deadline
+  (`GuardVM.pauseDeadline`) and the tick threshold never come from different sources. The
+  change applies to the current pause on the next tick (see `weto-core.md`).
 - **A manual recheck must not cost the user their targets.** `GuardController.probeNow()`
   skips the debounce window *and* leaves `freshVerdict` alone, so pressing the button on a
   healthy VPN keeps the current `.safe` state instead of dropping into `verificationPending`

@@ -33,11 +33,40 @@ pub struct ProcessSnapshot {
     pub is_stopped: bool,
 }
 
+/// Что ядро дописывает к `exe` процесса, чей файл удалён из-под него.
+pub const DELETED_SUFFIX: &str = " (deleted)";
+
+/// Путь процесса, чей бинарник удалён, — тот, по которому он запускался.
+///
+/// Обновление инструмента из версионного каталога удаляет прежнюю версию,
+/// а сеанс, начатый на ней, живёт дальше, и `readlink` отдаёт
+/// `…/versions/228 (deleted)`. С суффиксом путь не совпал бы ни с одним путём
+/// правила, и живой сеанс выпадал бы из-под охраны ровно в момент обновления.
+///
+/// Здесь, а не в реестре процессов: путь сравнивают двое — обход `/proc`
+/// и учёт остановленных, записанный версией, которая суффикс ещё не срезала.
+/// Разойдись они в одной букве, стоящую запись сочли бы чужим процессом
+/// на переиспользованном pid, и SIGCONT ей не ушёл бы никогда.
+pub fn without_deleted_suffix(path: &str) -> &str {
+    path.strip_suffix(DELETED_SUFFIX).unwrap_or(path)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TargetKind {
     Binary,
     Script,
+}
+
+impl TargetKind {
+    /// Второй вид: их ровно два, и пути цели, сменившей форму, сравниваются
+    /// по правилам прежнего.
+    pub fn other(self) -> TargetKind {
+        match self {
+            TargetKind::Binary => TargetKind::Script,
+            TargetKind::Script => TargetKind::Binary,
+        }
+    }
 }
 
 /// Чем процесс попал под охрану: сам совпал с правилом или оказался потомком
@@ -77,6 +106,11 @@ pub struct TargetRule {
     /// Пути, по которым цель может встретиться: сам путь запуска (обычно симлинк
     /// в `$PATH`) и всё, во что он разворачивается.
     pub launch_paths: Vec<String>,
+    /// Пути, по которым цель запускалась в другом виде — до того, как сменила
+    /// форму (npm ↔ нативная сборка). Сравниваются по правилам другого вида:
+    /// сеанс, начатый на прежней форме, живёт на ней до конца, и повторное
+    /// разрешение не имеет права сужать охрану.
+    pub other_kind_paths: Vec<String>,
 }
 
 impl TargetRule {
@@ -99,6 +133,7 @@ impl TargetRule {
             kind,
             path: path.to_string(),
             launch_paths: paths,
+            other_kind_paths: Vec::new(),
         }
     }
 }
@@ -107,6 +142,12 @@ impl TargetRule {
 pub struct MatchedProcess {
     pub pid: i32,
     pub target_name: String,
+    /// Запись цели в настройках, под которую процесс попал (у потомка — запись
+    /// его корня). Пустая у шелла: целью он не был. По ней охрана решает, снята
+    /// ли цель с охраны, — а не по тому, совпадает ли процесс с правилом сейчас:
+    /// осиротевший потомок и сеанс на прежней форме цели с правилом не совпадают,
+    /// а с охраны их никто не снимал.
+    pub target_entry: String,
     pub parent_pid: i32,
     pub executable_path: String,
     /// Процесс попал под охрану не сам по себе, а как потомок совпавшего.
@@ -219,19 +260,79 @@ impl ProcessTree {
     }
 }
 
+/// Интерпретаторы, которым ядро или пользователь передают скрипт первым
+/// аргументом. Имя сравнивается без номера версии: `python3.12`, `lua5.4`
+/// и `perl5.36.0` — те же `python`, `lua` и `perl`.
+///
+/// Список, а не «любой процесс»: на месте скрипта у редактора, пейджера
+/// и IDE стоит тот же путь (`vim /p/qwen`, `code /p/qwen`), и отличить
+/// запуск скрипта от открытого файла по одной форме argv нельзя — только
+/// по тому, кто его получил. Цена известна: скрипт под незнакомым
+/// интерпретатором под охрану не попадёт, как незнакомый шелл не попадает
+/// в план паузы (`SHELL_NAMES`).
+pub const INTERPRETER_NAMES: &[&str] = &[
+    "node", "nodejs", "deno", "bun", "python", "pypy", "perl", "ruby", "php", "lua", "luajit",
+    "tclsh", "wish", "Rscript", "awk", "gawk", "mawk", "busybox",
+];
+
+/// Запущен ли процесс интерпретатором: по `exe` или по `argv[0]`. `exe` честнее —
+/// его называет ядро, — но у node из пакета `exe` бывает `nodejs`, у python —
+/// `python3.12`, и имя без версии сверяется у обоих.
+fn is_interpreter(process: &ProcessSnapshot, arguments: &[String]) -> bool {
+    let is_known = |path: &str| {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let bare = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-');
+        INTERPRETER_NAMES.contains(&bare) || crate::pause_plan::SHELL_NAMES.contains(&bare)
+    };
+    is_known(&process.executable_path) || arguments.first().is_some_and(|zero| is_known(zero))
+}
+
+/// Место скрипта в argv интерпретатора: первый аргумент после `argv[0]`,
+/// не начинающийся с `-`. Ключи из шебанга (`#!/usr/bin/node --harmony`) ядро
+/// ставит перед путём скрипта, ключи пользователя (`python3 -u app.py`) стоят
+/// там же; `env` из `#!/usr/bin/env node` после exec не остаётся вовсе.
+fn script_position(arguments: &[String]) -> Option<&str> {
+    arguments
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .find(|argument| !argument.starts_with('-'))
+}
+
 fn matches_rule(process: &ProcessSnapshot, rule: &TargetRule) -> bool {
-    match rule.kind {
-        TargetKind::Binary => rule.launch_paths.contains(&process.executable_path),
+    matches_paths(process, rule.kind, &rule.launch_paths)
+        || matches_paths(process, rule.kind.other(), &rule.other_kind_paths)
+}
+
+fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    match kind {
+        TargetKind::Binary => paths.contains(&process.executable_path),
         TargetKind::Script => {
-            // Поэлементно, а не подстрокой: подстрочное сравнение убивало обёртки
-            // с похожим именем и процессы, у которых путь цели встретился
-            // в данных команды.
             let Some(arguments) = &process.arguments else {
                 return false;
             };
-            arguments
-                .iter()
-                .any(|argument| rule.launch_paths.contains(argument))
+            // Только место скрипта у интерпретатора, а не любой элемент argv:
+            // поэлементное сравнение уводило под охрану `vim /p/qwen`,
+            // `less /p/qwen` и `code /p/qwen` вместе с их деревьями, а `argv[0]`
+            // у шебанг-запуска — сам интерпретатор, и правило старого конфига
+            // с `/usr/bin/node` среди путей ловило бы любой node-скрипт.
+            if !is_interpreter(process, arguments) {
+                return false;
+            }
+            // Только абсолютные пути. Окно настроек запоминает среди путей
+            // запуска и введённое голое имя (`qwen`), а сравнение с ним уводило
+            // бы под охрану `node qwen` из чужого каталога. Скрипт интерпретатор
+            // получает абсолютным путём: шелл находит его по `PATH`, и ядро
+            // передаёт дальше найденный путь. Отсев стоит здесь, а не при сборке
+            // правила: правило собирают и настройки, и кэш охраны с памятью путей,
+            // а ветка бинарника его не видит вовсе — `exe` всегда абсолютный,
+            // голое имя с ним не совпадает.
+            script_position(arguments).is_some_and(|script| {
+                script.starts_with('/') && paths.iter().any(|path| path == script)
+            })
         }
     }
 }
@@ -243,7 +344,7 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
 
     let mut seen: HashSet<i32> = HashSet::new();
     let mut result: Vec<MatchedProcess> = Vec::new();
-    let mut name_by_root: HashMap<i32, String> = HashMap::new();
+    let mut name_by_root: HashMap<i32, (String, String)> = HashMap::new();
 
     // Снимок по pid: журналу нужны родитель и путь каждого завершённого процесса,
     // а обход дерева отдаёт одни идентификаторы.
@@ -257,21 +358,23 @@ pub fn matches(processes: &[ProcessSnapshot], rules: &[TargetRule]) -> Vec<Match
             result.push(MatchedProcess {
                 pid: process.pid,
                 target_name: rule.display_name.clone(),
+                target_entry: rule.entry.clone(),
                 parent_pid: process.parent_pid,
                 executable_path: process.executable_path.clone(),
                 matched_by: MatchBasis::Rule,
             });
-            name_by_root.insert(process.pid, rule.display_name.clone());
+            name_by_root.insert(process.pid, (rule.display_name.clone(), rule.entry.clone()));
         }
     }
 
     let tree = ProcessTree::new(processes);
     let roots: Vec<i32> = result.iter().map(|m| m.pid).collect();
     for (pid, root) in tree.descendants(&roots, &mut seen) {
-        if let Some(name) = name_by_root.get(&root) {
+        if let Some((name, entry)) = name_by_root.get(&root) {
             result.push(MatchedProcess {
                 pid,
                 target_name: name.clone(),
+                target_entry: entry.clone(),
                 parent_pid: by_pid.get(&pid).map(|p| p.parent_pid).unwrap_or_default(),
                 executable_path: by_pid
                     .get(&pid)
@@ -410,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn script_path_must_equal_one_argv_element() {
+    fn script_path_must_equal_the_script_argument() {
         let rule = script("/usr/local/bin/qwen", &[]);
         let wrapper = process(
             11,
@@ -429,10 +532,9 @@ mod tests {
             pids(&[wrapper], std::slice::from_ref(&rule)).is_empty(),
             "подстрочное сравнение убивало обёртку с похожим именем"
         );
-        assert_eq!(
-            pids(&[data], &[rule]),
-            vec![12],
-            "путь целиком отдельным аргументом — это совпадение, даже если это данные"
+        assert!(
+            pids(&[data], &[rule]).is_empty(),
+            "путь скрипта в данных чужой программы — не запуск цели"
         );
     }
 
@@ -453,6 +555,96 @@ mod tests {
             &["node", "/usr/local/bin/qwen"],
         )];
         assert_eq!(pids(&procs, &[rule]), vec![10]);
+    }
+
+    /// Окно настроек запоминает введённое имя (`qwen`) среди путей запуска.
+    /// Для бинарника это безвредно — `exe` всегда абсолютный, — а у скрипта
+    /// argv сравнивается поэлементно, и голое имя совпадало бы с `grep qwen`
+    /// и `man qwen`. Интерпретатор получает скрипт абсолютным путём: шелл
+    /// находит его по `PATH`, и ядро передаёт дальше найденный путь.
+    #[test]
+    fn script_ignores_a_bare_name_among_its_launch_paths() {
+        let rule = script("/opt/qwen/cli.js", &["qwen", "/usr/local/bin/qwen"]);
+        let procs = vec![
+            process(10, 1, "/usr/bin/node", &["node", "/usr/local/bin/qwen"]),
+            process(11, 1, "/usr/bin/grep", &["grep", "qwen"]),
+            process(12, 1, "/usr/bin/man", &["man", "qwen"]),
+        ];
+        assert_eq!(pids(&procs, &[rule]), vec![10]);
+    }
+
+    /// Совпадает только место скрипта: первый аргумент интерпретатора, не
+    /// начинающийся с `-`. Сравнение со всеми элементами argv уводило под охрану
+    /// редактор, пейджер и IDE, открывшие файл скрипта, — вместе с их деревьями:
+    /// падение VPN ставило на паузу и завершало `code` целиком.
+    #[test]
+    fn a_program_that_merely_opens_the_script_file_is_not_the_script() {
+        let rule = script("/p/qwen", &[]);
+        let procs = vec![
+            process(10, 1, "/usr/share/code/code", &["code", "/p/qwen"]),
+            process(11, 1, "/usr/bin/vim.basic", &["vim", "/p/qwen"]),
+            process(12, 1, "/usr/bin/less", &["less", "-R", "/p/qwen"]),
+            process(13, 1, "/usr/bin/cat", &["/usr/bin/cat", "/p/qwen"]),
+        ];
+        assert!(pids(&procs, &[rule]).is_empty());
+    }
+
+    /// Интерпретатор получает скрипт первым аргументом — после своих ключей,
+    /// если они есть: ключи из шебанга (`#!/usr/bin/node --harmony`) ядро
+    /// ставит перед путём скрипта, `env -S` после exec не остаётся вовсе.
+    #[test]
+    fn the_script_is_the_first_non_option_argument_of_an_interpreter() {
+        let rule = script("/p/qwen", &["/p/app.py"]);
+        let procs = vec![
+            process(10, 1, "/usr/bin/node", &["node", "/p/qwen", "--yolo"]),
+            process(11, 1, "/usr/bin/node", &["node", "--inspect", "/p/qwen"]),
+            process(
+                12,
+                1,
+                "/usr/bin/nodejs",
+                &["/usr/bin/node", "--harmony", "/p/qwen"],
+            ),
+            process(
+                13,
+                1,
+                "/usr/bin/python3.12",
+                &["python3", "-u", "/p/app.py"],
+            ),
+            process(14, 1, "/usr/bin/node", &["node", "/p/other.js", "/p/qwen"]),
+        ];
+        assert_eq!(
+            pids(&procs, &[rule]),
+            vec![10, 11, 12, 13],
+            "путь скрипта аргументом чужого скрипта — это данные, а не запуск цели"
+        );
+    }
+
+    /// Старые конфиги хранили целью-скриптом сам интерпретатор (`exe` у `qwen`
+    /// из npm — `/usr/bin/node`). Место скрипта у шебанг-запуска — после
+    /// интерпретатора, поэтому любой `#!/usr/bin/node`-скрипт под такое правило
+    /// не попадает: `argv[0]` с местом скрипта не путается.
+    #[test]
+    fn an_interpreter_path_in_a_script_rule_does_not_catch_every_script_it_runs() {
+        let rule = script("/p/qwen", &["/usr/bin/node"]);
+        let procs = vec![
+            process(10, 1, "/usr/bin/node", &["/usr/bin/node", "/p/other-tool"]),
+            process(11, 1, "/usr/bin/node", &["/usr/bin/node"]),
+        ];
+        assert!(pids(&procs, &[rule]).is_empty());
+    }
+
+    /// Цель сменила форму: путь прежней формы сравнивается по правилам прежнего
+    /// вида, а не нового — node с `cli.js` по `exe` не совпал бы никогда.
+    #[test]
+    fn paths_of_the_previous_form_match_by_the_previous_kind() {
+        let mut rule = binary("/p/native/qwen");
+        rule.other_kind_paths = vec!["/p/cli.js".to_string()];
+        let procs = vec![
+            process(10, 1, "/p/native/qwen", &["qwen"]),
+            process(11, 1, "/usr/bin/node", &["node", "/p/cli.js"]),
+            process(12, 1, "/p/cli.js", &["x"]),
+        ];
+        assert_eq!(pids(&procs, &[rule]), vec![10, 11]);
     }
 
     #[test]

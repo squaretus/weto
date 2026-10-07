@@ -52,6 +52,57 @@ pub fn row(first: bool) -> GtkBox {
     row
 }
 
+/// Ставит или снимает линию над строкой, не пересобирая её. Строка ввода
+/// под списком живёт дольше самого списка: тот перерисовывается, а линия
+/// над вводом зависит от того, есть ли над ним записи.
+pub fn set_divided(row: &GtkBox, divided: bool) {
+    if divided {
+        row.add_css_class("divided");
+    } else {
+        row.remove_css_class("divided");
+    }
+}
+
+/// Нужна ли линия над строкой ввода под списком из `entries` записей.
+///
+/// Пустой список показывает одну строку-заглушку, и линия под ней отделяла бы
+/// ввод от пустоты: на macOS (`TargetsCard`, `GeoListCard`) её там нет.
+pub fn input_row_divided(entries: usize) -> bool {
+    entries > 0
+}
+
+/// Подпись отказа внутри строки — порт `WetoRow { Text(error) }` с macOS:
+/// паддинг строки, без линии, капшен цветом `red`. Строка скрыта, пока
+/// показывать нечего; показывают и прячут именно её, а не подпись, иначе
+/// пустая строка держала бы паддинг.
+pub fn error_row() -> (GtkBox, Label) {
+    let row = row(true);
+    let error = Label::new(None);
+    // Один класс, а не `weto-caption` вместе с `weto-error`: из двух равных
+    // по силе селекторов цвет выбирал порядок правил, и отказ выходил блёклым.
+    error.add_css_class("weto-error");
+    error.set_halign(Align::Start);
+    error.set_hexpand(true);
+    error.set_xalign(0.0);
+    error.set_wrap(true);
+    row.append(&error);
+    row.set_visible(false);
+    (row, error)
+}
+
+/// Показывает отказ в строке `error_row` или прячет строку, когда отказа
+/// больше нет. Прячется строка целиком: пустая подпись в видимой строке
+/// держала бы паддинг.
+pub fn set_error(error: &Label, text: Option<&str>) {
+    if let Some(text) = text {
+        error.set_text(text);
+    }
+    match error.parent() {
+        Some(row) => row.set_visible(text.is_some()),
+        None => error.set_visible(text.is_some()),
+    }
+}
+
 pub fn label(text: &str) -> Label {
     let label = Label::new(Some(text));
     label.add_css_class("weto-label");
@@ -62,6 +113,31 @@ pub fn label(text: &str) -> Label {
 pub fn value(text: &str) -> Label {
     let label = Label::new(Some(text));
     label.add_css_class("weto-value");
+    label.set_halign(Align::End);
+    label
+}
+
+/// Значение цветом `ink` — имя выбранного VPN-приложения: это выбор
+/// пользователя, а не показание.
+pub fn ink_value(text: &str) -> Label {
+    let label = value(text);
+    label.add_css_class("ink");
+    label
+}
+
+/// Значение цветом `faint` — «не выбрано»: значения нет, и ярче подсказки
+/// оно стоять не должно.
+pub fn faint_value(text: &str) -> Label {
+    let label = value(text);
+    label.add_css_class("faint");
+    label
+}
+
+/// Число шрифтом данных — табличные цифры, `dim`: так на macOS стоит счётчик
+/// процессов цели (`WetoTokens.data`), и разряды не пляшут при смене числа.
+pub fn data_value(text: &str) -> Label {
+    let label = Label::new(Some(text));
+    label.add_css_class("weto-data-value");
     label.set_halign(Align::End);
     label
 }
@@ -77,16 +153,21 @@ pub fn caption(text: &str) -> Label {
 ///
 /// Недоступное значение — короткое тире, неизвестный адрес — «неизвестен».
 /// Пустых мест и прочерков другого вида в каноне нет.
+///
+/// Показания выделяются мышью, как `.textSelection(.enabled)` на macOS: адрес
+/// и ответ сервиса копируют в обращение к провайдеру.
 pub fn data_row(key: &str, text: Option<&str>) -> GtkBox {
     let row = GtkBox::new(Orientation::Horizontal, SPACE2);
 
     let key_label = Label::new(Some(&format!("{key}:")));
     key_label.add_css_class("weto-data-key");
     key_label.set_halign(Align::Start);
+    key_label.set_selectable(true);
 
     let value_label = Label::new(Some(text.unwrap_or("—")));
     value_label.add_css_class("weto-data-value");
     value_label.set_halign(Align::Start);
+    value_label.set_selectable(true);
 
     row.append(&key_label);
     row.append(&value_label);
@@ -123,6 +204,55 @@ pub fn muted_button(text: &str) -> Button {
 
 pub fn destructive_button(text: &str) -> Button {
     pill(text, "weto-destructive")
+}
+
+/// Кнопка с меню — порт `WetoMenuButton`: выглядит как приглушённая пилюля
+/// со стрелкой вниз, а пункты меню — действия, а не выбор значения
+/// («Напомнить позже» → «через час»). Поэтому не `DropDown`: тот помнит
+/// выбранный пункт и показывает его вместо подписи.
+///
+/// Возвращает и сами пункты: действие на них вешает вызывающий, а меню
+/// закрывается само по нажатию на любой.
+pub fn menu_button(text: &str, items: &[&str]) -> (gtk4::MenuButton, Vec<Button>) {
+    let menu = gtk4::MenuButton::new();
+    menu.add_css_class("weto-menu-button");
+    menu.set_label(text);
+    menu.set_always_show_arrow(true);
+    menu.set_valign(Align::Center);
+
+    let list = GtkBox::new(Orientation::Vertical, 0);
+    let popover = gtk4::Popover::new();
+    popover.add_css_class("weto-menu-popover");
+    popover.set_has_arrow(false);
+    popover.set_child(Some(&list));
+    menu.set_popover(Some(&popover));
+
+    let buttons = items
+        .iter()
+        .map(|title| {
+            let item = Button::with_label(title);
+            item.add_css_class("weto-menu-item");
+            item.set_has_frame(false);
+            if let Some(label) = item.child().and_downcast::<Label>() {
+                label.set_xalign(0.0);
+            }
+            let popover = popover.clone();
+            item.connect_clicked(move |_| popover.popdown());
+            list.append(&item);
+            item
+        })
+        .collect();
+
+    (menu, buttons)
+}
+
+/// Галочка с подписью — порт `Toggle(…).toggleStyle(.checkbox)` в окне
+/// обновления: подпись шрифтом значения цветом `dim`, отмеченная — `violet`.
+pub fn checkbox(text: &str) -> gtk4::CheckButton {
+    let check = gtk4::CheckButton::with_label(text);
+    check.add_css_class("weto-check");
+    check.set_halign(Align::Start);
+    check
 }
 
 /// Выпадающий список. Тот же контрол, что и приглушённая кнопка: стоит с ней
@@ -180,6 +310,78 @@ pub fn entry(prompt: &str) -> Entry {
     entry.set_hexpand(true);
     entry.set_valign(Align::Center);
     entry
+}
+
+/// Значок «?», открывающий пояснение по нажатию, — сразу после названия
+/// настройки. Порт `WetoHint`: по нажатию, а не по наведению — подсказка
+/// появляется сразу и в скруглённом окне цвета карточки. Фона у значка нет,
+/// но на наведение он отвечает цветом и курсором-указателем.
+pub fn hint(text: &str) -> Button {
+    let button = Button::from_icon_name("dialog-question-symbolic");
+    button.add_css_class("weto-hint-button");
+    button.set_has_frame(false);
+    button.set_valign(Align::Center);
+    button.set_cursor_from_name(Some("pointer"));
+    button.set_tooltip_text(None);
+    button.update_property(&[gtk4::accessible::Property::Label("Пояснение")]);
+
+    let popover = hint_popover(text);
+    popover.set_parent(&button);
+    {
+        let popover = popover.clone();
+        button.connect_clicked(move |_| popover.popup());
+    }
+    // Всплывающее окно — не дочерний виджет кнопки, а прицепленный: снимать
+    // его обязан тот, кто прицепил, иначе GTK ругается при разрушении кнопки.
+    button.connect_destroy(move |_| popover.unparent());
+    button
+}
+
+/// Значок в поле виден, пока в поле ничего не набрано: кто начал набирать,
+/// подсказку уже прочитал, а стерев ввод, увидит её снова.
+pub fn field_hint_shown(text: &str) -> bool {
+    text.is_empty()
+}
+
+/// Пояснение к формату ввода: значок «?» в конце поля, пока поле пустое;
+/// нажатие на значок открывает пояснение. Порт `wetoFieldHint`.
+pub fn entry_hint(entry: &Entry, text: &str) {
+    let position = gtk4::EntryIconPosition::Secondary;
+    let apply = move |entry: &Entry| {
+        let name = field_hint_shown(&entry.text()).then_some("dialog-question-symbolic");
+        entry.set_icon_from_icon_name(position, name);
+    };
+    apply(entry);
+    entry.connect_changed(apply);
+    entry.set_icon_activatable(position, true);
+
+    let popover = hint_popover(text);
+    popover.set_parent(entry);
+    {
+        let popover = popover.clone();
+        entry.connect_icon_press(move |entry, pressed| {
+            if pressed == position {
+                popover.set_pointing_to(Some(&entry.icon_area(position)));
+                popover.popup();
+            }
+        });
+    }
+    entry.connect_destroy(move |_| popover.unparent());
+}
+
+/// Окно пояснения: скруглённое, цвета карточки, строка в ~40 знаков.
+fn hint_popover(text: &str) -> gtk4::Popover {
+    let label = Label::new(Some(text));
+    label.add_css_class("weto-hint-text");
+    label.set_wrap(true);
+    label.set_max_width_chars(40);
+    label.set_xalign(0.0);
+
+    let popover = gtk4::Popover::new();
+    popover.add_css_class("weto-hint-popover");
+    popover.set_position(gtk4::PositionType::Bottom);
+    popover.set_child(Some(&label));
+    popover
 }
 
 pub fn toggle() -> Switch {
@@ -244,29 +446,40 @@ pub fn status_title(text: &str, state: GuardStatusColor) -> Label {
     label
 }
 
-/// Пилюля живой цели. `extra` — «и ещё N процессов» этого сеанса. `accessory` —
-/// значок паузы (`pause_badge`) у стоящей цели, вставляется перед `+N`;
-/// `None` — цель работает штатно, порт `WetoProcessPill` без аксессуара.
+/// Пилюля живой цели — порт `WetoProcessPill`: иконка, имя одной строкой,
+/// метка `terminal` у цели из командной строки, справа аксессуар и `+N`.
+///
+/// `icon` — `Icon=` ярлыка: имя из темы или абсолютный путь; `None` и имя,
+/// которого в теме нет, дают значок терминала. `extra` — «и ещё N процессов»
+/// этого сеанса. `accessory` — значок паузы (`pause_badge`) у стоящей цели.
+///
+/// Пути под именем нет: на macOS его нет тоже, а длинный путь распирал окно.
+/// Имя обрезается в середине — у версионных путей различается именно хвост.
 pub fn process_pill(
     name: &str,
-    subtitle: Option<&str>,
+    icon: Option<&str>,
+    is_command_line: bool,
     extra: usize,
     accessory: Option<&GtkBox>,
 ) -> GtkBox {
     let pill = GtkBox::new(Orientation::Horizontal, SPACE3);
     pill.add_css_class("weto-pill");
 
-    let icon = gtk4::Image::from_icon_name("utilities-terminal-symbolic");
-    icon.set_pixel_size(32);
-    pill.append(&icon);
+    pill.append(&pill_icon(icon));
 
-    let text = GtkBox::new(Orientation::Vertical, 0);
-    text.set_hexpand(true);
-    text.append(&label(name));
-    if let Some(subtitle) = subtitle {
-        text.append(&caption(subtitle));
+    let title = label(name);
+    title.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    title.set_single_line_mode(true);
+    pill.append(&title);
+
+    if is_command_line {
+        // Шрифт данных цветом `faint` — ровно стиль ключа показаний.
+        let kind = Label::new(Some("terminal"));
+        kind.add_css_class("weto-data-key");
+        pill.append(&kind);
     }
-    pill.append(&text);
+
+    pill.append(&spacer());
 
     if let Some(accessory) = accessory {
         pill.append(accessory);
@@ -281,7 +494,30 @@ pub fn process_pill(
     pill
 }
 
-/// Отсчёт до потолка паузы: «43 с», округление вверх — «0 с» не появляется,
+/// Иконка пилюли 32×32. Имени, которого в теме нет, GTK рисует «битую
+/// картинку» — лучше честный значок терминала.
+fn pill_icon(icon: Option<&str>) -> gtk4::Image {
+    const FALLBACK: &str = "utilities-terminal-symbolic";
+
+    let image = match icon {
+        Some(path) if path.starts_with('/') && std::path::Path::new(path).is_file() => {
+            gtk4::Image::from_file(path)
+        }
+        Some(name) if !name.starts_with('/') && icon_in_theme(name) => {
+            gtk4::Image::from_icon_name(name)
+        }
+        _ => gtk4::Image::from_icon_name(FALLBACK),
+    };
+    image.set_pixel_size(32);
+    image
+}
+
+fn icon_in_theme(name: &str) -> bool {
+    gtk4::gdk::Display::default()
+        .is_some_and(|display| gtk4::IconTheme::for_display(&display).has_icon(name))
+}
+
+/// Отсчёт до потолка паузы: «4:59», на последней минуте «43 с», округление вверх — «0 с» не появляется,
 /// пока пауза ещё не истекла. Без дедлайна — «пауза». Порт
 /// `WetoPauseBadge.countdown`: секундного таймера внутри нет, `now` приходит
 /// снаружи одним и тем же значением для всех значков разом.
@@ -294,7 +530,7 @@ pub fn pause_countdown_text(deadline: Option<SystemTime>, now: SystemTime) -> St
     if remaining.subsec_nanos() > 0 {
         seconds += 1;
     }
-    format!("{seconds} с")
+    weto_core::pause_ceiling::countdown_text(seconds)
 }
 
 /// Значок «на паузе»: капсула `amber` с отсчётом до потолка. `hint` — цель
@@ -311,54 +547,77 @@ pub fn pause_badge(
     hint: Option<&str>,
     terminal: bool,
 ) -> (GtkBox, Option<Button>) {
-    let badge = GtkBox::new(Orientation::Horizontal, SPACE2);
-    badge.add_css_class("weto-pause-badge");
+    let row = GtkBox::new(Orientation::Horizontal, SPACE2);
+
+    let capsule = GtkBox::new(Orientation::Horizontal, SPACE2);
+    capsule.add_css_class("weto-pause-badge");
 
     let icon = gtk4::Image::from_icon_name("media-playback-pause-symbolic");
     icon.set_pixel_size(12);
-    badge.append(&icon);
+    capsule.append(&icon);
 
     let countdown = Label::new(Some(&pause_countdown_text(deadline, now)));
     countdown.add_css_class("weto-pause-countdown");
-    badge.append(&countdown);
+    capsule.append(&countdown);
+    row.append(&capsule);
 
+    // (i) и кнопка стоят рядом с капсулой, а не внутри неё: заливка `amber` —
+    // это фон отсчёта, и всё, что легло бы на неё, читалось бы частью отсчёта.
+    // Цвет (i) — `faint`, как у подсказок: смысл несёт текст, а не значок.
     if let Some(hint) = hint {
         let info = gtk4::Image::from_icon_name("dialog-information-symbolic");
         info.set_pixel_size(12);
+        info.add_css_class("weto-hint");
         info.set_tooltip_text(Some(hint));
-        badge.append(&info);
+        row.append(&info);
     }
 
-    if !terminal {
-        return (badge, None);
-    }
+    let button = terminal.then(|| {
+        let button = compact_primary_button("Показать терминал");
+        row.append(&button);
+        button
+    });
 
-    // Кнопка стоит рядом с капсулой, а не внутри неё: заливка `amber` — это
-    // фон значка, и первичная пилюля поверх него читалась бы как часть отсчёта.
-    let row = GtkBox::new(Orientation::Horizontal, SPACE2);
-    row.append(&badge);
-    let button = compact_primary_button("Показать терминал");
-    row.append(&button);
-
-    (row, Some(button))
+    (row, button)
 }
 
-/// Запись журнала: три строки без плашек, рамок и цвета.
-pub fn journal_row(target: &str, summary: &str, diagnostics: &str) -> GtkBox {
-    let row = GtkBox::new(Orientation::Vertical, 0);
+/// Запись журнала без плашек, рамок и цвета — порт `JournalRow` с macOS:
+/// цель, сводка, исход эпизода, если он есть, и строка показаний.
+///
+/// Исход стоит своей строкой цветом сводки, а не хвостом блёклых показаний:
+/// именно он объясняет запись «подключение ещё не проверено», после которой
+/// всё оказалось в порядке, и в показаниях его не замечали.
+pub fn journal_row(
+    title: &str,
+    summary: &str,
+    resolution: Option<&str>,
+    diagnostics: &str,
+) -> GtkBox {
+    // Зазор между строками записи — 2, как у `JournalRow` на macOS: он мельче
+    // шага сетки намеренно, строки одной записи читаются одним блоком.
+    const LINE_GAP: i32 = 2;
+
+    let row = GtkBox::new(Orientation::Vertical, LINE_GAP);
     row.add_css_class("weto-row");
 
-    row.append(&label(target));
+    row.append(&label(title));
 
-    let summary_label = Label::new(Some(summary));
-    summary_label.add_css_class("weto-value");
-    summary_label.set_halign(Align::Start);
-    summary_label.set_wrap(true);
-    row.append(&summary_label);
+    let wrapped = |text: &str, class: &str| {
+        let line = Label::new(Some(text));
+        line.add_css_class(class);
+        line.set_halign(Align::Start);
+        line.set_xalign(0.0);
+        line.set_wrap(true);
+        line
+    };
 
-    let diagnostics_label = Label::new(Some(diagnostics));
-    diagnostics_label.add_css_class("weto-journal-diagnostics");
-    diagnostics_label.set_halign(Align::Start);
+    row.append(&wrapped(summary, "weto-value"));
+
+    if let Some(resolution) = resolution {
+        row.append(&wrapped(resolution, "weto-value"));
+    }
+
+    let diagnostics_label = wrapped(diagnostics, "weto-journal-diagnostics");
     // Диагностическую строку в каноне выделяют мышью.
     diagnostics_label.set_selectable(true);
     row.append(&diagnostics_label);
@@ -372,15 +631,22 @@ pub enum BannerTone {
     Warning,
 }
 
-/// Баннер: тон задаёт только иконка, текст всегда приглушённый.
-pub fn banner(tone: BannerTone, text: &str, action: Option<&str>) -> (GtkBox, Option<Button>) {
-    let banner = GtkBox::new(Orientation::Horizontal, SPACE3);
+/// Баннер: тон задаёт только цвет иконки, текст всегда приглушённый. Порт
+/// `WetoBanner`: иконку выбирает вызывающий, и у баннера обновления она одна
+/// и та же при любом тоне — меняется только цвет.
+///
+/// Зазор между иконкой, текстом и действием — `SPACE2`, как у `WetoBanner`
+/// на macOS: `SPACE3` отводит внутренний отступ баннера по горизонтали.
+pub fn banner(
+    tone: BannerTone,
+    icon_name: &str,
+    text: &str,
+    action: Option<&str>,
+) -> (GtkBox, Option<Button>) {
+    let banner = GtkBox::new(Orientation::Horizontal, SPACE2);
     banner.add_css_class("weto-banner");
 
-    let icon = gtk4::Image::from_icon_name(match tone {
-        BannerTone::News => "software-update-available-symbolic",
-        BannerTone::Warning => "dialog-warning-symbolic",
-    });
+    let icon = gtk4::Image::from_icon_name(icon_name);
     icon.add_css_class("weto-banner-icon");
     icon.add_css_class(match tone {
         BannerTone::News => "news",
@@ -390,6 +656,8 @@ pub fn banner(tone: BannerTone, text: &str, action: Option<&str>) -> (GtkBox, Op
 
     let text_label = caption(text);
     text_label.set_hexpand(true);
+    text_label.set_wrap(true);
+    text_label.set_xalign(0.0);
     banner.append(&text_label);
 
     let button = action.map(|title| {
@@ -438,6 +706,19 @@ pub fn content_column(child: &impl IsA<gtk4::Widget>) -> GtkBox {
 }
 
 #[cfg(test)]
+mod hint_tests {
+    use super::field_hint_shown;
+
+    /// Кто начал набирать, подсказку уже прочитал; стёр ввод — видит её снова.
+    #[test]
+    fn the_field_hint_shows_only_while_the_field_is_empty() {
+        assert!(field_hint_shown(""));
+        assert!(!field_hint_shown("n"));
+        assert!(!field_hint_shown(" "));
+    }
+}
+
+#[cfg(test)]
 mod countdown_tests {
     use super::pause_countdown_text;
     use std::time::{Duration, UNIX_EPOCH};
@@ -455,6 +736,14 @@ mod countdown_tests {
                 format!("{seconds} с")
             );
         }
+    }
+
+    /// Больше минуты — минуты и секунды: «600 с» не читается.
+    #[test]
+    fn switches_to_minutes_above_one_minute() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let deadline = now + Duration::from_secs(600);
+        assert_eq!(pause_countdown_text(Some(deadline), now), "10:00");
     }
 
     /// Округление вверх: 42.2 с не имеет права показаться как «42 с» — тогда

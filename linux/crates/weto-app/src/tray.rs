@@ -60,10 +60,13 @@ fn pump_events(receiver: &Receiver<TrayEvent>, app: &gtk4::Application, state: &
             },
             TrayEvent::CheckNow => state.probe_now(),
             TrayEvent::OpenSettings => crate::settings_window::present(app, state.clone()),
+            // «Выход» — тот же вопрос «Закрыть Weto?», что у кнопки
+            // «Закрыть приложение»: на macOS выйти можно только через него,
+            // а промах по пункту меню снимал бы охрану без единого слова.
             // Замороженных целей выход не оставляет, но занимается этим
             // не пункт меню: SIGCONT шлёт воронка `connect_shutdown`, через
             // которую проходит любой выход, включая закрытие последнего окна.
-            TrayEvent::Quit => app.quit(),
+            TrayEvent::Quit => crate::settings_window::ask_to_close(app.active_window().as_ref()),
         }
     }
 }

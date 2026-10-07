@@ -1,5 +1,6 @@
 import Foundation
 import WetoCore
+import WetoDesign
 
 public struct StatusLine: Equatable, Sendable, Identifiable {
     public let key: String
@@ -86,7 +87,7 @@ public enum StatusPresentation {
         case .paused(_, let reason):
             return StatusExplanation(
                 title: phase.title, action: "Цели остановлены", evidence: reason.displayText,
-                next: "Ждём ответа сервисов, \(remaining) с до завершения; возобновятся при подтверждении безопасного выхода"
+                next: "Ждём ответа сервисов, \(WetoPauseBadge.remainingText(seconds: remaining)) до завершения; возобновятся при подтверждении безопасного выхода"
             )
         case .danger(let evidence):
             return StatusExplanation(
