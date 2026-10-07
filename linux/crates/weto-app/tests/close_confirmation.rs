@@ -10,7 +10,7 @@ use weto_app::settings_window::close_confirmation;
 /// Enter нажимает «Отмена», а не «Закрыть»: Enter по привычке не должен снимать
 /// охрану, и на macOS после правки так же. Esc — тоже «Отмена».
 #[test]
-fn the_close_confirmation_matches_macos_and_defaults_to_cancel() {
+fn the_close_confirmation_matches_macos_and_has_no_default_button() {
     gtk4::init().expect("тесту нужен дисплей: Xvfb не поднят");
 
     let dialog = close_confirmation();
@@ -28,7 +28,7 @@ fn the_close_confirmation_matches_macos_and_defaults_to_cancel() {
         .map(|title| title.to_string())
         .collect();
     assert_eq!(buttons, vec!["Закрыть".to_string(), "Отмена".to_string()]);
-    assert_eq!(dialog.default_button(), 1, "Enter обязан нажимать «Отмена»");
+    assert_eq!(dialog.default_button(), -1, "Enter не нажимает ничего");
     assert_eq!(dialog.cancel_button(), 1, "Esc обязан нажимать «Отмена»");
     assert!(dialog.is_modal());
 }

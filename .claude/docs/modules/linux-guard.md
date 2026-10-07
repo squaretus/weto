@@ -70,7 +70,7 @@ missing from it is a bug, not a platform trait.
 | SF Symbols | symbolic icons of the icon theme (`security-high-symbolic`, `view-refresh-symbolic`, `emblem-system-symbolic`, `user-trash-symbolic`, `dialog-question-symbolic`, …) | SF Symbols exist on macOS only; colour comes from our CSS, the shape from Adwaita/Breeze |
 | SF Pro | `font-family: sans-serif` — whatever the system resolves; sizes, weights and `tnum` still come from the tokens | SF ships with macOS only |
 | target hint mentions bundles | hint mentions command and path only | `appBundle` does not exist here |
-| `NSAlert` for destructive confirmations | `Gtk.AlertDialog`, Enter and Esc on the safe button as on macOS | each platform asks its own dialog |
+| `NSAlert` for destructive confirmations | `Gtk.AlertDialog`; in close/uninstall confirmations Enter presses nothing (no default button) and Esc presses the safe button, as on macOS | each platform asks its own dialog |
 | — | tray context menu: «Проверить сейчас», «Настройки», «Выход»; «Выход» asks the same «Закрыть Weto?» as «Закрыть приложение» (`settings_window::ask_to_close`) | SNI needs a menu; on macOS that dialog is the only way out, so a menu item must not bypass it |
 | country flag and status dot in the menu bar | the app's grid glyph tinted with the status colour, the phase title in the tooltip; no country | flags ship with the macOS bundle only |
 | target picker: `NSOpenPanel` in `/Applications` | «Выбрать…» opens `Gtk.FileDialog` in the first XDG applications directory; a `.desktop` entry stands in for a bundle | the platform's own picker and its own notion of an app |

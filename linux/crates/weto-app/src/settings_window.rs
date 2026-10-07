@@ -1201,7 +1201,8 @@ fn ask_two_ways(
         .detail(detail)
         .buttons([confirm_title, alternative_title])
         .cancel_button(1)
-        .default_button(1)
+        // Enter не нажимает ничего: закрыть или удалить можно только явным нажатием.
+        .default_button(-1)
         .modal(true)
         .build();
 
@@ -1269,7 +1270,8 @@ fn confirmation(title: &str, detail: &str, confirm_title: &str) -> gtk4::AlertDi
         .detail(detail)
         .buttons([confirm_title, "Отмена"])
         .cancel_button(1)
-        .default_button(1)
+        // Enter не нажимает ничего: закрыть или удалить можно только явным нажатием.
+        .default_button(-1)
         .modal(true)
         .build()
 }

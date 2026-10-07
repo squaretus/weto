@@ -109,7 +109,7 @@ struct MaintenanceCard: View {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Закрыть")
         alert.addButton(withTitle: "Отмена")
-        alert.makeSafeButtonDefault()
+        alert.makeConfirmationButtons()
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
@@ -132,7 +132,7 @@ struct MaintenanceCard: View {
         alert.alertStyle = .critical
         alert.addButton(withTitle: "Удалить")
         alert.addButton(withTitle: "Отмена")
-        alert.makeSafeButtonDefault()
+        alert.makeConfirmationButtons()
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
@@ -206,7 +206,7 @@ struct MaintenanceCard: View {
         alert.alertStyle = .critical
         alert.addButton(withTitle: "Удалить всё равно")
         alert.addButton(withTitle: "Не удалять и закрыть Weto")
-        alert.makeSafeButtonDefault()
+        alert.makeConfirmationButtons()
 
         return alert.runModal() == .alertFirstButtonReturn
     }
