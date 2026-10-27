@@ -62,47 +62,48 @@ final class HTTPFetcherPhasesTests: XCTestCase {
         }
     }
 
-    /// Второй запрос через тот же `URLSessionHTTPFetcher` на тот же адрес обычно переиспользует
-    /// keep-alive-соединение: `connectStartDate`/`connectEndDate` у такой транзакции — `nil`
-    /// не потому что фаза не завершилась, а потому что её не было вовсе. Сервер отвечает
-    /// на первый запрос и держит то же соединение открытым, на второй — молчит, чтобы
-    /// запрос упёрся в ожидание первого байта на переиспользованном соединении.
-    func test_reused_connection_reports_connect_as_not_needed_not_stalled() async throws {
+    /// Каждая проба — своё соединение. Туннель с подменой адресов (Happ на `utun6`,
+    /// `198.18.0.1`) при перезапуске или смене узла молча бросает живые TCP-соединения —
+    /// без RST, — а отпечаток выхода при этом не меняется. Сессия, жившая всё время
+    /// приложения, раз за разом отдавала пробе мёртвое соединение из своего пула: фазы
+    /// DNS, соединения и TLS — нули (`isReusedConnection`), ожидание ответа — до таймаута,
+    /// и так минутами подряд, пока система сама не выбросит соединение. Цели вставали
+    /// на паузу при исправном VPN.
+    ///
+    /// Сервер отвечает на первый запрос и держит то соединение открытым, но молчащим;
+    /// второй запрос обязан прийти новым соединением и получить ответ.
+    func test_a_silent_pooled_connection_is_not_reused_by_the_next_request() async throws {
         let (fd, port) = try silentListener()
         defer { close(fd) }
         let responder = Thread {
-            let client = accept(fd, nil, nil)
-            guard client >= 0 else { return }
-            readRequestHeaders(client)
-            let body = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
-            _ = body.withCString { write(client, $0, strlen($0)) }
-            // Соединение НЕ закрывается: второй запрос обязан прийти по нему же.
-            readRequestHeaders(client)
-            // На второй запрос сервер намеренно не отвечает.
+            let answer = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            // Первое соединение: ответ и молчание. Не закрывается — так выглядит
+            // соединение, брошенное туннелем: снаружи живое, внутри мёртвое.
+            let first = accept(fd, nil, nil)
+            guard first >= 0 else { return }
+            readRequestHeaders(first)
+            _ = answer.withCString { write(first, $0, strlen($0)) }
+            // Второе соединение: ответ. Если клиент переиспользует первое,
+            // сюда он не придёт никогда.
+            let second = accept(fd, nil, nil)
+            guard second >= 0 else { return }
+            readRequestHeaders(second)
+            _ = answer.withCString { write(second, $0, strlen($0)) }
+            close(second)
         }
         responder.start()
 
-        let fetcher = URLSessionHTTPFetcher(timeout: 0.5)
+        let fetcher = URLSessionHTTPFetcher(timeout: 1)
         let url = URL(string: "http://127.0.0.1:\(port)/")!
 
         let first = try await fetcher.fetch(from: url, headers: [:])
         XCTAssertEqual(first.statusCode, 200)
 
-        do {
-            _ = try await fetcher.fetch(from: url, headers: [:])
-            XCTFail("второй запрос не получает ответа — обязан упасть по таймауту")
-        } catch let transport as HTTPTransportError {
-            let phases = try XCTUnwrap(transport.phases, "фазы обязаны быть даже у упавшего запроса")
-            XCTAssertEqual(
-                phases.connectMilliseconds, 0,
-                "соединение переиспользовано — это «фазы не было», а не «не завершилась»"
-            )
-            XCTAssertNil(phases.firstByteMilliseconds, "первого байта не было")
-            XCTAssertEqual(
-                phases.stalledPhase, .firstByte,
-                "застряли на ожидании ответа, а не на соединении — оно уже было"
-            )
-        }
+        // Отвечает сервер только на втором соединении, поэтому сам ответ и доказывает,
+        // что запрос не пошёл в молчащее первое. Фазы тут не судья: соединение
+        // на loopback открывается быстрее миллисекунды и округляется в тот же ноль.
+        let second = try await fetcher.fetch(from: url, headers: [:])
+        XCTAssertEqual(second.statusCode, 200, "ответ пришёл новым соединением")
     }
 
     func test_successful_request_carries_all_phases() async throws {

@@ -48,19 +48,23 @@ public struct HTTPTransportError: LocalizedError {
     public var errorDescription: String? { underlying.localizedDescription }
 }
 
+/// Каждый запрос идёт своей сессией и своим соединением, а сессия закрывается вместе
+/// с ним. Пул соединений между пробами — ровно то, что охране вредно: туннель с подменой
+/// адресов при перезапуске или смене узла молча бросает живые TCP-соединения, отпечаток
+/// выхода при этом не меняется, и общая на всё время приложения сессия раз за разом
+/// отдавала пробе мёртвое соединение — таймаут на ожидании ответа минутами подряд при
+/// исправном VPN. Цена — DNS, TCP и TLS на каждую пробу; проба и так спрашивает разных
+/// хостов, и переиспользовать внутри неё было нечего.
 public struct URLSessionHTTPFetcher: HTTPFetching {
 
-    private let session: URLSession
-    private let metrics: MetricsCollector
+    private let configuration: URLSessionConfiguration
 
     public init(timeout: TimeInterval = Constants.geoRequestTimeoutSeconds) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = timeout
-        let collector = MetricsCollector()
-        self.metrics = collector
-        self.session = URLSession(configuration: configuration, delegate: collector, delegateQueue: nil)
+        self.configuration = configuration
     }
 
     public func fetch(from url: URL, headers: [String: String]) async throws -> HTTPResponse {
@@ -69,6 +73,12 @@ public struct URLSessionHTTPFetcher: HTTPFetching {
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
+
+        let metrics = MetricsCollector()
+        let session = URLSession(configuration: configuration, delegate: metrics, delegateQueue: nil)
+        // Сессия держит делегата сильной ссылкой до инвалидации: без неё и делегат,
+        // и соединение жили бы до конца процесса.
+        defer { session.invalidateAndCancel() }
 
         let started = ContinuousClock.now
         let data: Data
