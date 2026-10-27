@@ -56,4 +56,7 @@ the previous verdict may still stand.
 - Known limits, unchanged by this decision and worth stating: per-application split tunnelling is
   not detected (the geo request may go through the tunnel while a target's traffic does not);
   travelling to a country that is not on the block list removes the protection; a VPN with no
-  process (`wg-quick`) cannot be chosen.
+  process (`wg-quick`) cannot be chosen **in the GUI**.
+- **Lifted for the terminal version:** `weto` (`vpn set`) can name the VPN as a tunnel (interface name),
+  mutually exclusive with the app; the window still cannot — see
+  `decisions/vpn-tunnel-in-terminal-version.md`.

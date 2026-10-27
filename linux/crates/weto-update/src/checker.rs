@@ -56,6 +56,10 @@ struct Asset {
 /// иначе держала бы проверку так же долго, как молчание.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Начало имени архива терминальной версии — его обновление приложения
+/// не берёт никогда.
+pub const CLI_ASSET_PREFIX: &str = "weto-cli-";
+
 pub struct ReleaseChecker {
     agent: ureq::Agent,
     repository: String,
@@ -121,9 +125,16 @@ impl ReleaseChecker {
         let latest = Version::parse(&release.tag_name)
             .ok_or_else(|| CheckError::Parse(format!("тег «{}» не версия", release.tag_name)))?;
 
+        // Архив терминальной версии приложению не годится: в нём один
+        // бинарник без установщика. Сейчас он назван иначе
+        // (`weto-cli-<версия>-linux-<arch>.tar.gz`) и суффиксом не совпадает,
+        // но первые его сборки кончались тем же `-<arch>-linux.tar.zst`,
+        // и фильтр по префиксу остаётся страховкой: взять его за своё значило бы
+        // сломать приложение собственным обновлением.
         let asset = release
             .assets
             .iter()
+            .filter(|asset| !asset.name.starts_with(CLI_ASSET_PREFIX))
             .find(|asset| asset.name.ends_with(&self.asset_suffix))
             .ok_or_else(|| CheckError::NoAsset(release.tag_name.clone()))?;
 

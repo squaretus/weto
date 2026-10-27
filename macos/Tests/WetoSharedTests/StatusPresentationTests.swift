@@ -72,14 +72,6 @@ final class StatusPresentationTests: XCTestCase {
         XCTAssertEqual(e.next, "Жду ответа сервисов о безопасности выхода")
     }
 
-    /// «Проверяю выход» не читает часы вовсе: считать там нечего независимо от того,
-    /// что передали в `remainingPause` — отсчёт принадлежит одной только паузе.
-    func test_verifying_ignores_remaining_pause_entirely() {
-        let withDeadline = StatusPresentation.explanation(for: .verifying(cause: .coldStart))
-        let withoutDeadline = StatusPresentation.explanation(for: .verifying(cause: .coldStart))
-        XCTAssertEqual(withDeadline, withoutDeadline)
-    }
-
     func test_protected_names_the_exit() {
         let e = StatusPresentation.explanation(for: .protected(reading))
         XCTAssertEqual(e.action, "Цели работают")
@@ -289,5 +281,22 @@ final class StatusPresentationTests: XCTestCase {
 
     func test_detail_is_nil_when_nothing_is_known() {
         XCTAssertNil(StatusPresentation.detail(for: .danger(.vpnAppNotRunning), reading: nil))
+    }
+
+    /// Упавший туннель — такая же локальная улика, как закрытый клиент: прежние
+    /// адрес и страна про текущий выход не говорят ничего.
+    func test_tunnel_evidence_hides_the_previous_exit_like_a_closed_app() {
+        let reading = GeoReading(ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .freeipapi)
+        XCTAssertNil(StatusPresentation.detail(for: .danger(.vpnTunnelDown("wg0")), reading: reading))
+        XCTAssertNil(StatusPresentation.detail(
+            for: .danger(.trafficBypassesTunnel(tunnel: "wg0", via: "eth0")), reading: reading
+        ))
+        XCTAssertNotNil(StatusPresentation.detail(
+            for: .danger(.blockedCountry(code: "RU", source: "ipinfo")), reading: reading
+        ))
+        XCTAssertEqual(
+            StatusPresentation.explanation(for: .danger(.vpnTunnelDown("wg0"))).evidence,
+            "VPN-туннель wg0 не поднят"
+        )
     }
 }

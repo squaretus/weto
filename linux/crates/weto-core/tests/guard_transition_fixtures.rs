@@ -252,7 +252,7 @@ impl Phase {
             },
             ("danger", GuardPhase::Danger(evidence)) => match &self.evidence {
                 None => true,
-                Some(expected) => expected.as_evidence("ожидаемая фаза", ceiling) == *evidence,
+                Some(expected) => expected.matches(evidence, ceiling),
             },
             _ => false,
         }
@@ -418,12 +418,50 @@ struct Evidence {
     source: Option<String>,
     primary: Option<String>,
     confirmed: Option<String>,
+    tunnel: Option<String>,
+    via: Option<String>,
 }
 
 impl Evidence {
+    /// Сверка ожидаемой улики фазы. У улик туннеля нагрузка (`tunnel`, `via`)
+    /// в ожидаемой фазе необязательна — файл сверяет там `evidence.kind`,
+    /// а нагрузку пришпиливает вход; заданная — сверяется. У остальных улик
+    /// нагрузка обязательна, как и прежде.
+    fn matches(&self, actual: &UnsafeEvidence, ceiling: Duration) -> bool {
+        match (self.kind.as_str(), actual) {
+            ("vpnTunnelDown", UnsafeEvidence::VpnTunnelDown(tunnel)) => self
+                .tunnel
+                .as_ref()
+                .is_none_or(|expected| expected == tunnel),
+            ("trafficBypassesTunnel", UnsafeEvidence::TrafficBypassesTunnel { tunnel, via }) => {
+                self.tunnel
+                    .as_ref()
+                    .is_none_or(|expected| expected == tunnel)
+                    && self.via.as_ref().is_none_or(|expected| expected == via)
+            }
+            ("vpnTunnelDown" | "trafficBypassesTunnel", _) => false,
+            _ => self.as_evidence("ожидаемая фаза", ceiling) == *actual,
+        }
+    }
+
     fn as_evidence(&self, case: &str, ceiling: Duration) -> UnsafeEvidence {
         match self.kind.as_str() {
             "vpnAppNotRunning" => UnsafeEvidence::VpnAppNotRunning,
+            "vpnTunnelDown" => UnsafeEvidence::VpnTunnelDown(
+                self.tunnel
+                    .clone()
+                    .unwrap_or_else(|| panic!("«{case}»: vpnTunnelDown без туннеля")),
+            ),
+            "trafficBypassesTunnel" => UnsafeEvidence::TrafficBypassesTunnel {
+                tunnel: self
+                    .tunnel
+                    .clone()
+                    .unwrap_or_else(|| panic!("«{case}»: trafficBypassesTunnel без туннеля")),
+                via: self
+                    .via
+                    .clone()
+                    .unwrap_or_else(|| panic!("«{case}»: trafficBypassesTunnel без носителя")),
+            },
             "blacklistedIP" => UnsafeEvidence::BlacklistedIp(
                 self.ip
                     .clone()

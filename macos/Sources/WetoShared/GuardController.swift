@@ -26,6 +26,8 @@ final class GuardController {
     private let now: () -> Date
 
     /// Статус выбранного VPN-приложения. Приходит снаружи: процессы обходит `GuardVM`.
+    /// Статус туннеля приходить снаружи не должен: он считается из снимка сети,
+    /// а снимок прохода снимает сам контроллер (`VPNTunnelStatus(chosen:snapshot:)`).
     private let vpnAppStatus: () -> VPNAppStatus
 
     /// Фаза, эффект над целями и происхождение показаний (для журнала).
@@ -161,11 +163,13 @@ final class GuardController {
 
         let fingerprint = snapshot.verdictFingerprint
         let vpn = vpnAppStatus()
+        let tunnel = VPNTunnelStatus(chosen: config.vpnTunnel, snapshot: snapshot)
         let hasVerdictForPath = established?.fingerprint == fingerprint
 
-        // Локальное доказательство применяется сразу, до сети: закрытый клиент — завершение.
+        // Локальное доказательство применяется сразу, до сети: закрытый клиент
+        // или упавший туннель — завершение.
         if case .kill(let evidence)? = GuardPolicy.decideLocal(
-            isEnabled: settings.isEnabled, vpn: vpn, config: config
+            isEnabled: settings.isEnabled, vpn: vpn, tunnel: tunnel, config: config
         ) {
             emit(machine.apply(.evidence(evidence), at: moment), origin: hasVerdictForPath ? .established : nil)
             if !hasVerdictForPath {
@@ -191,10 +195,12 @@ final class GuardController {
         let returnedFromAnnouncedLoss = announcedLoss != nil
         announcedLoss = nil
 
-        // VPN-приложение вернулось при действующем вердикте — переоценка без пробы.
-        if case .danger(.vpnAppNotRunning) = machine.phase {
+        // Локальная улика больше не подтверждается (приложение вернулось, туннель снова
+        // несёт трафик) при действующем вердикте — переоценка без пробы.
+        if case .danger(let evidence) = machine.phase, evidence.isLocal {
             let decision = GuardPolicy.decide(GuardSignals(
-                isEnabled: settings.isEnabled, vpn: vpn, geo: .resolved(established.reading), config: config
+                isEnabled: settings.isEnabled, vpn: vpn, tunnel: tunnel,
+                geo: .resolved(established.reading), config: config
             ))
             emit(machine.apply(.reassessment(decision, reading: established.reading), at: moment), origin: .established)
         }
@@ -257,11 +263,13 @@ final class GuardController {
     /// Проверка по кнопке: локальное доказательство применяется сразу, запрос уходит всегда.
     func probeNow() {
         let config = settings.guardConfig
+        let snapshot = snapshotReader.snapshot()
         if settings.isEnabled, config.hasTargets,
            case .kill(let evidence)? = GuardPolicy.decideLocal(
-               isEnabled: settings.isEnabled, vpn: vpnAppStatus(), config: config
+               isEnabled: settings.isEnabled, vpn: vpnAppStatus(),
+               tunnel: VPNTunnelStatus(chosen: config.vpnTunnel, snapshot: snapshot), config: config
            ) {
-            lastSnapshot = snapshotReader.snapshot()
+            lastSnapshot = snapshot
             emit(machine.apply(.evidence(evidence), at: now()), origin: nil)
         }
         startProbe(after: 0, trigger: .manual)
@@ -291,7 +299,9 @@ final class GuardController {
         }
         lastSnapshot = snapshot
         let decision = GuardPolicy.decide(GuardSignals(
-            isEnabled: settings.isEnabled, vpn: vpnAppStatus(), geo: .resolved(established.reading), config: config
+            isEnabled: settings.isEnabled, vpn: vpnAppStatus(),
+            tunnel: VPNTunnelStatus(chosen: config.vpnTunnel, snapshot: snapshot),
+            geo: .resolved(established.reading), config: config
         ))
         emit(machine.apply(.reassessment(decision, reading: established.reading), at: now()), origin: .established)
         probeIfStanding(trigger: .settingsChange)
@@ -395,7 +405,10 @@ final class GuardController {
             return
         }
 
-        let decision = GuardPolicy.decide(GuardSignals(isEnabled: settings.isEnabled, vpn: vpn, geo: geo, config: config))
+        let tunnel = VPNTunnelStatus(chosen: config.vpnTunnel, snapshot: snapshot)
+        let decision = GuardPolicy.decide(GuardSignals(
+            isEnabled: settings.isEnabled, vpn: vpn, tunnel: tunnel, geo: geo, config: config
+        ))
         let origin: VerdictOrigin? = geo.isResolved ? .current : (established == nil ? nil : .established)
 
         // Этот ответ откроет эпизод паузы — значит журналу нужен разбор свежести:

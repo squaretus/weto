@@ -46,7 +46,32 @@ impl FakeNetwork {
                 interface: "wg0".to_string(),
                 address: "10.7.0.2".to_string(),
             }),
+            up_interfaces: vec!["lo".to_string(), "eth0".to_string(), "wg0".to_string()],
         })))
+    }
+
+    /// Интерфейс туннеля пропал из поднятых, а носитель по пробе маршрута тот же:
+    /// несущая моргнула раньше, чем ядро пересчитало маршрут.
+    pub fn tunnel_interface_flaps(&self) {
+        self.0
+            .lock()
+            .unwrap()
+            .up_interfaces
+            .retain(|name| name != "wg0");
+    }
+
+    /// И вернулся.
+    pub fn tunnel_interface_returns(&self) {
+        let mut snapshot = self.0.lock().unwrap();
+        if !snapshot.up_interfaces.iter().any(|name| name == "wg0") {
+            snapshot.up_interfaces.push("wg0".to_string());
+        }
+    }
+
+    /// `wg-quick down`: интерфейса нет, трафик пошёл напрямую.
+    pub fn tunnel_interface_removed(&self) {
+        self.tunnel_interface_flaps();
+        self.tunnel_goes_down();
     }
 
     pub fn route_moves_to(&self, name: &str) {
@@ -552,6 +577,17 @@ impl FakeSettings {
             ..Default::default()
         };
         FakeSettings(Arc::new(Mutex::new(settings)))
+    }
+
+    /// VPN задан туннелем, а не приложением — так настраивает терминальная версия.
+    pub fn through_tunnel(name: &str) -> FakeSettings {
+        let settings = FakeSettings::armed();
+        settings
+            .0
+            .lock()
+            .unwrap()
+            .set_vpn_tunnel(Some(name.to_string()));
+        settings
     }
 
     pub fn edit(&self, change: impl FnOnce(&mut Settings)) {

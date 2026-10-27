@@ -3642,3 +3642,72 @@ final class GuardVMTests: XCTestCase {
         vm.stop()
     }
 }
+
+// MARK: - Туннель терминальной версии
+
+extension GuardVMTests {
+
+    /// Туннель несёт трафик: интерфейс поднят и вердиктный запрос уходит через него.
+    private func tunnelSnapshot(up: [String] = ["en0", "wg0"]) -> NetworkSnapshot {
+        NetworkSnapshot(outgoing: OutgoingRoute(interface: "wg0", address: "10.8.0.2"), upInterfaces: up)
+    }
+
+    private func makeTunnelHarness(snapshot: NetworkSnapshot) -> Harness {
+        let h = makeHarness(snapshot: snapshot, geo: geoOutcome())
+        h.settings.vpnTunnel = "wg0"
+        return h
+    }
+
+    func test_a_tunnel_that_is_down_kills_targets_without_probing_network() async {
+        let h = makeTunnelHarness(snapshot: tunnelSnapshot(up: ["en0"]))
+
+        h.vm.handle(.networkPath)
+
+        XCTAssertNil(h.settings.vpnAppRule, "туннель снял выбор приложения")
+        XCTAssertEqual(h.vm.phase, .danger(.vpnTunnelDown("wg0")))
+        // Выбор туннеля — правка настроек: охрана применила её сразу, ещё до события.
+        XCTAssertEqual(h.signaler.killedBatches.last, [500, 501], "убиты только процессы цели")
+        XCTAssertEqual(h.log.events.first?.reasonText, "VPN-туннель wg0 не поднят")
+        XCTAssertNil(h.vm.currentCountryCode, "локальная улика про выход ничего не говорит")
+        let probeCalls = await h.probe.calls()
+        XCTAssertEqual(probeCalls, 0, "сетевая проба не должна была запускаться")
+    }
+
+    /// Туннель упал и поднялся снова на тот же адрес при действующем вердикте —
+    /// улику снимает переоценка, без новой пробы: как с вернувшимся приложением.
+    func test_a_tunnel_coming_back_is_reassessed_without_a_probe() async {
+        let h = makeTunnelHarness(snapshot: tunnelSnapshot())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+        XCTAssertEqual(h.vm.phase.title, "На страже")
+        let probesBefore = await h.probe.calls()
+
+        h.network.snapshotValue = tunnelSnapshot(up: ["en0"])
+        h.vm.handle(.tick)
+        XCTAssertEqual(h.vm.phase, .danger(.vpnTunnelDown("wg0")))
+
+        h.network.snapshotValue = tunnelSnapshot()
+        h.vm.handle(.tick)
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.phase.title, "На страже", "туннель снова несёт трафик")
+        let probesAfter = await h.probe.calls()
+        XCTAssertEqual(probesAfter, probesBefore, "переоценка обходится без сети")
+    }
+
+    func test_traffic_going_around_the_tunnel_kills_targets() async {
+        let h = makeTunnelHarness(snapshot: tunnelSnapshot())
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        h.network.snapshotValue = NetworkSnapshot(
+            outgoing: OutgoingRoute(interface: "en0", address: "192.168.0.100"), upInterfaces: ["en0", "wg0"]
+        )
+        h.vm.handle(.networkPath)
+        await h.vm.awaitPendingProbe()
+
+        XCTAssertEqual(h.vm.phase, .danger(.trafficBypassesTunnel(tunnel: "wg0", via: "en0")))
+        XCTAssertEqual(h.signaler.killedBatches.last, [500, 501])
+        XCTAssertEqual(h.vm.currentVPNTunnelStatus(), .bypassed(via: "en0"))
+    }
+}

@@ -1,0 +1,36 @@
+[package]
+name = "weto-cli"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "weto-cli"
+path = "src/main.rs"
+
+# Терминальная версия: тот же бэкенд охраны, что у приложения с окном, и ничего
+# из рабочего стола. Ни gtk4, ни ksni, ни tokio напрямую — сервер без дисплея
+# обязан запускать её без единой графической библиотеки (проверяется ldd).
+[dependencies]
+weto-core = { path = "../weto-core" }
+weto-config = { path = "../weto-config" }
+weto-sys = { path = "../weto-sys" }
+weto-guard = { path = "../weto-guard" }
+# flock, сигналы, getifaddrs-независимые вызовы ядра: всё, что нужно
+# охране на переднем плане, — без обёрток поверх libc.
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Обновление: сверка версий и доверенные хосты — общие с обновлятором
+# приложения; свой здесь только ассет (`tar.gz`: на сервере может не быть
+# zstd) и сумма из `SHA256SUMS`. TLS у ureq — rustls: бинарник собирается
+# статически под musl и не тянет libssl.
+weto-update = { path = "../weto-update" }
+ureq = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -75,7 +75,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libssl-dev pkg-config zstd xvfb iproute2
+            libgtk-4-dev libssl-dev pkg-config zstd xvfb iproute2 musl-tools
+
+      # Терминальная версия собирается статически под musl: она едет на серверы,
+      # а бинарник, слинкованный с glibc раннера 24.04, требует GLIBC_2.39
+      # и не запустится ни на Debian 12, ни на Ubuntu 22.04.
+      - name: Add musl target
+        run: rustup target add "$(uname -m)-unknown-linux-musl"
 
       - name: Lint
         run: |
@@ -114,6 +120,11 @@ jobs:
           bash scripts/build.sh 9.9.9
           bash scripts/tests/install-contract.sh \
             "target/release_build/weto-9.9.9-$(uname -m)-linux.tar.zst" 9.9.9
+
+      # Установщик терминальной версии один на обе системы и живёт в shared/:
+      # релиз подделывается каталогом под file://, сеть не нужна.
+      - name: CLI installer contract
+        run: bash ../shared/cli/tests/install-contract.sh
 
   generators:
     name: Generators are idempotent

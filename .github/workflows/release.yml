@@ -49,10 +49,21 @@ jobs:
           chmod +x scripts/build.sh scripts/preinstall scripts/postinstall
           scripts/build.sh "$VERSION"
 
+      # Терминальная версия — тот же релиз, отдельный архив с одним бинарником
+      # `weto`: там, где интерфейса нет, ставится только она.
+      - name: Build CLI
+        env:
+          VERSION: ${{ needs.version.outputs.VERSION }}
+        run: |
+          chmod +x scripts/make-cli.sh
+          scripts/make-cli.sh release "$VERSION"
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: macos/.build/release_build/*.pkg
+          path: |
+            macos/.build/release_build/*.pkg
+            macos/.build/release_build/cli/*.tar.gz
 
   linux:
     name: Build tarball (${{ matrix.arch }})
@@ -81,7 +92,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libssl-dev pkg-config zstd xvfb
+            libgtk-4-dev libssl-dev pkg-config zstd xvfb musl-tools
+
+      # Терминальная версия собирается статически под musl: она едет на серверы,
+      # а бинарник, слинкованный с glibc раннера 24.04, требует GLIBC_2.39
+      # и не запустится ни на Debian 12, ни на Ubuntu 22.04.
+      - name: Add musl target
+        run: rustup target add "$(uname -m)-unknown-linux-musl"
 
       - name: Lint
         run: |
@@ -114,10 +131,17 @@ jobs:
 
       # Имя артефакта своё у каждой архитектуры: с общим второй перезаписал бы
       # первый, и в релиз ушёл бы один архив вместо двух.
+      - name: CLI installer contract
+        run: bash ../shared/cli/tests/install-contract.sh
+
+      # Архив терминальной версии (`release_build/cli/…tar.gz`) едет тем же
+      # артефактом: суффикс у него свой, и обновлятор приложения его не примет.
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
-          path: linux/target/release_build/*.tar.zst
+          path: |
+            linux/target/release_build/*.tar.zst
+            linux/target/release_build/cli/*.tar.gz
 
   publish:
     name: Publish release
@@ -127,16 +151,35 @@ jobs:
     needs: [version, macos, linux]
     runs-on: ubuntu-24.04
     steps:
+      # Нужен только установщик терминальной версии: он публикуется ассетом
+      # `install.sh`, чтобы команда установки из README всегда брала скрипт
+      # того же релиза, что и бинарник.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: shared/cli/install.sh
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      # Все файлы релиза — в один плоский каталог, и по нему SHA256SUMS:
+      # по этому списку установщик и `weto update` сверяют скачанное
+      # и из него же узнают имя архива последней версии.
+      - name: Collect assets and checksums
+        run: |
+          mkdir release
+          find artifacts -type f \( -name '*.pkg' -o -name '*.tar.zst' -o -name '*.tar.gz' \) \
+            -exec cp {} release/ \;
+          cp shared/cli/install.sh release/install.sh
+          cd release
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
 
       # Релиз в этот же репозиторий — источник автообновления обеих платформ.
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/macos/*
-            artifacts/linux-*/*
+          files: release/*
           name: weto ${{ needs.version.outputs.VERSION }}
           generate_release_notes: true

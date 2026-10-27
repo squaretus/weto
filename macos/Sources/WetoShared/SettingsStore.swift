@@ -42,11 +42,16 @@ public enum GeoListEntryError: Error, Equatable, Sendable {
 
 public enum SettingsPersistenceError: Error, Equatable, Sendable {
     case keychainWriteFailed(OSStatus)
+    /// Токен терминальной версии лежит файлом: фоновому сервису диалог связки
+    /// ключей показать некому.
+    case fileWriteFailed(String)
 
     public var displayText: String {
         switch self {
         case .keychainWriteFailed(let status):
             return "не удалось сохранить токен в связку ключей (ошибка \(status))"
+        case .fileWriteFailed(let detail):
+            return "не удалось сохранить токен в файл: \(detail)"
         }
     }
 }
@@ -59,6 +64,8 @@ public struct GuardConfigurationChange: Equatable, Sendable {
         case guardEnabled
         case targets
         case vpnApp
+        /// Туннель терминальной версии. Окно настроек его не задаёт.
+        case vpnTunnel
         case ipinfoToken
         case blacklist
         case whitelist
@@ -83,6 +90,9 @@ public final class SettingsStore {
         /// приложения», и переносить прежнее значение нельзя — оно называет `utunN`
         /// или UUID сервиса, а не приложение.
         static let vpnAppRule = "vpnAppRule"
+        /// Имя интерфейса VPN-туннеля. Только у терминальной версии: её настройки
+        /// живут в своём наборе (`com.weto.cli`), и окно приложения ключа не видит.
+        static let vpnTunnel = "vpnTunnel"
         static let targets = "targets"
 
         static let legacyBundleIDs = "targetBundleIDs"
@@ -106,6 +116,17 @@ public final class SettingsStore {
     @ObservationIgnored
     private var pauseCeilingHandlers: [(PauseCeiling) -> Void] = []
 
+    /// Идёт перечитывание набора: значения пришли из него же, и писать их обратно
+    /// нельзя — запись прочитанного затёрла бы правку, которую вторая копия успела
+    /// сделать между чтением и записью.
+    @ObservationIgnored
+    private var isReloading = false
+
+    private func persist(_ value: Any?, forKey key: String) {
+        guard !isReloading else { return }
+        defaults.set(value, forKey: key)
+    }
+
     public init(defaults: UserDefaults, secrets: SecretStoring) {
         self.defaults = defaults
         self.secrets = secrets
@@ -115,6 +136,7 @@ public final class SettingsStore {
             .flatMap(AppTheme.init(rawValue:)) ?? .dark
         self._pauseCeiling = PauseCeiling(storedSeconds: defaults.object(forKey: Key.pauseCeilingSeconds) as? Int)
         self._vpnAppRule = defaults.string(forKey: Key.vpnAppRule)
+        self._vpnTunnel = defaults.string(forKey: Key.vpnTunnel)
         self._targets = Self.loadTargets(from: defaults)
         self._blockedCountryCodes = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
         self._blockedIPRangeTexts = defaults.stringArray(forKey: Key.blockedIPRangeTexts) ?? []
@@ -138,7 +160,7 @@ public final class SettingsStore {
         get { _isEnabled }
         set {
             _isEnabled = newValue
-            defaults.set(newValue, forKey: Key.isEnabled)
+            persist(newValue, forKey: Key.isEnabled)
             emit(.guardEnabled)
         }
     }
@@ -157,7 +179,7 @@ public final class SettingsStore {
         get { _pauseCeiling }
         set {
             _pauseCeiling = newValue
-            defaults.set(newValue.rawValue, forKey: Key.pauseCeilingSeconds)
+            persist(newValue.rawValue, forKey: Key.pauseCeilingSeconds)
             for handler in pauseCeilingHandlers { handler(newValue) }
         }
     }
@@ -174,14 +196,36 @@ public final class SettingsStore {
         set {
             let cleaned = newValue?.trimmingCharacters(in: .whitespaces)
             _vpnAppRule = (cleaned?.isEmpty ?? true) ? nil : cleaned
-            defaults.set(_vpnAppRule, forKey: Key.vpnAppRule)
+            persist(_vpnAppRule, forKey: Key.vpnAppRule)
 
             // Охрана не должна завершать собственный источник защиты: цель,
             // совпавшая с VPN-приложением, снимается вместе с выбором.
             if let rule = _vpnAppRule, targets.contains(rule) {
                 targets = targets.filter { $0 != rule }
             }
+            // VPN задаётся одним способом: выбор приложения снимает туннель.
+            if _vpnAppRule != nil, _vpnTunnel != nil {
+                vpnTunnel = nil
+            }
             emit(.vpnApp)
+        }
+    }
+
+    private var _vpnTunnel: String?
+
+    /// Выбранный VPN-туннель — имя интерфейса. Задаёт его только терминальная версия;
+    /// выбор туннеля снимает приложение, и наоборот.
+    public var vpnTunnel: String? {
+        get { _vpnTunnel }
+        set {
+            let cleaned = newValue?.trimmingCharacters(in: .whitespaces)
+            _vpnTunnel = (cleaned?.isEmpty ?? true) ? nil : cleaned
+            persist(_vpnTunnel, forKey: Key.vpnTunnel)
+
+            if _vpnTunnel != nil, _vpnAppRule != nil {
+                vpnAppRule = nil
+            }
+            emit(.vpnTunnel)
         }
     }
 
@@ -191,7 +235,7 @@ public final class SettingsStore {
         get { _targets }
         set {
             _targets = newValue
-            defaults.set(newValue, forKey: Key.targets)
+            persist(newValue, forKey: Key.targets)
             emit(.targets)
         }
     }
@@ -212,7 +256,7 @@ public final class SettingsStore {
         set {
             let normalized = Array(Set(newValue.map { $0.uppercased() })).sorted()
             _blockedCountryCodes = normalized
-            defaults.set(normalized, forKey: Key.blockedCountryCodes)
+            persist(normalized, forKey: Key.blockedCountryCodes)
             emit(.blacklist)
         }
     }
@@ -222,7 +266,7 @@ public final class SettingsStore {
         get { _blockedIPRangeTexts }
         set {
             _blockedIPRangeTexts = newValue
-            defaults.set(newValue, forKey: Key.blockedIPRangeTexts)
+            persist(newValue, forKey: Key.blockedIPRangeTexts)
             emit(.blacklist)
         }
     }
@@ -233,7 +277,7 @@ public final class SettingsStore {
         set {
             let normalized = Array(Set(newValue.map { $0.uppercased() })).sorted()
             _allowedCountryCodes = normalized
-            defaults.set(normalized, forKey: Key.allowedCountryCodes)
+            persist(normalized, forKey: Key.allowedCountryCodes)
             emit(.whitelist)
         }
     }
@@ -243,7 +287,7 @@ public final class SettingsStore {
         get { _allowedIPRangeTexts }
         set {
             _allowedIPRangeTexts = newValue
-            defaults.set(newValue, forKey: Key.allowedIPRangeTexts)
+            persist(newValue, forKey: Key.allowedIPRangeTexts)
             emit(.whitelist)
         }
     }
@@ -262,8 +306,10 @@ public final class SettingsStore {
         let value = token.isEmpty ? nil : token
 
         if case .failure(let error) = secrets.write(value, account: Self.tokenAccount) {
-            guard case .keychain(let status) = error else { return .failure(.keychainWriteFailed(0)) }
-            return .failure(.keychainWriteFailed(status))
+            switch error {
+            case .keychain(let status): return .failure(.keychainWriteFailed(status))
+            case .file(let detail): return .failure(.fileWriteFailed(detail))
+            }
         }
 
         _ipinfoToken = token
@@ -369,7 +415,68 @@ public final class SettingsStore {
             blockedIPRanges: blockedIPRangeTexts.compactMap(IPRange.init),
             allowedCountries: Set(allowedCountryCodes),
             allowedIPRanges: allowedIPRangeTexts.compactMap(IPRange.init),
-            targets: targets
+            targets: targets,
+            vpnTunnel: vpnTunnel
         )
+    }
+
+    // MARK: - Перечитывание набора
+
+    /// Перечитывает набор настроек и применяет отличающиеся поля через обычные
+    /// сеттеры — чтобы сработали те же подписки, что у правки из окна.
+    ///
+    /// Нужно терминальной версии: настройки правит одна копия (`weto target add`),
+    /// а охраняет другая (`weto run`). Совпадающие поля не трогаются вовсе:
+    /// иначе каждое перечитывание поднимало бы ревизию и просило пробу раз в секунду.
+    /// Возвращает поля, которые сменились, — для лога.
+    @discardableResult
+    public func reloadFromDefaults() -> [GuardConfigurationChange.Field] {
+        var changed: [GuardConfigurationChange.Field] = []
+        let collect: (GuardConfigurationChange) -> Void = { changed.append($0.field) }
+        guardChangeHandlers.append(collect)
+        let collector = guardChangeHandlers.count - 1
+        isReloading = true
+        defer {
+            isReloading = false
+            guardChangeHandlers.remove(at: collector)
+        }
+
+        let stored = Self.loadTargets(from: defaults)
+        if stored != _targets { targets = stored }
+
+        let blocked = defaults.stringArray(forKey: Key.blockedCountryCodes) ?? []
+        if blocked != _blockedCountryCodes { blockedCountryCodes = blocked }
+        let blockedRanges = defaults.stringArray(forKey: Key.blockedIPRangeTexts) ?? []
+        if blockedRanges != _blockedIPRangeTexts { blockedIPRangeTexts = blockedRanges }
+        let allowed = defaults.stringArray(forKey: Key.allowedCountryCodes) ?? []
+        if allowed != _allowedCountryCodes { allowedCountryCodes = allowed }
+        let allowedRanges = defaults.stringArray(forKey: Key.allowedIPRangeTexts) ?? []
+        if allowedRanges != _allowedIPRangeTexts { allowedIPRangeTexts = allowedRanges }
+
+        // Сперва снимается выбор, потом ставится новый: сеттер выбора снимает
+        // другую сторону сам, и обратный порядок стёр бы только что прочитанное.
+        let app = defaults.string(forKey: Key.vpnAppRule)
+        let tunnel = defaults.string(forKey: Key.vpnTunnel)
+        if app == nil, _vpnAppRule != nil { vpnAppRule = nil }
+        if tunnel == nil, _vpnTunnel != nil { vpnTunnel = nil }
+        if let app, app != _vpnAppRule { vpnAppRule = app }
+        if let tunnel, tunnel != _vpnTunnel { vpnTunnel = tunnel }
+
+        let enabled = defaults.object(forKey: Key.isEnabled) as? Bool ?? true
+        if enabled != _isEnabled { isEnabled = enabled }
+
+        let ceiling = PauseCeiling(storedSeconds: defaults.object(forKey: Key.pauseCeilingSeconds) as? Int)
+        if ceiling != _pauseCeiling { pauseCeiling = ceiling }
+
+        // Токен лежит не в наборе, а в хранилище секретов, но правится тем же
+        // путём — второй копией, — и подхватываться обязан так же.
+        let token = secrets.read(account: Self.tokenAccount) ?? ""
+        if token != _ipinfoToken {
+            _ipinfoToken = token
+            tokenBox.value = token.isEmpty ? nil : token
+            emit(.ipinfoToken)
+        }
+
+        return changed
     }
 }

@@ -235,6 +235,9 @@ extension UnsafeEvidence {
     public var displayText: String {
         switch self {
         case .vpnAppNotRunning: return "VPN-приложение не запущено"
+        case .vpnTunnelDown(let tunnel): return "VPN-туннель \(tunnel) не поднят"
+        case .trafficBypassesTunnel(let tunnel, let via):
+            return "трафик идёт мимо туннеля \(tunnel) — через \(via)"
         case .blacklistedIP(let ip): return "Адрес \(ip) в чёрном списке"
         case .blockedCountry(let code, let source): return "Обнаружена страна \(code) по данным \(source)"
         case .countryConflict(let primary, let confirmed):

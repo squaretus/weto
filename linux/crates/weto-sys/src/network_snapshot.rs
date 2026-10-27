@@ -1,5 +1,5 @@
-//! Снимок сети: список интерфейсов из sysfs плюс ответ на вопрос, через кого
-//! ядро реально выпускает трафик наружу.
+//! Снимок сети: ответ на вопрос, через кого ядро реально выпускает трафик
+//! наружу, плюс имена поднятых интерфейсов — для VPN-туннеля терминальной версии.
 //!
 //! # Почему не дамп маршрутов
 //!
@@ -46,6 +46,54 @@ pub trait NetworkSnapshotReading: Send + Sync {
 /// таблицу маршрутов в тесте нельзя, а проверить остальную сборку снимка нужно.
 pub trait RouteProbing: Send + Sync {
     fn outgoing_route(&self) -> Option<OutgoingRoute>;
+}
+
+/// Какие интерфейсы подняты и несут связь. Отдельным трейтом по той же причине,
+/// что проба маршрута: поднять и уронить `wg0` в тесте нечем, а проверить, как
+/// охрана отвечает на упавший туннель, нужно.
+pub trait InterfaceListing: Send + Sync {
+    fn up_interfaces(&self) -> Vec<String>;
+}
+
+/// Интерфейсы ядра через `getifaddrs`: поднятым считается тот, у кого есть
+/// и `IFF_UP` (администратор включил), и `IFF_RUNNING` (есть несущая). Одного
+/// `IFF_UP` мало: `tun0`, чей процесс умер, остаётся включённым без несущей,
+/// и трафик через него не идёт.
+///
+/// Имя встречается в ответе столько раз, сколько у интерфейса адресов
+/// семейств, — повторы схлопываются, порядок первого появления сохраняется.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct KernelInterfaces;
+
+impl InterfaceListing for KernelInterfaces {
+    fn up_interfaces(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        // SAFETY: `getifaddrs` заполняет указатель на связный список, который
+        // принадлежит нам до `freeifaddrs`; мы только читаем его поля.
+        if unsafe { libc::getifaddrs(&mut head) } != 0 {
+            return names;
+        }
+        let wanted = (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_uint;
+        let mut cursor = head;
+        while !cursor.is_null() {
+            // SAFETY: `cursor` — узел списка, выданного `getifaddrs` и ещё не
+            // освобождённого; `ifa_name` — строка с нулём на конце.
+            let entry = unsafe { &*cursor };
+            if entry.ifa_flags & wanted == wanted && !entry.ifa_name.is_null() {
+                let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }
+                    .to_string_lossy()
+                    .into_owned();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            cursor = entry.ifa_next;
+        }
+        // SAFETY: список выдан `getifaddrs` выше и освобождается ровно раз.
+        unsafe { libc::freeifaddrs(head) };
+        names
+    }
 }
 
 /// Хост, до которого «ходит» проба, — тот же, у которого спрашивается вердикт.
@@ -145,24 +193,40 @@ fn route_to(destination: &str, bind: &str) -> Option<OutgoingRoute> {
         })
 }
 
-/// Читатель снимка: один вопрос к ядру и ничего больше.
+/// Читатель снимка: кто выпускает трафик и какие интерфейсы подняты.
 ///
-/// Раньше здесь читался `/sys/class/net`: состав интерфейсов, их флаги и `DEVTYPE`
-/// для квалификации «туннель или нет». Всё это было нужно списку выбора туннеля.
-/// Выбирается приложение, поэтому от снимка остался признак свежести вердикта.
+/// Квалификации «туннель или нет» (`DEVTYPE`, `tun_flags`) здесь нет и не будет:
+/// туннель, если он выбран, назвал пользователь сам, и вопрос к ядру один —
+/// поднят ли интерфейс с этим именем. Список в отпечаток вердикта не входит.
 pub struct KernelNetworkReader {
     route_probe: Box<dyn RouteProbing>,
+    interfaces: Box<dyn InterfaceListing>,
 }
 
 impl KernelNetworkReader {
     pub fn new() -> KernelNetworkReader {
         KernelNetworkReader {
             route_probe: Box::new(KernelRouteProbe::default()),
+            interfaces: Box::new(KernelInterfaces),
         }
     }
 
     pub fn with_probe(route_probe: Box<dyn RouteProbing>) -> KernelNetworkReader {
-        KernelNetworkReader { route_probe }
+        KernelNetworkReader {
+            route_probe,
+            interfaces: Box::new(KernelInterfaces),
+        }
+    }
+
+    /// Обе границы снаружи — для тестов, которым нужен и маршрут, и туннель.
+    pub fn with_sources(
+        route_probe: Box<dyn RouteProbing>,
+        interfaces: Box<dyn InterfaceListing>,
+    ) -> KernelNetworkReader {
+        KernelNetworkReader {
+            route_probe,
+            interfaces,
+        }
     }
 }
 
@@ -176,6 +240,7 @@ impl NetworkSnapshotReading for KernelNetworkReader {
     fn snapshot(&self) -> NetworkSnapshot {
         NetworkSnapshot {
             outgoing: self.route_probe.outgoing_route(),
+            up_interfaces: self.interfaces.up_interfaces(),
         }
     }
 }

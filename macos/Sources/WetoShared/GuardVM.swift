@@ -353,7 +353,9 @@ public final class GuardVM {
         case .paused:
             return lastReading?.primaryCountry
         case .danger(let evidence):
-            return evidence == .vpnAppNotRunning ? nil : lastReading?.primaryCountry
+            // Локальная улика про выход не говорит ничего: прежняя страна читалась бы
+            // как «я всё ещё под VPN».
+            return evidence.isLocal ? nil : lastReading?.primaryCountry
         }
     }
 
@@ -368,6 +370,21 @@ public final class GuardVM {
     public func unloadCompletely() -> Result<Void, LaunchAgentError> {
         stop()
         return launchAgent.disable()
+    }
+
+    /// Последний снимок сети, по которому решала охрана: носитель трафика
+    /// и поднятые интерфейсы. Читает терминальная версия для файла статуса.
+    public var lastSnapshot: NetworkSnapshot? { controller.lastSnapshot }
+
+    /// Состояние выбранного VPN-приложения сейчас — для файла статуса.
+    public func currentVPNAppStatus() -> VPNAppStatus { vpnAppStatus() }
+
+    /// Состояние выбранного туннеля по последнему снимку охраны.
+    public func currentVPNTunnelStatus() -> VPNTunnelStatus {
+        guard let snapshot = controller.lastSnapshot else {
+            return settings.vpnTunnel == nil ? .notChosen : .down
+        }
+        return VPNTunnelStatus(chosen: settings.vpnTunnel, snapshot: snapshot)
     }
 
     /// Запущено ли выбранное VPN-приложение.
@@ -406,6 +423,12 @@ public final class GuardVM {
     /// Подсказка про полный путь — единственный выход, который у пользователя
     /// есть прямо сейчас.
     public func resolvedDescription(forTarget entry: String) -> String {
+        Self.resolvedDescription(forTarget: entry, resolver: resolver)
+    }
+
+    /// То же описание без охраны: терминальной версии оно нужно в командах
+    /// настроек, где охрана не собирается вовсе.
+    public nonisolated static func resolvedDescription(forTarget entry: String, resolver: TargetResolving) -> String {
         guard let rule = resolver.resolve(entry) else {
             return entry.contains("/")
                 ? "не найдено: по этому пути нет исполняемого файла"

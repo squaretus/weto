@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use weto_core::geo::{ConfirmSource, GeoOutcome, GeoReading};
 use weto_core::ip::IpRange;
-use weto_core::network::VpnAppStatus;
+use weto_core::network::{VpnAppStatus, VpnTunnelStatus};
 use weto_core::policy::{
     decide, decide_local, GuardConfig, GuardDecision, GuardSignals, UnprovenReason, UnsafeEvidence,
 };
@@ -40,6 +40,13 @@ type Outcome = Option<GuardDecision>;
 
 fn run(fixture: &Case) -> Outcome {
     let config = fixture.config.as_guard_config();
+    // Поле необязательное: его отсутствие — `notChosen`, и случаи, написанные
+    // до туннеля, сохраняют прежний смысл дословно.
+    let tunnel = fixture
+        .tunnel
+        .as_ref()
+        .map(Tunnel::as_status)
+        .unwrap_or(VpnTunnelStatus::NotChosen);
 
     match fixture.function.as_str() {
         "decide" => {
@@ -56,6 +63,7 @@ fn run(fixture: &Case) -> Outcome {
             let signals = GuardSignals {
                 is_enabled: fixture.is_enabled,
                 vpn,
+                tunnel,
                 geo,
                 config,
             };
@@ -67,7 +75,7 @@ fn run(fixture: &Case) -> Outcome {
                 .as_ref()
                 .expect("decideLocal требует vpn")
                 .as_status();
-            decide_local(fixture.is_enabled, vpn, &config)
+            decide_local(fixture.is_enabled, vpn, &tunnel, &config)
         }
         other => panic!("неизвестная функция «{other}» в случае «{}»", fixture.name),
     }
@@ -95,6 +103,7 @@ struct Case {
     #[serde(rename = "isEnabled")]
     is_enabled: bool,
     vpn: Option<Vpn>,
+    tunnel: Option<Tunnel>,
     geo: Option<Geo>,
     config: Config,
     expect: Expect,
@@ -111,6 +120,26 @@ impl Vpn {
             "running" => VpnAppStatus::Running,
             "notRunning" => VpnAppStatus::NotRunning,
             _ => VpnAppStatus::NotChosen,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct Tunnel {
+    kind: String,
+    via: Option<String>,
+}
+
+impl Tunnel {
+    fn as_status(&self) -> VpnTunnelStatus {
+        match self.kind.as_str() {
+            "notChosen" => VpnTunnelStatus::NotChosen,
+            "down" => VpnTunnelStatus::Down,
+            "bypassed" => VpnTunnelStatus::Bypassed {
+                via: self.via.clone().expect("bypassed без via"),
+            },
+            "carrying" => VpnTunnelStatus::Carrying,
+            other => panic!("неизвестный статус туннеля «{other}» в фикстурах"),
         }
     }
 }
@@ -182,6 +211,9 @@ impl Geo {
 struct Config {
     #[serde(rename = "vpnApp")]
     vpn_app: Option<String>,
+    /// Случаи до версии 5 поля не знают: туннель не выбран.
+    #[serde(default, rename = "vpnTunnel")]
+    vpn_tunnel: Option<String>,
     #[serde(rename = "blockedCountries")]
     blocked_countries: Vec<String>,
     #[serde(rename = "blockedIPRanges")]
@@ -209,6 +241,7 @@ impl Config {
     fn as_guard_config(&self) -> GuardConfig {
         GuardConfig {
             vpn_app: self.vpn_app.clone(),
+            vpn_tunnel: self.vpn_tunnel.clone(),
             blocked_countries: self
                 .blocked_countries
                 .iter()
@@ -262,6 +295,8 @@ struct Reason {
     source: Option<String>,
     primary: Option<String>,
     confirmed: Option<String>,
+    tunnel: Option<String>,
+    via: Option<String>,
 }
 
 impl Reason {
@@ -281,6 +316,16 @@ impl Reason {
         let text = |value: &Option<String>| value.clone().unwrap_or_default();
         match self.kind.as_str() {
             "vpnAppNotRunning" => UnsafeEvidence::VpnAppNotRunning,
+            "vpnTunnelDown" => UnsafeEvidence::VpnTunnelDown(
+                self.tunnel.clone().expect("vpnTunnelDown без tunnel"),
+            ),
+            "trafficBypassesTunnel" => UnsafeEvidence::TrafficBypassesTunnel {
+                tunnel: self
+                    .tunnel
+                    .clone()
+                    .expect("trafficBypassesTunnel без tunnel"),
+                via: self.via.clone().expect("trafficBypassesTunnel без via"),
+            },
             "blacklistedIP" => UnsafeEvidence::BlacklistedIp(text(&self.ip)),
             "blockedCountry" => UnsafeEvidence::BlockedCountry {
                 code: text(&self.code),

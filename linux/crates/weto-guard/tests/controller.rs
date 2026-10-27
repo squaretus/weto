@@ -9,9 +9,10 @@ mod harness;
 use std::sync::Arc;
 use std::time::Duration;
 
-use harness::{detached, harness, harness_with_window, Harness};
+use harness::{build, detached, harness, harness_with_window, FakeSettings, Harness, World};
 use weto_core::check::{CheckOutcome, CheckTrigger};
 use weto_core::guard_machine::{GuardAction, GuardPhase};
+use weto_core::network::{VpnAppStatus, VpnTunnelStatus};
 use weto_core::policy::{UnprovenReason, UnsafeEvidence};
 use weto_sys::background::ThreadDispatcher;
 use weto_sys::process_signaler::ProcessSignal;
@@ -131,6 +132,157 @@ fn a_closed_vpn_app_is_noticed_locally_and_kills() {
 
     assert_eq!(evidence(&phase), Some(&UnsafeEvidence::VpnAppNotRunning));
     assert_eq!(h.world.signalled(ProcessSignal::Kill), vec![42]);
+}
+
+// --- VPN-туннель -------------------------------------------------------------
+
+/// Охрана по туннелю: VPN задан именем интерфейса, приложения нет вовсе —
+/// и закрытого приложения охрана не ищет.
+fn tunnel_harness() -> Harness {
+    build(
+        Duration::ZERO,
+        FakeSettings::through_tunnel("wg0"),
+        World::of(Harness::default_world()),
+        &[],
+    )
+}
+
+/// Туннель, несущий трафик, — ещё не safe: страну называет гео. А приложение,
+/// которого нет, туннельную охрану не касается.
+#[test]
+fn a_carrying_tunnel_leaves_the_verdict_to_the_geo() {
+    let h = tunnel_harness();
+    h.world.vpn_app_closes();
+
+    let phase = h.tick();
+
+    assert!(is_protected(&phase), "{phase:?}");
+    assert_eq!(h.geo.call_count(), 1);
+    let snapshot = h.controller.snapshot();
+    assert_eq!(snapshot.vpn_tunnel, Some(VpnTunnelStatus::Carrying));
+    assert_eq!(snapshot.vpn_app, Some(VpnAppStatus::NotChosen));
+    assert_eq!(
+        snapshot.outgoing.map(|route| route.interface).as_deref(),
+        Some("wg0")
+    );
+}
+
+/// Отметка вернувшейся пробы — по ней `weto-cli check` узнаёт, что его просьба
+/// исполнена. До ответа её нет, после — есть, и ставится она уже после
+/// применения ответа.
+#[test]
+fn the_snapshot_marks_when_the_probe_came_back() {
+    let h = harness();
+
+    h.controller.tick();
+    assert!(
+        h.controller.snapshot().probed_at.is_none(),
+        "проба ещё в полёте"
+    );
+
+    let phase = h.settle();
+    let snapshot = h.controller.snapshot();
+    assert!(snapshot.probed_at.is_some());
+    assert_eq!(
+        snapshot.phase, phase,
+        "рядом с отметкой — фаза этого ответа"
+    );
+}
+
+/// `wg-quick down`: интерфейса нет — это доказательство, и видно оно локально,
+/// раньше любой пробы.
+#[test]
+fn a_tunnel_that_is_gone_kills_locally() {
+    let h = tunnel_harness();
+    h.tick();
+
+    h.network.tunnel_interface_removed();
+    let phase = h.controller.tick();
+
+    assert_eq!(
+        evidence(&phase),
+        Some(&UnsafeEvidence::VpnTunnelDown("wg0".to_string()))
+    );
+    assert_eq!(h.world.signalled(ProcessSignal::Kill), vec![42]);
+}
+
+/// Туннель поднят, а трафик ядро выпускает через другой интерфейс: туннель
+/// есть, защиты нет.
+#[test]
+fn traffic_leaving_past_the_tunnel_kills_locally() {
+    let h = tunnel_harness();
+    h.tick();
+
+    h.network.tunnel_goes_down();
+    let phase = h.controller.tick();
+
+    assert_eq!(
+        evidence(&phase),
+        Some(&UnsafeEvidence::TrafficBypassesTunnel {
+            tunnel: "wg0".to_string(),
+            via: "eth0".to_string(),
+        })
+    );
+    assert_eq!(h.world.signalled(ProcessSignal::Kill), vec![42]);
+    assert_eq!(
+        h.controller.snapshot().vpn_tunnel,
+        Some(VpnTunnelStatus::Bypassed {
+            via: "eth0".to_string()
+        })
+    );
+}
+
+/// Туннель вернулся при действующем вердикте — та же переоценка без пробы,
+/// что у вернувшегося приложения: улику ставила не сеть, и снимает её не проба.
+#[test]
+fn a_tunnel_back_under_a_valid_verdict_is_reassessed_without_a_probe() {
+    let h = tunnel_harness();
+    h.tick();
+    let probes = h.geo.call_count();
+
+    h.network.tunnel_interface_flaps();
+    let down = h.controller.tick();
+    assert_eq!(
+        evidence(&down),
+        Some(&UnsafeEvidence::VpnTunnelDown("wg0".to_string()))
+    );
+
+    h.network.tunnel_interface_returns();
+    let phase = h.controller.tick();
+
+    assert!(is_protected(&phase), "{phase:?}");
+    assert_eq!(
+        h.geo.call_count(),
+        probes,
+        "переоценка идёт по установленному чтению, без пробы"
+    );
+}
+
+/// Сетевую улику переоценка не снимает: её ставил ответ сервисов, и снять её
+/// вправе только следующий ответ.
+#[test]
+fn a_network_evidence_is_not_lifted_by_a_reassessment() {
+    let h = harness();
+    h.tick();
+    h.geo.now_reports("RU");
+    let phase = h.probe_now();
+    assert!(
+        matches!(
+            evidence(&phase),
+            Some(UnsafeEvidence::BlockedCountry { .. })
+        ),
+        "{phase:?}"
+    );
+
+    let phase = h.controller.tick();
+
+    assert!(
+        matches!(
+            evidence(&phase),
+            Some(UnsafeEvidence::BlockedCountry { .. })
+        ),
+        "{phase:?}"
+    );
 }
 
 /// Упавший туннель виден по смене носителя трафика: вердикт недействителен,

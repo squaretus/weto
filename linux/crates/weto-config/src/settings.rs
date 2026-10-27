@@ -15,6 +15,11 @@ pub struct Settings {
     /// Выбранное VPN-приложение — такая же цель по форме. `None` — не выбрано,
     /// и это отдельная причина завершения, а не «любое сойдёт».
     pub vpn_app: Option<Target>,
+    /// Выбранный VPN-туннель — имя интерфейса (`wg0`, `tun0`). Задаёт его только
+    /// терминальная версия: на сервере VPN поднимает `wg-quick` без приложения.
+    /// С приложением взаимоисключающе — выбор одного снимает другое (сеттеры).
+    /// `serde(default)` у структуры читает конфиги без ключа как «не выбран».
+    pub vpn_tunnel: Option<String>,
     pub blocked_countries: Vec<String>,
     pub blocked_ip_ranges: Vec<String>,
     /// Пустой whitelist — нормальное умолчание: он не сужает ничего.
@@ -62,6 +67,7 @@ impl Default for Settings {
         Settings {
             is_enabled: true,
             vpn_app: None,
+            vpn_tunnel: None,
             blocked_countries: Vec::new(),
             blocked_ip_ranges: Vec::new(),
             allowed_countries: Vec::new(),
@@ -108,6 +114,41 @@ pub enum GeoListEntryError {
     InvalidEntry,
     #[error("такая запись уже есть в списке")]
     Duplicate,
+}
+
+/// Отказы при добавлении цели. Окно настроек пустую запись и повтор глушит
+/// молча (кнопка неактивна, повтор не добавляется), а терминалу нужен ответ.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TargetEntryError {
+    #[error("введите имя команды или путь")]
+    Empty,
+    #[error("такая цель уже есть в списке")]
+    Duplicate,
+    #[error("это выбранное VPN-приложение — охрана следит за ним, а не завершает его")]
+    IsVpnApp,
+}
+
+/// Отказ в имени VPN-туннеля: имя интерфейса Linux — до 15 символов
+/// (`IFNAMSIZ` минус ноль), и в настройки уходит только то, что ядро
+/// способно назвать.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TunnelNameError {
+    #[error("имя интерфейса — от 1 до 15 символов: латиница, цифры, «_», «.» и «-»")]
+    Invalid,
+}
+
+/// Проверка имени туннеля: 1–15 символов `[A-Za-z0-9_.-]`.
+pub fn validate_tunnel_name(text: &str) -> Result<String, TunnelNameError> {
+    let name = text.trim();
+    let valid = (1..=15).contains(&name.chars().count())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if valid {
+        Ok(name.to_string())
+    } else {
+        Err(TunnelNameError::Invalid)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -240,6 +281,7 @@ impl Settings {
     pub fn guard_config(&self) -> GuardConfig {
         GuardConfig {
             vpn_app: self.vpn_app.as_ref().map(|app| app.entry.clone()),
+            vpn_tunnel: self.vpn_tunnel.clone(),
             blocked_countries: self.blocked_countries.iter().cloned().collect(),
             blocked_ip_ranges: self
                 .blocked_ip_ranges
@@ -267,11 +309,45 @@ impl Settings {
     }
 
     /// Выбор VPN-приложения снимает его же из целей — по той же причине.
+    /// И снимает туннель: VPN задаётся одним из двух способов, а политика,
+    /// получившая оба, проверяла бы два источника защиты вместо одного.
     pub fn set_vpn_app(&mut self, app: Option<Target>) {
         if let Some(app) = &app {
             self.targets.retain(|t| t.entry != app.entry);
+            self.vpn_tunnel = None;
         }
         self.vpn_app = app;
+    }
+
+    /// Выбор VPN-туннеля снимает приложение — обратная сторона того же
+    /// инварианта. Снять туннель (`None`) приложение не возвращает.
+    pub fn set_vpn_tunnel(&mut self, tunnel: Option<String>) {
+        if tunnel.is_some() {
+            self.vpn_app = None;
+        }
+        self.vpn_tunnel = tunnel;
+    }
+
+    /// Цель в настройки. Отказ — тем же текстом, что видит пользователь:
+    /// пустая запись, повтор и само VPN-приложение. Последнее — защита
+    /// источника защиты: охрана, завершившая свой VPN-клиент, оставила бы
+    /// состояние необратимым.
+    pub fn add_target(&mut self, target: Target) -> Result<(), TargetEntryError> {
+        if target.entry.trim().is_empty() {
+            return Err(TargetEntryError::Empty);
+        }
+        if self.targets.iter().any(|t| t.entry == target.entry) {
+            return Err(TargetEntryError::Duplicate);
+        }
+        if self
+            .vpn_app
+            .as_ref()
+            .is_some_and(|app| app.entry == target.entry)
+        {
+            return Err(TargetEntryError::IsVpnApp);
+        }
+        self.targets.push(target);
+        Ok(())
     }
 }
 

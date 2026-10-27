@@ -30,7 +30,10 @@
     "а не пустая строка.",
     "Улика pauseExpired несёт потолок случая: раннеры строят её из ceilingSeconds, поэтому в файле он не повторяется.",
     "",
-    "Два первых случая — эпизоды реального журнала 2026-09-07: 18:03:21Z и 19:31:51Z."
+    "Два первых случая — эпизоды реального журнала 2026-09-07: 18:03:21Z и 19:31:51Z.",
+    "",
+    "Улики туннеля — vpnTunnelDown{tunnel} и trafficBypassesTunnel{tunnel, via} — локальные, как vpnAppNotRunning:",
+    "их снимает переоценка, когда туннель снова несёт трафик, а несвежесть вердикта завершения не отменяет."
   ],
   "reading": { "ip": "203.0.113.177", "primaryCountry": "KZ", "confirmedCountry": "KZ", "confirmSource": "freeipapi" },
   "cases": [
@@ -228,6 +231,21 @@
       "ceilingSeconds": 60, "start": { "kind": "verifying", "cause": "coldStart" },
       "steps": [
         { "at": 1, "input": { "kind": "disarmed" }, "phase": { "kind": "disabled" }, "effect": "none" }
+      ]
+    },
+    {
+      "name": "упавший туннель завершает из «На страже»",
+      "ceilingSeconds": 60, "start": { "kind": "protected" },
+      "steps": [
+        { "at": 1, "input": { "kind": "evidence", "evidence": { "kind": "vpnTunnelDown", "tunnel": "wg0" } }, "phase": { "kind": "danger", "evidence": { "kind": "vpnTunnelDown" } }, "effect": "terminate" }
+      ]
+    },
+    {
+      "name": "переоценка снимает улику туннеля, когда он снова несёт трафик",
+      "ceilingSeconds": 60, "start": { "kind": "danger", "evidence": { "kind": "trafficBypassesTunnel", "tunnel": "wg0", "via": "eth0" } },
+      "steps": [
+        { "at": 1, "input": { "kind": "verdictLost", "cause": "networkChanged" }, "phase": { "kind": "danger", "evidence": { "kind": "trafficBypassesTunnel" } }, "effect": "none" },
+        { "at": 2, "input": { "kind": "reassessment", "decision": { "kind": "safe" } }, "phase": { "kind": "protected" }, "effect": "none" }
       ]
     }
   ]

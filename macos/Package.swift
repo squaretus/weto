@@ -9,6 +9,9 @@ let package = Package(
         .library(name: "WetoSystem", targets: ["WetoSystem"]),
         .library(name: "WetoShared", targets: ["WetoShared"]),
         .library(name: "WetoDesign", targets: ["WetoDesign"]),
+        // Терминальная версия: тот же бэкенд охраны без менюбара. Продукт задаёт
+        // имя бинарника — `weto`, а не имя таргета.
+        .executable(name: "weto", targets: ["WetoCLI"]),
     ],
     dependencies: [
         // Механизм обновления живёт отдельным пакетом: он переносится между
@@ -49,6 +52,23 @@ let package = Package(
                 "WetoCore", "WetoSystem", "WetoShared", "WetoDesign",
             ],
             path: "Sources/WetoMenuBar"
+        ),
+        .executableTarget(
+            name: "WetoCLI",
+            dependencies: [
+                "WetoCore", "WetoSystem", "WetoShared", "WetoDesign",
+                // Версии и список хостов доставки — общие с обновлятором приложения.
+                .product(name: "UpdateKitCore", package: "UpdateKit"),
+            ],
+            path: "Sources/WetoCLI"
+        ),
+        .testTarget(
+            name: "WetoCLITests",
+            dependencies: [
+                "WetoCLI", "WetoCore", "WetoSystem", "WetoShared",
+                .product(name: "UpdateKitCore", package: "UpdateKit"),
+            ],
+            path: "Tests/WetoCLITests"
         ),
         .testTarget(
             name: "WetoDesignTests",

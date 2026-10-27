@@ -16,6 +16,7 @@ swift test --package-path macos/Packages/UpdateKit   # тесты пакета �
 swift run --package-path macos WetoMenuBar           # запуск без бандла (без Keychain и уведомлений)
 macos/scripts/make-app.sh release                    # .app → macos/.build/app/Weto.app
 macos/scripts/build.sh 0.1.0                         # PKG → macos/.build/release_build/Weto-0.1.0.pkg
+macos/scripts/make-cli.sh release [0.1.0]            # weto → macos/.build/cli/weto; с версией и архив в release_build/cli/
 ```
 
 Linux собирается и тестируется в контейнере: netlink, `/proc` и GTK4 на macOS отсутствуют,
@@ -24,12 +25,14 @@ Linux собирается и тестируется в контейнере: ne
 
 ```bash
 linux/scripts/dev.sh cargo build --workspace         # сборка
+linux/scripts/dev.sh cargo build -p weto-cli         # только терминальная версия
 linux/scripts/dev.sh bash -c 'Xvfb :99 -screen 0 1280x1024x24 & sleep 2
                               DISPLAY=:99 cargo test --workspace'      # тесты
 linux/scripts/dev.sh cargo fmt --all --check                   # форматирование, его требует CI
 linux/scripts/dev.sh cargo clippy --workspace --all-targets -- -D warnings
 linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh      # инвариант границ ядра
-linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/
+linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/, weto (musl) — cli/*.tar.gz
+bash shared/cli/tests/install-contract.sh            # контракт установщика терминальной версии (и на macOS)
 linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабочим столом для проверки глазами
 ```
 
@@ -79,7 +82,8 @@ linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабо�
   `isSuccess` и `failureValue` из `WetoCore/VoidResult.swift`.
 - Автозапуск живёт ровно одним файлом в `~/Library/LaunchAgents`. Установщик, тумблер
   в настройках и деинсталлятор обязаны работать с этим же путём.
-- Привилегированный демон `com.weto.helper` — единственное место с правами root. Ему нельзя
+- Привилегированный демон `com.weto.helper` — единственное место с правами root у приложения
+  (терминальная версия `weto` от root работает сама — охраняет всю машину). Демону нельзя
   передавать из приложения ни ссылку, ни версию, ни путь: он перепроверяет релиз сам,
   иначе root установит то, что попросит любой авторизованный процесс.
 - В `Form` у `TextField` первый аргумент уходит в колонку подписей и ломает вёрстку строки:

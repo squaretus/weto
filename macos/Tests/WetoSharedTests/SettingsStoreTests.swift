@@ -384,4 +384,169 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.guardConfig.allowedCountries, ["NL"])
         XCTAssertEqual(store.guardConfig.allowedIPRanges.map(\.text), ["198.51.100.0/24"])
     }
+
+    // MARK: - Туннель терминальной версии
+
+    func test_choosing_a_tunnel_drops_the_vpn_app() {
+        let store = makeStore()
+        store.vpnAppRule = "su.ffg.happ"
+        var fields: [GuardConfigurationChange.Field] = []
+        store.onGuardConfigurationChange { fields.append($0.field) }
+
+        store.vpnTunnel = "wg0"
+
+        XCTAssertEqual(store.vpnTunnel, "wg0")
+        XCTAssertNil(store.vpnAppRule)
+        XCTAssertEqual(store.guardConfig.vpnTunnel, "wg0")
+        XCTAssertNil(store.guardConfig.vpnAppRule)
+        XCTAssertEqual(fields, [.vpnApp, .vpnTunnel])
+    }
+
+    func test_choosing_a_vpn_app_drops_the_tunnel() {
+        let store = makeStore()
+        store.vpnTunnel = "wg0"
+
+        store.vpnAppRule = "su.ffg.happ"
+
+        XCTAssertNil(store.vpnTunnel)
+        XCTAssertEqual(store.vpnAppRule, "su.ffg.happ")
+        XCTAssertNil(makeStore().vpnTunnel, "снятие записано в набор, а не только в память")
+    }
+
+    func test_the_tunnel_survives_a_restart_and_blank_clears_it() {
+        makeStore().vpnTunnel = "  utun6 "
+        XCTAssertEqual(makeStore().vpnTunnel, "utun6")
+
+        makeStore().vpnTunnel = " "
+        XCTAssertNil(makeStore().vpnTunnel)
+    }
+
+    /// Окно приложения туннель не задаёт: ключа нет — туннеля нет.
+    func test_no_tunnel_out_of_the_box() {
+        XCTAssertNil(makeStore().vpnTunnel)
+        XCTAssertNil(makeStore().guardConfig.vpnTunnel)
+    }
+
+    // MARK: - Перечитывание набора
+
+    /// Настройки правит одна копия, охраняет другая: работающая охрана обязана
+    /// подхватить правку, и подписчики слышат ровно отличающиеся поля.
+    func test_reload_applies_only_the_fields_another_store_changed() {
+        let secrets = InMemorySecretStore()
+        let running = SettingsStore(defaults: defaults, secrets: secrets)
+        running.targets = ["claude"]
+        running.blockedCountryCodes = ["RU"]
+        var heard: [GuardConfigurationChange.Field] = []
+        running.onGuardConfigurationChange { heard.append($0.field) }
+
+        let editor = SettingsStore(defaults: defaults, secrets: secrets)
+        editor.targets = ["claude", "codex"]
+        editor.vpnTunnel = "wg0"
+
+        let changed = running.reloadFromDefaults()
+
+        XCTAssertEqual(running.targets, ["claude", "codex"])
+        XCTAssertEqual(running.vpnTunnel, "wg0")
+        XCTAssertEqual(running.blockedCountryCodes, ["RU"])
+        XCTAssertEqual(heard, [.targets, .vpnTunnel])
+        XCTAssertEqual(changed, [.targets, .vpnTunnel])
+    }
+
+    func test_reload_without_changes_says_nothing() {
+        let store = makeStore()
+        store.targets = ["claude"]
+        store.vpnTunnel = "wg0"
+        _ = store.addAllowedEntry("NL")
+        var heard: [GuardConfigurationChange.Field] = []
+        store.onGuardConfigurationChange { heard.append($0.field) }
+
+        XCTAssertTrue(store.reloadFromDefaults().isEmpty)
+        XCTAssertTrue(heard.isEmpty, "совпадающие поля не поднимают ревизию и не просят пробу")
+    }
+
+    /// Выбор VPN сменил сторону во второй копии: перечитывание не имеет права
+    /// оставить обе стороны выбранными — и не имеет права стереть прочитанное.
+    func test_reload_switches_the_vpn_from_app_to_tunnel_and_back() {
+        let running = makeStore()
+        running.vpnAppRule = "su.ffg.happ"
+        let editor = makeStore()
+
+        editor.vpnTunnel = "wg0"
+        running.reloadFromDefaults()
+        XCTAssertNil(running.vpnAppRule)
+        XCTAssertEqual(running.vpnTunnel, "wg0")
+
+        editor.vpnAppRule = "su.ffg.happ"
+        running.reloadFromDefaults()
+        XCTAssertEqual(running.vpnAppRule, "su.ffg.happ")
+        XCTAssertNil(running.vpnTunnel)
+    }
+
+    func test_reload_picks_up_the_pause_ceiling_without_a_configuration_change() {
+        let running = makeStore()
+        var heard: [GuardConfigurationChange.Field] = []
+        var ceilings: [PauseCeiling] = []
+        running.onGuardConfigurationChange { heard.append($0.field) }
+        running.onPauseCeilingChange { ceilings.append($0) }
+
+        makeStore().pauseCeiling = .fiveMinutes
+        running.reloadFromDefaults()
+
+        XCTAssertEqual(running.pauseCeiling, .fiveMinutes)
+        XCTAssertEqual(ceilings, [.fiveMinutes])
+        XCTAssertTrue(heard.isEmpty)
+    }
+
+    func test_reload_picks_up_a_token_written_by_another_copy() {
+        let secrets = InMemorySecretStore()
+        let running = SettingsStore(defaults: defaults, secrets: secrets)
+        var heard: [GuardConfigurationChange.Field] = []
+        running.onGuardConfigurationChange { heard.append($0.field) }
+
+        SettingsStore(defaults: defaults, secrets: secrets).setIPInfoToken("abc")
+        running.reloadFromDefaults()
+
+        XCTAssertEqual(running.ipinfoToken, "abc")
+        XCTAssertEqual(running.tokenBox.value, "abc")
+        XCTAssertEqual(heard, [.ipinfoToken])
+    }
+
+    /// Перечитанное назад не пишется: запись прочитанного затёрла бы правку второй
+    /// копии, сделанную между чтением и записью.
+    func test_reload_does_not_write_back_what_it_read() {
+        let running = makeStore()
+        makeStore().targets = ["claude"]
+        let observer = KeyWriteObserver(defaults: defaults, key: "targets")
+
+        running.reloadFromDefaults()
+
+        XCTAssertEqual(running.targets, ["claude"])
+        XCTAssertEqual(observer.writes, 0)
+
+        // Наблюдатель видит запись: обычная правка после перечитывания пишется как всегда.
+        running.targets = ["claude", "codex"]
+        XCTAssertEqual(observer.writes, 1)
+        withExtendedLifetime(observer) {}
+    }
+}
+
+/// Считает записи ключа в набор: `UserDefaults` шлёт KVO на каждую `set`.
+private final class KeyWriteObserver: NSObject {
+    private let defaults: UserDefaults
+    private let key: String
+    private(set) var writes = 0
+
+    init(defaults: UserDefaults, key: String) {
+        self.defaults = defaults
+        self.key = key
+        super.init()
+        defaults.addObserver(self, forKeyPath: key, options: [.new], context: nil)
+    }
+
+    deinit { defaults.removeObserver(self, forKeyPath: key) }
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
+        writes += 1
+    }
 }

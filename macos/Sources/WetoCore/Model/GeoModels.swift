@@ -15,6 +15,42 @@ public enum VPNAppStatus: Equatable, Sendable {
     case running
 }
 
+/// Состояние выбранного VPN-туннеля — интерфейса, названного пользователем.
+///
+/// Туннель выбирается только в терминальной версии: на сервере VPN поднимает
+/// `wg-quick` или юнит без приложения, а имена интерфейсов стабильны. Состояние
+/// считается чистой функцией из имени и снимка сети этого прохода
+/// (`VPNTunnelStatus.init(chosen:snapshot:)`).
+public enum VPNTunnelStatus: Equatable, Sendable {
+
+    case notChosen
+
+    /// Интерфейса нет среди поднятых (`IFF_UP` и `IFF_RUNNING`).
+    case down
+
+    /// Интерфейс поднят, а ядро выпускает вердиктный запрос через другой.
+    case bypassed(via: String)
+
+    /// Трафик идёт через туннель — или наружу не идёт вовсе: тогда отвечает гео.
+    case carrying
+
+    public init(chosen: String?, snapshot: NetworkSnapshot) {
+        guard let chosen else {
+            self = .notChosen
+            return
+        }
+        guard snapshot.upInterfaces.contains(chosen) else {
+            self = .down
+            return
+        }
+        if let outgoing = snapshot.outgoing, outgoing.interface != chosen {
+            self = .bypassed(via: outgoing.interface)
+            return
+        }
+        self = .carrying
+    }
+}
+
 public enum ConfirmSource: String, Equatable, Codable, Sendable {
     case freeipapi
     case geojs

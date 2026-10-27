@@ -1,7 +1,8 @@
 # Release
 
-Cutting a weto version: a macOS PKG and two Linux tarballs, published as one GitHub
-Release that feeds auto-update on both platforms.
+Cutting a weto version: a macOS PKG, two Linux app tarballs, three terminal-version archives,
+`SHA256SUMS` and `install.sh`, published as one GitHub Release that feeds auto-update of the
+apps and of the terminal version on both platforms.
 
 ## Steps
 
@@ -32,16 +33,24 @@ Release that feeds auto-update on both platforms.
    of `pr-checks.yml`, which also drags in `launch-agent-contract.sh` and every `build.sh` guard
    below. A release therefore cannot be cut from a `master` that fails packaging.
 
-5. **Publish.** Push a tag `vX.Y.Z` on `master`. `.github/workflows/release.yml`
-   (runner `macos-26`) validates the tag matches `^[0-9]+\.[0-9]+\.[0-9]+$` after stripping
-   `v`, runs `swift test`, runs `macos/scripts/build.sh "$VERSION"`, and publishes via
-   `softprops/action-gh-release@v2` with `generate_release_notes: true`, attaching
-   `macos/.build/release_build/Weto-<VERSION>.pkg`. Release name: `weto <VERSION>`.
-   A mismatched tag fails the job before any build.
+5. **Publish.** Push a tag `vX.Y.Z` on `master`. `.github/workflows/release.yml` validates the
+   tag (`^[0-9]+\.[0-9]+\.[0-9]+$` after stripping `v`; a mismatch fails before any build), then:
+   - `macos` job (`macos-26`): `swift test`, `scripts/build.sh "$VERSION"` (PKG),
+     `scripts/make-cli.sh release "$VERSION"` (CLI archive); uploads `release_build/*.pkg` and
+     `release_build/cli/*.tar.gz`;
+   - `linux` jobs (x86_64, aarch64): lint, tests, `scripts/build.sh "$VERSION"` (app `.tar.zst` +
+     static CLI `.tar.gz`), install contract, `shared/cli/tests/install-contract.sh`;
+   - `publish`: sparse checkout of `shared/cli/install.sh`, copies every `*.pkg`, `*.tar.zst`,
+     `*.tar.gz` **flat** into `release/`, adds `install.sh`, writes `SHA256SUMS` over all of them
+     (`sha256sum -- *`), and publishes `release/*` via `softprops/action-gh-release@v2`
+     (`generate_release_notes: true`, name `weto <VERSION>`).
 
-6. **Verify auto-update sees it.** The release must have the `.pkg` among its assets
-   (see "Auto-update depends on the asset" below). `GET /repos/squaretus/weto/releases/latest`
-   should return `tag_name` = the new tag and one asset ending in `.pkg`.
+6. **Verify.** `GET /repos/squaretus/weto/releases/latest` returns the new `tag_name` and the
+   assets: `Weto-<v>.pkg`, `weto-<v>-{x86_64,aarch64}-linux.tar.zst`,
+   `weto-cli-<v>-linux-{x86_64,aarch64}.tar.gz`, `weto-cli-<v>-macos-arm64.tar.gz`,
+   `SHA256SUMS`, `install.sh`. Then on a server:
+   `curl -fsSL https://github.com/squaretus/weto/releases/latest/download/install.sh | sudo bash`
+   and `weto version`.
 
 ## Build safety net — and what each failure means
 
@@ -99,8 +108,9 @@ minimum OS `26.0`. Editing installer copy means editing those two files.
 The release workflow builds Linux natively on two runners — `ubuntu-24.04` (x86_64) and
 `ubuntu-24.04-arm` (aarch64); arm64 runners are free for public repositories, so there is
 no QEMU and no cross-compilation anywhere. Each job produces
-`weto-<X.Y.Z>-<arch>-linux.tar.zst` and uploads it under its own artifact name — a shared
-name would let the second job overwrite the first and ship one archive instead of two.
+`weto-<X.Y.Z>-<arch>-linux.tar.zst` (app) and `cli/weto-cli-<X.Y.Z>-linux-<arch>.tar.gz`
+(terminal version) and uploads both under its own artifact name — a shared name would let the
+second job overwrite the first and ship one archive instead of two.
 
 Locally the same script does it: `linux/scripts/build.sh <X.Y.Z>`, which names the archive
 from `uname -m`.
@@ -115,6 +125,33 @@ builder. Nothing hardcodes an architecture on either side; check both if either 
 
 **Not verified on real arm64 hardware.** The artifact builds and its install contract
 passes, but nobody has watched the tray or the windows on an arm64 desktop.
+
+## Terminal version assets
+
+- **Names are a contract** shared by `build.sh` / `make-cli.sh`, the workflow, `install.sh` and
+  `weto update`: `weto-cli-<v>-linux-<uname -m>.tar.gz`, `weto-cli-<v>-macos-arm64.tar.gz`, each
+  with exactly one file `weto` in the root. Change one — change all four.
+- **gzip, not zstd**: a server may have no `zstd`. **Linux CLI is static musl**
+  (`<arch>-unknown-linux-musl`, `musl-tools` + `rustup target add` in CI and `Dockerfile.dev`):
+  a glibc binary from `ubuntu-24.04` needs `GLIBC_2.39` and fails on Debian 12 / Ubuntu 22.04.
+  `build.sh` fails if `ldd` reports a dynamic binary. TLS is rustls (no libssl).
+- **macOS archive** is built with `COPYFILE_DISABLE=1 --no-mac-metadata --no-xattrs` and
+  `make-cli.sh` checks `tar -tzf` lists only `weto`; it also refuses a non-arm64 binary.
+  Without a version (`dev`) no archive is built.
+- **`SHA256SUMS`** is the trust anchor *and* the index: `install.sh` finds the archive name in it
+  (`releases/latest/download/` does not know the version), `weto update` takes the sum for its
+  asset from it. A release without `SHA256SUMS` or without the platform's archive installs nothing.
+- **`install.sh` is published per release**, so `latest/download/install.sh` is always the script
+  of the same release as the binaries. Its contract (`shared/cli/tests/install-contract.sh`, fake
+  release over `file://`) runs in the Linux jobs of `pr-checks.yml` and `release.yml`; on macOS
+  only locally (`bash shared/cli/tests/install-contract.sh`).
+- **No collision with the app updaters.** macOS app takes the first asset ending in `.pkg`; Linux
+  app matches the suffix `-<arch>-linux.tar.zst`. CLI archives end in `-linux-<arch>.tar.gz` /
+  `-macos-arm64.tar.gz` (arch and OS swapped, different compression), `SHA256SUMS` and
+  `install.sh` match neither. `ReleaseChecker` additionally skips the `weto-cli-` prefix
+  (`CLI_ASSET_PREFIX`), kept as a belt.
+- **App-only releases are fine**: `weto update check` and the guard's daily check treat a release
+  without the platform's CLI archive as "nothing to update to", not as an error.
 
 ## Auto-update depends on the `.pkg` asset
 
@@ -138,7 +175,8 @@ it would answer "В релизе нет файла .pkg".)
 
 Practical consequences for a release:
 - The asset name must end in `.pkg`; `Weto-<X.Y.Z>.pkg` from `build.sh` satisfies this.
-- Exactly one `.pkg` per release — `first` wins, order is not guaranteed.
+- Exactly one `.pkg` per release — `first` wins, order is not guaranteed. The other assets
+  (`.tar.zst`, `.tar.gz`, `SHA256SUMS`, `install.sh`) never end in `.pkg`.
 - The tag must be `vX.Y.Z` (or plain `X.Y.Z`); anything else makes
   `ReleaseParser` return `invalidVersion` and updates stop for every installed copy.
 - Don't publish as draft/pre-release: `releases/latest` skips those. <!-- generated, verify -->
@@ -187,7 +225,8 @@ trade-off (README, "Установка"). Consequences to keep in mind and to ke
 ## Where logs / metrics
 
 - CI: GitHub Actions → workflows `Release` (tags `v*`) and `PR Checks` (`master` PRs/pushes).
-- Local build output: `macos/.build/release_build/` (`Weto-<version>.pkg`), `macos/.build/app/Weto.app`.
+- Local build output: `macos/.build/release_build/` (`Weto-<version>.pkg`, `cli/weto-cli-<v>-macos-arm64.tar.gz`),
+  `macos/.build/app/Weto.app`, `macos/.build/cli/weto`; Linux `linux/target/release_build/` (`cli/` for the CLI).
 - Update daemon: `HelperLogger` (`macos/Packages/UpdateKit/Sources/UpdateKitHelper/HelperLogger.swift`);
   working directory `/var/db/weto`. The install phase and the last failure are additionally
   readable from the app itself (update window → progress or error text, via `installState`)

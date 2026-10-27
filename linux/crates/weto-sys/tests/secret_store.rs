@@ -33,6 +33,26 @@ fn the_secret_file_is_readable_only_by_its_owner() {
     assert_eq!(dir_mode, 0o700, "права каталога: {dir_mode:o}");
 }
 
+/// Общий системный каталог (`/etc/weto`) токен не сужает: рядом лежат
+/// настройки, которые читаются без sudo. Сам токен закрыт так же.
+#[test]
+fn a_token_in_a_shared_directory_leaves_the_directory_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("etc/weto");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = dir.join("token");
+
+    FileSecretStore::in_shared_directory(path.clone())
+        .save("токен")
+        .unwrap();
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "права файла: {mode:o}");
+    let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dir_mode, 0o755, "права каталога: {dir_mode:o}");
+}
+
 /// Файл мог остаться от прежней версии с широкими правами — перезапись
 /// обязана их сузить, а не унаследовать.
 #[test]

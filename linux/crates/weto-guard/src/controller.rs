@@ -45,8 +45,8 @@ use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading};
 use weto_core::guard_machine::{GuardAction, GuardInput, GuardMachine, GuardPhase};
-use weto_core::network::NetworkSnapshot;
-use weto_core::network::VpnAppStatus;
+use weto_core::network::{tunnel_status, NetworkSnapshot, OutgoingRoute};
+use weto_core::network::{VpnAppStatus, VpnTunnelStatus};
 use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
 use weto_core::policy::GuardSignals;
 use weto_core::policy::{decide, decide_local, GuardDecision, UnsafeEvidence};
@@ -193,6 +193,17 @@ pub struct GuardSnapshot {
     /// Сигнал не дошёл до целей из-за нехватки прав: экран называет pid
     /// красной строкой под показаниями. Порт `GuardVM.permissionFailure`.
     pub permission_failure: Option<String>,
+    /// Кто выпускал трафик наружу на последнем проходе. Окно его не показывает,
+    /// а статус терминальной версии называет строкой «Трафик».
+    pub outgoing: Option<OutgoingRoute>,
+    /// Статус VPN-приложения на последнем проходе — по тому же обходу, что
+    /// сигналы. `None` — проходов ещё не было.
+    pub vpn_app: Option<VpnAppStatus>,
+    /// Статус VPN-туннеля на последнем проходе — по снимку сети того же прохода.
+    pub vpn_tunnel: Option<VpnTunnelStatus>,
+    /// Когда вернулась последняя проба — любая, включая отброшенную: по нему
+    /// `weto-cli check` узнаёт, что его просьба исполнена.
+    pub probed_at: Option<SystemTime>,
 }
 
 /// Учёт стояния: что уже описано журналом и кому сколько раз досылали SIGCONT.
@@ -545,11 +556,16 @@ impl GuardController {
         }
 
         let vpn = self.vpn_app_status(&settings, &scan);
+        // Статус туннеля — рядом со статусом приложения и по снимку этого же
+        // прохода: улика и отпечаток обязаны описывать один момент.
+        let tunnel = tunnel_status(settings.vpn_tunnel.as_deref(), &network);
         let has_verdict = self.has_verdict(settings.revision, &fingerprint);
 
-        // Локальное доказательство применяется сразу, до сети: закрытый клиент —
-        // завершение. Жизни целям сетевой запрос не продлевает.
-        if let Some(GuardDecision::Kill(evidence)) = decide_local(settings.is_enabled, vpn, &config)
+        // Локальное доказательство применяется сразу, до сети: закрытый клиент,
+        // упавший туннель или трафик мимо него — завершение. Жизни целям сетевой
+        // запрос не продлевает.
+        if let Some(GuardDecision::Kill(evidence)) =
+            decide_local(settings.is_enabled, vpn, &tunnel, &config)
         {
             let phase = self.dispatch(GuardInput::Evidence(evidence), &settings, &scan);
             if !has_verdict {
@@ -582,17 +598,22 @@ impl GuardController {
         // Вердикт про этот путь есть — прошлая потеря закрыта.
         self.inner.lock().expect("состояние охраны").announced_loss = None;
 
-        // VPN-приложение вернулось при действующем вердикте — переоценка без пробы.
-        if let (GuardPhase::Danger(UnsafeEvidence::VpnAppNotRunning), Some(reading)) =
+        // Локальная улика ушла при действующем вердикте — VPN-приложение
+        // вернулось или туннель снова несёт трафик: переоценка без пробы. Сюда
+        // проход доходит, только если локальная проверка улики больше не даёт.
+        if let (GuardPhase::Danger(evidence), Some(reading)) =
             (self.phase(), self.established_reading(&fingerprint))
         {
-            let decision = decide(&GuardSignals {
-                is_enabled: settings.is_enabled,
-                vpn,
-                geo: GeoOutcome::Resolved(reading.clone()),
-                config: config.clone(),
-            });
-            self.feed(GuardInput::Reassessment { decision, reading });
+            if evidence.is_local() {
+                let decision = decide(&GuardSignals {
+                    is_enabled: settings.is_enabled,
+                    vpn,
+                    tunnel: tunnel.clone(),
+                    geo: GeoOutcome::Resolved(reading.clone()),
+                    config: config.clone(),
+                });
+                self.feed(GuardInput::Reassessment { decision, reading });
+            }
         }
 
         self.feed(GuardInput::Tick);
@@ -650,12 +671,14 @@ impl GuardController {
         settings: &Settings,
         outcome: GeoOutcome,
         vpn: VpnAppStatus,
+        tunnel: VpnTunnelStatus,
         fingerprint: &str,
     ) {
         let config = settings.guard_config();
         let decision = decide(&GuardSignals {
             is_enabled: settings.is_enabled,
             vpn,
+            tunnel,
             geo: outcome.clone(),
             config,
         });
@@ -777,7 +800,7 @@ impl GuardController {
             .expect("состояние охраны")
             .pending_staleness = None;
 
-        self.publish(&phase, scan);
+        self.publish(&phase, settings, scan);
         phase
     }
 
@@ -1438,10 +1461,17 @@ impl GuardController {
     /// Снимок для экрана: фаза, живые цели и стоящие. Заголовок, цвет щита
     /// и три строки объяснения строит сам экран из фазы через
     /// `weto_core::presentation` — снимок их не кеширует.
-    fn publish(&self, phase: &GuardPhase, scan: &Scan) {
+    fn publish(&self, phase: &GuardPhase, settings: &Settings, scan: &Scan) {
         let running = self.enforcer.running_in(scan);
+        let vpn = self.vpn_app_status(settings, scan);
 
         let mut inner = self.inner.lock().expect("состояние охраны");
+        inner.snapshot.outgoing = inner.last_network.outgoing.clone();
+        inner.snapshot.vpn_app = Some(vpn);
+        inner.snapshot.vpn_tunnel = Some(tunnel_status(
+            settings.vpn_tunnel.as_deref(),
+            &inner.last_network,
+        ));
         inner.snapshot.phase = phase.clone();
         inner.snapshot.running = running;
         inner.snapshot.paused = inner.pause.paused.clone();
@@ -1713,6 +1743,14 @@ impl GuardController {
             .last_probe_finished = Some(Instant::now());
 
         self.apply_probe(report, revision, fingerprint, trigger, elapsed);
+
+        // Отметка ставится после применения: кто ждёт её (`weto-cli check`),
+        // прочтёт рядом с ней уже фазу, которую этот ответ принёс.
+        self.inner
+            .lock()
+            .expect("состояние охраны")
+            .snapshot
+            .probed_at = Some((self.now)());
     }
 
     /// Ответ пробы — своим проходом: вход редьюсеру и своё применение.
@@ -1815,7 +1853,11 @@ impl GuardController {
         }
 
         let vpn = self.vpn_app_status(&settings, &scan);
-        self.feed_verdict(&settings, outcome, vpn, &fingerprint);
+        let tunnel = tunnel_status(
+            settings.vpn_tunnel.as_deref(),
+            &self.inner.lock().expect("состояние охраны").last_network,
+        );
+        self.feed_verdict(&settings, outcome, vpn, tunnel, &fingerprint);
         self.enforce(&settings, &scan);
     }
 
