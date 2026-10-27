@@ -78,8 +78,7 @@ struct StatusPopupView: View {
     /// Три строки: что сделал weto, почему, что дальше.
     private func explanationLines(at now: Date) -> some View {
         let vm = coordinator.guardVM
-        let remaining = vm.pauseDeadline.map { max(0, $0.timeIntervalSince(now)) }
-        let text = StatusPresentation.explanation(for: vm.phase, remainingPause: remaining)
+        let text = StatusPresentation.explanation(for: vm.phase)
         return VStack(alignment: .leading, spacing: 2) {
             Text(text.action)
                 .font(WetoTokens.label)

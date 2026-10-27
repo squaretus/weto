@@ -156,7 +156,7 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
 
             clear(&explanation_slot);
             if presentation::should_explain(phase) {
-                let text = presentation::explanation(phase, state.remaining_pause());
+                let text = presentation::explanation(phase);
                 explanation_slot.append(&explanation_line(&text.action, "weto-label"));
                 explanation_slot.append(&explanation_line(&text.evidence, "weto-explain-evidence"));
                 explanation_slot.append(&explanation_line(&text.next, "weto-caption"));
