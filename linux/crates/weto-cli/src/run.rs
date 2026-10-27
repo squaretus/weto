@@ -39,6 +39,34 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 pub const ALREADY_RUNNING: &str = "охрана уже запущена";
 pub const APP_IS_RUNNING: &str = "запущено приложение Weto: две охраны над одними целями мешают \
      друг другу — закройте приложение";
+pub const APP_IS_RUNNING_UNDER_ROOT: &str = "запущено приложение Weto: две охраны над одними \
+     целями мешают друг другу — охрана всей машины продолжает работу, закройте приложение";
+
+/// Что делать охране, увидевшей рядом приложение Weto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppConflict {
+    /// Приложения нет — стартуем.
+    None,
+    /// Охрана пользователя рядом с его же приложением не стартует.
+    Refuse(i32),
+    /// Охрана всей машины стартует всё равно и предупреждает.
+    Warn(i32),
+}
+
+/// Охрана всей машины из-за найденного приложения не останавливается никогда.
+/// Признак приложения — путь бинарника под `*/.local/share/weto/`, а такой путь
+/// любой пользователь создаст себе сам: скопирует туда что угодно, запустит —
+/// и отказ на старте выключил бы охрану всей машины чужими руками. Машинная охрана
+/// обязана продолжать охранять: предупреждение в лог, а не выход. Охране
+/// пользователя отказ по-прежнему годится — подделать его приложение может
+/// только он сам.
+pub fn app_conflict(is_root: bool, app: Option<i32>) -> AppConflict {
+    match (app, is_root) {
+        (None, _) => AppConflict::None,
+        (Some(pid), true) => AppConflict::Warn(pid),
+        (Some(pid), false) => AppConflict::Refuse(pid),
+    }
+}
 
 // --- замок -----------------------------------------------------------------
 
@@ -276,7 +304,7 @@ impl AfterPass {
 
         // Смена фазы — по заголовку и улике: «На страже» с новой страной
         // тоже новость, а такт без новостей лог не засоряет.
-        let text = explanation(phase, self.controller.remaining_pause());
+        let text = explanation(phase);
         let summary = format!(
             "{} — {}: {}",
             text.title,
@@ -369,9 +397,14 @@ pub fn run(paths: &Paths, app_data_dir: &Path, version: &str, identity: &Identit
         }
     };
 
-    if let Some(app) = app_is_running(&ProcRegistry::new(), app_data_dir, pid) {
-        eprintln!("{APP_IS_RUNNING} (pid {app})");
-        return FAILURE;
+    let app = app_is_running(&ProcRegistry::new(), app_data_dir, pid);
+    match app_conflict(identity.is_root, app) {
+        AppConflict::None => {}
+        AppConflict::Refuse(app) => {
+            eprintln!("{APP_IS_RUNNING} (pid {app})");
+            return FAILURE;
+        }
+        AppConflict::Warn(app) => log(&format!("{APP_IS_RUNNING_UNDER_ROOT} (pid {app})")),
     }
 
     let settings = match WatchedSettings::open(paths.settings_file()) {

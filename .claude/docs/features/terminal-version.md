@@ -47,8 +47,10 @@ app. New shell, same backend. New for the terminal version only: the VPN can be 
   `weto-cli-…-linux.tar.zst`, `NSRunningApplication` app detection.
 
 ## Risks
-- **Two guards over one target set** fight with SIGSTOP/SIGCONT. `run` refuses while the GUI app
-  runs for any user and holds `flock`; a GUI started *after* `weto run` is not checked by the app.
+- **Two guards over one target set** fight with SIGSTOP/SIGCONT. A user guard refuses to start
+  next to the GUI app; a root guard only warns and keeps guarding — the app is recognised by its
+  path, which any user can fake, and a refusal would let them switch the whole-machine guard off.
+  `run` holds `flock`; a GUI started *after* `weto run` is not checked by the app.
 - **Bare target names under `sudo`** — not found by root, they are looked up in the `PATH`
   of `SUDO_USER` and stored as an absolute path (round 4); verified live on Linux, not on macOS
   (no passwordless `sudo` on the dev machine).

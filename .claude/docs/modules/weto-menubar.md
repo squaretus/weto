@@ -12,8 +12,9 @@ parsing, validation and persistence happen in the stores.
 - `macos/Sources/WetoMenuBar/WetoMenuBarApp.swift` — `@main` scene, `AppDelegate`, `SingleInstanceGuard`
 - `macos/Sources/WetoMenuBar/MenuBarLabel.swift`
 - `macos/Sources/WetoMenuBar/StatusPopupView.swift` — shield + title + refresh/gear, the three
-  explanation lines (`StatusPresentation.explanation`, shown when `.shouldExplain`), the geo
-  readout, live target pills each with a `WetoPauseBadge` when paused
+  explanation lines (`StatusPresentation.explanation(for:)`, shown when `.shouldExplain`; the
+  paused «what's next» line carries no countdown — the pills do), the geo readout, live target
+  pills each with a `WetoPauseBadge` when paused
 - `macos/Sources/WetoMenuBar/MenuBarPopupPresenter.swift` — `PopupPresenting` implementation:
   finds the menu-bar-extra status button and popup window by class-name substring (no public
   AppKit/SwiftUI API for either) and toggles the popup open from code, the way a notification tap
@@ -125,10 +126,10 @@ parsing, validation and persistence happen in the stores.
 
 - **One clock drives every countdown in the popup.** `StatusPopupView` wraps its content in
   `TimelineView(.periodic(from: .now, by: 1))` only while `guardVM.pauseDeadline != nil`, and
-  passes that single `Date` down to both the explanation's third line and every target's
-  `WetoPauseBadge`. Two independent per-badge timers would drift a second apart from each other
-  and from the explanation text — the popup would visibly disagree with itself about how much
-  time is left.
+  passes that single `Date` down to every target's `WetoPauseBadge`. Two independent per-badge
+  timers would drift a second apart — the popup would visibly disagree with itself about how much
+  time is left. The explanation's third line used to carry a countdown too; it was dropped as a
+  duplicate of the pills, and the line no longer reads the clock.
 - **`MenuBarPopupPresenter` reads private AppKit/SwiftUI class names**
   (`…StatusBarWindow…`, `…MenuBarExtraWindow…`) because `MenuBarExtra` exposes no public way to
   open its own popup from code. A future AppKit/SwiftUI version can silently break the match; the

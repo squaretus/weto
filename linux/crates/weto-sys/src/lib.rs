@@ -17,3 +17,4 @@ pub mod secret_store;
 pub mod session_bus;
 pub mod target_resolver;
 pub mod terminal;
+pub mod terminal_mode;

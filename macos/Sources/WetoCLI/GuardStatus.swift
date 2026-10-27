@@ -236,10 +236,7 @@ extension GuardStatus {
     }
 
     init(_ inputs: Inputs) {
-        let explanation = StatusPresentation.explanation(
-            for: inputs.phase,
-            remainingPause: inputs.pauseDeadline.map { $0.timeIntervalSince(inputs.now) }
-        )
+        let explanation = StatusPresentation.explanation(for: inputs.phase)
         let known = StatusPresentation.knownReading(for: inputs.phase, reading: inputs.lastReading)
 
         self.init(

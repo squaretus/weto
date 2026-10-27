@@ -6,10 +6,8 @@
 //! `UnsafeEvidence.displayText`, `GuardVM.statusColor` и `StatusPresentation`
 //! с macOS — тексты и цвета обязаны совпадать на обеих платформах дословно.
 
-use std::time::Duration;
-
 use crate::guard_machine::GuardPhase;
-use crate::pause_ceiling::{countdown_text, duration_text};
+use crate::pause_ceiling::duration_text;
 use crate::policy::{UnprovenReason, UnsafeEvidence};
 use crate::process::TargetKind;
 
@@ -97,16 +95,9 @@ pub struct StatusExplanation {
 }
 
 /// Объяснение состояния тремя строками: что сделано с целями, почему — улика
-/// фазы, и что дальше — счётчик паузы или совет действия. `remaining_pause`
-/// приходит параметром (обычно из `GuardController::remaining_pause`):
-/// представление не читает часы само.
-pub fn explanation(phase: &GuardPhase, remaining_pause: Option<Duration>) -> StatusExplanation {
-    let remaining = remaining_pause.unwrap_or(Duration::ZERO);
-    let mut remaining_seconds = remaining.as_secs();
-    if remaining.subsec_nanos() > 0 {
-        remaining_seconds += 1;
-    }
-
+/// фазы, и что дальше. Отсчёта паузы здесь нет: он стоит на пилюле каждой
+/// стоящей цели, и второй такой же над ними только повторял их.
+pub fn explanation(phase: &GuardPhase) -> StatusExplanation {
     match phase {
         GuardPhase::Disabled => StatusExplanation {
             title: phase.title().to_string(),
@@ -144,11 +135,9 @@ pub fn explanation(phase: &GuardPhase, remaining_pause: Option<Duration>) -> Sta
             title: phase.title().to_string(),
             action: "Цели остановлены".to_string(),
             evidence: reason.display_text(),
-            next: format!(
-                "Ждём ответа сервисов, {} до завершения; возобновятся \
-                 при подтверждении безопасного выхода",
-                countdown_text(remaining_seconds)
-            ),
+            next: "Ждём ответа сервисов; возобновятся при подтверждении безопасного \
+                   выхода, без него завершатся по истечении отсчёта"
+                .to_string(),
         },
         GuardPhase::Danger(evidence) => StatusExplanation {
             title: phase.title().to_string(),
@@ -346,6 +335,7 @@ mod tests {
     use crate::diagnostics::StalenessCause;
     use crate::geo::{ConfirmSource, GeoReading};
     use crate::policy::UnsafeEvidence;
+    use std::time::Duration;
     use std::time::UNIX_EPOCH;
 
     fn reading() -> GeoReading {
@@ -482,7 +472,7 @@ mod tests {
         }
 
         for phase in phases {
-            let text = explanation(&phase, Some(Duration::from_secs(43)));
+            let text = explanation(&phase);
             for value in [&text.title, &text.action, &text.evidence, &text.next] {
                 assert!(!value.is_empty(), "пустая клетка у {phase:?}");
             }
@@ -495,7 +485,7 @@ mod tests {
         let phase = GuardPhase::Verifying {
             cause: StalenessCause::ColdStart,
         };
-        let text = explanation(&phase, Some(Duration::from_secs(43)));
+        let text = explanation(&phase);
         assert_eq!(text.title, "Проверяю выход");
         assert_eq!(text.action, "Цели работают");
         assert_eq!(
@@ -505,21 +495,9 @@ mod tests {
         assert_eq!(text.next, "Жду ответа сервисов о безопасности выхода");
     }
 
-    /// «Проверяю выход» не читает часы вовсе: считать там нечего независимо
-    /// от того, что передали в `remaining_pause`.
-    #[test]
-    fn verifying_ignores_remaining_pause_entirely() {
-        let phase = GuardPhase::Verifying {
-            cause: StalenessCause::ColdStart,
-        };
-        let with_deadline = explanation(&phase, Some(Duration::from_secs(43)));
-        let without_deadline = explanation(&phase, None);
-        assert_eq!(with_deadline, without_deadline);
-    }
-
     #[test]
     fn protected_names_the_exit() {
-        let text = explanation(&GuardPhase::Protected(reading()), None);
+        let text = explanation(&GuardPhase::Protected(reading()));
         assert_eq!(text.action, "Цели работают");
         assert_eq!(
             text.evidence,
@@ -535,7 +513,7 @@ mod tests {
             reading: reading(),
             reason: UnprovenReason::GeoUnavailable(detail.clone()),
         };
-        let text = explanation(&phase, None);
+        let text = explanation(&phase);
         assert_eq!(text.title, "На страже");
         assert_eq!(text.action, "Цели работают");
         assert_eq!(
@@ -554,14 +532,14 @@ mod tests {
             since: t0(),
             reason: UnprovenReason::ConfirmationUnavailable,
         };
-        let text = explanation(&phase, Some(Duration::from_secs(12)));
+        let text = explanation(&phase);
         assert_eq!(text.title, "Выход не подтверждён");
         assert_eq!(text.action, "Цели остановлены");
         assert_eq!(text.evidence, "Подтверждающие сервисы недоступны");
         assert_eq!(
             text.next,
-            "Ждём ответа сервисов, 12 с до завершения; возобновятся при подтверждении \
-             безопасного выхода"
+            "Ждём ответа сервисов; возобновятся при подтверждении безопасного выхода, \
+             без него завершатся по истечении отсчёта"
         );
     }
 
@@ -571,7 +549,7 @@ mod tests {
             code: "RU".to_string(),
             source: "ipinfo".to_string(),
         });
-        let text = explanation(&phase, None);
+        let text = explanation(&phase);
         assert_eq!(text.action, "Цели завершены");
         assert_eq!(text.evidence, "Обнаружена страна RU по данным ipinfo");
         assert_eq!(
@@ -582,48 +560,13 @@ mod tests {
 
     #[test]
     fn disabled_tells_what_to_do() {
-        let text = explanation(&GuardPhase::Disabled, None);
+        let text = explanation(&GuardPhase::Disabled);
         assert_eq!(text.action, "Цели работают");
         assert_eq!(
             text.evidence,
             "Цели не выбраны — охрана ничего не завершает"
         );
         assert_eq!(text.next, "Добавьте приложение или команду в настройках");
-    }
-
-    /// Отсчёт обязан читаться натурально и на границах: 60 с, 43 с, 1 с и —
-    /// на исходе — 0 с.
-    #[test]
-    fn countdown_reads_naturally_at_the_edges() {
-        let phase = GuardPhase::Paused {
-            since: t0(),
-            reason: UnprovenReason::ConfirmationUnavailable,
-        };
-        for seconds in [60, 43, 1, 0] {
-            let text = explanation(&phase, Some(Duration::from_secs(seconds)));
-            assert_eq!(
-                text.next,
-                format!(
-                    "Ждём ответа сервисов, {seconds} с до завершения; возобновятся \
-                     при подтверждении безопасного выхода"
-                )
-            );
-        }
-    }
-
-    /// Больше минуты — минуты и секунды: «299 с» не читается.
-    #[test]
-    fn countdown_above_a_minute_reads_as_minutes_and_seconds() {
-        let phase = GuardPhase::Paused {
-            since: t0(),
-            reason: UnprovenReason::ConfirmationUnavailable,
-        };
-        let text = explanation(&phase, Some(Duration::from_secs(299)));
-        assert_eq!(
-            text.next,
-            "Ждём ответа сервисов, 4:59 до завершения; возобновятся \
-             при подтверждении безопасного выхода"
-        );
     }
 
     #[test]
@@ -638,21 +581,17 @@ mod tests {
         );
     }
 
-    /// `remaining_pause` может не подъехать вовремя (например, дедлайн ещё
-    /// не выставлен) — строка паузы не имеет права падать или показывать
-    /// отрицательное число.
+    /// Отсчёт до завершения стоит на пилюле каждой стоящей цели — в строке «что
+    /// дальше» он только повторял их: два одинаковых таймера на одном экране.
     #[test]
-    fn countdown_survives_a_missing_deadline() {
+    fn paused_does_not_repeat_the_countdown_the_pills_show() {
         let phase = GuardPhase::Paused {
             since: t0(),
             reason: UnprovenReason::ConfirmationUnavailable,
         };
-        let text = explanation(&phase, None);
-        assert_eq!(
-            text.next,
-            "Ждём ответа сервисов, 0 с до завершения; возобновятся при подтверждении \
-             безопасного выхода"
-        );
+        let text = explanation(&phase);
+        assert!(!text.next.contains(" с "), "секунд в объяснении нет");
+        assert!(!text.next.contains(':'), "минут в объяснении нет");
     }
 
     /// Там, где охрана ничего не сделала с целями — целей нет (`Disabled`) или

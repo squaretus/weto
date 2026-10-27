@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use support::{process, FakeRegistry};
 use weto_cli::context::Identity;
 use weto_cli::log::{LogSink, LoggingReporter};
-use weto_cli::run::{app_is_running, scope_text, LockError, RunLock};
+use weto_cli::run::{app_conflict, app_is_running, scope_text, AppConflict, LockError, RunLock};
 use weto_cli::store::{Reload, Store, WatchedSettings};
 use weto_config::journal::KillContext;
 use weto_core::process::{MatchBasis, MatchedProcess};
@@ -78,6 +78,17 @@ fn the_app_of_another_user_counts_too() {
     ]);
 
     assert_eq!(app_is_running(&registry, root_data, 1), Some(21));
+}
+
+/// Признак приложения — путь под `*/.local/share/weto/`, и создать его может любой
+/// пользователь. Охрану всей машины такой процесс не выключает: она стартует
+/// и предупреждает. Пользовательская охрана рядом со своим приложением не стартует.
+#[test]
+fn a_whole_machine_guard_never_refuses_because_of_an_app() {
+    assert_eq!(app_conflict(true, Some(21)), AppConflict::Warn(21));
+    assert_eq!(app_conflict(false, Some(21)), AppConflict::Refuse(21));
+    assert_eq!(app_conflict(true, None), AppConflict::None);
+    assert_eq!(app_conflict(false, None), AppConflict::None);
 }
 
 /// Строка старта называет, чью охрану ведёт процесс: машины или пользователя.

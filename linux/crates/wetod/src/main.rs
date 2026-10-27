@@ -134,7 +134,7 @@ fn check(paths: &Paths) {
     let phase = controller.phase();
     let snapshot = controller.snapshot();
 
-    let text = presentation::explanation(&phase, controller.remaining_pause());
+    let text = presentation::explanation(&phase);
     println!("{}", text.title);
     println!("{}: {}", text.action, text.evidence);
     if let Some(report) = snapshot.report {
@@ -167,12 +167,12 @@ fn watch(paths: &Paths) {
                 GuardAction::Pause => println!(
                     "{}: цели на паузе — {}",
                     phase.title(),
-                    presentation::explanation(&phase, controller.remaining_pause()).evidence
+                    presentation::explanation(&phase).evidence
                 ),
                 GuardAction::Terminate => println!(
                     "{}: цели завершены — {}",
                     phase.title(),
-                    presentation::explanation(&phase, controller.remaining_pause()).evidence
+                    presentation::explanation(&phase).evidence
                 ),
             }
             previous = Some(phase.clone());

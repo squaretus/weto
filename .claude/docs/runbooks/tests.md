@@ -20,8 +20,8 @@ Test targets declared in `macos/Package.swift` (`macos/Tests/<name>/`):
 | --- | --- | --- |
 | `module-boundary-contract.sh` | все модули macOS | разрешённые импорты по слоям: ядро без системы, `WetoSystem` без UI |
 | `WetoCoreTests` | `WetoCore` | policy decisions (`GuardPolicy`, `GuardPolicyLocal`), `ProcessMatcher`, `IPRange`, geo response parsing, `GuardMachineTests` (the pause/kill reducer against `shared/fixtures/guard-transitions.json`), `VPNTunnelStatusTests` |
-| `WetoSystemTests` | `WetoSystem`, `WetoCore` | boundary adapters: `GeoProbe` (`HTTPFetcherPhasesTests` for DNS/connect/TLS/first-byte timing), `KeychainStore`, `FileSecretStoreTests`, `NetworkEventSource`, `NetworkSnapshotReader` (route + raised interfaces), process listing, `ProcessSignalerTests` (signal order and delivery), `TerminalLocatorTests` |
-| `WetoSharedTests` | `WetoShared`, `WetoCore`, `WetoSystem`, `UpdateKit*` | VM layer: `GuardVM` (pause/resume, journal episodes), `SettingsStore`, `EventLogStore`, `CheckLogStoreTests`, `StoppedLedgerTests`, `GuardNotifyingTests`, `LaunchAgentController`, `Maintenance`, `StatusPresentation`, `WetoUpdateTheme`, update banner texts |
+| `WetoSystemTests` | `WetoSystem`, `WetoCore` | boundary adapters: `GeoProbe` (`HTTPFetcherPhasesTests` for DNS/connect/TLS/first-byte timing and `test_a_silent_pooled_connection_is_not_reused_by_the_next_request` — a local server that answers only on a second connection), `KeychainStore`, `FileSecretStoreTests`, `NetworkEventSource`, `NetworkSnapshotReader` (route + raised interfaces), process listing, `ProcessSignalerTests` (signal order and delivery), `TerminalLocatorTests`, `TerminalModeKeeperTests` (raw mode captured on a real pty comes back after a shell-like change), `ForegroundJobPlanTests` (real pty job: `terminalDevice` from `e_tdev` resolves to `/dev/ttys*`) |
+| `WetoSharedTests` | `WetoShared`, `WetoCore`, `WetoSystem`, `UpdateKit*` | VM layer: `GuardVM` (pause/resume, journal episodes), `ProcessEnforcerTests` (terminal mode captured before `SIGSTOP`, restored once in front again, dropped for a background or vanished target — through a recording `TerminalModeKeeping`), `SettingsStore`, `EventLogStore`, `CheckLogStoreTests`, `StoppedLedgerTests`, `GuardNotifyingTests`, `LaunchAgentController`, `Maintenance`, `StatusPresentation`, `WetoUpdateTheme`, update banner texts |
 | `WetoCLITests` | `WetoCLI`, `WetoCore`, `WetoSystem`, `WetoShared` | terminal version `weto`: `CommandParserTests` (grammar, help, parse errors), `CLICommandsTests` (every settings command against a temporary suite and directory, `vpn set` auto-detection), `SystemModeTests` (system paths under a temp root, non-root refusal hint, which commands stay open), `GuardStatusTests` (`status.json`, liveness by age and pid, `updateAvailable`), `ServiceTests` (plist text, idempotent install, `launchctl` calls), `UpdateTests` (asset names, `SHA256SUMS`, trusted hosts, refusal texts, daily check), `GuardLogTests` |
 | `WetoDesignTests` | `WetoDesign` | `DesignResources` bundle resolution, `MenuBarImageRenderer`, `WetoPauseBadgeTests` (countdown rounding), `WetoPillButtonStyleTests` (`.controlSize(.small)` is genuinely more compact than the default) |
 
@@ -49,13 +49,17 @@ Both packaging failures the project has shipped so far ("the app never appeared"
 ### 2. Mocking rule of the project
 
 Only system boundaries are substituted, and only through their protocols:
-`GeoProbing`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`,
+`GeoProbing`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`, `TerminalModeKeeping`,
 `StoppedLedgerPersisting`, `NetworkSnapshotReading`, `TargetResolving`, `NetworkEventSourcing`
 (plus the adjacent `HTTPFetching`, `SecretStoring`, `ProcessLocating`, `InterfaceListing` in `macos/Sources/WetoSystem/`;
 in `WetoCLI` — `ServiceControlling` (`launchctl`), `WetoAppDetecting`, `GuardProcessSignaling`, `CLIOutput`,
 `ArchiveUnpacking` (`tar`), `ExecutableReplacing`; the update's network goes through `HTTPFetching`).
 In the update package the boundaries are `ReleaseFetching`, `UpdateInstalling`,
 `UpdateStateStoring`, `UpdateClock`, `URLOpening` — nothing else is substituted there either.
+On Linux the same terminal-mode boundary is `weto_sys::terminal_mode::TerminalModeKeeping`,
+injected with `ProcessEnforcer::with_terminal_modes` and recorded in
+`weto-guard/tests/harness/mod.rs`: the real keeper would write to real ttys by invented device
+numbers.
 
 Internal types are never substituted: `GuardPolicy`, `GuardController`, `ProcessEnforcer`, `ProcessMatcher` are exercised for real. This is what keeps the bulk of `WetoCoreTests` synchronous and double-free — `WetoCore` imports no system framework at all (project invariant, see `.claude/rules/ARCHITECTURE.md`). Test doubles live inline in the test file that needs them (`FakeFetcher` in `GeoProbeTests`, doubles in `GuardVMTests`, `LaunchAgentControllerTests`, `TestDoubles.swift` of `UpdateKitTests`); there is no shared mock/support target.
 

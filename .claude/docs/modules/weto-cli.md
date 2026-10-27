@@ -107,8 +107,9 @@ directories `weto-cli`, asset prefix `weto-cli-`.
 
 ## Invariants / assumptions
 - **One guard per set of targets.** `run` takes `flock` on `run.lock` (released by the kernel even
-  on SIGKILL) and refuses to start while the GUI app runs — for **any** user, since a root guard
-  watches everyone's targets: macOS walks the process table for `…/Weto.app/Contents/MacOS/…`
+  on SIGKILL). A user guard refuses to start while its GUI app runs; a root guard detects the app
+  of **any** user but only logs a warning and keeps guarding — the marker is a path any user can
+  fake, and refusing would hand them an off switch for the whole-machine guard: macOS walks the process table for `…/Weto.app/Contents/MacOS/…`
   (a LaunchDaemon has no window session for `NSRunningApplication`); Linux looks for a
   `/proc/<pid>/exe` under any `*/.local/share/weto/` (non-root can only see its own).
 - **System install seen by a non-root user** (macOS: LaunchDaemon plist or the system data dir

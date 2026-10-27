@@ -488,6 +488,7 @@ public final class GuardVM {
         // повод стоять исчезает правкой настроек, а не фазой охраны.
         releaseUnguarded()
         settleResume()
+        enforcer.restoreTerminalModes(observing: scan)
     }
 
     /// Проверка по кнопке из попапа. Повторное нажатие, пока ответ не пришёл,

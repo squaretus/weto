@@ -142,6 +142,15 @@ final class SystemModeTests: XCTestCase {
         }
     }
 
+    /// Признак приложения подделывает любой пользователь, поэтому охрана всей машины
+    /// из-за него не останавливается: стартует и предупреждает. Пользовательская — нет.
+    func test_a_whole_machine_guard_never_refuses_because_of_an_app() {
+        XCTAssertEqual(GuardRunner.appConflict(isSystem: true, appIsRunning: true), .warn)
+        XCTAssertEqual(GuardRunner.appConflict(isSystem: false, appIsRunning: true), .refuse)
+        XCTAssertEqual(GuardRunner.appConflict(isSystem: true, appIsRunning: false), .none)
+        XCTAssertEqual(GuardRunner.appConflict(isSystem: false, appIsRunning: false), .none)
+    }
+
     /// Приложение любого пользователя видно обходом процессов — без GUI-сессии.
     func test_the_weto_app_is_found_by_walking_processes() {
         XCTAssertTrue(WetoAppProcessDetector(locator: FixedProcesses(paths: [

@@ -627,3 +627,77 @@ fn after_the_hard_ceiling_a_failed_refresh_drops_the_confirmation() {
         "вечно доверять одному подтверждению нельзя: у переприсвоенных диапазонов страна меняется"
     );
 }
+
+/// Сервер, который на каждом соединении отвечает ровно один раз — с keep-alive — и дальше
+/// держит соединение открытым, но молчит. Так выглядит соединение, брошенное туннелем
+/// с подменой адресов при перезапуске или смене узла: снаружи живое, внутри мёртвое,
+/// и RST не приходит.
+fn one_answer_per_connection(routes: HashMap<&'static str, &'static str>) -> GeoEndpoints {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let mut header = String::new();
+            while reader
+                .read_line(&mut header)
+                .map(|n| n > 0)
+                .unwrap_or(false)
+            {
+                if header.trim().is_empty() {
+                    break;
+                }
+                header.clear();
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let body = routes.get(path.as_str()).copied().unwrap_or("");
+            let mut stream = stream;
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            // Не закрывается: соединение остаётся в пуле клиента, если пул есть.
+            held.push(stream);
+        }
+    });
+    let base = format!("http://127.0.0.1:{port}");
+    GeoEndpoints {
+        ipinfo: format!("{base}/ipinfo"),
+        freeipapi: format!("{base}/freeipapi/{{ip}}"),
+        geojs: format!("{base}/geojs/{{ip}}"),
+        geojs_self: format!("{base}/geojs-self"),
+    }
+}
+
+/// Каждый запрос пробы — своё соединение. На macOS общая на всё время приложения
+/// `URLSession` отдавала следующей пробе соединение, брошенное туннелем, и проба ждала
+/// ответа до таймаута минутами подряд при исправном VPN: отпечаток выхода не менялся,
+/// и ничто не заставляло открыть новое. Здесь `ureq::get` строит агент на каждый вызов,
+/// и пула между запросами нет; тест держит это свойство — общий `Agent` ради экономии
+/// на TLS вернул бы ту же поломку.
+#[test]
+fn a_silent_pooled_connection_is_not_reused_by_the_next_request() {
+    let endpoints = one_answer_per_connection(HashMap::from([
+        ("/ipinfo", r#"{"ip":"203.0.113.7","country_code":"NL"}"#),
+        ("/freeipapi/203.0.113.7", r#"{"countryCode":"NL"}"#),
+        ("/geojs/203.0.113.7", r#"{"country":"NL"}"#),
+    ]));
+    let probe = HttpGeoProbe::new(endpoints, Box::new(HasPath(true)))
+        .with_timeout(std::time::Duration::from_secs(1));
+
+    for round in 1..=2 {
+        let report = probe.probe(Some("token"));
+        assert!(
+            matches!(report.outcome(), GeoOutcome::Resolved(_)),
+            "проба {round}: каждый запрос обязан уйти новым соединением, а не ждать молчащее из пула"
+        );
+    }
+}

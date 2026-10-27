@@ -139,8 +139,10 @@ log for «настройки …». A command run **without `sudo`** next to a r
 («охрана установлена на всю машину — sudo weto …»), and one run with `sudo` writes root's storage,
 not the user's — euid picks it (`CLIEnvironment.live`, `context.rs` `Context::from_env`). macOS
 root suite via `sudo` with preserved `HOME` is unverified live — suspect it first if edits never
-arrive. `run` refusals: `run.lock` held (`RunLock`) or the GUI app of any user detected
-(`run.rs` `app_is_running`, `Boundaries.swift` `WetoAppProcessDetector`).
+arrive. `run` refusals: `run.lock` held (`RunLock`), or — for a **user** guard only — the GUI app
+detected (`run.rs` `app_is_running`, `Boundaries.swift` `WetoAppProcessDetector`). A root guard
+never refuses because of the app: it logs «… охрана всей машины продолжает работу» and keeps
+guarding (`app_conflict` / `GuardRunner.appConflict`) — the app marker is a path any user can fake.
 `modules/weto-cli.md`, `decisions/whole-machine-guard-from-root.md`.
 
 ## If a target added through `sudo weto target add` is never matched
@@ -162,3 +164,17 @@ across `linux/scripts/build.sh`, `macos/scripts/make-cli.sh`, `release.yml` and 
 release (by design not "available"); «версия этой сборки неизвестна» = a `dev` build.
 «архив … не годится» on macOS = `._weto` / xattrs in the tarball. Linux binary «not found» /
 GLIBC errors on a server = a non-musl build slipped through. `runbooks/release.md`.
+
+## If the probe times out for minutes while the VPN is fine
+
+Look at `checks.json`: failures with DNS, connect and TLS all `0` mean the request went out over a
+pooled connection that never answered. Fixed by a session per request (macOS); Linux builds an agent
+per call. `bugs/stale-pooled-connection-under-fake-ip-tunnel.md`.
+
+## If `fg` returns a paused terminal target that ignores the keyboard
+
+tmux continues the stopped pane shell at once, so the shell takes the terminal and changes its mode;
+`claude` does not restore raw mode. The guard restores the mode itself once the target is in front
+again — check that the snapshot has `terminalDevice`/`tty_nr`, that the target was in
+`PausePlan.foregroundRoots`, and that the ledger let it go. Restoring is in-memory: a weto restart
+between pause and `fg` loses it. `bugs/tmux-takes-the-terminal-from-a-paused-target.md`.

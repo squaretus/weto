@@ -28,8 +28,12 @@ home happens to be `/root`". On a server that broke in three ways:
   other command answers «охрана установлена на всю машину — sudo weto <args>» (code 1). The
   marker is the system config dir or the system service file — so only writing commands may
   create the dir.
-- **The "is the GUI app running" refusal looks at every user**: process-table walk on both
-  platforms (`…/Weto.app/Contents/MacOS/…`, `/proc/<pid>/exe` under any `*/.local/share/weto/`).
+- **The GUI app is looked for at every user, but a root guard never refuses because of it**:
+  process-table walk on both platforms (`…/Weto.app/Contents/MacOS/…`, `/proc/<pid>/exe` under
+  any `*/.local/share/weto/`). Both markers are paths any unprivileged user can create, so a
+  refusal would let anyone switch the whole-machine guard off by running a fake «app» — the root
+  guard logs a warning and keeps guarding (`app_conflict` / `GuardRunner.appConflict`); only a
+  user guard refuses, where faking the app is self-inflicted.
   A LaunchDaemon has no window session, so no `NSRunningApplication` / `NSWorkspace` in `WetoCLI`
   at all (enforced by `module-boundary-contract.sh`).
 

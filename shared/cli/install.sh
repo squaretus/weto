@@ -124,8 +124,8 @@ if [ "$SYSTEM" = "linux" ] && [ -n "$OWNER" ]; then
     OWNER_HOME="$(getent passwd "$OWNER" 2>/dev/null | cut -d: -f6 || true)"
     if [ -n "$OWNER_HOME" ] && [ -e "$OWNER_HOME/.local/bin/weto" ]; then
         say "weto: внимание — у $OWNER есть приложение weto с интерфейсом ($OWNER_HOME/.local/bin/weto);"
-        say "      без sudo команда «weto» может вызвать его. Две охраны на одной машине не работают:"
-        say "      терминальная откажется запускаться, пока приложение открыто."
+        say "      без sudo команда «weto» может вызвать его. Две охраны над одними целями мешают"
+        say "      друг другу — закройте приложение, пока работает охрана всей машины."
     fi
 fi
 

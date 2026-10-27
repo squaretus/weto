@@ -131,10 +131,7 @@ pub fn build(
     update_available: Option<String>,
 ) -> StatusFile {
     let phase = &snapshot.phase;
-    let remaining = snapshot
-        .pause_deadline
-        .map(|deadline| deadline.duration_since(now).unwrap_or(Duration::ZERO));
-    let text = explanation(phase, remaining);
+    let text = explanation(phase);
 
     StatusFile {
         version: VERSION,

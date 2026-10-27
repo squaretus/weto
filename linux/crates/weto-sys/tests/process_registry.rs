@@ -200,6 +200,10 @@ fn group_terminal_and_stopped_state_come_from_stat() {
     assert_eq!(processes[0].parent_pid, 30);
     assert_eq!(processes[0].process_group, 31);
     assert_eq!(processes[0].terminal_foreground_group, 777);
+    assert_eq!(
+        processes[0].terminal_device, 34816,
+        "`tty_nr` как его пишет ядро: по нему ищется путь терминала"
+    );
     assert!(processes[0].is_stopped);
 }
 
@@ -220,6 +224,7 @@ fn a_process_without_a_controlling_terminal_reports_zero_not_minus_one() {
     let processes = ProcRegistry::rooted(tmp.path().into()).snapshot();
 
     assert_eq!(processes[0].terminal_foreground_group, 0);
+    assert_eq!(processes[0].terminal_device, 0);
 }
 
 /// `t` — остановка трассировщиком, а не сигналом. Пользовательского Ctrl-Z
@@ -396,6 +401,7 @@ fn a_process_with_a_controlling_terminal_reports_the_foreground_group() {
         "у процесса в pty есть передняя группа терминала"
     );
     assert_eq!(sleeping.terminal_foreground_group, sleeping.process_group);
+    assert_ne!(sleeping.terminal_device, 0, "и сам терминал");
 }
 
 /// А без управляющего терминала — ноль, и именно ноль: ядро пишет сюда -1,

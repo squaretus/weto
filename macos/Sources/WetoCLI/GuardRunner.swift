@@ -137,6 +137,24 @@ final class GuardRunner {
         self.updateSource = updateSource.flatMap { CLIUpdate.knownVersion($0.currentVersion) == nil ? nil : $0 }
     }
 
+    static let appIsRunningText =
+        "запущено приложение Weto: две охраны над одними целями мешают друг другу — закройте приложение"
+    static let appIsRunningUnderRootText =
+        "запущено приложение Weto: две охраны над одними целями мешают друг другу — охрана всей машины продолжает работу, закройте приложение"
+
+    enum AppConflict: Equatable { case none, refuse, warn }
+
+    /// Охрана всей машины из-за найденного приложения не останавливается никогда.
+    /// Признак приложения — путь с `/Weto.app/Contents/MacOS/`, а такой бандл любой
+    /// пользователь соберёт себе сам: назовёт что угодно `Weto.app`, запустит — и отказ
+    /// на старте выключил бы охрану всей машины чужими руками (а `KeepAlive` крутил бы
+    /// её перезапуски впустую). Машинная охрана продолжает охранять и предупреждает
+    /// в лог. Охране пользователя отказ по-прежнему годится.
+    static func appConflict(isSystem: Bool, appIsRunning: Bool) -> AppConflict {
+        guard appIsRunning else { return .none }
+        return isSystem ? .warn : .refuse
+    }
+
     /// Возвращает код выхода, только если охрана не стартовала. Штатный выход
     /// по сигналу завершает процесс сам, из обработчика.
     func start() -> Int32? {
@@ -151,10 +169,15 @@ final class GuardRunner {
             return ExitCode.failure
         }
 
-        guard !appDetector.isWetoAppRunning else {
-            output.err("запущено приложение Weto: две охраны над одними целями мешают друг другу — закройте приложение")
+        switch Self.appConflict(isSystem: paths.isSystem, appIsRunning: appDetector.isWetoAppRunning) {
+        case .none:
+            break
+        case .refuse:
+            output.err(Self.appIsRunningText)
             close(lockDescriptor)
             return ExitCode.failure
+        case .warn:
+            log.line(Self.appIsRunningUnderRootText)
         }
 
         // App Nap и троттлинг таймеров душат ровно такие процессы: без окон, вся работа —
@@ -326,9 +349,7 @@ final class GuardRunner {
     }
 
     private func logPhase(_ phase: GuardPhase, now: Date) {
-        let explanation = StatusPresentation.explanation(
-            for: phase, remainingPause: vm.pauseDeadline.map { $0.timeIntervalSince(now) }
-        )
+        let explanation = StatusPresentation.explanation(for: phase)
         var line = "фаза: \(phase.title) — \(GuardStatus.actionText(phase.action)): \(explanation.evidence)"
         if case .paused = phase, !vm.pausedProcesses.isEmpty {
             line += "; на паузе: " + vm.pausedProcesses.map { "\($0.targetName) (pid \($0.pid))" }
