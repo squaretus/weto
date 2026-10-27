@@ -40,6 +40,8 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   the zsh of a `script`/tmux session (both are session leaders — session leadership excludes
   exactly the shell we need). Only the job control does: `login` never takes the terminal back
   from a stopped target, so SIGSTOP to it is a signal off the point
+- `macos/Sources/WetoCore/Model/GeoModels.swift` — also `VPNAppStatus` and `VPNTunnelStatus`
+  (`notChosen | down | bypassed(via:) | carrying`, built by `init(chosen:snapshot:)`)
 - `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`,
   `TargetRule`, `KillEvent`, `KillDiagnostics`, `JournalExport`, `NetworkPhases` (per-request DNS /
   connect / TLS / first-byte timings, `stalledPhase` tells a dead tunnel from a slow service),
@@ -49,7 +51,13 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   `GuardMachineTests` are the load-bearing ones)
 
 ## Entry points
-- `GuardPolicy.decideLocal(isEnabled:vpn:config:) → GuardDecision?` — tri-state, see invariants; `vpn` is a `VPNAppStatus`, computed by the caller from the process scan
+- `GuardPolicy.decideLocal(isEnabled:vpn:tunnel:config:) → GuardDecision?` — tri-state, see
+  invariants; `vpn` is a `VPNAppStatus` computed by the caller from the process scan, `tunnel` a
+  `VPNTunnelStatus` (default `.notChosen`) computed from the same pass's snapshot
+- `VPNTunnelStatus(chosen: config.vpnTunnel, snapshot:)` — pure: not in `upInterfaces` → `.down`;
+  up, but `snapshot.outgoing` names another interface → `.bypassed(via:)`; otherwise (carrier is
+  the tunnel, or there is no carrier at all) → `.carrying`
+- `UnsafeEvidence.isLocal` — `vpnAppNotRunning`, `vpnTunnelDown`, `trafficBypassesTunnel`
 - `GuardPolicy.decide(GuardSignals) → GuardDecision` — full ordered chain. `pendingVerification`
   is gone: a lost verdict is `GuardMachine.apply(.verdictLost(cause:))` now, a reducer input,
   not a policy outcome — see `GuardMachine.swift` below.
@@ -77,7 +85,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - Service / DB / queue / external API: none — the module never performs a request or a write.
 - Consumers: `WetoSystem` (`GeoProbe`, `ProcessRegistry`, `TargetResolver`, `NetworkSnapshotReader`),
   `WetoShared` (`GuardController`, `ProcessEnforcer`, `GuardVM`, `SettingsStore`),
-  `WetoMenuBar`, `WetoHelper` (entry point only). Release parsing, versions and the download
+  `WetoMenuBar`, `WetoCLI`, `WetoHelper` (entry point only). Release parsing, versions and the download
   host allow-list moved to `UpdateKitCore` — see `modules/update-kit.md`.
 
 ## Side effects
@@ -136,9 +144,24 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   `decisions/pause-instead-of-kill.md`). `out=-` (no carrier, or the geo host not resolved yet) is
   its own state, and a verdict cannot exist in it.
 - **`VPNAppStatus` is the caller's answer, not the core's.** The core never scans processes; it only
-  knows whether something was chosen (`config.vpnAppRule`) and what the caller reports. `decideLocal`
-  kills on an empty selection *before* looking at the status, so a caller whose status drifts out of
-  sync with the settings still fails closed.
+  knows whether something was chosen (`config.vpnAppRule`) and what the caller reports. Each local
+  check runs only when its source is chosen: app first (`config.vpnAppRule != nil`), then tunnel
+  (`config.vpnTunnel != nil`); neither chosen → `nil`, geo alone decides. The two are mutually
+  exclusive in settings (`SettingsStore` / `Settings` setters), never in the core.
+- **The tunnel is the terminal version's choice only** (`GuardConfig.vpnTunnel`, set from
+  `weto vpn set`). Its evidence — `vpnTunnelDown(name)`, `trafficBypassesTunnel(tunnel:via:)`,
+  texts «VPN-туннель wg0 не поднят» / «трафик идёт мимо туннеля wg0 — через eth0», word for word on
+  Linux — is **local** like `vpnAppNotRunning`: everywhere code used to special-case
+  `vpnAppNotRunning` (reassessment without a probe, hiding the stale country, `StatusPresentation`)
+  it now asks `isLocal`. A new local evidence must be added to `isLocal`, or the guard never lifts
+  it without a probe and the popup shows the old country as if the exit were known.
+- **`NetworkSnapshot.upInterfaces` is outside `verdictFingerprint`.** Only the tunnel status reads
+  it. Putting it in the fingerprint would bring back the second-VPN trap: a corporate client
+  reconnecting next to the working tunnel would void the verdict every time. `bypassed` is judged
+  by the kernel route to the ipinfo host (`outgoing.interface`), so a tunnel that does not carry
+  the verdict request is "bypassed" even when it carries other prefixes. No carrier at all is
+  `carrying`, not `bypassed`: nothing leaves, so there is no leak — geo answers (probe fails →
+  pause). Fixtures: `guard-policy.json` v5, two tunnel cases in `guard-transitions.json`.
 - **`ProcessSnapshot.arguments` stays an array.** A joined command line must never be used for matching.
 - **The pause ceiling is a machine parameter, not an input.** `setPauseCeiling` touches neither
   the phase nor `pausedSince`; only the `.tick` threshold moves, and the deadline is always
@@ -183,5 +206,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   notifications): `.claude/CLAUDE.md` → "Ловушки предметной области"
 - `features/geo-whitelist.md` — the optional allowed-exits list and where its stage sits
 - `features/pause-instead-of-kill.md` — the six-phase reducer and the SIGSTOP/SIGCONT plan
+- `features/terminal-version.md`, `modules/weto-cli.md` — the only place a tunnel is chosen
 - `bugs/`, `decisions/` — `decisions/vpn-app-instead-of-tunnel.md`,
+  `decisions/vpn-tunnel-in-terminal-version.md`,
   `decisions/geo-confirmation-services.md`, `decisions/pause-instead-of-kill.md`

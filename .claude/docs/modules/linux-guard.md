@@ -8,7 +8,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | Crate | File | Responsibility |
 |---|---|---|
 | `weto-core` | `policy.rs` | `decide`, `decide_local` — port of `GuardPolicy`, three-outcome `GuardDecision` |
-| `weto-core` | `network.rs` | `NetworkSnapshot`, `verdict_fingerprint`, `resolve_vpn_status` |
+| `weto-core` | `network.rs` | `NetworkSnapshot` (`up_interfaces`, outside the fingerprint), `verdict_fingerprint`, `VpnTunnelStatus` + `tunnel_status` (terminal version only) |
 | `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
 | `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
 | `weto-core` | `ip.rs` | address validation and CIDR |
@@ -16,7 +16,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText` |
 | `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `PausedProcess`, `RecoveredProcess` |
 | `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation`/`should_explain`, `status_lines`, `idle_targets` |
-| `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic |
+| `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic; `InterfaceListing` / `KernelInterfaces` (`getifaddrs`, `IFF_UP` and `IFF_RUNNING`) |
 | `weto-sys` | `network_events.rs` | netlink subscription |
 | `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, `T` state |
 | `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order |
@@ -24,16 +24,17 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `background.rs` | the background track: one thread per probe, so a pass never waits for a request |
 | `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
 | `weto-core` | `launcher.rs` | `.desktop` text: `DesktopCommand`, `name_from_desktop_entry`, wrapper stripping |
-| `weto-sys` | `target_resolver.rs` | the same chain on disk: `Resolution`, `display_name_for`; `TargetResolving` / `LaunchTargetResolver` for the guard; `launch_paths_for` (the `PATH` file stored on add) |
+| `weto-sys` | `target_resolver.rs` | the same chain on disk: `Resolution`, `display_name_for`; `TargetResolving` / `LaunchTargetResolver` for the guard; `launch_paths_for` (the `PATH` file stored on add); `settings_target` — the one way to build a stored `Target`, shared by the settings window and `weto-cli` |
 | `weto-sys` | `desktop_entries.rs` | the `.desktop` index over the XDG application directories |
 | `weto-sys` | `terminal.rs` | raises it: `org.freedesktop.Application.Activate` over the session bus |
 | `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
 | `weto-sys` | `notifications.rs` | notifications over D-Bus; the `default` action opens the status window |
 | `weto-sys` | `secret_store.rs` | token file, mode `0600` |
-| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings, ring-buffer journal, XDG paths |
+| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings (`set_vpn_app` / `set_vpn_tunnel` clear each other, `add_target` with `TargetEntryError`, `validate_tunnel_name`), ring-buffer journal, XDG paths (`from_env_named(APP_DIR \| CLI_DIR)`, `status_file`, `run_lock_file`) |
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
-| `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping |
+| `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping; tunnel status next to `vpn_app_status`, from the same pass's snapshot; `GuardSnapshot` also carries `outgoing`, `vpn_app`, `vpn_tunnel`, `probed_at` for `weto-cli`'s status file |
 | `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger |
+| `weto-guard` | `runtime.rs` | the guard loop and its journal writers, shared by `weto-app` and `weto-cli`: `JournalWriter`, `CheckWriter`, `PauseEpisodes`/`StandingEpisode`, `system_controller`, `run_guard`/`spawn_guard` (with an `after_pass` hook), `tick_interval` — moved out of the GTK crate `weto-app/src/state.rs` unchanged |
 | `weto-guard` | `rules.rs` | `RuleCache`: target and VPN-app rules re-resolved on a target-list change or every `TARGET_RULE_REFRESH` (2 s), never narrowed |
 | `weto-app` | `lifecycle.rs` | whether the process outlives its windows (`holds_application`) |
 | `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
@@ -164,10 +165,12 @@ Everything the policy decides is shared. What the system dictates is not:
   nothing to the user and changed between runs; sysfs reading and the tunnel qualification
   (`DEVTYPE`, `tun_flags`, ARPHRD) went away with the picker. What survived is the route probe —
   it answers whether traffic flows, which is the only thing the verdict needs.
-- **A VPN without a process cannot be chosen.** `wg-quick` brings an interface up and exits;
-  there is nothing to watch. Such a setup leaves the choice empty, which is fail-closed, and the
-  geo half of the policy still works once an app is picked. macOS has no equivalent gap because
-  every client there is an app.
+- **A VPN without a process cannot be chosen in the window.** `wg-quick` brings an interface up
+  and exits; there is nothing to watch. In the GUI such a setup leaves the choice empty and geo
+  alone decides. The terminal version (`weto vpn set wg0`) can name the interface instead —
+  `Settings.vpn_tunnel`, mutually exclusive with `vpn_app`; the window never shows it because the
+  CLI keeps its own config (`~/.config/weto-cli/config.toml`, from root `/etc/weto/config.toml`).
+  [decisions/vpn-tunnel-in-terminal-version](../decisions/vpn-tunnel-in-terminal-version.md).
 - **Network events come from a netlink subscription**, the replacement for
   `NWPathMonitor`: single-digit milliseconds instead of waiting out a five-second tick.
   Locked down by `netlink-events-contract.sh`.
@@ -325,7 +328,7 @@ Everything the policy decides is shared. What the system dictates is not:
   diagnostics — instead of a bare `&str`. `Journal::refine_episode` rewrites every record of the
   episode; `refine_basis` rewrites only the records of one `MatchBasis`. A record's `id` is
   `{episode}-{n}` and `n` keeps counting across the passes of one episode (`StandingEpisode` in
-  `state.rs`): a pause lasts, and a target that joins it on a second pass — born under the pause,
+  `weto-guard/src/runtime.rs`): a pause lasts, and a target that joins it on a second pass — born under the pause,
   or resumed and stopped again — would otherwise repeat `{episode}-0`. macOS gives every record
   a UUID, and `id` is part of the shared export format.
 - **Everything weto sends `SIGSTOP` is explainable from the journal alone.** `KillReporting::paused`
@@ -344,8 +347,8 @@ Everything the policy decides is shared. What the system dictates is not:
 - The episode ledger lives in `weto_core::episode::EpisodeLedger`, not in the app layer:
   the rule is identical on both platforms, and the app crate is all but untestable — a mistake in
   it showed up only on a live machine, as "launch blocked" records for a process killed for the
-  first time. What little of it can be tested is tested in place (`#[cfg(test)] mod tests` in
-  `state.rs` and `main.rs`): per-record journal ids and the exit funnel.
+  first time. What little of it can be tested is tested in place: per-record journal ids in
+  `weto-guard/src/runtime.rs` (moved there with the writers), the exit funnel in `weto-app` `main.rs`.
   `episode_finished` fires on **every** transition to safe, not just for an episode
   that began before the verdict: that call is where the ledger is reset.
 - Dedup is by the pair **reason + pid**. It used to be by reason alone, which never let a target
@@ -406,15 +409,21 @@ points at the new version.
   symlink and a `pkill -f` on the `current` path matched nothing. Both are covered by
   `scripts/tests/install-contract.sh` and `weto-sys/tests/autostart.rs`; see
   `bugs/launch-path-is-the-symlink-not-the-version.md`.
-- **No root anywhere:** not for installing, updating, killing targets or reading routes.
+- **The terminal version's archive is never an update.** It is published in the same release as
+  `weto-cli-<v>-linux-<arch>.tar.gz` (static musl, one file `weto`) — OS and arch swapped and gzip
+  instead of zstd, so it cannot match the app's `-<arch>-linux.tar.zst` suffix; `SHA256SUMS` and
+  `install.sh` cannot either. `ReleaseChecker` still skips the `CLI_ASSET_PREFIX` (`weto-cli-`)
+  as a second guard. The CLI updates itself (`weto update`), see `modules/weto-cli.md`.
+- **No root anywhere** (in the GUI app; the terminal version runs from root by design —
+  `decisions/whole-machine-guard-from-root.md`): not for installing, updating, killing targets or reading routes.
   There is no privileged helper in the Linux build at all. Download protection is the same
   as on macOS — https plus the GitHub delivery host list; neither platform has a signature,
   and splitting them over that would be a decision without a reason.
 
 ## Divergence control
 
-`shared/fixtures/guard-policy.json` (`version: 3`) holds 36 cases extracted from the existing
-Swift tests. `allowedCountries` / `allowedIPRanges` are optional in both runners, so a case that
+`shared/fixtures/guard-policy.json` (`version: 5`) holds 46 cases extracted from the existing
+Swift tests (v5 added the tunnel cases). `allowedCountries` / `allowedIPRanges` are optional in both runners, so a case that
 predates the whitelist keeps its exact previous meaning. Both `weto-core/tests/policy_fixtures.rs` and
 `macos/Tests/WetoCoreTests/GuardPolicyFixtureTests.swift` run them. A behavioural drift
 between platforms fails a test naming the case, instead of surfacing as a kill-switch
@@ -426,7 +435,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-528 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+657 tests (with `weto-cli`), run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
@@ -460,6 +469,7 @@ and that `Arc::strong_count` of the state returns to its baseline after closing.
 | `weto-tray` | StatusNotifierItem icon rendered from the shared `.icon` bundle |
 | `weto-update` | release check, show policy, install into `$HOME`, rollback |
 | `weto-app` | `weto` binary: status window, settings, update banner and window |
+| `weto-cli` | `weto-cli` cargo binary, shipped as `weto`: the terminal version, no GTK/D-Bus, static musl — `modules/weto-cli.md` |
 
 ## How a pause plays out here
 

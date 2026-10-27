@@ -76,7 +76,11 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `macos/Sources/WetoShared/PopupPresenting.swift` — the one-method boundary `MenuBarPopupPresenter`
   needs to open the popup from a notification tap, without pulling `WetoMenuBar` into this module
 - `macos/Sources/WetoShared/SettingsStore.swift` — `UserDefaults` + Keychain, guard-config change bus;
-  the pause ceiling (`pauseCeiling`, key `pauseCeilingSeconds`) has its own bus, `onPauseCeilingChange`
+  the pause ceiling (`pauseCeiling`, key `pauseCeilingSeconds`) has its own bus, `onPauseCeilingChange`.
+  `vpnTunnel` (key `vpnTunnel`, field `.vpnTunnel`) exists for the terminal version only and is
+  mutually exclusive with `vpnAppRule` — each setter clears the other side.
+  `reloadFromDefaults()` re-reads the suite and applies only the differing fields through the
+  normal setters (see invariants); `weto run` calls it once a second
 - `macos/Sources/WetoShared/EventLogStore.swift` — 100-entry ring buffer of `KillEvent`, one per killed process
 - `macos/Sources/WetoShared/CheckLogStore.swift` — 50-entry ring buffer of `CheckEvent` (the second
   journal: every connectivity-check attempt, not just the ones that killed something).
@@ -105,6 +109,12 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `GuardVM.recheckNow()` — user-driven probe from the popup; `isProbing`, `lastReport` back it
 - `GuardVM.refreshVPNCandidates()`, `refreshRunningTargets()`, `runningProcessCount(forTarget:)`,
   `displayName(forTarget:)`, `resolvedDescription(forTarget:)`, `unloadCompletely() → Result<Void, LaunchAgentError>`
+- For the terminal version `weto` (status file and settings commands): `GuardVM.lastSnapshot`,
+  `currentVPNAppStatus()`, `currentVPNTunnelStatus()` (no snapshot yet → `.down` when a tunnel is
+  chosen), `static resolvedDescription(forTarget:resolver:)` — usable without a running guard;
+  `StatusPresentation.knownReading(for:reading:)` is public now
+- `SettingsStore.vpnTunnel`, `reloadFromDefaults() → [GuardConfigurationChange.Field]`;
+  `SettingsPersistenceError.fileWriteFailed` — the CLI's token goes to `FileSecretStore`
 - `SettingsStore` setters (`isEnabled`, `targets`, `vpnAppRule`, `blockedCountryCodes`,
   `blockedIPRangeTexts`, `allowedCountryCodes`, `allowedIPRangeTexts`, `appTheme`),
   `setIPInfoToken(_) → Result<Void, SettingsPersistenceError>`,
@@ -192,6 +202,18 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Invariants / assumptions
 <!-- generated, verify -->
+- **Two processes share one settings suite in the terminal version** (`com.weto.cli` — the user's, or root's in whole-machine mode): commands
+  write through the setters, `weto run` picks the edit up with `reloadFromDefaults()`. It
+  touches only fields that differ — a blind re-apply would bump the revision and ask for a probe
+  every second. While it runs, `persist` is muted (`isReloading`): writing the just-read values
+  back would overwrite an edit the other process made in between. VPN fields are cleared before
+  being set, because each setter clears the other side and the reverse order would erase what
+  was just read. The token is reloaded too (from `SecretStoring`, not the suite).
+- **A tunnel is evaluated like the VPN app, from the same pass.** `GuardController` computes
+  `VPNTunnelStatus(chosen: config.vpnTunnel, snapshot:)` from the snapshot it took itself, in
+  `evaluate`, `probeNow`, the settings-change reassessment and `applyLatestNetworkOutcome`.
+  The `.danger(evidence)` reassessment without a probe fires for any `evidence.isLocal`, not just
+  `vpnAppNotRunning`; `GuardVM` hides the country under any local evidence.
 - **The pause ceiling is not a `GuardConfigurationChange`.** It does not change any policy
   decision, and a configuration change would ask for a probe and write a check-log entry
   («правка настроек»). `SettingsStore.pauseCeiling` fans out to `onPauseCeilingChange`
@@ -404,5 +426,6 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `features/geo-whitelist.md` — the allowed-exits list this store persists
 - `features/pause-instead-of-kill.md` — pause/resume path end to end
 - `decisions/pause-instead-of-kill.md` — why unproven pauses instead of killing
+- `modules/weto-cli.md` — the second composition root over `GuardVM` (the terminal version)
 - `docs/design-system.md` — for the UI that consumes `StatusPresentation`, the pause badge and
   the "Показать терминал" affordance

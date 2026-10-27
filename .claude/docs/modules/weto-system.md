@@ -10,7 +10,13 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 `WetoShared` is ever substituted.
 
 ## Key files
-- `macos/Sources/WetoSystem/NetworkSnapshotReader.swift` — one question: who carries the traffic
+- `macos/Sources/WetoSystem/NetworkSnapshotReader.swift` — who carries the traffic, plus the names
+  of raised interfaces (for the terminal version's tunnel)
+- `macos/Sources/WetoSystem/RaisedInterfaces.swift` — `InterfaceListing`, `KernelInterfaceList`
+  (`getifaddrs`, `IFF_UP` **and** `IFF_RUNNING`, sorted by name), `RaisedInterface` (name + addresses)
+- `macos/Sources/WetoSystem/FileSecretStore.swift` — `SecretStoring` as `0600` files, the terminal
+  version's token store (Keychain prompts after every rebuild, and a launchd job or an ssh session
+  has nobody to show the dialog to)
 - `macos/Sources/WetoSystem/RouteProbe.swift` — `RouteProbing`, `KernelRouteProbe`, `InterfaceAddresses`
 - `macos/Sources/WetoSystem/NetworkEventSource.swift`
 - `macos/Sources/WetoSystem/SearchPaths.swift` — `PATH` логин-шелла для поиска целей по имени
@@ -28,11 +34,15 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `macos/Sources/WetoSystem/TargetResolver.swift`
 - `macos/Sources/WetoSystem/KeychainStore.swift` (also `SecretStoring`, `SecretStoreError`, `TokenBox`)
 - `macos/Sources/WetoSystem/FlagImageStore.swift`
-- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests,ProcessSignalerTests,TerminalLocatorTests,HTTPFetcherPhasesTests}.swift`
+- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests,FileSecretStoreTests,ProcessSignalerTests,TerminalLocatorTests,HTTPFetcherPhasesTests}.swift`
 
 ## Entry points
-- `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; kernel route probe.
+- `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; kernel route probe plus
+  `upInterfaces` from `InterfaceListing.raisedInterfaces()` (`NetworkSnapshotReader(routeProbe:interfaces:)`).
+- `FileSecretStore(directory:)` — `read`/`write` like Keychain; failures are `SecretStoreError.file(_)`
 - `NetworkEventSourcing.start(handler: @Sendable (GuardTrigger) -> Void)` / `.stop()`
+  (`NetworkEventSource(observesWorkspace: false)` — no `NSWorkspace` observers: the terminal
+  version's root LaunchDaemon has no GUI session; process polling covers targets)
 - `GuardTrigger` — `.networkPath`, `.dynamicStore`, `.route`, `.wake`, `.appLaunched(bundleID:)`,
   `.appTerminated(bundleID:)`, `.tick`, `.geoSchedule`
 - `GeoProbing.probe() async → GeoProbeReport` (`GeoProbe` is an `actor`); the guard verdict is
@@ -67,7 +77,8 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - Internal: `WetoCore` only (`NetworkSnapshot`, `ProcessSnapshot`, `TargetRule`, `GeoOutcome`,
   `IPAddress`, `GeoResponses`, `Constants`). No dependency on `WetoShared` — direction is one-way.
 - Consumers: `AppCoordinator` (wires the production set), `GuardVM`/`GuardController`/
-  `ProcessEnforcer`, `SettingsStore` + `Maintenance` (Keychain), `MenuBarLabel` (flags)
+  `ProcessEnforcer`, `SettingsStore` + `Maintenance` (Keychain), `MenuBarLabel` (flags),
+  `WetoCLI` (`FileSecretStore`, `NetworkSnapshotReader`, `InterfaceListing` for `vpn list` and `vpn set` auto-detection)
 
 ## Side effects
 <!-- generated, verify -->
@@ -169,6 +180,10 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   seconds, so resolution runs on its own queue; the last known address survives a resolver outage,
   and `unresolved` is reported only when no address was ever obtained. A blinking resolver must not
   invalidate the verdict and kill targets.
+- **"Raised" means `IFF_UP` and `IFF_RUNNING` together.** An interface switched on with no live
+  link (`wg0` with no peer, a `tun` whose process died) carries nothing, and a tunnel that reads
+  as up there would keep targets running through a dead VPN. The list is a separate boundary
+  because interfaces cannot be raised or dropped in a test.
 - **Route changes are only visible on `PF_ROUTE`.** A client that edits routes directly touches
   neither `Global/IPv4` nor any service, so `SCDynamicStore` notifications stay silent. Bringing up
   a tunnel adds routes by the hundred, so the burst is coalesced into one event.
@@ -226,5 +241,6 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `AGENTS.md` — boundary invariant and the domain traps summarised above
 - `bugs/tunnel-without-network-service.md` — why the route owner is asked of the kernel
 - `decisions/vpn-app-instead-of-tunnel.md` — why there is no tunnel picker any more
+- `decisions/vpn-tunnel-in-terminal-version.md` — why the raised-interface list came back
 - `decisions/geo-confirmation-services.md` — the request budget this module spends
 - `decisions/pause-instead-of-kill.md` — the signal-order contract `ProcessSignaling` enforces

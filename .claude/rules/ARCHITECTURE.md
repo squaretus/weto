@@ -13,6 +13,9 @@
 - Внешних зависимостей нет. Флаги стран лежат в бандле (`shared/flags`, набор
   `HatScripts/circle-flags` под MIT).
 - Распространение: PKG-установщик, автообновление через GitHub Releases `squaretus/weto`.
+- Терминальная версия — команда `weto` (`executableTarget WetoCLI`, продукт SPM `weto`) поверх
+  того же `GuardVM`/`SettingsStore`; сервис — задание launchd `com.weto.cli` (от root —
+  LaunchDaemon), не `com.weto.app`. Обновляется сама из того же GitHub Releases.
 
 ## Стек Linux
 - Rust 2021 (floor 1.82), Cargo workspace в `linux/`, GTK4 без libadwaita.
@@ -22,12 +25,16 @@
   Обе архитектуры собираются нативно на раннерах GitHub, база размера бинарника
   у каждой своя.
 - Установка целиком в `$HOME`: `~/.local/share/weto/<версия>` плюс симлинк `current`.
-  Обновление — распаковка рядом и атомарная подмена симлинка. Root не нужен нигде.
+  Обновление — распаковка рядом и атомарная подмена симлинка. Приложению root не нужен нигде.
   Стабильный путь запуска ровно один — `~/.local/bin/weto` (`Paths::launcher`): версионный
   каталог вычищается, и всё, что называет бинарник снаружи процесса (ярлык автозапуска,
   деинсталлятор), обязано называть симлинк.
 - Сборка и тесты идут в Linux-контейнере: кросс-компиляции недостаточно, тесты обязаны
   выполняться на настоящем ядре.
+- Терминальная версия — крейт `weto-cli` поверх `weto-guard`, без gtk4, D-Bus и tokio;
+  в поставке бинарник называется `weto` (cargo-имя `weto` занято приложением), собирается
+  статически под musl. Сервис systemd `weto.service` (от root — системный). Цикл охраны
+  и писатели журналов — `weto_guard::runtime`, общий для `weto-app` и `weto-cli`.
 
 ## Персистентность
 Доменной БД нет, правило UUID-PK неприменимо.
@@ -40,6 +47,15 @@
 | токен ipinfo | Keychain, сервис `com.weto.ipinfo` | `~/.config/weto/token`, права `0600` |
 | кэш обновлений | `~/Library/Caches/com.weto.app/updates/` | `~/.cache/weto/updates/` |
 | учёт остановленных | `~/Library/Application Support/weto/stopped.json` | `~/.local/state/weto/stopped.json` |
+| `weto` от root: настройки | `UserDefaults(suiteName: "com.weto.cli")` процесса root | `/etc/weto/config.toml` (`0644`) |
+| `weto` от root: токен, журналы, учёт, `status.json`, `run.lock` | `/Library/Application Support/weto/` | токен — `/etc/weto/token`, остальное — `/var/lib/weto/` |
+| `weto` от пользователя: настройки | `UserDefaults(suiteName: "com.weto.cli")` | `~/.config/weto-cli/config.toml` |
+| `weto` от пользователя: остальное | `~/Library/Application Support/weto-cli/` | токен — `~/.config/weto-cli/token`, остальное — `~/.local/state/weto-cli/` |
+
+Хранилище терминальной версии отдельное целиком: окно не видит туннеля, а две установки
+не путают учёт остановленных. Выбирает его эффективный uid, а не `$HOME`: `sudo` обращается
+с `HOME` по-разному. Токен и журналы — `0600`, `status.json` — `0644` (читается без sudo).
+[decisions/whole-machine-guard-from-root](../docs/decisions/whole-machine-guard-from-root.md).
 
 Журнал завершений — кольцевой буфер на 100 записей, по записи на завершённый процесс;
 журнал проверок — на 50, по записи на попытку проверки подключения. Оба на обеих
@@ -97,20 +113,23 @@ SIGTTIN и встанет обратно. Обязательство держи�
 
 ## Сборка и запуск
 ```bash
-cd macos && swift build                              # Debug-сборка macOS
+cd macos && swift build                              # Debug-сборка macOS (и weto)
 cd macos && swift test                               # тесты
 swift test --package-path macos/Packages/UpdateKit   # тесты пакета обновления
 swift run --package-path macos WetoMenuBar           # запуск без бандла (без Keychain и уведомлений)
 macos/scripts/make-app.sh release                    # .app → macos/.build/app/Weto.app
 macos/scripts/build.sh 0.1.0                         # PKG → macos/.build/release_build/Weto-0.1.0.pkg
+macos/scripts/make-cli.sh release [0.1.0]            # weto → macos/.build/cli/weto; с версией и архив в release_build/cli/
 
 linux/scripts/dev.sh cargo build --workspace         # сборка Linux (в контейнере)
+linux/scripts/dev.sh cargo build -p weto-cli         # только терминальная версия
 linux/scripts/dev.sh bash -c 'Xvfb :99 -screen 0 1280x1024x24 & sleep 2
                               DISPLAY=:99 cargo test --workspace'      # тесты
 linux/scripts/dev.sh cargo fmt --all --check                   # форматирование, его требует CI
 linux/scripts/dev.sh cargo clippy --workspace --all-targets -- -D warnings
 linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh      # инвариант границ ядра
-linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/
+linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/, weto (musl) — cli/*.tar.gz
+bash shared/cli/tests/install-contract.sh            # контракт установщика терминальной версии
 linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабочим столом для проверки глазами
 ```
 Дисплей тестам поднимаем свой: `xvfb-run` в контейнере умеет повиснуть — стартует Xvfb
@@ -119,17 +138,17 @@ linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабо�
 ## Раскладка репозитория
 ```
 macos/            приложение под macOS
-├── Sources/      WetoCore, WetoSystem, WetoShared, WetoDesign, WetoMenuBar, WetoHelper
+├── Sources/      WetoCore, WetoSystem, WetoShared, WetoDesign, WetoMenuBar, WetoHelper, WetoCLI
 ├── Packages/     UpdateKit — переносимый механизм обновления, свой Package.swift
 ├── Tests/        по таргету на каждый модуль
 └── scripts/      сборка, упаковка, shell-контракты установки и релиза
 linux/            приложение под Linux (Cargo workspace)
 ├── crates/       weto-core, weto-sys, weto-config, weto-guard, weto-ui,
-│                 weto-tray, weto-update, weto-app, wetod
+│                 weto-tray, weto-update, weto-app, weto-cli, wetod
 ├── scripts/      dev.sh (контейнер), build.sh, install.sh, desktop-machine.sh, tests/
 └── docs/         ручные проверки и сценарий живого рабочего стола
 shared/           то, что обязано совпадать: исходники иконки, токены дизайна,
-                  голден-фикстуры политики, генератор токенов
+                  голден-фикстуры политики, генератор токенов, установщик `weto` (cli/)
 docs/             канон дизайн-системы — общий, по платформам не делится
 ```
 Состав файлов каждого модуля — в его документе из индекса ниже.
@@ -140,7 +159,7 @@ docs/             канон дизайн-системы — общий, по п
 
 ## Индекс модулей
 - **WetoCore** ([docs](../docs/modules/weto-core.md)) — `GuardPolicy.decide`/`decideLocal`,
-  статус VPN-приложения, отпечаток снимка сети, отбор процессов с обходом дерева потомков,
+  статус VPN-приложения и VPN-туннеля (`VPNTunnelStatus`), отпечаток снимка сети, отбор процессов с обходом дерева потомков,
   CIDR, разбор ответов гео-сервисов и GitHub Releases, отчёт о пробе (`GeoProbeReport`),
   классификация отказа (`GeoFailure`), запись журнала (`KillEvent`), её отладочные показания
   (`KillDiagnostics`) и конверт выгрузки (`JournalExport`).
@@ -159,11 +178,17 @@ docs/             канон дизайн-системы — общий, по п
   переносимым пакетом из пяти таргетов. Ни одной константы проекта внутри: всё приходит
   `UpdateFeedConfiguration`.
 - **WetoHelper** ([docs](../docs/modules/weto-helper.md)) — LaunchDaemon `com.weto.helper`
-  под root: единственное место с правами. Демон сам перепроверяет релиз и ставит `.pkg`.
+  под root: единственное место с правами у приложения (терминальная версия — отдельно). Демон сам перепроверяет релиз и ставит `.pkg`.
 - **Linux-охрана** ([docs](../docs/modules/linux-guard.md)) — все крейты Linux-части:
   политика и общие фикстуры, адаптеры к sysfs, `/proc` и netlink, машина состояний,
+  цикл охраны и писатели журналов (`weto-guard/src/runtime.rs`),
   самообновление, отступления интерфейса от macOS. Ручные проверки —
   `linux/docs/manual-check.md`, живой рабочий стол — `linux/docs/desktop-testing.md`.
+- **Терминальная версия** ([docs](../docs/modules/weto-cli.md)) — команда `weto` на обеих
+  платформах (`macos/Sources/WetoCLI`, `linux/crates/weto-cli`): `weto <объект> <действие>`,
+  `run`, `status.json`, сервис systemd/launchd, охрана всей машины от root, самообновление;
+  VPN можно задать туннелем. Установка одной командой (`shared/cli/install.sh`) —
+  [runbooks/install-weto-cli-on-a-server](../docs/runbooks/install-weto-cli-on-a-server.md).
 
 Потоки данных — [overview](../docs/overview.md). Процедуры — [runbooks](../docs/runbooks/).
 
@@ -176,11 +201,12 @@ docs/             канон дизайн-системы — общий, по п
   reqwest, netlink, procfs, gtk4 или rustix в графе зависимостей ядра.
 - **Политика отвечает тремя исходами:** `safe`, `unproven(причина)`, `kill(доказательство)`.
   Порядок проверок (задаёт приоритет улики и экономию запросов): охрана выключена или целей
-  нет → safe; VPN-приложение выбрано и не запущено → доказательство; вердикта нет или адрес
+  нет → safe; VPN-приложение выбрано и не запущено → доказательство; VPN-туннель выбран
+  и не поднят или трафик идёт мимо него → доказательство; вердикта нет или адрес
   не доказан → unproven; IP в чёрном списке → доказательство; страна ipinfo заблокирована →
   доказательство; нет подтверждения → unproven; страна подтверждающего заблокирована,
   расхождение стран, промах непустого белого списка → доказательство; иначе safe.
-  Невыбранное VPN-приложение не является причиной ничего: охрана работает по гео одной.
+  Невыбранные приложение и туннель не являются причиной ничего: охрана работает по гео одной.
 - **Белый список необязателен и спрашивается последним.** Пустой не меняет ничего; непустой
   требует, чтобы адрес попал в разрешённый CIDR **или** согласованная страна была
   в разрешённых. Чёрный список всегда решает раньше белого, поэтому одна и та же запись
@@ -191,6 +217,12 @@ docs/             канон дизайн-системы — общий, по п
   задать нельзя. Запущенное приложение не доказывает, что трафик в туннеле, — на это отвечает
   гео, и ответ обязателен.
   [decisions/vpn-app-instead-of-tunnel](../docs/decisions/vpn-app-instead-of-tunnel.md).
+  Исключение — **терминальная версия**: на сервере VPN поднимает `wg-quick` без процесса,
+  и там VPN задаётся туннелем (имя интерфейса) — взаимоисключающе с приложением, выбор
+  одного снимает другое. В окне выбора туннеля нет ни на одной платформе. Статус туннеля
+  (`down` / `bypassed(via)` по маршруту ядра до адреса ipinfo / `carrying`) — локальная улика,
+  как закрытое приложение (`isLocal`); поднятые интерфейсы в отпечаток не входят.
+  [decisions/vpn-tunnel-in-terminal-version](../docs/decisions/vpn-tunnel-in-terminal-version.md).
 - **Завершение — только по доказательству.** Плохой результат пробы ставит цели на паузу
   (SIGSTOP), а не завершает. Переходы принимает чистый редьюсер `GuardMachine` в ядре:
   шесть фаз — Выключено, Проверка, На страже, Помехи, Пауза, Опасно, но заголовков

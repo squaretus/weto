@@ -120,3 +120,45 @@ interpreter (`/usr/bin/node`) is the bug. `bugs/linux-script-targets-matched-as-
 Past failures worth reading before guessing: `bugs/tunnel-without-network-service.md`
 (a healthy tunnel reported as bypassed, and third-party 429s killing targets),
 `bugs/a-quarter-of-the-process-list.md` (three quarters of the machine invisible to the guard).
+
+## If the terminal version (`weto`) kills targets with «VPN-туннель … не поднят» / «трафик идёт мимо туннеля …»
+
+Local evidence from `VPNTunnelStatus` / `tunnel_status` (`WetoCore/Model/GeoModels.swift`,
+`weto-core/src/network.rs`): the name is not in `upInterfaces` (needs `IFF_UP` **and**
+`IFF_RUNNING` — `RaisedInterfaces.swift`, `weto-sys/src/network_snapshot.rs` `KernelInterfaces`),
+or the kernel route to the ipinfo host leaves elsewhere. `weto vpn list` shows both lists
+as the guard sees them. If `vpn set X` picked app instead of tunnel (or back) — the auto-detection
+order is in `CLI.vpnKind(of:…)` / `commands.rs` `detect_vpn_kind`; force with `--tunnel`/`--app`.
+`decisions/vpn-tunnel-in-terminal-version.md`.
+
+## If `weto` does not react to a settings command, or refuses to `run`
+
+Edits reach a running guard by re-reading: Linux `weto-cli/src/store.rs` (`WatchedSettings`, file
+stamp), macOS `SettingsStore.reloadFromDefaults()` from `WetoCLI/GuardRunner.swift`. Check the run
+log for «настройки …». A command run **without `sudo`** next to a root guard is refused
+(«охрана установлена на всю машину — sudo weto …»), and one run with `sudo` writes root's storage,
+not the user's — euid picks it (`CLIEnvironment.live`, `context.rs` `Context::from_env`). macOS
+root suite via `sudo` with preserved `HOME` is unverified live — suspect it first if edits never
+arrive. `run` refusals: `run.lock` held (`RunLock`) or the GUI app of any user detected
+(`run.rs` `app_is_running`, `Boundaries.swift` `WetoAppProcessDetector`).
+`modules/weto-cli.md`, `decisions/whole-machine-guard-from-root.md`.
+
+## If a target added through `sudo weto target add` is never matched
+
+A bare name not found by root is looked up in the `PATH` of `SUDO_USER` (login shell via
+`su -l`/`runuser -l`, 3 s timeout, then `~/.local/bin`, `~/bin`, `~/.cargo/bin`, …) and stored as
+the unresolved absolute path — check the third line «найдено в PATH пользователя …» of
+`target add` and the `entry` in the config. No `SUDO_USER` (logged in as root directly) → root's
+`PATH` only; add by full path. Linux: root inside a container or a unit without `CAP_SYS_PTRACE`
+cannot read other users' `/proc/<pid>/exe`, so their targets look «не запущено». macOS: a target under `/tmp` or `/var` — `resolvingSymlinksInPath` strips
+`/private`, while `proc_pidpath` reports `/private/tmp/…` (`WetoSystem/TargetResolver.swift`);
+known and open, hits the GUI too.
+
+## If `weto update` / the installer refuses, or a new release is not offered
+
+`WetoCLI/Update.swift`, `weto-cli/src/update.rs`, `shared/cli/install.sh`. Asset names must agree
+across `linux/scripts/build.sh`, `macos/scripts/make-cli.sh`, `release.yml` and both readers;
+`SHA256SUMS` must be in the release. «нет терминальной версии для этой системы» = an app-only
+release (by design not "available"); «версия этой сборки неизвестна» = a `dev` build.
+«архив … не годится» on macOS = `._weto` / xattrs in the tarball. Linux binary «not found» /
+GLIBC errors on a server = a non-musl build slipped through. `runbooks/release.md`.

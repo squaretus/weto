@@ -8,7 +8,7 @@ How to run the two independent test layers of weto: XCTest suites via SwiftPM an
 
 ```bash
 cd macos && swift build                              # compile first, faster feedback on syntax errors
-cd macos && swift test                               # all four test targets
+cd macos && swift test                               # all test targets (694 tests)
 cd macos && swift test --filter WetoCoreTests        # single target
 cd macos && swift test --filter GuardPolicyTests     # single class
 cd macos && swift test --filter test_written_secret_is_read_back   # single case
@@ -19,17 +19,18 @@ Test targets declared in `macos/Package.swift` (`macos/Tests/<name>/`):
 | Target | Depends on | Covers |
 | --- | --- | --- |
 | `module-boundary-contract.sh` | все модули macOS | разрешённые импорты по слоям: ядро без системы, `WetoSystem` без UI |
-| `WetoCoreTests` | `WetoCore` | policy decisions (`GuardPolicy`, `GuardPolicyLocal`), `ProcessMatcher`, `IPRange`, geo response parsing, `GuardMachineTests` (the pause/kill reducer against `shared/fixtures/guard-transitions.json`) |
-| `WetoSystemTests` | `WetoSystem`, `WetoCore` | boundary adapters: `GeoProbe` (`HTTPFetcherPhasesTests` for DNS/connect/TLS/first-byte timing), `KeychainStore`, `NetworkEventSource`, `NetworkSnapshotReader`, process listing, `ProcessSignalerTests` (signal order and delivery), `TerminalLocatorTests` |
+| `WetoCoreTests` | `WetoCore` | policy decisions (`GuardPolicy`, `GuardPolicyLocal`), `ProcessMatcher`, `IPRange`, geo response parsing, `GuardMachineTests` (the pause/kill reducer against `shared/fixtures/guard-transitions.json`), `VPNTunnelStatusTests` |
+| `WetoSystemTests` | `WetoSystem`, `WetoCore` | boundary adapters: `GeoProbe` (`HTTPFetcherPhasesTests` for DNS/connect/TLS/first-byte timing), `KeychainStore`, `FileSecretStoreTests`, `NetworkEventSource`, `NetworkSnapshotReader` (route + raised interfaces), process listing, `ProcessSignalerTests` (signal order and delivery), `TerminalLocatorTests` |
 | `WetoSharedTests` | `WetoShared`, `WetoCore`, `WetoSystem`, `UpdateKit*` | VM layer: `GuardVM` (pause/resume, journal episodes), `SettingsStore`, `EventLogStore`, `CheckLogStoreTests`, `StoppedLedgerTests`, `GuardNotifyingTests`, `LaunchAgentController`, `Maintenance`, `StatusPresentation`, `WetoUpdateTheme`, update banner texts |
+| `WetoCLITests` | `WetoCLI`, `WetoCore`, `WetoSystem`, `WetoShared` | terminal version `weto`: `CommandParserTests` (grammar, help, parse errors), `CLICommandsTests` (every settings command against a temporary suite and directory, `vpn set` auto-detection), `SystemModeTests` (system paths under a temp root, non-root refusal hint, which commands stay open), `GuardStatusTests` (`status.json`, liveness by age and pid, `updateAvailable`), `ServiceTests` (plist text, idempotent install, `launchctl` calls), `UpdateTests` (asset names, `SHA256SUMS`, trusted hosts, refusal texts, daily check), `GuardLogTests` |
 | `WetoDesignTests` | `WetoDesign` | `DesignResources` bundle resolution, `MenuBarImageRenderer`, `WetoPauseBadgeTests` (countdown rounding), `WetoPillButtonStyleTests` (`.controlSize(.small)` is genuinely more compact than the default) |
 
-`WetoHelper` and `WetoMenuBar` are executable targets with no test target: the helper's behaviour is root-only and the menu bar target is the `@main` entry point.
+`WetoCLI` is an executable target with its own test target (`@testable import`). `WetoHelper` and `WetoMenuBar` are executable targets with no test target: the helper's behaviour is root-only and the menu bar target is the `@main` entry point.
 
 The update mechanism is a separate SPM package and its tests are **not** run by `swift test` of the root project:
 
 ```bash
-cd macos && swift test --package-path macos/Packages/UpdateKit
+cd macos && swift test --package-path macos/Packages/UpdateKit   # 83 tests
 ```
 
 | Target | Covers |
@@ -50,7 +51,9 @@ Both packaging failures the project has shipped so far ("the app never appeared"
 Only system boundaries are substituted, and only through their protocols:
 `GeoProbing`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`,
 `StoppedLedgerPersisting`, `NetworkSnapshotReading`, `TargetResolving`, `NetworkEventSourcing`
-(plus the adjacent `HTTPFetching`, `SecretStoring`, `ProcessLocating` in `macos/Sources/WetoSystem/`).
+(plus the adjacent `HTTPFetching`, `SecretStoring`, `ProcessLocating`, `InterfaceListing` in `macos/Sources/WetoSystem/`;
+in `WetoCLI` — `ServiceControlling` (`launchctl`), `WetoAppDetecting`, `GuardProcessSignaling`, `CLIOutput`,
+`ArchiveUnpacking` (`tar`), `ExecutableReplacing`; the update's network goes through `HTTPFetching`).
 In the update package the boundaries are `ReleaseFetching`, `UpdateInstalling`,
 `UpdateStateStoring`, `UpdateClock`, `URLOpening` — nothing else is substituted there either.
 
@@ -90,6 +93,25 @@ What it asserts:
 - `macos/.build/release_build/Weto-<version>.pkg` exists.
 - `pkgutil --payload-files` contains no `docs/`.
 - `CFBundleShortVersionString` inside the payload's `Weto.app/Contents/Info.plist` equals the requested version (not just the file name).
+
+### 4a. Terminal version: installer contract and CLI archives
+
+```bash
+bash shared/cli/tests/install-contract.sh            # macOS arm64 or Linux; needs curl
+macos/scripts/make-cli.sh release 9.9.9              # archive must list only `weto`, arm64
+```
+
+`install-contract.sh` fakes a release as a directory served over `file://` (`WETO_BASE_URL`,
+`WETO_REQUIRE_ROOT=0`) with a stub `weto` that records its arguments, and asserts: only the file
+verified against `SHA256SUMS` is installed, `service install` is called, a re-run installs over,
+a corrupted archive installs nothing. CI runs it in the Linux jobs of `pr-checks.yml` and
+`release.yml` only — on macOS it is local. `make-cli.sh` is not run on PRs (only `swift build`
+of the `weto` product); the release job is the first to build the macOS CLI archive.
+
+Linux side: `linux/crates/weto-cli/tests/{commands,run,service,status,system,update}.rs` run with
+the workspace (657 tests in total); `system.rs` covers root paths under a temp root, `update.rs`
+the fake `ReleaseFetching` / `BinaryFiles`. The PR build (`scripts/build.sh 9.9.9`) also builds
+the static musl CLI and fails on a dynamic binary.
 
 ### 5. Why these cannot be unit tests
 
