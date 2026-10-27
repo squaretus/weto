@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use weto_core::diagnostics::GeoServiceTrace;
 use weto_core::geo::{GeoFailure, GeoOutcome, SourceOutcome};
-use weto_core::network::VpnAppStatus;
+use weto_core::network::{VpnAppStatus, VpnTunnelStatus};
 use weto_core::policy::{self, GuardConfig, GuardDecision, GuardSignals, UnprovenReason};
 use weto_sys::geo_probe::{
     GeoEndpoints, GeoProbing, HttpGeoProbe, NetworkPathReporting, CONFIRMATION_HARD_TTL,
@@ -583,9 +583,11 @@ fn both_confirmations_unavailable_still_yields_the_unproven_path() {
     let decision = policy::decide(&GuardSignals {
         is_enabled: true,
         vpn: VpnAppStatus::NotChosen,
+        tunnel: VpnTunnelStatus::NotChosen,
         geo: report.outcome(),
         config: GuardConfig {
             vpn_app: None,
+            vpn_tunnel: None,
             blocked_countries: Default::default(),
             blocked_ip_ranges: Vec::new(),
             allowed_countries: Default::default(),

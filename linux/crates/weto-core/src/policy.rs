@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::geo::GeoOutcome;
 use crate::ip::IpRange;
-use crate::network::VpnAppStatus;
+use crate::network::{VpnAppStatus, VpnTunnelStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuardConfig {
@@ -18,6 +18,10 @@ pub struct GuardConfig {
     /// путь или бандл. Для политики это непрозрачная строка — важно лишь,
     /// выбрано ли что-нибудь.
     pub vpn_app: Option<String>,
+    /// Имя выбранного VPN-туннеля (`wg0`, `tun0`). Задаётся только терминальной
+    /// версией и взаимоисключающе с приложением: настройки обоих сразу
+    /// не допускают. Для политики важно лишь, выбран ли туннель.
+    pub vpn_tunnel: Option<String>,
     pub blocked_countries: HashSet<String>,
     pub blocked_ip_ranges: Vec<IpRange>,
     /// Пустой whitelist — нормальное умолчание: он не сужает ничего.
@@ -41,6 +45,7 @@ impl GuardConfig {
 pub struct GuardSignals {
     pub is_enabled: bool,
     pub vpn: VpnAppStatus,
+    pub tunnel: VpnTunnelStatus,
     pub geo: GeoOutcome,
     pub config: GuardConfig,
 }
@@ -61,6 +66,13 @@ pub enum UnprovenReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsafeEvidence {
     VpnAppNotRunning,
+    /// Выбранный туннель не поднят: интерфейса нет среди поднятых.
+    VpnTunnelDown(String),
+    /// Туннель поднят, но ядро выпускает трафик через другой интерфейс.
+    TrafficBypassesTunnel {
+        tunnel: String,
+        via: String,
+    },
     BlacklistedIp(String),
     BlockedCountry {
         code: String,
@@ -83,6 +95,19 @@ impl UnsafeEvidence {
     pub fn is_pause_expired(&self) -> bool {
         matches!(self, UnsafeEvidence::PauseExpired(_))
     }
+
+    /// Улика, видная без обращения в сеть: закрытое VPN-приложение, упавший
+    /// туннель, трафик мимо туннеля. Такую снимает переоценка по прошлому
+    /// чтению, когда локальная проверка её больше не даёт, — пробы ей не нужно,
+    /// ведь сеть её и не ставила. Сетевые улики снимает только ответ пробы.
+    pub fn is_local(&self) -> bool {
+        matches!(
+            self,
+            UnsafeEvidence::VpnAppNotRunning
+                | UnsafeEvidence::VpnTunnelDown(_)
+                | UnsafeEvidence::TrafficBypassesTunnel { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,29 +122,61 @@ pub enum GuardDecision {
 /// `None` означает «локальных оснований нет, нужен сетевой вердикт». Падение
 /// туннеля видно из netlink мгновенно, поэтому в сеть идём только тогда, когда
 /// здесь ничего не нашлось.
+///
+/// Порядок: приложение, затем туннель — каждое только если выбрано. Статус
+/// без выбора оснований не даёт: невыбранное приложение и невыбранный туннель
+/// значат «охрана работает по гео одной».
 pub fn decide_local(
     is_enabled: bool,
     vpn: VpnAppStatus,
+    tunnel: &VpnTunnelStatus,
     config: &GuardConfig,
 ) -> Option<GuardDecision> {
     if !is_enabled || !config.has_targets() {
         return Some(GuardDecision::Safe);
     }
 
-    // Невыбранное приложение оснований не даёт: охрана работает по гео одной.
-    config.vpn_app.as_ref()?;
-
-    match vpn {
-        // Запущенное приложение — ещё не доказательство, что трафик идёт через VPN:
-        // клиент умеет висеть в трее с выключенным подключением. Отвечает на это
-        // гео, и ответ обязателен.
-        VpnAppStatus::NotChosen | VpnAppStatus::Running => None,
-        VpnAppStatus::NotRunning => Some(GuardDecision::Kill(UnsafeEvidence::VpnAppNotRunning)),
+    if config.vpn_app.is_some() {
+        match vpn {
+            // Запущенное приложение — ещё не доказательство, что трафик идёт
+            // через VPN: клиент умеет висеть в трее с выключенным подключением.
+            // Отвечает на это гео, и ответ обязателен.
+            VpnAppStatus::NotChosen | VpnAppStatus::Running => {}
+            VpnAppStatus::NotRunning => {
+                return Some(GuardDecision::Kill(UnsafeEvidence::VpnAppNotRunning))
+            }
+        }
     }
+
+    if let Some(name) = &config.vpn_tunnel {
+        match tunnel {
+            VpnTunnelStatus::Down => {
+                return Some(GuardDecision::Kill(UnsafeEvidence::VpnTunnelDown(
+                    name.clone(),
+                )))
+            }
+            VpnTunnelStatus::Bypassed { via } => {
+                return Some(GuardDecision::Kill(UnsafeEvidence::TrafficBypassesTunnel {
+                    tunnel: name.clone(),
+                    via: via.clone(),
+                }))
+            }
+            // Туннель несёт трафик — это ещё не доказательство, что выход
+            // безопасен: страну называет гео, и ответ обязателен.
+            VpnTunnelStatus::NotChosen | VpnTunnelStatus::Carrying => {}
+        }
+    }
+
+    None
 }
 
 pub fn decide(signals: &GuardSignals) -> GuardDecision {
-    if let Some(local) = decide_local(signals.is_enabled, signals.vpn, &signals.config) {
+    if let Some(local) = decide_local(
+        signals.is_enabled,
+        signals.vpn,
+        &signals.tunnel,
+        &signals.config,
+    ) {
         return local;
     }
 
@@ -235,6 +292,7 @@ mod tests {
         };
         GuardConfig {
             vpn_app: Some("happ".to_string()),
+            vpn_tunnel: None,
             blocked_countries: blocked.iter().map(|c| c.to_string()).collect(),
             blocked_ip_ranges: parse(blocked_ranges),
             allowed_countries: allowed.iter().map(|c| c.to_string()).collect(),
@@ -247,6 +305,7 @@ mod tests {
         GuardSignals {
             is_enabled: true,
             vpn: VpnAppStatus::Running,
+            tunnel: VpnTunnelStatus::NotChosen,
             geo: GeoOutcome::Resolved(GeoReading {
                 ip: "203.0.113.28".to_string(),
                 primary_country: primary.to_string(),
@@ -255,6 +314,44 @@ mod tests {
             }),
             config,
         }
+    }
+
+    /// Локальные улики — те, что ставятся без сети: их снимает переоценка.
+    /// Сетевые и истёкший потолок локальными не бывают — их снимает только проба.
+    #[test]
+    fn only_vpn_app_and_tunnel_evidence_is_local() {
+        assert!(UnsafeEvidence::VpnAppNotRunning.is_local());
+        assert!(UnsafeEvidence::VpnTunnelDown("wg0".to_string()).is_local());
+        assert!(UnsafeEvidence::TrafficBypassesTunnel {
+            tunnel: "wg0".to_string(),
+            via: "eth0".to_string(),
+        }
+        .is_local());
+        assert!(!UnsafeEvidence::BlacklistedIp("203.0.113.28".to_string()).is_local());
+        assert!(!UnsafeEvidence::PauseExpired(Duration::from_secs(60)).is_local());
+    }
+
+    /// Приложение проверяется раньше туннеля: настройки обоих сразу не допускают,
+    /// но порядок улик обязан быть однозначным и на испорченном файле.
+    #[test]
+    fn the_app_is_checked_before_the_tunnel() {
+        let mut config = config(&["RU"], &[], &[], &[]);
+        config.vpn_tunnel = Some("wg0".to_string());
+        assert_eq!(
+            decide_local(
+                true,
+                VpnAppStatus::NotRunning,
+                &VpnTunnelStatus::Down,
+                &config
+            ),
+            Some(GuardDecision::Kill(UnsafeEvidence::VpnAppNotRunning))
+        );
+        assert_eq!(
+            decide_local(true, VpnAppStatus::Running, &VpnTunnelStatus::Down, &config),
+            Some(GuardDecision::Kill(UnsafeEvidence::VpnTunnelDown(
+                "wg0".to_string()
+            )))
+        );
     }
 
     #[test]

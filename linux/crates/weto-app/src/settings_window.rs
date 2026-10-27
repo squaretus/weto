@@ -16,12 +16,12 @@ use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack}
 
 use weto_config::settings::{GeoListKind, Theme};
 use weto_core::pause_ceiling::PauseCeiling;
-use weto_core::presentation::{target_description, target_fallback_name};
+use weto_core::presentation::target_description;
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 use weto_sys::target_resolver::{
-    applications_dirs, display_name_for, launch_paths_for, locate_with_launch_paths,
-    resolve_launch_entry, resolve_launch_target, target_kind_for, LaunchTargetResolver, Resolution,
+    applications_dirs, display_name_for, locate_with_launch_paths, resolve_launch_entry,
+    settings_target, LaunchTargetResolver, Resolution,
 };
 use weto_ui::components as ui;
 use weto_ui::theme;
@@ -378,37 +378,18 @@ fn resolved_description(target: &weto_config::settings::Target) -> String {
 /// в диалоге выбора.
 fn add_target_named(state: &Arc<AppState>, text: &str, display_name: Option<String>) {
     let text = text.trim();
-    if text.is_empty()
-        || state
-            .settings
-            .current()
-            .targets
-            .iter()
-            .any(|t| t.entry == text)
-    {
+    if text.is_empty() {
         return;
     }
-
-    let resolved = resolve_launch_target(text);
-    let name = display_name
-        .or_else(|| display_name_for(text))
-        .unwrap_or_else(|| target_fallback_name(text));
-    // Голое имя запоминается вместе с файлом в PATH (`~/.local/bin/claude`):
-    // охрана разрешает цель заново, и если голого имени в её PATH не окажется,
-    // она начнёт с него, а не с развёрнутого пути, устаревающего с обновлением.
-    let launch_paths = launch_paths_for(text);
-    // Скрипт с шебангом (`qwen` из npm) ядро запускает интерпретатором,
-    // и по пути `exe` он не совпал бы ни с одним процессом — его узнают по argv.
-    let kind = target_kind_for(text);
-
+    // Сборка записи и отказы (повтор, само VPN-приложение) — общие с терминальной
+    // версией: окно отказ глушит молча, как и прежде, а правки без новой цели
+    // не бывает — ревизия не поднимается впустую.
+    let target = settings_target(text, display_name);
+    if state.settings.current().add_target(target.clone()).is_err() {
+        return;
+    }
     state.settings.edit(|s| {
-        s.targets.push(weto_config::settings::Target {
-            entry: text.to_string(),
-            display_name: name,
-            kind,
-            path: resolved,
-            launch_paths,
-        })
+        let _ = s.add_target(target);
     });
 }
 
@@ -1702,25 +1683,12 @@ fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<Str
         return;
     }
 
-    let resolved = resolve_launch_target(text);
-    let name = display_name
-        .or_else(|| display_name_for(text))
-        .unwrap_or_else(|| target_fallback_name(text));
     // Файл в PATH запоминается по той же причине, что у цели, и вид
     // определяется так же: VPN-клиент-скрипт, записанный бинарником, читался бы
-    // закрытым всегда — а это завершение целей.
-    let launch_paths = launch_paths_for(text);
-    let kind = target_kind_for(text);
-
-    state.settings.edit(|s| {
-        s.set_vpn_app(Some(weto_config::settings::Target {
-            entry: text.to_string(),
-            display_name: name,
-            kind,
-            path: resolved,
-            launch_paths,
-        }))
-    });
+    // закрытым всегда — а это завершение целей. Сборка записи общая с целью
+    // и с терминальной версией (`settings_target`).
+    let app = settings_target(text, display_name);
+    state.settings.edit(|s| s.set_vpn_app(Some(app)));
 }
 
 /// Отметка времени для имени файла — с точностью до минуты и без пробелов,

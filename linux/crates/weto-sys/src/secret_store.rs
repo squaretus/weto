@@ -33,11 +33,27 @@ pub trait SecretStoring: Send + Sync {
 
 pub struct FileSecretStore {
     path: PathBuf,
+    /// Сужать ли каталог до `0700`. Свой каталог пользователя сужается;
+    /// общий системный (`/etc/weto`) — нет: рядом лежат настройки `0644`,
+    /// а секрет и так закрыт правами самого файла.
+    harden_directory: bool,
 }
 
 impl FileSecretStore {
     pub fn new(path: PathBuf) -> FileSecretStore {
-        FileSecretStore { path }
+        FileSecretStore {
+            path,
+            harden_directory: true,
+        }
+    }
+
+    /// Токен в общем каталоге, права которого решает не он: файл — `0600`,
+    /// каталог остаётся как есть.
+    pub fn in_shared_directory(path: PathBuf) -> FileSecretStore {
+        FileSecretStore {
+            path,
+            harden_directory: false,
+        }
     }
 }
 
@@ -53,7 +69,9 @@ impl SecretStoring for FileSecretStore {
     fn save(&self, token: &str) -> Result<(), SecretError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| SecretError::Write(e.to_string()))?;
-            harden(parent)?;
+            if self.harden_directory {
+                harden(parent)?;
+            }
         }
 
         // Режим задаётся при создании, а не после записи: иначе между

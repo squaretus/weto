@@ -16,6 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xauth \
         # Трей и уведомления живут на шине; для тестов нужна сессионная.
         dbus-x11 \
+        # Терминальная версия собирается статически под musl (build.sh):
+        # musl-gcc собирает C-части ring и zstd.
+        musl-tools \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup component add clippy rustfmt
+RUN rustup component add clippy rustfmt \
+    && rustup target add "$(uname -m)-unknown-linux-musl"

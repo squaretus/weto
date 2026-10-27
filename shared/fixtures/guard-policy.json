@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "about": [
     "Голден-фикстуры политики охраны. Один и тот же набор случаев прогоняют обе",
     "реализации: macOS/Tests/WetoCoreTests/GuardPolicyFixtureTests.swift и",
@@ -31,7 +31,22 @@
     "config.allowedCountries и config.allowedIPRanges — белый список. Поля",
     "необязательные: их отсутствие означает пустой whitelist, и такой случай",
     "работает ровно как до его появления. Whitelist спрашивается последним —",
-    "после чёрного списка, подтверждения и сверки стран."
+    "после чёрного списка, подтверждения и сверки стран.",
+    "",
+    "Версия 5: VPN задаётся одним из двух способов — приложением (config.vpnApp) или",
+    "туннелем (config.vpnTunnel, имя интерфейса: wg0, tun0, utun6). Оба сразу настройки",
+    "не допускают. Туннель выбирается только в терминальной версии: на сервере VPN",
+    "поднимает wg-quick или systemd-юнит без приложения, а имена интерфейсов стабильны.",
+    "",
+    "tunnel.kind: notChosen | down | bypassed{via} | carrying. Поле необязательное, его",
+    "отсутствие — notChosen. down — интерфейса нет или он не поднят; bypassed — поднят,",
+    "но ядро выпускает вердиктный запрос через другой интерфейс (via); carrying — трафик",
+    "идёт через туннель или наружу не идёт вовсе (тогда отвечает гео). Статус туннеля",
+    "без config.vpnTunnel оснований не даёт. Проверка туннеля локальная: идёт после",
+    "проверки приложения и раньше гео.",
+    "",
+    "expect.reason.kind для kill дополнительно: vpnTunnelDown{tunnel} |",
+    "trafficBypassesTunnel{tunnel, via}."
   ],
   "cases": [
     {
@@ -1072,6 +1087,390 @@
           "kind": "addressChanged",
           "ip": "198.51.100.7"
         }
+      }
+    },
+    {
+      "name": "туннель не поднят — цели завершаются",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "down"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "vpnTunnelDown",
+          "tunnel": "wg0"
+        }
+      }
+    },
+    {
+      "name": "трафик идёт мимо туннеля — цели завершаются",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "bypassed",
+        "via": "eth0"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "trafficBypassesTunnel",
+          "tunnel": "wg0",
+          "via": "eth0"
+        }
+      }
+    },
+    {
+      "name": "трафик идёт через туннель — решает гео",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "carrying"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "safe"
+      }
+    },
+    {
+      "name": "туннель поднят, а гео молчит — пауза, а не завершение",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "carrying"
+      },
+      "geo": {
+        "kind": "unavailable",
+        "detail": "timeout"
+      },
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "unproven",
+        "reason": {
+          "kind": "geoUnavailable",
+          "detail": "timeout"
+        }
+      }
+    },
+    {
+      "name": "туннель через заблокированную страну — решает гео",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "carrying"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "RU",
+        "confirmedCountry": "RU",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "blockedCountry",
+          "code": "RU",
+          "source": "ipinfo"
+        }
+      }
+    },
+    {
+      "name": "проверка туннеля идёт раньше гео — экономит запрос",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "down"
+      },
+      "geo": {
+        "kind": "unavailable",
+        "detail": "timeout"
+      },
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "vpnTunnelDown",
+          "tunnel": "wg0"
+        }
+      }
+    },
+    {
+      "name": "выключенная охрана безопасна и при упавшем туннеле",
+      "function": "decide",
+      "isEnabled": false,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "down"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "safe"
+      }
+    },
+    {
+      "name": "пустой список целей безопасен и при упавшем туннеле",
+      "function": "decide",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "down"
+      },
+      "geo": {
+        "kind": "resolved",
+        "ip": "203.0.113.28",
+        "primaryCountry": "KZ",
+        "confirmedCountry": "KZ",
+        "confirmSource": "freeipapi"
+      },
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "safe"
+      }
+    },
+    {
+      "name": "локально: упавший туннель завершает, не касаясь сети",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "down"
+      },
+      "geo": null,
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "vpnTunnelDown",
+          "tunnel": "wg0"
+        }
+      }
+    },
+    {
+      "name": "локально: трафик мимо туннеля завершает, не касаясь сети",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "bypassed",
+        "via": "en0"
+      },
+      "geo": null,
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "utun6"
+      },
+      "expect": {
+        "decision": "kill",
+        "reason": {
+          "kind": "trafficBypassesTunnel",
+          "tunnel": "utun6",
+          "via": "en0"
+        }
+      }
+    },
+    {
+      "name": "локально: туннель несёт трафик — нужен сетевой вердикт",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "carrying"
+      },
+      "geo": null,
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ],
+        "vpnTunnel": "wg0"
+      },
+      "expect": {
+        "decision": "none"
+      }
+    },
+    {
+      "name": "локально: статус туннеля без выбранного туннеля оснований не даёт",
+      "function": "decideLocal",
+      "isEnabled": true,
+      "vpn": {
+        "kind": "notChosen"
+      },
+      "tunnel": {
+        "kind": "down"
+      },
+      "geo": null,
+      "config": {
+        "vpnApp": null,
+        "blockedCountries": [
+          "RU"
+        ],
+        "blockedIPRanges": [],
+        "targets": [
+          "claude"
+        ]
+      },
+      "expect": {
+        "decision": "none"
       }
     }
   ]

@@ -74,6 +74,39 @@ fn a_newer_release_is_found_with_its_linux_archive() {
     assert_eq!(info.current_version, "1.1.0", "окно говорит «у вас 1.1.0»");
 }
 
+/// Архив терминальной версии кончается тем же суффиксом, но приложению он
+/// не годится: в нём один бинарник без установщика. Порядок ассетов в ответе
+/// GitHub не обещан, поэтому он стоит первым.
+#[test]
+fn the_terminal_version_archive_is_never_taken_for_the_app() {
+    const WITH_CLI_FIRST: &str = r#"{
+      "tag_name": "v1.2.0", "draft": false, "prerelease": false,
+      "assets": [
+        {"name": "weto-cli-1.2.0-x86_64-linux.tar.zst",
+         "browser_download_url": "https://github.com/x/y/weto-cli-1.2.0-x86_64-linux.tar.zst"},
+        {"name": "weto-1.2.0-x86_64-linux.tar.zst",
+         "browser_download_url": "https://github.com/x/y/weto-1.2.0-x86_64-linux.tar.zst"}
+      ]
+    }"#;
+    const ONLY_CLI: &str = r#"{
+      "tag_name": "v1.2.0", "draft": false, "prerelease": false,
+      "assets": [{"name": "weto-cli-1.2.0-x86_64-linux.tar.zst",
+                  "browser_download_url": "https://github.com/x/y"}]
+    }"#;
+
+    let info = checker(WITH_CLI_FIRST)
+        .latest(&Version::parse("1.1.0").unwrap())
+        .unwrap();
+    assert!(info
+        .download_url
+        .ends_with("/weto-1.2.0-x86_64-linux.tar.zst"));
+
+    let error = checker(ONLY_CLI)
+        .latest(&Version::parse("1.1.0").unwrap())
+        .unwrap_err();
+    assert!(matches!(error, CheckError::NoAsset(_)), "получили: {error}");
+}
+
 /// Ответ без `html_url` всё равно ведёт на страницу релиза — по тегу.
 #[test]
 fn a_release_without_a_page_link_falls_back_to_the_tag_page() {

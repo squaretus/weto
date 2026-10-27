@@ -7,7 +7,10 @@ use weto_config::journal::{
     visible_limit_caption, Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY, VISIBLE_LIMIT,
 };
 use weto_config::paths::Paths;
-use weto_config::settings::{GeoListEntryError, GeoListKind, Settings, Target};
+use weto_config::settings::{
+    validate_tunnel_name, GeoListEntryError, GeoListKind, Settings, Target, TargetEntryError,
+    TunnelNameError,
+};
 use weto_core::pause_ceiling::PauseCeiling;
 use weto_core::process::TargetKind;
 
@@ -532,6 +535,30 @@ fn paths_follow_xdg_layout_under_a_given_home() {
     );
 }
 
+/// Системное хранилище терминальной версии — фиксированные пути, не `$HOME`.
+#[test]
+fn system_paths_live_in_etc_and_var_lib() {
+    let paths = Paths::system();
+
+    assert_eq!(
+        paths.settings_file(),
+        std::path::Path::new("/etc/weto/config.toml")
+    );
+    assert_eq!(paths.token_file(), std::path::Path::new("/etc/weto/token"));
+    assert_eq!(
+        paths.journal_file(),
+        std::path::Path::new("/var/lib/weto/journal.json")
+    );
+    assert_eq!(
+        paths.status_file(),
+        std::path::Path::new("/var/lib/weto/status.json")
+    );
+    assert_eq!(
+        paths.run_lock_file(),
+        std::path::Path::new("/var/lib/weto/run.lock")
+    );
+}
+
 /// Разбор записи чёрного списка живёт в настройках, а не в окне: мусор
 /// не должен молча попадать в файл и висеть там как «не разобран».
 #[test]
@@ -571,6 +598,144 @@ fn removing_a_blacklist_entry_does_not_care_which_list_it_came_from() {
     settings.remove_blocked_entry("10.0.0.0/8");
 
     assert!(settings.blocked_entries().is_empty());
+}
+
+fn happ() -> Target {
+    Target {
+        entry: "happ".to_string(),
+        display_name: "happ".to_string(),
+        kind: TargetKind::Binary,
+        path: "/usr/bin/happ".to_string(),
+        launch_paths: vec![],
+    }
+}
+
+/// VPN задаётся одним способом: выбор туннеля снимает приложение, выбор
+/// приложения снимает туннель. Политика, получившая оба, проверяла бы два
+/// источника защиты вместо одного.
+#[test]
+fn choosing_a_tunnel_drops_the_app_and_back() {
+    let mut settings = Settings::default();
+
+    settings.set_vpn_app(Some(happ()));
+    settings.set_vpn_tunnel(Some("wg0".to_string()));
+    assert_eq!(settings.vpn_tunnel.as_deref(), Some("wg0"));
+    assert!(settings.vpn_app.is_none(), "туннель снял приложение");
+
+    settings.set_vpn_app(Some(happ()));
+    assert!(settings.vpn_app.is_some());
+    assert!(settings.vpn_tunnel.is_none(), "приложение сняло туннель");
+
+    // Снять выбор — не значит выбрать другое: снятие туннеля приложение
+    // не трогает, и наоборот.
+    settings.set_vpn_tunnel(None);
+    assert!(settings.vpn_app.is_some());
+    settings.set_vpn_tunnel(Some("wg0".to_string()));
+    settings.set_vpn_app(None);
+    assert_eq!(settings.vpn_tunnel.as_deref(), Some("wg0"));
+}
+
+/// Туннель доходит до политики, а конфиг без ключа читается как «не выбран».
+#[test]
+fn the_tunnel_reaches_the_policy_and_old_configs_read_without_it() {
+    let settings = Settings {
+        vpn_tunnel: Some("wg0".to_string()),
+        ..Settings::default()
+    };
+    assert_eq!(settings.guard_config().vpn_tunnel.as_deref(), Some("wg0"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "is_enabled = true\ntargets = []\n").unwrap();
+    assert_eq!(Settings::load(&path).unwrap().vpn_tunnel, None);
+
+    settings.save(&path).unwrap();
+    assert_eq!(
+        Settings::load(&path).unwrap().vpn_tunnel.as_deref(),
+        Some("wg0")
+    );
+}
+
+#[test]
+fn a_tunnel_name_is_what_the_kernel_can_name() {
+    assert_eq!(validate_tunnel_name(" wg0 "), Ok("wg0".to_string()));
+    assert_eq!(
+        validate_tunnel_name("tun.vpn_1-a"),
+        Ok("tun.vpn_1-a".to_string())
+    );
+    assert_eq!(
+        validate_tunnel_name("123456789012345").map(|n| n.len()),
+        Ok(15)
+    );
+    for bad in ["", "1234567890123456", "wg 0", "wg/0", "туннель"] {
+        assert_eq!(
+            validate_tunnel_name(bad),
+            Err(TunnelNameError::Invalid),
+            "«{bad}»"
+        );
+    }
+}
+
+/// Цель добавляется одним путём на окно и терминал; отказы — с текстом.
+#[test]
+fn adding_a_target_refuses_the_empty_the_duplicate_and_the_vpn_app() {
+    let mut settings = Settings::default();
+    settings.set_vpn_app(Some(happ()));
+    let nano = Target {
+        entry: "nano".to_string(),
+        display_name: "nano".to_string(),
+        kind: TargetKind::Binary,
+        path: "/usr/bin/nano".to_string(),
+        launch_paths: vec![],
+    };
+
+    assert_eq!(settings.add_target(nano.clone()), Ok(()));
+    assert_eq!(
+        settings.add_target(nano.clone()),
+        Err(TargetEntryError::Duplicate)
+    );
+    assert_eq!(
+        settings.add_target(Target {
+            entry: " ".to_string(),
+            ..nano
+        }),
+        Err(TargetEntryError::Empty)
+    );
+    assert_eq!(settings.add_target(happ()), Err(TargetEntryError::IsVpnApp));
+    assert_eq!(settings.targets.len(), 1);
+}
+
+/// Терминальная версия живёт в своём каталоге целиком: окно её туннеля
+/// не видит, учёт остановленных у двух установок раздельный.
+#[test]
+fn the_terminal_version_keeps_its_own_directories() {
+    let paths = Paths::rooted_named("/дом".into(), "weto-cli");
+
+    assert_eq!(
+        paths.settings_file(),
+        std::path::Path::new("/дом/.config/weto-cli/config.toml")
+    );
+    assert_eq!(
+        paths.stopped_file(),
+        std::path::Path::new("/дом/.local/state/weto-cli/stopped.json")
+    );
+    assert_eq!(
+        paths.status_file(),
+        std::path::Path::new("/дом/.local/state/weto-cli/status.json")
+    );
+    assert_eq!(
+        paths.run_lock_file(),
+        std::path::Path::new("/дом/.local/state/weto-cli/run.lock")
+    );
+    assert_eq!(
+        paths.token_file(),
+        std::path::Path::new("/дом/.config/weto-cli/token")
+    );
+    // Приложение — прежние пути, байт в байт.
+    assert_eq!(
+        Paths::rooted("/дом".into()).settings_file(),
+        std::path::Path::new("/дом/.config/weto/config.toml")
+    );
 }
 
 /// Выбор VPN-приложения снимает его же из целей: охрана не имеет права

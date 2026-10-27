@@ -33,6 +33,10 @@ impl UnsafeEvidence {
     pub fn display_text(&self) -> String {
         match self {
             UnsafeEvidence::VpnAppNotRunning => "VPN-приложение не запущено".to_string(),
+            UnsafeEvidence::VpnTunnelDown(tunnel) => format!("VPN-туннель {tunnel} не поднят"),
+            UnsafeEvidence::TrafficBypassesTunnel { tunnel, via } => {
+                format!("трафик идёт мимо туннеля {tunnel} — через {via}")
+            }
             UnsafeEvidence::BlacklistedIp(ip) => format!("Адрес {ip} в чёрном списке"),
             UnsafeEvidence::BlockedCountry { code, source } => {
                 format!("Обнаружена страна {code} по данным {source}")
@@ -409,6 +413,24 @@ mod tests {
         );
     }
 
+    /// Тексты улик туннеля — дословно те же, что на macOS: журнал и статус
+    /// терминальной версии читают их на обеих платформах.
+    #[test]
+    fn tunnel_evidence_names_the_tunnel_and_the_carrier() {
+        assert_eq!(
+            UnsafeEvidence::VpnTunnelDown("wg0".to_string()).display_text(),
+            "VPN-туннель wg0 не поднят"
+        );
+        assert_eq!(
+            UnsafeEvidence::TrafficBypassesTunnel {
+                tunnel: "wg0".to_string(),
+                via: "eth0".to_string(),
+            }
+            .display_text(),
+            "трафик идёт мимо туннеля wg0 — через eth0"
+        );
+    }
+
     /// Таблица «состояние × причина» без пустых клеток: каждая фаза с каждой
     /// уликой даёт три непустые строки, а заголовок — ровно `GuardPhase::title`.
     #[test]
@@ -422,6 +444,11 @@ mod tests {
         ];
         let evidence = [
             UnsafeEvidence::VpnAppNotRunning,
+            UnsafeEvidence::VpnTunnelDown("wg0".to_string()),
+            UnsafeEvidence::TrafficBypassesTunnel {
+                tunnel: "wg0".to_string(),
+                via: "eth0".to_string(),
+            },
             UnsafeEvidence::BlacklistedIp("203.0.113.28".to_string()),
             UnsafeEvidence::BlockedCountry {
                 code: "RU".to_string(),
