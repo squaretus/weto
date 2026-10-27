@@ -147,7 +147,7 @@ final class GuardMachineFixtureTests: XCTestCase {
                 return (try? reason.asUnproven) == actualReason
             case ("danger", .danger(let actualEvidence)):
                 guard let evidence else { return true }
-                return (try? evidence.asEvidence(ceiling: ceiling)) == actualEvidence
+                return evidence.matches(actualEvidence, ceiling: ceiling)
             default: return false
             }
         }
@@ -258,12 +258,34 @@ final class GuardMachineFixtureTests: XCTestCase {
         let source: String?
         let primary: String?
         let confirmed: String?
+        let tunnel: String?
+        let via: String?
+
+        /// Ожидаемая улика сверяется по `kind`, а нагрузка — когда узел её называет.
+        /// Улики туннеля в ожидаемых фазах записаны одним видом: какой туннель упал,
+        /// задаёт вход шага, и повторять его в каждой фазе файл не стал.
+        func matches(_ actual: UnsafeEvidence, ceiling: TimeInterval) -> Bool {
+            switch (kind, actual) {
+            case ("vpnTunnelDown", .vpnTunnelDown(let actualTunnel)):
+                return tunnel.map { $0 == actualTunnel } ?? true
+            case ("trafficBypassesTunnel", .trafficBypassesTunnel(let actualTunnel, let actualVia)):
+                return (tunnel.map { $0 == actualTunnel } ?? true) && (via.map { $0 == actualVia } ?? true)
+            default:
+                return (try? asEvidence(ceiling: ceiling)) == actual
+            }
+        }
 
         /// Потолок улики `pauseExpired` — потолок случая: в файле он не повторяется.
         func asEvidence(ceiling: TimeInterval) throws -> UnsafeEvidence {
             do {
                 switch kind {
                 case "vpnAppNotRunning": return .vpnAppNotRunning
+                case "vpnTunnelDown":
+                    guard let tunnel else { throw Failure("vpnTunnelDown без туннеля") }
+                    return .vpnTunnelDown(tunnel)
+                case "trafficBypassesTunnel":
+                    guard let tunnel, let via else { throw Failure("trafficBypassesTunnel без туннеля или via") }
+                    return .trafficBypassesTunnel(tunnel: tunnel, via: via)
                 case "blacklistedIP":
                     guard let ip else { throw Failure("blacklistedIP без адреса") }
                     return .blacklistedIP(ip)

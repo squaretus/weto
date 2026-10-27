@@ -29,14 +29,18 @@ final class GuardPolicyFixtureTests: XCTestCase {
             guard let vpn = fixture.vpn?.asStatus, let geo = try fixture.geo?.asOutcome() else {
                 throw Failure("случай «\(fixture.name)» для decide обязан задавать vpn и geo")
             }
-            let signals = GuardSignals(isEnabled: fixture.isEnabled, vpn: vpn, geo: geo, config: config)
+            let signals = try GuardSignals(
+                isEnabled: fixture.isEnabled, vpn: vpn, tunnel: fixture.tunnelStatus, geo: geo, config: config
+            )
             return .some(GuardPolicy.decide(signals))
 
         case "decideLocal":
             guard let vpn = fixture.vpn?.asStatus else {
                 throw Failure("случай «\(fixture.name)» для decideLocal обязан задавать vpn")
             }
-            let local = GuardPolicy.decideLocal(isEnabled: fixture.isEnabled, vpn: vpn, config: config)
+            let local = try GuardPolicy.decideLocal(
+                isEnabled: fixture.isEnabled, vpn: vpn, tunnel: fixture.tunnelStatus, config: config
+            )
             return local.map(Decision.some) ?? .none
 
         default:
@@ -78,9 +82,35 @@ final class GuardPolicyFixtureTests: XCTestCase {
         let function: String
         let isEnabled: Bool
         let vpn: VPN?
+        /// Необязательно: отсутствие — `notChosen`, так старые случаи читаются как прежде.
+        let tunnel: Tunnel?
         let geo: Geo?
         let config: Config
         let expect: Expect
+
+        var tunnelStatus: VPNTunnelStatus {
+            get throws { try tunnel?.asStatus ?? .notChosen }
+        }
+    }
+
+    private struct Tunnel: Decodable {
+        let kind: String
+        let via: String?
+
+        var asStatus: VPNTunnelStatus {
+            get throws {
+                switch kind {
+                case "notChosen": return .notChosen
+                case "down": return .down
+                case "carrying": return .carrying
+                case "bypassed":
+                    guard let via else { throw Failure("tunnel bypassed без via") }
+                    return .bypassed(via: via)
+                default:
+                    throw Failure("неизвестный статус туннеля «\(kind)»")
+                }
+            }
+        }
     }
 
     private struct VPN: Decodable {
@@ -142,6 +172,8 @@ final class GuardPolicyFixtureTests: XCTestCase {
         let allowedCountries: [String]?
         let allowedIPRanges: [String]?
         let targets: [String]
+        /// Версия 5: туннель вместо приложения. Отсутствие — туннель не выбран.
+        let vpnTunnel: String?
 
         func asGuardConfig() throws -> GuardConfig {
             GuardConfig(
@@ -150,7 +182,8 @@ final class GuardPolicyFixtureTests: XCTestCase {
                 blockedIPRanges: try Self.ranges(blockedIPRanges),
                 allowedCountries: Set(allowedCountries ?? []),
                 allowedIPRanges: try Self.ranges(allowedIPRanges ?? []),
-                targets: targets
+                targets: targets,
+                vpnTunnel: vpnTunnel
             )
         }
 
@@ -188,6 +221,8 @@ final class GuardPolicyFixtureTests: XCTestCase {
         let source: String?
         let primary: String?
         let confirmed: String?
+        let tunnel: String?
+        let via: String?
 
         var asUnproven: UnprovenReason {
             switch kind {
@@ -202,6 +237,8 @@ final class GuardPolicyFixtureTests: XCTestCase {
         var asEvidence: UnsafeEvidence {
             switch kind {
             case "vpnAppNotRunning": return .vpnAppNotRunning
+            case "vpnTunnelDown": return .vpnTunnelDown(tunnel ?? "")
+            case "trafficBypassesTunnel": return .trafficBypassesTunnel(tunnel: tunnel ?? "", via: via ?? "")
             case "blacklistedIP": return .blacklistedIP(ip ?? "")
             case "blockedCountry": return .blockedCountry(code: code ?? "", source: source ?? "")
             case "countryConflict":

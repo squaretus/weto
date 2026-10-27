@@ -62,14 +62,46 @@ final class NetworkSnapshotReaderTests: XCTestCase {
     /// Проба подменяется — остальная сборка снимка проверяется без сети.
     func test_the_snapshot_carries_whatever_the_probe_answered() {
         let route = OutgoingRoute(interface: "utun9", address: "10.7.0.2")
-        let snapshot = NetworkSnapshotReader(routeProbe: FixedRoute(route)).snapshot()
+        let snapshot = NetworkSnapshotReader(routeProbe: FixedRoute(route), interfaces: FixedInterfaces([])).snapshot()
 
         XCTAssertEqual(snapshot.outgoing, route)
         XCTAssertEqual(snapshot.verdictFingerprint, "out=utun9/10.7.0.2")
     }
 
+    /// Поднятые интерфейсы едут в снимок для статуса туннеля, но не в отпечаток.
+    func test_raised_interfaces_reach_the_snapshot_but_not_the_fingerprint() {
+        let route = OutgoingRoute(interface: "utun9", address: "10.7.0.2")
+        let interfaces = FixedInterfaces([
+            RaisedInterface(name: "en0", addresses: ["192.168.0.100"]),
+            RaisedInterface(name: "utun9", addresses: ["10.7.0.2"]),
+        ])
+        let snapshot = NetworkSnapshotReader(routeProbe: FixedRoute(route), interfaces: interfaces).snapshot()
+
+        XCTAssertEqual(snapshot.upInterfaces, ["en0", "utun9"])
+        XCTAssertEqual(snapshot.verdictFingerprint, "out=utun9/10.7.0.2")
+    }
+
+    /// Живая машина: носитель трафика поднят — иначе ядро не выпускало бы через него.
+    func test_the_live_carrier_is_among_the_raised_interfaces() throws {
+        let snapshot = snapshotWithRoute()
+        guard let outgoing = snapshot.outgoing else {
+            throw XCTSkip("наружу сейчас никто не выпускает")
+        }
+        XCTAssertTrue(snapshot.upInterfaces.contains(outgoing.interface), "\(snapshot.upInterfaces)")
+        XCTAssertFalse(KernelInterfaceList().raisedInterfaces().contains { $0.name.isEmpty })
+    }
+
+    /// Живая машина: все интерфейсы — это и опущенные тоже, поэтому поднятые входят в них целиком.
+    /// `weto vpn set wg0` называет туннелем и опущенный wg0.
+    func test_all_interface_names_cover_the_raised_ones() {
+        let all = Set(KernelInterfaceList().interfaceNames())
+        let raised = Set(KernelInterfaceList().raisedInterfaces().map(\.name))
+        XCTAssertTrue(all.contains("lo0"), "\(all)")
+        XCTAssertTrue(raised.isSubset(of: all), "поднятые \(raised) не все среди \(all)")
+    }
+
     func test_without_a_route_the_snapshot_is_empty() {
-        let snapshot = NetworkSnapshotReader(routeProbe: FixedRoute(nil)).snapshot()
+        let snapshot = NetworkSnapshotReader(routeProbe: FixedRoute(nil), interfaces: FixedInterfaces([])).snapshot()
 
         XCTAssertNil(snapshot.outgoing)
         XCTAssertEqual(snapshot.verdictFingerprint, "out=-")
@@ -82,4 +114,12 @@ private struct FixedRoute: RouteProbing {
     init(_ route: OutgoingRoute?) { self.route = route }
 
     func outgoingRoute() -> OutgoingRoute? { route }
+}
+
+private struct FixedInterfaces: InterfaceListing {
+    let interfaces: [RaisedInterface]
+
+    init(_ interfaces: [RaisedInterface]) { self.interfaces = interfaces }
+
+    func raisedInterfaces() -> [RaisedInterface] { interfaces }
 }

@@ -304,4 +304,21 @@ final class StatusPresentationTests: XCTestCase {
     func test_detail_is_nil_when_nothing_is_known() {
         XCTAssertNil(StatusPresentation.detail(for: .danger(.vpnAppNotRunning), reading: nil))
     }
+
+    /// Упавший туннель — такая же локальная улика, как закрытый клиент: прежние
+    /// адрес и страна про текущий выход не говорят ничего.
+    func test_tunnel_evidence_hides_the_previous_exit_like_a_closed_app() {
+        let reading = GeoReading(ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: "KZ", confirmSource: .freeipapi)
+        XCTAssertNil(StatusPresentation.detail(for: .danger(.vpnTunnelDown("wg0")), reading: reading))
+        XCTAssertNil(StatusPresentation.detail(
+            for: .danger(.trafficBypassesTunnel(tunnel: "wg0", via: "eth0")), reading: reading
+        ))
+        XCTAssertNotNil(StatusPresentation.detail(
+            for: .danger(.blockedCountry(code: "RU", source: "ipinfo")), reading: reading
+        ))
+        XCTAssertEqual(
+            StatusPresentation.explanation(for: .danger(.vpnTunnelDown("wg0")), remainingPause: nil).evidence,
+            "VPN-туннель wg0 не поднят"
+        )
+    }
 }

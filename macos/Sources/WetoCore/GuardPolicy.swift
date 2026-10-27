@@ -6,6 +6,11 @@ public struct GuardConfig: Equatable, Sendable {
     /// bundle ID или путь к бинарнику.
     public let vpnAppRule: String?
 
+    /// Выбранный VPN-туннель — имя интерфейса (`wg0`, `tun0`, `utun6`). Задаётся
+    /// только в терминальной версии и взаимоисключающе с приложением: на сервере
+    /// VPN поднимает `wg-quick` или юнит без приложения, и имена там стабильны.
+    public let vpnTunnel: String?
+
     public let blockedCountries: Set<String>
     public let blockedIPRanges: [IPRange]
 
@@ -26,9 +31,11 @@ public struct GuardConfig: Equatable, Sendable {
         blockedIPRanges: [IPRange],
         allowedCountries: Set<String>,
         allowedIPRanges: [IPRange],
-        targets: [String]
+        targets: [String],
+        vpnTunnel: String? = nil
     ) {
         self.vpnAppRule = vpnAppRule
+        self.vpnTunnel = vpnTunnel
         self.blockedCountries = blockedCountries
         self.blockedIPRanges = blockedIPRanges
         self.allowedCountries = allowedCountries
@@ -40,12 +47,20 @@ public struct GuardConfig: Equatable, Sendable {
 public struct GuardSignals: Equatable, Sendable {
     public let isEnabled: Bool
     public let vpn: VPNAppStatus
+    public let tunnel: VPNTunnelStatus
     public let geo: GeoOutcome
     public let config: GuardConfig
 
-    public init(isEnabled: Bool, vpn: VPNAppStatus, geo: GeoOutcome, config: GuardConfig) {
+    public init(
+        isEnabled: Bool,
+        vpn: VPNAppStatus,
+        tunnel: VPNTunnelStatus = .notChosen,
+        geo: GeoOutcome,
+        config: GuardConfig
+    ) {
         self.isEnabled = isEnabled
         self.vpn = vpn
+        self.tunnel = tunnel
         self.geo = geo
         self.config = config
     }
@@ -64,6 +79,11 @@ public enum UnprovenReason: Equatable, Sendable {
 /// Положительное доказательство опасности. Только оно завершает цели.
 public enum UnsafeEvidence: Equatable, Sendable {
     case vpnAppNotRunning
+    /// Выбранного туннеля нет среди поднятых интерфейсов. Несёт имя туннеля:
+    /// запись обязана назвать тот, что был выбран в момент завершения.
+    case vpnTunnelDown(String)
+    /// Туннель поднят, а ядро выпускает вердиктный запрос через другой интерфейс.
+    case trafficBypassesTunnel(tunnel: String, via: String)
     case blacklistedIP(String)
     case blockedCountry(code: String, source: String)
     case countryConflict(primary: String, confirmed: String)
@@ -80,6 +100,18 @@ extension UnsafeEvidence {
         if case .pauseExpired = self { return true }
         return false
     }
+
+    /// Улика видна без сети — по процессам и интерфейсам машины. Про выход такая улика
+    /// не говорит ничего, поэтому прежние адрес и страна при ней не показываются,
+    /// а снимает её переоценка, когда локальная проверка улики больше не даёт.
+    public var isLocal: Bool {
+        switch self {
+        case .vpnAppNotRunning, .vpnTunnelDown, .trafficBypassesTunnel: return true
+        case .blacklistedIP, .blockedCountry, .countryConflict, .notWhitelistedIP,
+             .notWhitelistedCountry, .pauseExpired:
+            return false
+        }
+    }
 }
 
 public enum GuardDecision: Equatable, Sendable {
@@ -91,27 +123,46 @@ public enum GuardDecision: Equatable, Sendable {
 public enum GuardPolicy {
 
     /// Основания, видные без сети. `nil` — «локальных оснований нет, решает гео».
-    /// Невыбранное приложение оснований не даёт: это дешёвый дополнительный сигнал,
-    /// а не условие работы охраны.
+    /// Невыбранные приложение и туннель оснований не дают: это дешёвые дополнительные
+    /// сигналы, а не условие работы охраны. Порядок: приложение, затем туннель —
+    /// каждый спрашивается только тогда, когда выбран.
     public static func decideLocal(
         isEnabled: Bool,
         vpn: VPNAppStatus,
+        tunnel: VPNTunnelStatus = .notChosen,
         config: GuardConfig
     ) -> GuardDecision? {
         guard isEnabled, config.hasTargets else { return .safe }
-        guard config.vpnAppRule != nil else { return nil }
 
-        switch vpn {
-        case .notChosen, .running:
-            // Запущенное приложение — ещё не доказательство, что трафик в туннеле.
-            return nil
-        case .notRunning:
-            return .kill(.vpnAppNotRunning)
+        if config.vpnAppRule != nil {
+            switch vpn {
+            case .notChosen, .running:
+                // Запущенное приложение — ещё не доказательство, что трафик в туннеле.
+                break
+            case .notRunning:
+                return .kill(.vpnAppNotRunning)
+            }
         }
+
+        if let chosen = config.vpnTunnel {
+            switch tunnel {
+            case .notChosen, .carrying:
+                // Туннель несёт трафик — это ещё не доказательство безопасного выхода.
+                break
+            case .down:
+                return .kill(.vpnTunnelDown(chosen))
+            case .bypassed(let via):
+                return .kill(.trafficBypassesTunnel(tunnel: chosen, via: via))
+            }
+        }
+
+        return nil
     }
 
     public static func decide(_ signals: GuardSignals) -> GuardDecision {
-        if let local = decideLocal(isEnabled: signals.isEnabled, vpn: signals.vpn, config: signals.config) {
+        if let local = decideLocal(
+            isEnabled: signals.isEnabled, vpn: signals.vpn, tunnel: signals.tunnel, config: signals.config
+        ) {
             return local
         }
 

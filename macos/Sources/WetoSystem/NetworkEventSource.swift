@@ -49,8 +49,14 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
     private var runLoopSource: CFRunLoopSource?
     private var observerTokens: [NSObjectProtocol] = []
     private var handler: (@Sendable (GuardTrigger) -> Void)?
+    private let observesWorkspace: Bool
 
-    public init() {}
+    /// `observesWorkspace: false` — без уведомлений `NSWorkspace`. Они живут
+    /// в GUI-сессии пользователя, а у LaunchDaemon от root её нет; терминальные
+    /// цели и без них ловит опрос процессов, а пробуждение — события сети.
+    public init(observesWorkspace: Bool = true) {
+        self.observesWorkspace = observesWorkspace
+    }
 
     deinit { stop() }
 
@@ -63,7 +69,7 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
         startPathMonitor()
         startDynamicStore()
         startRouteSocket()
-        startWorkspaceObservers()
+        if observesWorkspace { startWorkspaceObservers() }
     }
 
     /// Правки таблицы маршрутов от ядра.
@@ -124,10 +130,12 @@ public final class NetworkEventSource: NetworkEventSourcing, @unchecked Sendable
         routeSocket = nil
         routeEmitPending = false
 
-        for token in observerTokens {
-            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        if !observerTokens.isEmpty {
+            for token in observerTokens {
+                NSWorkspace.shared.notificationCenter.removeObserver(token)
+            }
+            observerTokens.removeAll()
         }
-        observerTokens.removeAll()
     }
 
     fileprivate func emit(_ trigger: GuardTrigger) {

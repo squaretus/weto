@@ -194,12 +194,13 @@ public enum StatusPresentation {
     /// Что мы имеем право показывать как известное про выход.
     ///
     /// «Проверка» не знает ничего: вердикта про текущий путь нет, и прошлые адрес
-    /// со страной читались бы как «я всё ещё под VPN». Закрытый клиент — то же самое.
-    private static func knownReading(for phase: GuardPhase, reading: GeoReading?) -> GeoReading? {
+    /// со страной читались бы как «я всё ещё под VPN». Локальная улика (закрытый
+    /// клиент, упавший туннель) — то же самое.
+    public static func knownReading(for phase: GuardPhase, reading: GeoReading?) -> GeoReading? {
         switch phase {
         case .verifying: return nil
         case .protected(let current), .interference(let current, _): return current
-        case .danger(.vpnAppNotRunning): return nil
+        case .danger(let evidence) where evidence.isLocal: return nil
         default: return reading
         }
     }

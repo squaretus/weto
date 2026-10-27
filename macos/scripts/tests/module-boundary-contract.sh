@@ -46,6 +46,25 @@ check WetoSystem "$(printf '%s\n' AppKit Darwin Foundation Network Security Syst
 # знание о точке входа.
 check WetoShared "$(printf '%s\n' AppKit Darwin Foundation Observation SwiftUI UpdateKit UpdateKitCore UpdateKitUI UserNotifications WetoCore WetoDesign WetoSystem)"
 
+# Терминальная версия — оболочка над тем же бэкендом охраны. Уведомлений рабочего
+# стола, SwiftUI и AppKit у неё нет: новости уходят строкой в лог, а под root
+# у LaunchDaemon нет GUI-сессии, которую AppKit спрашивал бы. CryptoKit — сумма
+# скачанного обновления, UpdateKitCore — версии и хосты доставки релизов.
+check WetoCLI "$(printf '%s\n' CryptoKit Darwin Foundation UpdateKitCore WetoCore WetoDesign WetoShared WetoSystem)"
+
+if grep -rn 'UNUserNotificationCenter' Sources/WetoCLI >/dev/null 2>&1; then
+    echo "✗ WetoCLI шлёт уведомления рабочего стола — у терминальной версии их нет" >&2
+    status=1
+fi
+
+# Приложение Weto ищется обходом процессов: `NSRunningApplication` и уведомления
+# `NSWorkspace` у LaunchDaemon от root не работают — сессии окна у него нет.
+# Комментарии, объясняющие этот запрет, нарушением не считаются.
+if grep -rnE 'NSRunningApplication|NSWorkspace' Sources/WetoCLI | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' >/dev/null 2>&1; then
+    echo "✗ WetoCLI обращается к GUI-сессии (NSRunningApplication/NSWorkspace) — под root её нет" >&2
+    status=1
+fi
+
 # `URLSession` в ядре — тот же запрет, но по имени типа: импорт `Foundation`
 # законен, а сетевой запрос из ядра — нет.
 if grep -rn 'URLSession' Sources/WetoCore >/dev/null 2>&1; then

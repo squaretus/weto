@@ -3,11 +3,15 @@ import Security
 
 public enum SecretStoreError: Error, Equatable, Sendable {
     case keychain(OSStatus)
+    /// Файловое хранилище терминальной версии: текст ошибки файловой системы.
+    case file(String)
 
     public var displayText: String {
         switch self {
         case .keychain(let status):
             return "связка ключей вернула ошибку \(status)"
+        case .file(let detail):
+            return "не удалось записать файл токена: \(detail)"
         }
     }
 }
