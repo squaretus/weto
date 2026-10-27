@@ -3,7 +3,9 @@
 //! Порт `macos/Sources/WetoCore/PausePlan.swift`. Порядок — часть контракта границы
 //! сигналов: шелл раньше своей цели, родитель раньше потомков; продолжение —
 //! строго наоборот. Иначе шелл забирает терминал себе обратно, и цель встаёт
-//! по `SIGTTIN`. Проверено на zsh и bash.
+//! по `SIGTTIN`. Проверено на zsh и bash на голом pty. Под tmux порядок не спасает:
+//! tmux продолжает остановленный шелл панели сразу, и тот забирает терминал вместе
+//! с его режимом — это чинит возврат режима терминала (`foreground_roots`).
 //!
 //! Данные сюда приходят готовым снимком: ни `/proc`, ни сигналов здесь нет —
 //! их шлёт граница, получив этот план.
@@ -48,6 +50,14 @@ pub struct PausePlan {
 
     /// Стояли до нас (Ctrl-Z): не трогаем ни при паузе, ни при возобновлении.
     pub skipped: Vec<i32>,
+
+    /// Корни целей, державшие передний план своего терминала в момент паузы. Их режим
+    /// терминала weto снимает до SIGSTOP и возвращает, когда цель снова впереди: под tmux
+    /// шелл остановленным не удержать — tmux продолжает его сразу, — и он замечает остановку
+    /// своего задания, забирает терминал и переключает его режим, а программа в сыром
+    /// режиме (`claude`) его не восстанавливает: после `fg` она рисуется, но клавиши
+    /// до неё не доходят.
+    pub foreground_roots: Vec<i32>,
 }
 
 impl PausePlan {
@@ -110,6 +120,7 @@ pub fn plan(matched: &[MatchedProcess], processes: &[ProcessSnapshot]) -> PauseP
     let mut shells: Vec<i32> = Vec::new();
     let mut shell_targets: HashMap<i32, String> = HashMap::new();
     let mut backgrounded: Vec<i32> = Vec::new();
+    let mut foreground_roots: Vec<i32> = Vec::new();
     for root in active.iter().filter(|m| m.matched_by == MatchBasis::Rule) {
         let Some(snapshot) = by_pid.get(&root.pid) else {
             continue;
@@ -117,10 +128,11 @@ pub fn plan(matched: &[MatchedProcess], processes: &[ProcessSnapshot]) -> PauseP
         if snapshot.terminal_foreground_group == 0 {
             continue;
         }
-        if !holds_foreground(snapshot, &tree) {
+        if !holds_foreground_in(snapshot, &tree) {
             backgrounded.push(root.pid);
             continue;
         }
+        foreground_roots.push(root.pid);
         // Лидер группы обычно и есть сама цель. Если лидер уже вышел и в снимке его нет,
         // намеренно считаем root'а собственным лидером: родителя-шелла всё равно ищем
         // через parent_pid, а не через факт лидерства, так что отсутствие лидера в снимке
@@ -163,7 +175,16 @@ pub fn plan(matched: &[MatchedProcess], processes: &[ProcessSnapshot]) -> PauseP
         shell_targets,
         backgrounded,
         skipped,
+        foreground_roots,
     }
+}
+
+/// Держит ли процесс передний план своего терминала — тем же правилом, что план паузы.
+pub fn holds_foreground(target: &ProcessSnapshot, processes: &[ProcessSnapshot]) -> bool {
+    if target.terminal_foreground_group == 0 {
+        return false;
+    }
+    holds_foreground_in(target, &ProcessTree::new(processes))
 }
 
 /// Цель в переднем плане своего терминала, если лидер передней группы tty — сама цель
@@ -179,7 +200,7 @@ pub fn plan(matched: &[MatchedProcess], processes: &[ProcessSnapshot]) -> PauseP
 /// своего лидера, так что этот случай — то же равенство групп сверху. Лидера может
 /// не быть в снимке (успел выйти) — тогда предков у него нет и передний план
 /// поддереву цели не принадлежит.
-fn holds_foreground(target: &ProcessSnapshot, tree: &ProcessTree) -> bool {
+fn holds_foreground_in(target: &ProcessSnapshot, tree: &ProcessTree) -> bool {
     if target.process_group == target.terminal_foreground_group {
         return true;
     }
@@ -247,7 +268,10 @@ mod tests {
             .collect()
     }
 
-    /// Стоп — шелл, цель, потомки; продолжение — в обратном порядке.
+    /// Стоп — шелл, цель, потомки; продолжение — в обратном порядке. На голом терминале
+    /// так цель сохраняет передний план (проверено на zsh и bash). Под tmux — нет:
+    /// tmux продолжает остановленный шелл панели сразу, и тот забирает терминал; это чинит
+    /// возврат режима терминала (`foreground_roots`), а не порядок.
     #[test]
     fn foreground_job_takes_its_shell_along_shell_first() {
         let plan = plan(
@@ -263,6 +287,11 @@ mod tests {
             "запись журнала обязана назвать цель, ради терминала которой шелл встал"
         );
         assert!(plan.backgrounded.is_empty());
+        assert_eq!(
+            plan.foreground_roots,
+            vec![200],
+            "режим терминала снимается у цели, державшей передний план"
+        );
     }
 
     /// Фоновое задание (`claude &`): группа не передняя — шелл не трогаем, цель помечена.
@@ -273,6 +302,10 @@ mod tests {
         assert_eq!(plan.stop_order, vec![200]);
         assert!(plan.shells.is_empty());
         assert_eq!(plan.backgrounded, vec![200]);
+        assert!(
+            plan.foreground_roots.is_empty(),
+            "режим терминала принадлежит тому, кто впереди"
+        );
     }
 
     /// GUI-приложение без tty — обычное дерево, родитель первым, без пометок.

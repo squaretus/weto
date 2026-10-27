@@ -16,8 +16,8 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `macos/Sources/WetoSystem/SearchPaths.swift` — `PATH` логин-шелла для поиска целей по имени
 - `macos/Sources/WetoSystem/GeoProbe.swift`
 - `macos/Sources/WetoSystem/NetworkPathReporter.swift` (also `NetworkPathReporting`)
-- `macos/Sources/WetoSystem/HTTPFetching.swift`
-- `macos/Sources/WetoSystem/ProcessRegistry.swift`
+- `macos/Sources/WetoSystem/HTTPFetching.swift` — one `URLSession` per request, invalidated with the answer
+- `macos/Sources/WetoSystem/ProcessRegistry.swift` — also the controlling tty (`e_tdev` → `terminalDevice`)
 - `macos/Sources/WetoSystem/ProcessSignaler.swift` — `ProcessSignaling` (was `ProcessKilling`):
   `send(_:to:)` delivers `.kill`/`.stop`/`.resume` strictly in list order — pause's
   shell-then-target-then-descendants contract lives on this boundary, not in the caller
@@ -25,10 +25,12 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   hosts a backgrounded terminal target's pid, to bring it back to the user's attention. Never
   types `fg` for them — only Terminal.app/iTerm2 support that via AppleScript, and not every
   emulator does
+- `macos/Sources/WetoSystem/TerminalModeKeeper.swift` — `TerminalModeKeeping`: captures a
+  target's `termios` by device before the pause and writes it back after `fg`
 - `macos/Sources/WetoSystem/TargetResolver.swift`
 - `macos/Sources/WetoSystem/KeychainStore.swift` (also `SecretStoring`, `SecretStoreError`, `TokenBox`)
 - `macos/Sources/WetoSystem/FlagImageStore.swift`
-- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests,ProcessSignalerTests,TerminalLocatorTests,HTTPFetcherPhasesTests}.swift`
+- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests,ProcessSignalerTests,TerminalLocatorTests,HTTPFetcherPhasesTests,TerminalModeKeeperTests,ForegroundJobPlanTests}.swift`
 
 ## Entry points
 - `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; kernel route probe.
@@ -48,6 +50,9 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `.kill`/`.stop`/`.resume` (`SignalResult.isDelivered`, true for `nil` and `ESRCH` alike)
 - `TerminalLocating.activateTerminal(owning pid:in processes:) → Bool` — brings the hosting
   `.app` to the front; `TerminalLocator.hostApplicationPID(of:in:)` is the pure lookup half
+- `TerminalModeKeeping.capture(device:) → Result<TerminalMode, TerminalModeError>`,
+  `.restore(_:) → Result<Void, TerminalModeError>`; `TerminalMode` carries the device, the
+  `/dev/ttysNNN` path (`devname`) and the raw `termios` bytes
 - `TargetResolving.resolve(_ entry: String) → TargetRule?`
 - `SecretStoring.read(account:) → String?`,
   `.write(_:account:) → Result<Void, SecretStoreError>`
@@ -85,6 +90,8 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - Keychain item add/update/delete under the injected service name.
 - Creates the flag cache directory and writes downloaded `.svg` files into it.
 - Reads the first two bytes of candidate executables (shebang sniffing in `TargetResolver`).
+- `TerminalModeKeeper` opens a target's tty (`O_RDWR | O_NOCTTY | O_NONBLOCK`) and calls
+  `tcgetattr` / `tcsetattr(TCSANOW)` on it — `TCSANOW`, so input typed after `fg` is not flushed.
 
 ## Invariants / assumptions
 - **«Is there a network at all» costs nothing.** `NetworkPathReporter` answers from a running
@@ -113,6 +120,13 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   configuration, `urlCache = nil`, and `reloadIgnoringLocalAndRemoteCacheData` on both the
   configuration and each request; `GeoProbe` keeps no state between probes. A cached 200 would
   freeze the reported country while the real exit node changed.
+- **No connection pool between probes.** `URLSessionHTTPFetcher.fetch` builds its own
+  `URLSession` (and `MetricsCollector`) per request and calls `invalidateAndCancel` on the way out.
+  A fake-IP tunnel (`198.18.0.0/15`) drops TCP connections silently on a client restart, the
+  verdict fingerprint does not change, and a shared session kept handing every probe the same dead
+  connection — timeouts for minutes on a healthy VPN, with DNS/connect/TLS phases all `0` in
+  `checks.json`. Do not "optimise" the session back into a stored property.
+  [bugs/stale-pooled-connection-under-fake-ip-tunnel](../bugs/stale-pooled-connection-under-fake-ip-tunnel.md).
 - **The IP from ipinfo is validated by `IPAddress.isValid` before it is interpolated into the
   confirmation URLs.** A string from the network must never reach a URL unchecked.
 - **A failed confirmation is not an error.** Both confirmers failing yields
@@ -199,6 +213,11 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   of them saw it; the guard is `launchd` (pid 1), which must always be in the list.
 - **`proc_listallpids` races.** Capacity is queried, then over-allocated by 64 slots; processes
   spawning between the two calls can still be missed on that sweep.
+- **The terminal mode is only as good as `terminalDevice`.** It is set only when
+  `PROC_FLAG_CONTROLT` is present; `0` means no tty and nothing is captured. `restore` refuses a
+  blob whose size differs from `MemoryLayout<termios>.size`. Any user process may set the mode of
+  a tty it owns: `SIGTTOU` threatens only background members of that terminal's session, which
+  weto is not.
 - **`kill` returning `EPERM`** (root-owned target) is a genuine, unrecoverable failure that must
   surface to the user, unlike `ESRCH`.
 - **Keychain is unavailable in unbundled runs** (`swift run WetoMenuBar`, and partly under
@@ -228,3 +247,5 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `decisions/vpn-app-instead-of-tunnel.md` — why there is no tunnel picker any more
 - `decisions/geo-confirmation-services.md` — the request budget this module spends
 - `decisions/pause-instead-of-kill.md` — the signal-order contract `ProcessSignaling` enforces
+- `bugs/stale-pooled-connection-under-fake-ip-tunnel.md` — why the fetcher has no shared session
+- `bugs/tmux-takes-the-terminal-from-a-paused-target.md` — why `TerminalModeKeeping` exists

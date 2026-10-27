@@ -18,6 +18,10 @@ public struct ProcessSnapshot: Equatable, Sendable {
     /// Совпадает с `processGroup` у переднего задания интерактивного шелла.
     public let terminalForegroundGroup: Int32
 
+    /// Управляющий терминал (`e_tdev`). 0 — терминала нет. По нему weto снимает
+    /// режим терминала цели перед паузой и возвращает его после (`TerminalModeKeeping`).
+    public let terminalDevice: Int32
+
     /// Уже остановлен (`SSTOP`) — пользовательский Ctrl-Z, не наша пауза.
     public let isStopped: Bool
 
@@ -28,6 +32,7 @@ public struct ProcessSnapshot: Equatable, Sendable {
         arguments: [String]? = nil,
         processGroup: Int32 = 0,
         terminalForegroundGroup: Int32 = 0,
+        terminalDevice: Int32 = 0,
         isStopped: Bool = false
     ) {
         self.pid = pid
@@ -36,6 +41,7 @@ public struct ProcessSnapshot: Equatable, Sendable {
         self.arguments = arguments
         self.processGroup = processGroup
         self.terminalForegroundGroup = terminalForegroundGroup
+        self.terminalDevice = terminalDevice
         self.isStopped = isStopped
     }
 }

@@ -14,13 +14,14 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `ip.rs` | address validation and CIDR |
 | `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the pause ceiling as a parameter (`set_pause_ceiling`) |
 | `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText` |
-| `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `PausedProcess`, `RecoveredProcess` |
-| `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation`/`should_explain`, `status_lines`, `idle_targets` |
+| `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `foreground_roots`, public `holds_foreground`; `PausedProcess`, `RecoveredProcess` |
+| `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation(phase)`/`should_explain` (no countdown — that is on the pills), `status_lines`, `idle_targets` |
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic |
 | `weto-sys` | `network_events.rs` | netlink subscription |
-| `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, `T` state |
+| `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, controlling tty (`tty_nr` → `terminal_device`), `T` state |
 | `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order |
-| `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq |
+| `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq; `ureq::get` builds an agent per call, so no connection pool between probes |
+| `weto-sys` | `terminal_mode.rs` | `TerminalModeKeeping` / `TerminalModeKeeper`: `termios` of a target's tty captured before the pause, restored after `fg`; `path_of` finds the device by the kernel's `tty_nr` encoding |
 | `weto-sys` | `background.rs` | the background track: one thread per probe, so a pass never waits for a request |
 | `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
 | `weto-core` | `launcher.rs` | `.desktop` text: `DesktopCommand`, `name_from_desktop_entry`, wrapper stripping |
@@ -33,7 +34,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings, ring-buffer journal, XDG paths |
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping |
-| `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger |
+| `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger, terminal modes (`restore_terminal_modes`) |
 | `weto-guard` | `rules.rs` | `RuleCache`: target and VPN-app rules re-resolved on a target-list change or every `TARGET_RULE_REFRESH` (2 s), never narrowed |
 | `weto-app` | `lifecycle.rs` | whether the process outlives its windows (`holds_application`) |
 | `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
@@ -300,6 +301,14 @@ Everything the policy decides is shared. What the system dictates is not:
   send a request; the stale report is dropped first. The fingerprint is `verdict_fingerprint()` —
   the traffic carrier and its local address, never the interface list: a second tunnel appearing or
   vanishing beside the working one must not cost the user their targets.
+- **No connection pool between geo probes — here by construction.** `ureq::get` in ureq 2.x
+  builds a fresh `Agent` per call, so the dead pooled connection that cost macOS minutes of
+  timeouts under a fake-IP tunnel cannot happen; `weto-sys/tests/geo_probe.rs::
+  a_silent_pooled_connection_is_not_reused_by_the_next_request` pins it against a future shared
+  `Agent`. [bugs/stale-pooled-connection-under-fake-ip-tunnel](../bugs/stale-pooled-connection-under-fake-ip-tunnel.md).
+- **`tty_nr` is in the kernel's encoding, not glibc's.** `terminal_mode::kernel_device_numbers`
+  decodes `new_encode_dev` (minor above 255 lives in the upper bits) before matching `st_rdev`
+  of `/dev/pts/*`, then `/dev/tty*`; comparing the raw numbers misses every pty with a large minor.
 - **The confirmation cache, the cooldown and the reference-address fallback are identical to
   macOS**, down to the 60 s / 15 min ceilings and the 300 s `CONFIRMATION_COOLDOWN`: the freeipapi
   quota counts per exit address and is shared with everyone else on that node, so its 429 must
@@ -426,7 +435,7 @@ divergence between the implementations lives in the transitions.
 
 ## Testing
 
-528 tests, run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
+535 tests (macOS: 566), run in a Linux container (`linux/scripts/dev.sh`). Two contracts need
 `CAP_NET_ADMIN` because they create interfaces and routing rules:
 `policy-routing-contract.sh` and `netlink-events-contract.sh`. The notification and the terminal
 lookup are tested against a real session bus: the test starts its own `dbus-daemon`, serves a fake
@@ -532,6 +541,16 @@ one record the journal is kept for out of its fifty.
    observation like any other. The record gets its own outcome — `RELEASE_SIGNALLED_TEXT` when the
    signal went out, `RELEASED_TEXT` once observed, both word for word with macOS — and
    `pause_resolved` skips those pids so the episode's outcome cannot overwrite them.
+
+   Before the `SIGSTOP`, `pause` captures the terminal mode of every `plan.foreground_roots` pid
+   it is about to stop (`TerminalModeKeeping::capture` by `terminal_device`) into `saved_modes`,
+   keyed by pid + path; a mode already saved is never overwritten. Under tmux the pane shell is
+   continued by the tmux server at once, takes the terminal mid-pause and switches its mode, and
+   `claude` ignores the keyboard after `fg`. `restore_terminal_modes(Some(scan))` runs at the end
+   of `enforce()`, after the ledger work and on the pass's own scan, and restores once when the
+   process is not `T`, not in the ledger and holds the foreground again (`pause_plan::holds_foreground`);
+   gone, another path or another tty drops the mode. In memory only, same as macOS.
+   [bugs/tmux-takes-the-terminal-from-a-paused-target](../bugs/tmux-takes-the-terminal-from-a-paused-target.md).
 2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the bad
    result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
    restart it. At the ceiling (the user's setting, 1 min by default) the phase becomes
@@ -590,7 +609,8 @@ neither the tray nor the readout shows one. A target's pill icon comes only from
 entry; a command or path target keeps the terminal glyph.
 
 **The pause has a face now.** The status window builds its title, shield colour and the
-three explanation lines straight from `GuardPhase` (`weto_core::presentation::shield_color`,
+three explanation lines straight from `GuardPhase` (`explanation(phase)` takes no remaining time:
+the paused «what next» line names no countdown, the badges do) (`weto_core::presentation::shield_color`,
 `explanation`, `should_explain` — the same texts as macOS `GuardVM.statusColor` and
 `StatusPresentation.explanation`, word for word), and every standing target gets a pause
 badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`; «4:59»

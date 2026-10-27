@@ -32,6 +32,7 @@ use weto_sys::process_registry::ProcessRegistryReading;
 use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
 use weto_sys::secret_store::{SecretError, SecretStoring};
 use weto_sys::target_resolver::{LocatedTarget, TargetResolving};
+use weto_sys::terminal_mode::{TerminalMode, TerminalModeError, TerminalModeKeeping};
 
 // --- сеть -------------------------------------------------------------------
 
@@ -283,6 +284,31 @@ impl World {
         world.background.remove(&pid);
         if let Some(process) = world.processes.iter_mut().find(|p| p.pid == pid) {
             process.is_stopped = false;
+        }
+    }
+
+    /// Процесс продолжил кто-то кроме weto: сервер tmux — свой шелл панели,
+    /// остановленный ради терминала цели.
+    pub fn continues(&self, pid: i32) {
+        if let Some(process) = self
+            .0
+            .lock()
+            .unwrap()
+            .processes
+            .iter_mut()
+            .find(|p| p.pid == pid)
+        {
+            process.is_stopped = false;
+        }
+    }
+
+    /// Передний план терминала перешёл к группе `group`: шелл забрал его себе
+    /// или пользователь вернул заданию (`fg`). У всех, кто на терминале.
+    pub fn terminal_goes_to(&self, group: i32) {
+        for process in self.0.lock().unwrap().processes.iter_mut() {
+            if process.terminal_foreground_group != 0 {
+                process.terminal_foreground_group = group;
+            }
         }
     }
 
@@ -714,6 +740,7 @@ pub struct Harness {
     pub reporter: RecordingReporter,
     pub checks: RecordingChecks,
     pub resolver: FakeResolver,
+    pub terminal_modes: RecordingTerminalModes,
     pub ledger_path: std::path::PathBuf,
     /// Каталог живёт ровно столько, сколько стенд: учёт остановленных пишется
     /// настоящим файлом, а не выдумкой.
@@ -858,6 +885,7 @@ fn build_over(
 
     let probes = QueuedProbes::default();
     let resolver = FakeResolver::default();
+    let terminal_modes = RecordingTerminalModes::default();
 
     let controller = Arc::new(
         GuardController::new(
@@ -865,7 +893,8 @@ fn build_over(
             Box::new(geo.clone()),
             Box::new(NoSecret),
             Box::new(settings.clone()),
-            ProcessEnforcer::new(Box::new(world.clone()), signaler, ledger_path.clone()),
+            ProcessEnforcer::new(Box::new(world.clone()), signaler, ledger_path.clone())
+                .with_terminal_modes(Box::new(terminal_modes.clone())),
             Box::new(reporter.clone()),
             Box::new(checks.clone()),
         )
@@ -884,6 +913,7 @@ fn build_over(
         reporter,
         checks,
         resolver,
+        terminal_modes,
         ledger_path,
         _home: home,
     }
@@ -904,7 +934,55 @@ pub fn process(
         arguments: Some(vec![executable_path.to_string()]),
         process_group,
         terminal_foreground_group,
+        terminal_device: 0,
         is_stopped: false,
+    }
+}
+
+/// Тот же процесс на терминале с номером `device` (`tty_nr`).
+pub fn on_terminal(process: ProcessSnapshot, device: i32) -> ProcessSnapshot {
+    ProcessSnapshot {
+        terminal_device: device,
+        ..process
+    }
+}
+
+// --- режим терминала --------------------------------------------------------
+
+/// Режим терминала без терминала: что сняли и что вернули — ровно то, что нужно
+/// доказать. Настоящая граница трогала бы настоящие терминалы по выдуманным номерам.
+#[derive(Clone, Default)]
+pub struct RecordingTerminalModes(Arc<Mutex<(Vec<i32>, Vec<TerminalMode>)>>);
+
+impl RecordingTerminalModes {
+    pub fn captured(&self) -> Vec<i32> {
+        self.0.lock().unwrap().0.clone()
+    }
+
+    pub fn restored(&self) -> Vec<i32> {
+        self.0
+            .lock()
+            .unwrap()
+            .1
+            .iter()
+            .map(|mode| mode.device)
+            .collect()
+    }
+}
+
+impl TerminalModeKeeping for RecordingTerminalModes {
+    fn capture(&self, device: i32) -> Result<TerminalMode, TerminalModeError> {
+        self.0.lock().unwrap().0.push(device);
+        Ok(TerminalMode {
+            device,
+            path: "/dev/pts/3".into(),
+            attributes: b"raw".to_vec(),
+        })
+    }
+
+    fn restore(&self, mode: &TerminalMode) -> Result<(), TerminalModeError> {
+        self.0.lock().unwrap().1.push(mode.clone());
+        Ok(())
     }
 }
 

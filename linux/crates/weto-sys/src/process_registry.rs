@@ -52,6 +52,7 @@ impl ProcRegistry {
             arguments,
             process_group: stat.process_group,
             terminal_foreground_group: stat.terminal_foreground_group,
+            terminal_device: stat.terminal_device,
             is_stopped: stat.is_stopped,
         })
     }
@@ -109,11 +110,12 @@ fn read_cmdline(path: &Path) -> Option<Option<Vec<String>>> {
 }
 
 /// То из `/proc/<pid>/stat`, что нужно охране: родитель, группа процессов,
-/// передняя группа управляющего терминала и признак остановки.
+/// управляющий терминал, его передняя группа и признак остановки.
 struct Stat {
     parent_pid: i32,
     process_group: i32,
     terminal_foreground_group: i32,
+    terminal_device: i32,
     is_stopped: bool,
 }
 
@@ -142,6 +144,9 @@ fn read_stat(path: &Path) -> Option<Stat> {
         } else {
             foreground
         },
+        // `tty_nr` в кодировке ядра (`new_encode_dev`), а не glibc: путь устройства
+        // по нему ищет `terminal_mode`, сравнивая major и minor.
+        terminal_device: terminal,
         // `T` — остановлен сигналом: пользовательский Ctrl-Z или наша пауза.
         // `t` — остановка трассировщиком, это другое состояние и не она.
         is_stopped: fields.first() == Some(&"T"),

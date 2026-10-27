@@ -61,7 +61,10 @@ this layer decides *when* to ask and *what to do* with the answer.
   same reason it joins the plan at all: it is released only when no non-shell entry is still
   guarded, otherwise it takes the terminal back and its target lands on `SIGTTIN`. Signals go in
   the same reverse stop order, and the obligation is still discharged by observation —
-  `freed` is who got the signal, `released` is who was observed and left the ledger
+  `freed` is who got the signal, `released` is who was observed and left the ledger.
+  `pause` also captures the terminal mode of every `PausePlan.foregroundRoots` pid it is about to
+  stop (`TerminalModeKeeping.capture`, by `ProcessSnapshot.terminalDevice`) into `savedModes`,
+  keyed by `StoppedIdentity`; `restoreTerminalModes(observing:)` writes it back — see invariants
 - `macos/Sources/WetoShared/StoppedLedger.swift` — `StoppedProcess` (pid + path + `isShell`),
   `StoppedLedgerPersisting` (`StoppedFile` at `stopped.json`, atomic temp+rename, next to the
   journals; `InMemoryStoppedLedger` for tests), `StoppedLedgerReadout` (`.entries`/`.corrupted` —
@@ -125,9 +128,10 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `WetoUpdateTheme.make(for:) → UpdateTheme` — the only weto-specific part of the dialog
 - `UpdateInstalling.requestInstall(completion:)`, `requestLastFailure(completion:)`;
   `HelperUninstalling.uninstallHelper(completion:)`
-- `StatusPresentation.explanation(for:remainingPause:) → StatusExplanation` — the three popup
+- `StatusPresentation.explanation(for:) → StatusExplanation` — the three popup
   lines (what weto did / why / what's next); `shouldExplain(_:)` gates them off for `.disabled`
-  and `.protected`, where there is nothing to explain
+  and `.protected`, where there is nothing to explain. No countdown in the «what's next» line:
+  each standing target's pill already shows one, and a second timer above them only repeated them
 - `StatusPresentation.lines(for:reading:)`, `lines(for:report:timeZone:)`, `detail(for:reading:)`
 - `GuardVM.showTerminal(for pid:) → Bool` — the popup's "Показать терминал" button, delegates to
   `TerminalLocating`
@@ -138,11 +142,12 @@ this layer decides *when* to ask and *what to do* with the answer.
 
 ## Dependencies
 - `WetoCore`: `GuardPolicy`, `ProcessMatcher`, `IPRange`, `ReleaseParser`, `Constants`, `PauseCeiling`
-- `WetoDesign`: `StatusPresentation` formats the pause countdown with `WetoPauseBadge.remainingText`,
-  so the popup's explanation line and the badge read the same («4:59» / «43 с»)
+- `WetoDesign`: the pause countdown is formatted only by `WetoPauseBadge.remainingText` on the
+  pills; `StatusPresentation` no longer formats one
 - `WetoSystem` protocols (injected, mocked in tests): `NetworkSnapshotReading`, `NetworkEventSourcing`,
   `GeoProbing`, `ProcessLocating`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`,
-  `TargetResolving`, `SecretStoring`, `HTTPFetching`
+  `TargetResolving`, `SecretStoring`, `HTTPFetching`, `TerminalModeKeeping` (`ProcessEnforcer`,
+  defaults to the real `TerminalModeKeeper`)
 - `StoppedLedgerPersisting` (injected, mocked in tests as `InMemoryStoppedLedger`)
 - `UpdateKit` / `UpdateKitUI`: `UpdateController`, `HelperUpdateInstaller`, `UserDefaultsUpdateStore`,
   `UpdateWindowPresenter` (see `modules/update-kit.md`)
@@ -167,6 +172,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   «не подтверждено: цель снята с охраны …» when the signal went out, «продолжен: цель снята
   с охраны» once observed — and the episode-wide refine leaves it alone
   (`EventLogStore.refine(skipping:)`), because its standing ended earlier and for another reason.
+- Reads and writes the `termios` of a paused foreground target's tty (`ProcessEnforcer`, through
+  `TerminalModeKeeping`): captured before `SIGSTOP`, written back once after `fg`. In memory only.
 - Writes `stopped.json` on every ledger `add`/`remove`/`clear` — atomic temp+rename, same pattern
   as the journals. `add` dedupes by the same identity the rest of the code uses — pid **and**
   path — and an entry whose pid matches but whose path differs is provably dead (one pid, one live
@@ -191,6 +198,18 @@ this layer decides *when* to ask and *what to do* with the answer.
   All stored and cancelled — see invariants.
 
 ## Invariants / assumptions
+- **The terminal mode of a paused foreground target is weto's to return.** Under tmux the pane
+  shell cannot be held stopped — the tmux server continues it at once — so mid-pause it sees its
+  job stopped, takes the terminal and switches its mode; `claude` never re-enters raw mode and
+  ignores the keyboard after `fg`. `ProcessEnforcer.pause` captures the mode before `SIGSTOP`
+  (an already saved mode is never overwritten: a target the user `fg`'d under the pause and weto
+  stopped again already stands in the shell's mode). `restoreTerminalModes(observing:)` runs
+  last in `GuardVM.handle`, on the pass's own scan, and restores exactly once, when the process
+  is not stopped, is not in the ledger and `PausePlanner.holdsForeground` is true — i.e. the
+  pause is over and the user typed `fg`. Never during the pause. Gone, another path on the pid, or
+  another `terminalDevice` → the saved mode is dropped, never imposed on a stranger's tty. Not
+  persisted: a weto restart between pause and `fg` loses it.
+  [bugs/tmux-takes-the-terminal-from-a-paused-target](../bugs/tmux-takes-the-terminal-from-a-paused-target.md).
 <!-- generated, verify -->
 - **The pause ceiling is not a `GuardConfigurationChange`.** It does not change any policy
   decision, and a configuration change would ask for a probe and write a check-log entry
@@ -404,5 +423,6 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `features/geo-whitelist.md` — the allowed-exits list this store persists
 - `features/pause-instead-of-kill.md` — pause/resume path end to end
 - `decisions/pause-instead-of-kill.md` — why unproven pauses instead of killing
+- `bugs/tmux-takes-the-terminal-from-a-paused-target.md` — why `ProcessEnforcer` keeps terminal modes
 - `docs/design-system.md` — for the UI that consumes `StatusPresentation`, the pause badge and
   the "Показать терминал" affordance

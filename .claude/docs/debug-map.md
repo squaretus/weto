@@ -120,3 +120,17 @@ interpreter (`/usr/bin/node`) is the bug. `bugs/linux-script-targets-matched-as-
 Past failures worth reading before guessing: `bugs/tunnel-without-network-service.md`
 (a healthy tunnel reported as bypassed, and third-party 429s killing targets),
 `bugs/a-quarter-of-the-process-list.md` (three quarters of the machine invisible to the guard).
+
+## If the probe times out for minutes while the VPN is fine
+
+Look at `checks.json`: failures with DNS, connect and TLS all `0` mean the request went out over a
+pooled connection that never answered. Fixed by a session per request (macOS); Linux builds an agent
+per call. `bugs/stale-pooled-connection-under-fake-ip-tunnel.md`.
+
+## If `fg` returns a paused terminal target that ignores the keyboard
+
+tmux continues the stopped pane shell at once, so the shell takes the terminal and changes its mode;
+`claude` does not restore raw mode. The guard restores the mode itself once the target is in front
+again — check that the snapshot has `terminalDevice`/`tty_nr`, that the target was in
+`PausePlan.foregroundRoots`, and that the ledger let it go. Restoring is in-memory: a weto restart
+between pause and `fg` loses it. `bugs/tmux-takes-the-terminal-from-a-paused-target.md`.
