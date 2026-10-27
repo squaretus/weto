@@ -89,6 +89,26 @@ private final class RecordingSignaler: ProcessSignaling, @unchecked Sendable {
     }
 }
 
+/// Режим терминала без терминала: что сняли и что вернули — ровно то, что нужно доказать.
+private final class RecordingTerminalModes: TerminalModeKeeping, @unchecked Sendable {
+    private let lock = NSLock()
+    private var captures: [Int32] = []
+    private var restores: [TerminalMode] = []
+
+    var captured: [Int32] { lock.lock(); defer { lock.unlock() }; return captures }
+    var restored: [TerminalMode] { lock.lock(); defer { lock.unlock() }; return restores }
+
+    func capture(device: Int32) -> Result<TerminalMode, TerminalModeError> {
+        lock.lock(); captures.append(device); lock.unlock()
+        return .success(TerminalMode(device: device, path: "/dev/ttys006", attributes: Data([0x72, 0x61, 0x77])))
+    }
+
+    func restore(_ mode: TerminalMode) -> Result<Void, TerminalModeError> {
+        lock.lock(); restores.append(mode); lock.unlock()
+        return .success(())
+    }
+}
+
 /// Часы под управлением теста: обновление правил привязано ко времени,
 /// а не к числу обходов процессов.
 private final class TestClock: @unchecked Sendable {
@@ -130,7 +150,8 @@ final class ProcessEnforcerTests: XCTestCase {
         locator: ProcessLocating,
         clock: TestClock,
         signaler: ProcessSignaling = SilentSignaler(),
-        ledger: StoppedLedger? = nil
+        ledger: StoppedLedger? = nil,
+        terminalModes: TerminalModeKeeping = RecordingTerminalModes()
     ) -> ProcessEnforcer {
         let ledger = ledger ?? StoppedLedger(storage: InMemoryStoppedLedger())
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
@@ -141,6 +162,7 @@ final class ProcessEnforcerTests: XCTestCase {
             locator: locator,
             signaler: signaler,
             ledger: ledger,
+            terminalModes: terminalModes,
             now: { clock.now }
         )
     }
@@ -159,7 +181,102 @@ final class ProcessEnforcerTests: XCTestCase {
         ProcessSnapshot(pid: process.pid, parentPID: process.parentPID,
                         executablePath: process.executablePath, arguments: process.arguments,
                         processGroup: process.processGroup,
-                        terminalForegroundGroup: process.terminalForegroundGroup, isStopped: true)
+                        terminalForegroundGroup: process.terminalForegroundGroup,
+                        terminalDevice: process.terminalDevice, isStopped: true)
+    }
+
+    /// Тот же процесс с другой передней группой терминала: шелл забрал его себе
+    /// (`tpgid` — шелл) или пользователь вернул заданию (`fg`).
+    private static func foreground(_ process: ProcessSnapshot, group: Int32, stopped: Bool = false) -> ProcessSnapshot {
+        ProcessSnapshot(pid: process.pid, parentPID: process.parentPID,
+                        executablePath: process.executablePath, arguments: process.arguments,
+                        processGroup: process.processGroup, terminalForegroundGroup: group,
+                        terminalDevice: process.terminalDevice, isStopped: stopped)
+    }
+
+    // Переднее задание на настоящем терминале: шелл, цель в сыром режиме, её потомок.
+    private let ttyShell = ProcessSnapshot(pid: 100, parentPID: 1, executablePath: "/bin/zsh",
+                                           processGroup: 100, terminalForegroundGroup: 200, terminalDevice: 0x1000006)
+    private let ttyTarget = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/Users/me/.local/share/claude/versions/2.1.227",
+                                            processGroup: 200, terminalForegroundGroup: 200, terminalDevice: 0x1000006)
+    private let ttyChild = ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                                           processGroup: 200, terminalForegroundGroup: 200, terminalDevice: 0x1000006)
+
+    /// Под tmux шелл остановленным не удержать: tmux продолжает его сразу, шелл замечает
+    /// SIGSTOP своего задания, забирает терминал и переключает его режим; `claude` сама
+    /// сырой режим не восстанавливает, и после `fg` клавиши до неё не доходили. Режим снимается до остановки и возвращается ровно один
+    /// раз — когда цель снова идёт и снова впереди: пауза кончилась, пользователь ввёл `fg`.
+    func test_the_terminal_mode_of_a_foreground_target_comes_back_once_it_is_in_front_again() {
+        let clock = TestClock()
+        let modes = RecordingTerminalModes()
+        let locator = MutableProcessLocator([ttyShell, ttyTarget, ttyChild])
+        let enforcer = makeEnforcer(
+            targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+            locator: locator, clock: clock, terminalModes: modes
+        )
+
+        _ = enforcer.pause(enforcer.scan())
+        XCTAssertEqual(modes.captured, [0x1000006], "режим снят до SIGSTOP — пока он ещё сырой")
+
+        // Пауза: все стоят, шелл уже забрал терминал. Возвращать режим некому и незачем.
+        locator.replace(with: [Self.foreground(ttyShell, group: 100), Self.foreground(ttyTarget, group: 100, stopped: true),
+                               Self.foreground(ttyChild, group: 100, stopped: true)])
+        enforcer.restoreTerminalModes(observing: enforcer.scan())
+        XCTAssertTrue(modes.restored.isEmpty, "под паузой режим не трогаем")
+
+        // Пауза кончилась: SIGCONT ушёл, цель идёт, но фоном — терминал у шелла.
+        enforcer.resume()
+        locator.replace(with: [Self.foreground(ttyShell, group: 100), Self.foreground(ttyTarget, group: 100),
+                               Self.foreground(ttyChild, group: 100)])
+        enforcer.resume()
+        enforcer.restoreTerminalModes(observing: enforcer.scan())
+        XCTAssertTrue(modes.restored.isEmpty, "цель фоном — режим шелла её не касается, пока не `fg`")
+
+        // `fg`: терминал снова у цели.
+        locator.replace(with: [Self.foreground(ttyShell, group: 200), ttyTarget, ttyChild])
+        enforcer.restoreTerminalModes(observing: enforcer.scan())
+        XCTAssertEqual(modes.restored.map(\.device), [0x1000006], "сырой режим вернулся")
+
+        enforcer.restoreTerminalModes(observing: enforcer.scan())
+        XCTAssertEqual(modes.restored.count, 1, "ровно один раз: дальше режимом правит сама программа")
+    }
+
+    /// Фоновое задание терминала не держит — и снимать с него режим нечего: режим
+    /// терминала принадлежит тому, кто впереди.
+    func test_a_background_target_leaves_the_terminal_mode_alone() {
+        let clock = TestClock()
+        let modes = RecordingTerminalModes()
+        let locator = MutableProcessLocator([Self.foreground(ttyShell, group: 100), Self.foreground(ttyTarget, group: 100)])
+        let enforcer = makeEnforcer(
+            targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+            locator: locator, clock: clock, terminalModes: modes
+        )
+
+        _ = enforcer.pause(enforcer.scan())
+        XCTAssertTrue(modes.captured.isEmpty)
+    }
+
+    /// Цель умерла, пока стояла (завершение по доказательству): возвращать режим некому,
+    /// а тот же pid у другого процесса — чужой терминал.
+    func test_a_target_that_is_gone_takes_its_terminal_mode_with_it() {
+        let clock = TestClock()
+        let modes = RecordingTerminalModes()
+        let locator = MutableProcessLocator([ttyShell, ttyTarget])
+        let enforcer = makeEnforcer(
+            targets: [entry], resolver: MutableResolver([entry: oldVersionPath]),
+            locator: locator, clock: clock, terminalModes: modes
+        )
+        _ = enforcer.pause(enforcer.scan())
+
+        locator.replace(with: [Self.foreground(ttyShell, group: 100)])
+        enforcer.resume()
+        enforcer.restoreTerminalModes(observing: enforcer.scan())
+
+        let stranger = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/vim",
+                                       processGroup: 200, terminalForegroundGroup: 200, terminalDevice: 0x1000006)
+        locator.replace(with: [Self.foreground(ttyShell, group: 200), stranger])
+        enforcer.restoreTerminalModes(observing: enforcer.scan())
+        XCTAssertTrue(modes.restored.isEmpty, "чужому процессу на том же pid режим не навязываем")
     }
 
     /// Бинарник обновился, симлинк указывает на новую версию — цель обязана

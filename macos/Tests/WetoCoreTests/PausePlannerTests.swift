@@ -16,7 +16,10 @@ final class PausePlannerTests: XCTestCase {
         pids.map { MatchedProcess(pid: $0.0, targetName: "claude", matchedBy: $0.1) }
     }
 
-    /// Стоп — шелл, цель, потомки; продолжение — в обратном порядке. Проверено на zsh и bash 3.2.
+    /// Стоп — шелл, цель, потомки; продолжение — в обратном порядке. На голом терминале
+    /// так цель сохраняет передний план (проверено на zsh и bash 3.2). Под tmux — нет:
+    /// tmux продолжает остановленный шелл панели сразу, и тот забирает терминал; это чинит
+    /// возврат режима терминала (`foregroundRoots`), а не порядок.
     func test_foreground_job_takes_its_shell_along_shell_first() {
         let plan = PausePlanner.plan(matched: matched([(200, .rule), (201, .descendant)]),
                                      processes: [shell, claude, child])
@@ -26,6 +29,7 @@ final class PausePlannerTests: XCTestCase {
         XCTAssertEqual(plan.shellTargets, [100: "claude"],
                        "запись журнала обязана назвать цель, ради терминала которой шелл встал")
         XCTAssertTrue(plan.backgrounded.isEmpty)
+        XCTAssertEqual(plan.foregroundRoots, [200], "режим терминала снимается у цели, державшей передний план")
     }
 
     /// Фоновое задание (`claude &`): группа не передняя — шелл не трогаем, цель помечена.
@@ -36,6 +40,7 @@ final class PausePlannerTests: XCTestCase {
         XCTAssertEqual(plan.stopOrder, [200])
         XCTAssertTrue(plan.shells.isEmpty)
         XCTAssertEqual(plan.backgrounded, [200])
+        XCTAssertTrue(plan.foregroundRoots.isEmpty, "режим терминала принадлежит тому, кто впереди")
     }
 
     /// GUI-приложение без tty — обычное дерево, родитель первым, без пометок.

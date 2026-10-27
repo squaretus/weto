@@ -21,6 +21,7 @@ use weto_core::process::{
 };
 use weto_sys::process_registry::ProcessRegistryReading;
 use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
+use weto_sys::terminal_mode::{TerminalMode, TerminalModeKeeper, TerminalModeKeeping};
 
 /// Один обход процессов вместе с правилами, по которым его разбирают.
 pub struct Scan {
@@ -107,6 +108,12 @@ pub struct ProcessEnforcer {
     ledger: Mutex<StoppedLedger>,
     ledger_path: PathBuf,
     ledger_was_corrupted: bool,
+    terminal_modes: Box<dyn TerminalModeKeeping>,
+    /// Режим терминала каждой цели, остановленной на переднем плане, — снятый до SIGSTOP.
+    /// Ключ — пара «pid + путь», как у учёта: pid переиспользуется. Живёт до возврата:
+    /// возвращается один раз, когда цель снова идёт и снова впереди. В учёт на диске
+    /// не пишется — после падения weto режим не вернуть, и это известно.
+    saved_modes: Mutex<HashMap<(i32, String), TerminalMode>>,
 }
 
 impl ProcessEnforcer {
@@ -122,7 +129,16 @@ impl ProcessEnforcer {
             ledger_was_corrupted: ledger.started_from_corrupted_file(),
             ledger: Mutex::new(ledger),
             ledger_path,
+            terminal_modes: Box::new(TerminalModeKeeper::new()),
+            saved_modes: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Своя граница режима терминала — для тестов: настоящая трогала бы
+    /// настоящие терминалы по выдуманным номерам устройств.
+    pub fn with_terminal_modes(mut self, keeper: Box<dyn TerminalModeKeeping>) -> Self {
+        self.terminal_modes = keeper;
+        self
     }
 
     /// Учёт остановленных на старте не прочитался: обязательство «вернуть
@@ -242,6 +258,13 @@ impl ProcessEnforcer {
             .copied()
             .filter(|pid| !already_stopped(*pid))
             .collect();
+        let roots: Vec<i32> = plan
+            .foreground_roots
+            .iter()
+            .copied()
+            .filter(|pid| order.contains(pid))
+            .collect();
+        self.capture_terminal_modes(&roots, &by_pid);
         let results = self.signaler.send(ProcessSignal::Stop, &order);
         let delivered: HashSet<i32> = results
             .iter()
@@ -596,6 +619,73 @@ impl ProcessEnforcer {
                 .map(|result| result.pid)
                 .collect(),
         }
+    }
+
+    /// Режим терминала снимается до SIGSTOP, пока он ещё режим самой программы: после
+    /// остановки шелл его переключит. Снятый раньше не перезаписывается — цель, которую
+    /// пользователь продолжил `fg` под паузой и которую weto остановила снова, стоит уже
+    /// в режиме шелла, и снимать его было бы поздно.
+    fn capture_terminal_modes(&self, roots: &[i32], by_pid: &HashMap<i32, &ProcessSnapshot>) {
+        let mut saved = self.saved_modes.lock().expect("режимы терминала");
+        for pid in roots {
+            let Some(process) = by_pid.get(pid).filter(|p| p.terminal_device != 0) else {
+                continue;
+            };
+            let identity = (*pid, process.executable_path.clone());
+            if saved.contains_key(&identity) {
+                continue;
+            }
+            if let Ok(mode) = self.terminal_modes.capture(process.terminal_device) {
+                saved.insert(identity, mode);
+            }
+        }
+    }
+
+    /// Вернуть режим терминала цели, которая снова идёт и снова впереди.
+    ///
+    /// Под tmux шелл остановленным не удержать — сервер tmux продолжает его сразу, — и он
+    /// замечает SIGSTOP своего задания, забирает терминал и переключает его режим. На голом
+    /// терминале этого не случается, но и вернуть тот же режим там безвредно. Программа
+    /// в сыром режиме, сама его не восстанавливающая (`claude`), после `fg` рисуется,
+    /// но клавиши до неё не доходят. Поэтому режим возвращает weto: один раз, когда цель
+    /// не стоит, не держится учётом (пауза для неё кончилась) и держит передний план своего
+    /// терминала — то есть пользователь ввёл `fg`. Под паузой — никогда: `fg` в это время
+    /// weto всё равно перебьёт. Исчезла цель или её pid достался другому процессу —
+    /// режим забывается: чужому терминалу его не навязываем.
+    ///
+    /// Обход — тот же, что у прохода: передний план и остановленность обязаны описывать
+    /// тот же момент, что и сигналы с учётом.
+    pub fn restore_terminal_modes(&self, scan: Option<&Scan>) {
+        if self
+            .saved_modes
+            .lock()
+            .expect("режимы терминала")
+            .is_empty()
+        {
+            return;
+        }
+        let processes = self.observed_processes(scan);
+        let by_pid: HashMap<i32, &ProcessSnapshot> = processes.iter().map(|p| (p.pid, p)).collect();
+        let held: HashSet<i32> = self.entries().iter().map(|entry| entry.pid).collect();
+
+        let mut saved = self.saved_modes.lock().expect("режимы терминала");
+        saved.retain(|(pid, path), mode| {
+            let Some(process) = by_pid.get(pid).filter(|process| {
+                process.executable_path == *path && process.terminal_device == mode.device
+            }) else {
+                return false;
+            };
+            if process.is_stopped
+                || held.contains(pid)
+                || !pause_plan::holds_foreground(process, &processes)
+            {
+                return true;
+            }
+            if let Err(error) = self.terminal_modes.restore(mode) {
+                eprintln!("weto: режим терминала не вернулся: {error}");
+            }
+            false
+        });
     }
 
     /// Наблюдать обязательство можно только по настоящему обходу. `scan()` при

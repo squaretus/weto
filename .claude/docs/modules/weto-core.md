@@ -39,8 +39,12 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   when the matched root is itself the interactive shell nothing structural tells `login` from
   the zsh of a `script`/tmux session (both are session leaders — session leadership excludes
   exactly the shell we need). Only the job control does: `login` never takes the terminal back
-  from a stopped target, so SIGSTOP to it is a signal off the point
-- `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`,
+  from a stopped target, so SIGSTOP to it is a signal off the point. `foregroundRoots` lists the
+  rule roots that held the foreground when paused — the ones whose terminal mode `ProcessEnforcer`
+  captures and later restores; `PausePlanner.holdsForeground(_:among:)` is the same foreground
+  rule made public for that restore check
+- `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`
+  (`terminalDevice` — the controlling tty, `e_tdev`, `0` without one),
   `TargetRule`, `KillEvent`, `KillDiagnostics`, `JournalExport`, `NetworkPhases` (per-request DNS /
   connect / TLS / first-byte timings, `stalledPhase` tells a dead tunnel from a slow service),
   `CheckEvent` (one connectivity-check attempt — trigger, outcome, fingerprint; the second journal,
@@ -57,7 +61,9 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   `.verdict`/`.reassessment`/`.evidence`/`.verdictLost`/`.tick`/`.disarmed` in,
   `.none`/`.pause`/`.resume`/`.terminate` out. `GuardController` owns the one live instance.
 - `GuardMachine.setPauseCeiling(_:)` — the ceiling is a parameter, not a `GuardInput`
-- `PausePlanner.plan(matched:processes:) → PausePlan`
+- `PausePlanner.plan(matched:processes:) → PausePlan` (`stopOrder`, `shells`, `shellTargets`,
+  `backgrounded`, `skipped`, `foregroundRoots`)
+- `PausePlanner.holdsForeground(_ target:, among processes:) → Bool` — `false` without a tty
 - `GuardConfig.hasTargets`, `GuardConfig.hasWhitelist` — the whitelist stage is skipped entirely
   when the latter is `false`
 - `ProcessMatcher.matches(in:rules:) → [MatchedProcess]`, `.pids(in:rules:) → [Int32]`
@@ -140,6 +146,11 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   kills on an empty selection *before* looking at the status, so a caller whose status drifts out of
   sync with the settings still fails closed.
 - **`ProcessSnapshot.arguments` stays an array.** A joined command line must never be used for matching.
+- **"Shell first" keeps the foreground only on a bare pty.** Under tmux the server continues the
+  stopped pane shell at once and it takes the terminal anyway; the order is kept (it still works
+  without tmux), and the damage — the terminal mode — is undone by `foregroundRoots` + the
+  enforcer, not by the plan.
+  [bugs/tmux-takes-the-terminal-from-a-paused-target](../bugs/tmux-takes-the-terminal-from-a-paused-target.md).
 - **The pause ceiling is a machine parameter, not an input.** `setPauseCeiling` touches neither
   the phase nor `pausedSince`; only the `.tick` threshold moves, and the deadline is always
   `pausedSince + pauseCeiling`. A change therefore applies to the current pause at once: raising
@@ -184,4 +195,5 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `features/geo-whitelist.md` — the optional allowed-exits list and where its stage sits
 - `features/pause-instead-of-kill.md` — the six-phase reducer and the SIGSTOP/SIGCONT plan
 - `bugs/`, `decisions/` — `decisions/vpn-app-instead-of-tunnel.md`,
-  `decisions/geo-confirmation-services.md`, `decisions/pause-instead-of-kill.md`
+  `decisions/geo-confirmation-services.md`, `decisions/pause-instead-of-kill.md`,
+  `bugs/tmux-takes-the-terminal-from-a-paused-target.md`

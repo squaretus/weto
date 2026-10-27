@@ -91,6 +91,12 @@ final class ProcessEnforcer {
     private let locator: ProcessLocating
     private let signaler: ProcessSignaling
     private let ledger: StoppedLedger
+    private let terminalModes: TerminalModeKeeping
+
+    /// Режим терминала каждой цели, остановленной на переднем плане, — снятый до SIGSTOP.
+    /// Живёт до возврата: возвращается один раз, когда цель снова идёт и снова впереди.
+    /// В учёт на диске не пишется — после падения weto режим не вернуть, и это известно.
+    private var savedModes: [StoppedIdentity: TerminalMode] = [:]
 
     private var cachedEntries: [String]?
     private var cachedRules: [TargetRule] = []
@@ -109,6 +115,7 @@ final class ProcessEnforcer {
         locator: ProcessLocating,
         signaler: ProcessSignaling,
         ledger: StoppedLedger,
+        terminalModes: TerminalModeKeeping = TerminalModeKeeper(),
         now: @escaping () -> Date = Date.init
     ) {
         self.settings = settings
@@ -116,6 +123,7 @@ final class ProcessEnforcer {
         self.locator = locator
         self.signaler = signaler
         self.ledger = ledger
+        self.terminalModes = terminalModes
         self.now = now
     }
 
@@ -251,6 +259,7 @@ final class ProcessEnforcer {
 
         let plan = PausePlanner.plan(matched: pending, processes: scan.processes)
         let order = plan.stopOrder.filter { !isAlreadyStopped($0) }
+        captureTerminalModes(of: plan.foregroundRoots.filter(order.contains), in: snapshotByPID)
         let results = signaler.send(.stop, to: order)
         let delivered = Set(results.filter(\.isDelivered).map(\.pid))
 
@@ -280,6 +289,52 @@ final class ProcessEnforcer {
 
         return PauseOutcome(plan: plan, fresh: pending.filter { delivered.contains($0.pid) },
                             freshShells: freshShells, results: results, matched: matched)
+    }
+
+    /// Режим терминала снимается до SIGSTOP, пока он ещё режим самой программы: после
+    /// остановки шелл его переключит. Снятый раньше не перезаписывается — цель, которую
+    /// пользователь продолжил `fg` под паузой и которую weto остановила снова, стоит уже
+    /// в режиме шелла, и снимать его было бы поздно.
+    private func captureTerminalModes(of roots: [Int32], in snapshotByPID: [Int32: ProcessSnapshot]) {
+        for pid in roots {
+            guard let process = snapshotByPID[pid], process.terminalDevice != 0 else { continue }
+            let identity = StoppedIdentity(pid: pid, executablePath: process.executablePath)
+            guard savedModes[identity] == nil,
+                  case .success(let mode) = terminalModes.capture(device: process.terminalDevice)
+            else { continue }
+            savedModes[identity] = mode
+        }
+    }
+
+    /// Вернуть режим терминала цели, которая снова идёт и снова впереди.
+    ///
+    /// Под tmux шелл остановленным не удержать — сервер tmux продолжает его сразу, — и он
+    /// замечает SIGSTOP своего задания, забирает терминал и переключает его режим. На голом
+    /// терминале этого не случается, но и вернуть тот же режим там безвредно. Программа в сыром режиме,
+    /// сама его не восстанавливающая (`claude`), после `fg` рисуется, но клавиши до неё
+    /// не доходят. Поэтому режим возвращает weto: один раз, когда цель не стоит, не держится
+    /// учётом (пауза для неё кончилась) и держит передний план своего терминала — то есть
+    /// пользователь ввёл `fg`. Под паузой — никогда: `fg` в это время weto всё равно перебьёт.
+    func restoreTerminalModes(observing scan: Scan? = nil) {
+        guard !savedModes.isEmpty else { return }
+        let processes = observedProcesses(scan)
+        var byPID: [Int32: ProcessSnapshot] = [:]
+        for process in processes { byPID[process.pid] = process }
+        let held = Set(ledger.entries.map(\.pid))
+
+        for (identity, mode) in savedModes {
+            guard let process = byPID[identity.pid], process.executablePath == identity.executablePath,
+                  process.terminalDevice == mode.device
+            else {
+                savedModes[identity] = nil
+                continue
+            }
+            guard !process.isStopped, !held.contains(identity.pid),
+                  PausePlanner.holdsForeground(process, among: processes)
+            else { continue }
+            _ = terminalModes.restore(mode)
+            savedModes[identity] = nil
+        }
     }
 
     /// Кого учёт всё ещё держит, а кого отпускает: `nil` в снимке — процесса нет,

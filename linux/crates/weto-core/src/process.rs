@@ -27,6 +27,11 @@ pub struct ProcessSnapshot {
     /// и приводить его к нулю обязан читающий (это делает стадия B).
     #[serde(default)]
     pub terminal_foreground_group: i32,
+    /// Управляющий терминал (`tty_nr` из `/proc/<pid>/stat`) в кодировке ядра.
+    /// 0 — терминала нет. По нему weto снимает режим терминала цели перед паузой
+    /// и возвращает его после (`weto_sys::terminal_mode`).
+    #[serde(default)]
+    pub terminal_device: i32,
     /// Уже остановлен (`T` в `/proc/<pid>/stat`) — пользовательский Ctrl-Z,
     /// не наша пауза.
     #[serde(default)]

@@ -12,8 +12,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use harness::{
-    build, build_with_broken_ledger, build_with_signaler, detached, process, FakeSettings, Harness,
-    World,
+    build, build_with_broken_ledger, build_with_signaler, detached, on_terminal, process,
+    FakeSettings, Harness, World,
 };
 use weto_config::stopped::{StoppedLedger, StoppedProcess};
 use weto_core::check::{CheckOutcome, CheckTrigger};
@@ -355,6 +355,57 @@ fn the_obligation_is_held_until_the_kernel_shows_the_process_running() {
     s.world.brought_to_foreground(200);
     s.tick();
     assert!(ledger_pids(&s).is_empty());
+}
+
+/// Под tmux шелл остановленным не удержать: tmux продолжает его сразу, и он забирает
+/// терминал вместе с его режимом. Охрана снимает режим цели до паузы и возвращает его
+/// сама — тем проходом, чей обход показал цель отпущенной и снова впереди (`fg`),
+/// и ровно один раз.
+#[test]
+fn the_terminal_mode_comes_back_on_the_pass_that_sees_the_target_in_front() {
+    const TTY: i32 = (136 << 8) | 3;
+    let world = World::of(vec![
+        on_terminal(process(100, 1, "/usr/bin/zsh", 100, 200), TTY),
+        on_terminal(process(200, 100, CLAUDE, 200, 200), TTY),
+        on_terminal(process(201, 200, "/usr/bin/node", 200, 200), TTY),
+        detached(77, 1, "/usr/bin/happ"),
+    ]);
+    let s = stand_with(world, &[]);
+    guarded(&s);
+
+    services_go_silent(&s);
+    assert_eq!(s.terminal_modes.captured(), vec![TTY]);
+
+    // tmux продолжил шелл, шелл забрал терминал.
+    s.world.continues(100);
+    s.world.terminal_goes_to(100);
+    s.tick();
+    assert!(
+        s.terminal_modes.restored().is_empty(),
+        "под паузой — никогда"
+    );
+
+    s.geo.everything_answers_again();
+    s.probe_now();
+    s.tick();
+    assert!(ledger_pids(&s).is_empty(), "пауза кончилась по наблюдению");
+    assert!(
+        s.terminal_modes.restored().is_empty(),
+        "цель идёт фоном: терминал у шелла, пока пользователь не ввёл `fg`"
+    );
+
+    let walks = s.world.walks();
+    s.world.terminal_goes_to(200);
+    s.tick();
+    assert_eq!(s.terminal_modes.restored(), vec![TTY]);
+    assert_eq!(
+        s.world.walks() - walks,
+        1,
+        "возврат режима идёт по обходу прохода, а не по своему"
+    );
+
+    s.tick();
+    assert_eq!(s.terminal_modes.restored(), vec![TTY], "ровно один раз");
 }
 
 /// Терминальная цель, стоявшая на переднем плане, а после несостоявшегося

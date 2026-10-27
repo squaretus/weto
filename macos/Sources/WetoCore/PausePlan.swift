@@ -22,6 +22,14 @@ public struct PausePlan: Equatable, Sendable {
     /// Стояли до нас (Ctrl-Z): не трогаем ни при паузе, ни при возобновлении.
     public let skipped: [Int32]
 
+    /// Корни целей, державшие передний план своего терминала в момент паузы. Их режим
+    /// терминала weto снимает до SIGSTOP и возвращает, когда цель снова впереди: под tmux
+    /// шелл остановленным не удержать — tmux продолжает его сразу, — и он замечает остановку
+    /// своего задания, забирает терминал и переключает его режим, а программа в сыром
+    /// режиме (`claude`) его не восстанавливает: после `fg` она рисуется, но клавиши
+    /// до неё не доходят.
+    public let foregroundRoots: [Int32]
+
     public var resumeOrder: [Int32] { stopOrder.reversed() }
 
     public init(
@@ -29,13 +37,15 @@ public struct PausePlan: Equatable, Sendable {
         shells: [Int32],
         shellTargets: [Int32: String] = [:],
         backgrounded: [Int32],
-        skipped: [Int32]
+        skipped: [Int32],
+        foregroundRoots: [Int32] = []
     ) {
         self.stopOrder = stopOrder
         self.shells = shells
         self.shellTargets = shellTargets
         self.backgrounded = backgrounded
         self.skipped = skipped
+        self.foregroundRoots = foregroundRoots
     }
 }
 
@@ -60,12 +70,14 @@ public enum PausePlanner {
         var shells: [Int32] = []
         var shellTargets: [Int32: String] = [:]
         var backgrounded: [Int32] = []
+        var foregroundRoots: [Int32] = []
         for root in active where root.matchedBy == .rule {
             guard let snapshot = byPID[root.pid], snapshot.terminalForegroundGroup != 0 else { continue }
             guard holdsForeground(snapshot, tree: tree) else {
                 backgrounded.append(root.pid)
                 continue
             }
+            foregroundRoots.append(root.pid)
             // Лидер группы обычно и есть сама цель. Если лидер уже вышел и в снимке его нет,
             // намеренно считаем root'а собственным лидером: родителя-шелла всё равно ищем
             // через parentPID, а не через факт лидерства, так что отсутствие лидера в снимке
@@ -96,7 +108,7 @@ public enum PausePlanner {
         let ordered: [Int32] = sortedDepths.map { $0.pid }
 
         return PausePlan(stopOrder: shells + ordered, shells: shells, shellTargets: shellTargets,
-                         backgrounded: backgrounded, skipped: skipped)
+                         backgrounded: backgrounded, skipped: skipped, foregroundRoots: foregroundRoots)
     }
 
     /// Цель в переднем плане своего терминала, если лидер передней группы tty — сама цель
@@ -112,6 +124,12 @@ public enum PausePlanner {
     /// своего лидера, так что этот случай — то же равенство групп сверху.
     /// Лидера может не быть в снимке (успел выйти) — тогда предков у него нет и передний
     /// план поддереву цели не принадлежит.
+    /// Держит ли процесс передний план своего терминала — тем же правилом, что план паузы.
+    public static func holdsForeground(_ target: ProcessSnapshot, among processes: [ProcessSnapshot]) -> Bool {
+        guard target.terminalForegroundGroup != 0 else { return false }
+        return holdsForeground(target, tree: ProcessTree(processes: processes))
+    }
+
     private static func holdsForeground(_ target: ProcessSnapshot, tree: ProcessTree) -> Bool {
         if target.processGroup == target.terminalForegroundGroup { return true }
         return tree.ancestors(of: target.terminalForegroundGroup).contains(target.pid)

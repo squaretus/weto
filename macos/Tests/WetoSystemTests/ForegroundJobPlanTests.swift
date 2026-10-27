@@ -224,6 +224,23 @@ final class ForegroundJobPlanTests: XCTestCase {
                        "У переднего задания передняя группа терминала — его собственная.")
     }
 
+    /// Режим терминала цели снимается по `e_tdev` из снимка: устройство обязано быть
+    /// найдено, и это обязан быть терминал задания, а не чей-то ещё. Режим снимается
+    /// снаружи — процессом, для которого этот терминал не управляющий, как у weto.
+    func test_the_terminal_of_a_real_job_is_found_by_its_device_and_its_mode_is_read() throws {
+        let session = try startSession()
+        defer { session.tearDown() }
+
+        let job = try XCTUnwrap(ProcessRegistry().allProcesses().first { $0.pid == session.jobPID })
+        XCTAssertNotEqual(job.terminalDevice, 0, "у задания в pty есть управляющий терминал")
+        let shell = try XCTUnwrap(ProcessRegistry().allProcesses().first { $0.pid == session.shellPID })
+        XCTAssertEqual(job.terminalDevice, shell.terminalDevice, "шелл и его задание — на одном терминале")
+
+        let mode = try TerminalModeKeeper().capture(device: job.terminalDevice).get()
+        XCTAssertTrue(mode.path.hasPrefix("/dev/ttys"), "путь устройства: \(mode.path)")
+        XCTAssertTrue(TerminalModeKeeper().restore(mode).isSuccess, "тот же режим возвращается без отказа")
+    }
+
     /// Тот же снимок, но целиком через `PausePlanner`: шелл задания обязан войти в план
     /// и обязан стоять в нём первым. Поменяются местами шелл и цель — тест упадёт.
     func test_planner_takes_the_shell_of_a_real_foreground_job_first() throws {

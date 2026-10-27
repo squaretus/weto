@@ -64,6 +64,9 @@ public struct ProcessRegistry: ProcessLocating {
                 terminalForegroundGroup: info.flatMap {
                     ($0.pbi_flags & UInt32(PROC_FLAG_CONTROLT)) != 0 ? Int32($0.e_tpgid) : nil
                 } ?? 0,
+                terminalDevice: info.flatMap {
+                    ($0.pbi_flags & UInt32(PROC_FLAG_CONTROLT)) != 0 ? Int32(bitPattern: $0.e_tdev) : nil
+                } ?? 0,
                 isStopped: info.map { $0.pbi_status == UInt32(SSTOP) } ?? false
             ))
         }

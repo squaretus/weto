@@ -47,14 +47,9 @@ public struct StatusExplanation: Equatable, Sendable {
 public enum StatusPresentation {
 
     /// Объяснение состояния тремя строками: что сделано с целями, почему —
-    /// улика фазы, и что дальше — счётчик паузы или совет действия. `remainingPause`
-    /// приходит параметром (обычно из `GuardMachine.remainingPause(at:)`): представление
-    /// не читает часы само.
-    public static func explanation(
-        for phase: GuardPhase,
-        remainingPause: TimeInterval?
-    ) -> StatusExplanation {
-        let remaining = Int((remainingPause ?? 0).rounded(.up))
+    /// улика фазы, и что дальше. Отсчёта паузы здесь нет: он стоит на пилюле каждой
+    /// стоящей цели, и второй такой же над ними только повторял их.
+    public static func explanation(for phase: GuardPhase) -> StatusExplanation {
         switch phase {
         case .disabled:
             return StatusExplanation(
@@ -87,7 +82,7 @@ public enum StatusPresentation {
         case .paused(_, let reason):
             return StatusExplanation(
                 title: phase.title, action: "Цели остановлены", evidence: reason.displayText,
-                next: "Ждём ответа сервисов, \(WetoPauseBadge.remainingText(seconds: remaining)) до завершения; возобновятся при подтверждении безопасного выхода"
+                next: "Ждём ответа сервисов; возобновятся при подтверждении безопасного выхода, без него завершатся по истечении отсчёта"
             )
         case .danger(let evidence):
             return StatusExplanation(
