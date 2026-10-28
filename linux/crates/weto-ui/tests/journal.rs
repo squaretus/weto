@@ -26,7 +26,7 @@ fn the_outcome_is_a_line_of_its_own() {
     gtk4::init().expect("GTK не поднялся: тестам нужен дисплей, запускать под Xvfb");
 
     let with_outcome = ui::journal_row(
-        "claude · pid 42",
+        "claude",
         "на паузе — подключение ещё не проверено",
         Some("Итог: возобновлено проверкой"),
         "06.10.2026 14:03:09 · IP: неизвестен",
@@ -39,7 +39,7 @@ fn the_outcome_is_a_line_of_its_own() {
     assert_eq!(
         texts,
         [
-            "claude · pid 42",
+            "claude",
             "на паузе — подключение ещё не проверено",
             "Итог: возобновлено проверкой",
             "06.10.2026 14:03:09 · IP: неизвестен",
@@ -50,7 +50,6 @@ fn the_outcome_is_a_line_of_its_own() {
     assert!(lines_with_outcome[3].is_selectable());
     assert_eq!(with_outcome.spacing(), 2);
 
-    let without_outcome =
-        ui::journal_row("claude · pid 42", "завершено — VPN не поднят", None, "t");
+    let without_outcome = ui::journal_row("claude", "завершено — VPN не поднят", None, "t");
     assert_eq!(lines(&without_outcome).len(), 3);
 }

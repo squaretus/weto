@@ -1087,7 +1087,7 @@ impl GuardController {
         if answered.is_empty() && refused.is_empty() {
             return;
         }
-        let text = Self::unresolved_episode_text(&standing_pids(&outcome.unresolved), &refused);
+        let text = Self::unresolved_episode_text(!refused.is_empty());
         self.resolve_pause_episode(settings, &text, None, scan);
     }
 
@@ -1117,17 +1117,16 @@ impl GuardController {
     /// Исход эпизода, у которого возобновления не случилось. Журнал обязан
     /// говорить правду: «возобновлено» пишется только про наблюдённое
     /// возобновление, иначе запись выдавала бы замороженную цель за живую.
-    fn unresolved_episode_text(standing: &[i32], refused: &[i32]) -> String {
-        if !refused.is_empty() {
-            return format!(
-                "не возобновлено: сигнал продолжения не дошёл до процессов {refused:?} — \
-                 недостаточно прав"
-            );
+    ///
+    /// Процессы не перечисляются: текст стоит у каждой записи эпизода и виден
+    /// в окне, где pid не говорит ничего, а стоящие и так названы пилюлями.
+    fn unresolved_episode_text(refused: bool) -> String {
+        if refused {
+            return "не возобновлено: сигнал продолжения не дошёл — недостаточно прав".to_string();
         }
-        format!(
-            "не возобновлено: процессы {standing:?} остались остановленными — \
-             задание ушло в фон, продолжите его в терминале командой fg"
-        )
+        "не возобновлено: процессы остались остановленными — \
+         задание ушло в фон, продолжите его в терминале командой fg"
+            .to_string()
     }
 
     /// Исход эпизода паузы: записи те же, к ним дописывается, чем стояние
@@ -1383,7 +1382,7 @@ impl GuardController {
         let settings = self.settings.settings();
         let (scan, outcome) = self.resume_from_ledger(&settings);
         let standing = standing_pids(&outcome.unresolved);
-        let text = Self::shutdown_episode_text(&outcome, &standing);
+        let text = Self::shutdown_episode_text(&outcome);
         self.resolve_pause_episode(&settings, &text, None, &scan);
 
         let mut inner = self.inner.lock().expect("состояние охраны");
@@ -1413,24 +1412,17 @@ impl GuardController {
     /// Чем кончился последний SIGCONT штатного выхода. Журнал говорит ровно то,
     /// что установлено: наблюдать результат нечем, и «не возобновлено» было бы
     /// такой же неправдой, как «возобновлено».
-    fn shutdown_episode_text(outcome: &ResumeOutcome, standing: &[i32]) -> String {
-        let refused: Vec<i32> = outcome
-            .results
-            .iter()
-            .filter(|result| !result.is_delivered())
-            .map(|result| result.pid)
-            .collect();
-
+    fn shutdown_episode_text(outcome: &ResumeOutcome) -> String {
         if outcome.is_complete() {
-            "возобновлено: охрана остановлена".to_string()
-        } else if !refused.is_empty() {
-            Self::unresolved_episode_text(standing, &refused)
+            "возобновлено при выходе из Weto".to_string()
+        } else if outcome.results.iter().any(|result| !result.is_delivered()) {
+            Self::unresolved_episode_text(true)
         } else {
-            format!(
-                "не подтверждено: сигнал продолжения отправлен процессам {standing:?}, \
-                 а охрана остановлена — результат наблюдать нечем, Weto проверит их \
-                 при следующем запуске"
-            )
+            // «Продолжено», а не «не подтверждено»: второе читали как
+            // неподтверждённый выход VPN, под которым weto будто бы отпустил цели.
+            "продолжено при выходе из Weto — пошли ли процессы, \
+             Weto проверит при следующем запуске"
+                .to_string()
         }
     }
 

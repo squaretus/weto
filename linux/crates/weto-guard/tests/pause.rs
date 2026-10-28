@@ -341,11 +341,9 @@ fn the_obligation_is_held_until_the_kernel_shows_the_process_running() {
         s.reporter.resolutions()
     );
     assert!(
-        s.reporter
-            .resolutions()
-            .iter()
-            .any(|text| text.contains("не возобновлено: процессы [200]")
-                && text.contains("командой fg")),
+        s.reporter.resolutions().iter().any(|text| text
+            .contains("не возобновлено: процессы остались остановленными")
+            && text.contains("командой fg")),
         "{:?}",
         s.reporter.resolutions()
     );
@@ -1176,8 +1174,9 @@ fn shutdown_resumes_and_admits_it_cannot_observe_the_result() {
     let resolutions = s.reporter.resolutions();
     assert_eq!(resolutions.len(), 1);
     assert!(
-        resolutions[0].starts_with("не подтверждено: сигнал продолжения отправлен процессам")
-            && resolutions[0].contains("при следующем запуске"),
+        resolutions[0]
+            == "продолжено при выходе из Weto — пошли ли процессы, \
+                Weto проверит при следующем запуске",
         "{resolutions:?}"
     );
     assert_eq!(s.controller.phase(), GuardPhase::Disabled);

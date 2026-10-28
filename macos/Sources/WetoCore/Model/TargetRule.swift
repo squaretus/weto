@@ -81,16 +81,6 @@ public enum MatchBasis: String, Codable, Equatable, Sendable {
     /// он не подходил ни одной буквой, а SIGSTOP получил — и значит, обязан быть
     /// объяснён журналом наравне с целями.
     case shell
-
-    /// Чем запись объясняет своё присутствие в журнале. У совпавшего по правилу
-    /// объяснять нечего — он и есть цель.
-    public func detailText(parentPID: Int32) -> String? {
-        switch self {
-        case .rule: return nil
-        case .descendant: return "потомок \(parentPID)"
-        case .shell: return "шелл терминала цели"
-        }
-    }
 }
 
 public struct MatchedProcess: Equatable, Sendable {

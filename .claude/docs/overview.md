@@ -120,7 +120,8 @@ turns a decision into one of six phases and either keeps targets running, pauses
 10. **Record.** `EventLogStore` (`journal.json`, 100-entry ring buffer) holds one `KillEvent` per
     process actually stopped or terminated, deduplicated by *both* pid and reason within an
     episode — a repeat reason with a new pid writes `.launchBlocked` rather than a fresh
-    `.terminated`. `CheckLogStore` (`checks.json`, 50-entry ring buffer) is a second, independent
+    `.terminated`. The window and `weto journal` show one row per episode, not per process
+    (`JournalEpisode`). `CheckLogStore` (`checks.json`, 50-entry ring buffer) is a second, independent
     journal for connectivity-check *attempts* (trigger + outcome), including probes that answered
     nothing. `UserNotificationKillNotifier` silently no-ops without a bundle id (`swift run`,
     tests).

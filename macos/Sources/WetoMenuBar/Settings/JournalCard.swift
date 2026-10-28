@@ -7,11 +7,11 @@ import WetoDesign
 
 struct JournalCard: View {
 
-    /// Сколько записей показывать в карточке.
+    /// Сколько эпизодов показывать в карточке.
     ///
-    /// Хранится сто, а запись теперь на процесс: одно падение VPN — это десятки
-    /// строк, и списком в окне настроек их не читают. Разбор идёт по выгрузке,
-    /// поэтому на экране последние двадцать и честная строка про остальные.
+    /// Строка — эпизод, а не процесс, но и эпизодов за неделю набирается много,
+    /// а списком в окне настроек их не читают. Разбор идёт по выгрузке, поэтому
+    /// на экране последние двадцать и честная строка про остальные.
     private static let visibleLimit = 20
 
     @Environment(AppCoordinator.self) private var coordinator
@@ -19,6 +19,8 @@ struct JournalCard: View {
     private var scheme: ColorScheme { coordinator.settings.appTheme.colorScheme }
 
     private var events: [KillEvent] { coordinator.eventLog.events }
+
+    private var episodes: [JournalEpisode] { JournalEpisode.group(events) }
 
     var body: some View {
         WetoCard("Журнал") {
@@ -30,16 +32,17 @@ struct JournalCard: View {
                             .foregroundStyle(WetoTokens.faint.resolve(scheme))
                     }
                 } else {
-                    ForEach(Array(events.prefix(Self.visibleLimit).enumerated()), id: \.element.id) { index, event in
+                    let episodes = episodes
+                    ForEach(Array(episodes.prefix(Self.visibleLimit).enumerated()), id: \.element.id) { index, episode in
                         VStack(spacing: 0) {
                             if index > 0 { WetoDivider() }
-                            JournalRow(event: event)
+                            JournalRow(episode: episode)
                         }
                     }
 
-                    if events.count > Self.visibleLimit {
+                    if episodes.count > Self.visibleLimit {
                         WetoRow {
-                            Text(verbatim: "Показаны последние \(Self.visibleLimit) из \(events.count) — выгрузите журнал целиком")
+                            Text(verbatim: "Показаны последние \(Self.visibleLimit) из \(episodes.count) — выгрузите журнал целиком")
                                 .font(WetoTokens.caption)
                                 .foregroundStyle(WetoTokens.faint.resolve(scheme))
                         }

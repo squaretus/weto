@@ -290,16 +290,16 @@ public final class GuardVM {
     /// что установлено: наблюдать результат нечем, и «не возобновлено» было бы
     /// такой же неправдой, как «возобновлено».
     private func shutdownEpisodeText(_ outcome: ProcessEnforcer.ResumeOutcome) -> String {
-        let refused = outcome.results.filter { !$0.isDelivered }.map(\.pid)
         if outcome.isComplete {
-            return "возобновлено: охрана остановлена"
+            return "возобновлено при выходе из Weto"
         }
-        if !refused.isEmpty {
-            return unresolvedEpisodeText(standing: outcome.unresolved.map(\.pid), refused: refused)
+        if outcome.results.contains(where: { !$0.isDelivered }) {
+            return unresolvedEpisodeText(refused: true)
         }
-        return "не подтверждено: сигнал продолжения отправлен процессам "
-            + "\(outcome.unresolved.map(\.pid)), а охрана остановлена — "
-            + "результат наблюдать нечем, Weto проверит их при следующем запуске"
+        // «Продолжено», а не «не подтверждено»: второе читали как неподтверждённый
+        // выход VPN, под которым weto будто бы отпустил цели.
+        return "продолжено при выходе из Weto — пошли ли процессы, "
+            + "Weto проверит при следующем запуске"
     }
 
     /// Досылает SIGCONT оставшимся записям учёта и возвращает тех, кого обход всё
@@ -858,7 +858,7 @@ public final class GuardVM {
         surfaceStanding(outcome.unresolved, answered: Set(answered.map(\.pid)))
 
         guard !answered.isEmpty || !refused.isEmpty else { return }
-        resolvePauseEpisode(unresolvedEpisodeText(standing: outcome.unresolved.map(\.pid), refused: refused))
+        resolvePauseEpisode(unresolvedEpisodeText(refused: !refused.isEmpty))
     }
 
     /// Записи, которым SIGCONT больше не досылается: ответ «встал обратно» получен
@@ -986,12 +986,14 @@ public final class GuardVM {
     /// Исход эпизода, у которого возобновления не случилось. Журнал обязан говорить
     /// правду: «возобновлено» пишется только про наблюдённое возобновление, иначе
     /// запись выдавала бы замороженную цель за живую.
-    private func unresolvedEpisodeText(standing: [Int32], refused: [Int32]) -> String {
-        if !refused.isEmpty {
-            return "не возобновлено: сигнал продолжения не дошёл до процессов \(refused) — "
-                + "недостаточно прав"
+    ///
+    /// Процессы не перечисляются: текст стоит у каждой записи эпизода и виден в окне,
+    /// где pid не говорит ничего, а стоящие и так названы пилюлями попапа.
+    private func unresolvedEpisodeText(refused: Bool) -> String {
+        if refused {
+            return "не возобновлено: сигнал продолжения не дошёл — недостаточно прав"
         }
-        return "не возобновлено: процессы \(standing) остались остановленными — "
+        return "не возобновлено: процессы остались остановленными — "
             + "задание ушло в фон, продолжите его в терминале командой fg"
     }
 

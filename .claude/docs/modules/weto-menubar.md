@@ -19,7 +19,7 @@ parsing, validation and persistence happen in the stores.
   finds the menu-bar-extra status button and popup window by class-name substring (no public
   AppKit/SwiftUI API for either) and toggles the popup open from code, the way a notification tap
   needs to
-- `macos/Sources/WetoMenuBar/JournalRow.swift`
+- `macos/Sources/WetoMenuBar/JournalRow.swift` — one row per episode (`JournalEpisode`), not per process: no pid in the window
 - `macos/Sources/WetoMenuBar/Settings/SettingsWindow.swift`
 - `macos/Sources/WetoMenuBar/Settings/TargetsCard.swift` — input format hint is `.wetoFieldHint` in the field, shown while it is empty
 - `macos/Sources/WetoMenuBar/Settings/NetworkSettingsCard.swift` — VPN app, ipinfo token and the
@@ -27,7 +27,7 @@ parsing, validation and persistence happen in the stores.
   `settings.pauseCeiling` through the binding setter (not `onChange`); the explanation is a `WetoHint` «?» right after «Таймаут»; token and timeout labels share one column (`labelColumn`)
 - `macos/Sources/WetoMenuBar/Settings/GeoListCard.swift` — built twice, for the blacklist and the whitelist
 - `macos/Sources/WetoMenuBar/Settings/MaintenanceCard.swift`
-- `macos/Sources/WetoMenuBar/Settings/JournalCard.swift`
+- `macos/Sources/WetoMenuBar/Settings/JournalCard.swift` — latest 20 episodes; «Показаны последние 20 из N» counts episodes
 - `macos/Sources/WetoMenuBar/Settings/SettingsFooter.swift`
 - `macos/Resources/Weto-Info.plist` — bundle identity plus residency flags (copied by `macos/scripts/make-app.sh`)
 
@@ -50,7 +50,7 @@ parsing, validation and persistence happen in the stores.
   `UpdateController` (from `UpdateKit`), `LaunchAgentManaging`, `Maintenance`, `StatusPresentation`), `WetoDesign`
   (`WetoTokens`, `WetoCard/Row/Panel/Divider`, `WetoSegmentedControl`, `WetoBanner`,
   button/field styles, `StatusShield`, `WetoPauseBadge`, `MenuBarImageRenderer`, `TargetIconStore`),
-  `WetoCore` (`KillEvent`, `GuardStatusColor`, `Constants`, `AppTheme`), `WetoSystem`
+  `WetoCore` (`KillEvent`, `JournalEpisode`, `GuardStatusColor`, `Constants`, `AppTheme`), `WetoSystem`
   (`FlagImageStore` only)
 - Frameworks: SwiftUI, AppKit (`NSAlert`, `NSOpenPanel`, `NSWorkspace`, `NSApplication`,
   `NSViewRepresentable`), CoreFoundation (`CFMessagePortCreateLocal`)

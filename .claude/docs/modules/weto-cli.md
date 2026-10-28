@@ -57,6 +57,9 @@ directories `weto-cli`, asset prefix `weto-cli-`.
   `service install|uninstall|status`, `update check|install` (bare `update` = `install`),
   `version` / `--version`, `help` / `--help` / `-h`.
   Gone: `vpn app|tunnel|tunnels` (→ `vpn set`, `vpn list`), `timeout [N]` (→ `timeout show|set`).
+- `journal` prints one line per episode, like the window (`JournalEpisode` / `weto_config::journal::episodes`):
+  «time  targets  summary», then «    Итог: …»; the latest 20, then «Показаны последние 20 из N —
+  выгрузите журнал целиком: weto journal --json» (N counts episodes). Pids only in `--json`.
 - Help: `weto <object> help` and `weto help <object>` → stdout, code 0; `weto <object>` with no
   action → the same help to stderr, code 2.
 - Exit codes: `0` ok, `1` failure, `2` bad arguments, `3` guard not running (`status`, `check`).

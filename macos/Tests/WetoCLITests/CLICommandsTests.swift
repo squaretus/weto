@@ -340,14 +340,14 @@ final class CLICommandsTests: XCTestCase {
                       ip: nil, country: nil),
         ])
 
-        let lines = CLI.journalLines(store.events[0], timeZone: TimeZone(identifier: "UTC")!)
+        let lines = CLI.journalLines(JournalEpisode.group(store.events)[0], timeZone: TimeZone(identifier: "UTC")!)
         XCTAssertEqual(lines, [
-            "15.01.2027 08:01:40  codex · pid 4133  на паузе — подтверждающие сервисы недоступны",
+            "15.01.2027 08:01:40  codex  на паузе — подтверждающие сервисы недоступны",
             "    Итог: возобновлено проверкой",
         ])
 
         h.run("journal")
-        XCTAssertTrue(h.output.lines.contains { $0.contains("codex · pid 4133") })
+        XCTAssertFalse(h.output.lines.contains { $0.contains("pid") }, "строка на эпизод, pid не нужен")
         let codex = h.output.lines.firstIndex { $0.contains("codex") } ?? .max
         let claude = h.output.lines.firstIndex { $0.contains("claude") } ?? .min
         XCTAssertLessThan(codex, claude, "свежие записи первыми")

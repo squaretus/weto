@@ -2679,7 +2679,7 @@ final class GuardVMTests: XCTestCase {
 
         XCTAssertEqual(harness.signaler.batches.last?.signal, .resume)
         XCTAssertEqual(
-            harness.log.events.first?.resolutionText, "возобновлено: охрана остановлена",
+            harness.log.events.first?.resolutionText, "возобновлено при выходе из Weto",
             "исход эпизода дописан и при выходе"
         )
         XCTAssertTrue(harness.vm.pausedProcesses.isEmpty)
@@ -2768,7 +2768,7 @@ final class GuardVMTests: XCTestCase {
                        "пока цель стоит, учёт её держит — иначе SIGCONT не пошлёт уже никто")
         XCTAssertEqual(
             h.log.events.first?.resolutionText,
-            "не возобновлено: процессы [200, 201] остались остановленными — "
+            "не возобновлено: процессы остались остановленными — "
                 + "задание ушло в фон, продолжите его в терминале командой fg",
             "журнал говорит, что случилось на самом деле"
         )
@@ -3101,9 +3101,8 @@ final class GuardVMTests: XCTestCase {
                        "обязательство исполняется и на выходе: продолжение в обратном порядке")
         XCTAssertEqual(
             h.log.events.first?.resolutionText,
-            "не подтверждено: сигнал продолжения отправлен процессам [200, 201], "
-                + "а охрана остановлена — результат наблюдать нечем, Weto проверит их "
-                + "при следующем запуске",
+            "продолжено при выходе из Weto — пошли ли процессы, "
+                + "Weto проверит при следующем запуске",
             "ни «возобновлено», ни «не возобновлено»: наблюдения не было вовсе"
         )
         XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
@@ -3256,7 +3255,7 @@ final class GuardVMTests: XCTestCase {
         // называет его, не выдавая отправку сигнала за возобновление.
         XCTAssertEqual(
             Set(h.log.events.map(\.resolutionText)),
-            ["не возобновлено: процессы [100, 200, 201] остались остановленными — "
+            ["не возобновлено: процессы остались остановленными — "
                 + "задание ушло в фон, продолжите его в терминале командой fg"],
             "исход один на весь эпизод, включая шелл"
         )

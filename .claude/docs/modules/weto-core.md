@@ -51,6 +51,12 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   connect / TLS / first-byte timings, `stalledPhase` tells a dead tunnel from a slow service),
   `CheckEvent` (one connectivity-check attempt — trigger, outcome, fingerprint; the second journal,
   see `weto-shared.md`)
+- `macos/Sources/WetoCore/Model/JournalEpisode.swift` — the journal as the window and `weto journal`
+  read it: `group(_:)` folds `KillEvent`s by `episodeID`, ordered by the episode's newest record.
+  Title — distinct target names joined by «, »; summary and readout from the earliest record;
+  `resolutionLine` — distinct outcomes of non-shell records joined by «; » (the shell's own only
+  when there is nothing else); `diagnosticsText` adds «процессов: N» for N > 1, never a pid. Texts
+  match `weto_config::journal::Episode` verbatim
 - Tests: `macos/Tests/WetoCoreTests/` (~100 cases; `ProcessMatcherTests`, `GuardPolicyTests` and
   `GuardMachineTests` are the load-bearing ones)
 
