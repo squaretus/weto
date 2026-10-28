@@ -101,8 +101,10 @@ What changed:
 - The ipinfo host doubles as the route probe's destination: the guard must know which interface the
   verdict request itself will travel through, and fixed public addresses get excluded from tunnels
   by clients.
-- Confirmation gets its own fetcher with a shorter timeout
-  (`Constants.geoConfirmationTimeoutSeconds`), so a slow confirmer does not stall the probe.
+- Confirmation gets its own fetcher (`Constants.geoConfirmationTimeoutSeconds`). Its timeout was
+  2.5s and is now 5s, equal to ipinfo and to Linux: through a fake-IP tunnel successful answers sat
+  right under 2.5s, and the truncated ones paused targets every minute while ipinfo was silent
+  from the provider's exit (2026-10-28, five machines).
 - Swapping or adding a service means re-measuring, not just editing a URL: the provider has to be
   releasing it through the chosen profile *now*, its limit has to hold at our per-probe rate, and
   its data has to be accurate on reassigned ranges. `api.country.is` and `ipwho.is` are already
