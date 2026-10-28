@@ -23,7 +23,9 @@ use weto_core::guard_machine::GuardPhase;
 use weto_core::network::{NetworkSnapshot, OutgoingRoute};
 use weto_core::pause_plan::RecoveredProcess;
 use weto_core::process::{MatchedProcess, ProcessSnapshot, TargetKind};
-use weto_guard::controller::{CheckReporting, GuardController, KillReporting, SettingsProviding};
+use weto_guard::controller::{
+    CheckReporting, GuardController, KillReporting, OutcomeException, SettingsProviding,
+};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::background::BackgroundDispatching;
 use weto_sys::geo_probe::GeoProbing;
@@ -663,6 +665,8 @@ pub struct Recorded {
     pub recovered: Vec<Entry>,
     /// Исходы стояния: (общий, исход записей шелла).
     pub resolutions: Vec<(String, Option<String>)>,
+    /// Исходы отдельных процессов, расходящиеся с общим исходом эпизода.
+    pub outcome_of: std::collections::HashMap<i32, String>,
     /// Записи, отпущенные снятием цели с охраны: (pid, свой исход) в порядке
     /// поступления. Исход у них приходит раньше эпизодного и своим проходом.
     pub released: Vec<(Vec<i32>, String)>,
@@ -679,6 +683,11 @@ impl RecordingReporter {
 
     pub fn paused_pids(&self) -> Vec<i32> {
         self.recorded().paused.iter().map(|e| e.pid).collect()
+    }
+
+    /// Исход процесса, если он расходится с общим исходом эпизода.
+    pub fn outcome_of(&self, pid: i32) -> Option<String> {
+        self.recorded().outcome_of.get(&pid).cloned()
     }
 
     pub fn resolutions(&self) -> Vec<String> {
@@ -746,12 +755,22 @@ impl KillReporting for RecordingReporter {
             .push((pids.to_vec(), outcome.to_string()));
     }
 
-    fn pause_resolved(&self, outcome: &str, shell_outcome: Option<&str>, _context: &KillContext) {
-        self.0
-            .lock()
-            .unwrap()
+    fn pause_resolved(
+        &self,
+        outcome: &str,
+        shell_outcome: Option<&str>,
+        exceptions: &[OutcomeException],
+        _context: &KillContext,
+    ) {
+        let mut recorded = self.0.lock().unwrap();
+        recorded
             .resolutions
             .push((outcome.to_string(), shell_outcome.map(str::to_string)));
+        for exception in exceptions {
+            for pid in &exception.pids {
+                recorded.outcome_of.insert(*pid, exception.text.clone());
+            }
+        }
     }
 
     fn backgrounded(&self, target_name: &str) {

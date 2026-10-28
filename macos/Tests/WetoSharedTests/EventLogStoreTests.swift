@@ -104,15 +104,13 @@ final class EventLogStoreTests: XCTestCase {
         XCTAssertEqual(store().events.count, 2, "и лежит уже в файле")
     }
 
-    /// Перенос обязан соблюдать ёмкость.
+    /// Перенос обязан соблюдать ёмкость — в эпизодах, как и всякая запись.
     ///
-    /// На живой машине десять прежних записей — это две с лишним сотни pid:
-    /// одно падение VPN завершало по три десятка процессов разом. Развернув их
-    /// по процессам, перенос клал в журнал больше, чем журнал вмещает, и лишнее
-    /// уходило только при следующем завершении.
+    /// Развернув прежние записи по процессам, перенос клал в журнал больше, чем журнал
+    /// вмещает, и лишнее уходило только при следующем завершении.
     func test_migration_respects_the_capacity() {
         var records: [String] = []
-        for episode in 0..<10 {
+        for episode in 0..<(Constants.eventLogEpisodeCapacity + 10) {
             let pids = (0..<30).map { "\(episode * 100 + $0)" }.joined(separator: ",")
             records.append("""
             {"id":"\(UUID().uuidString)","date":\(809_519_566 - Double(episode) * 60),
@@ -124,9 +122,10 @@ final class EventLogStoreTests: XCTestCase {
 
         let migrated = EventLogStore(storage: file(), migratingFrom: defaults)
 
-        XCTAssertEqual(migrated.events.count, Constants.eventLogCapacity)
+        XCTAssertEqual(Set(migrated.events.map(\.episodeID)).count, Constants.eventLogEpisodeCapacity)
+        XCTAssertEqual(migrated.events.count, Constants.eventLogEpisodeCapacity * 30, "эпизоды целиком")
         XCTAssertEqual(migrated.events.first?.pid, 0, "свежие сверху и остались")
-        XCTAssertEqual(store().events.count, Constants.eventLogCapacity, "и на диск легло столько же")
+        XCTAssertEqual(store().events.count, migrated.events.count, "и на диск легло столько же")
     }
 
     /// Перенос — разовый. Журнал, уже живущий файлом, настройки не переписывают:
@@ -141,26 +140,47 @@ final class EventLogStoreTests: XCTestCase {
         XCTAssertEqual(reopened.events.map(\.reasonText), ["своё"])
     }
 
-    func test_ring_buffer_drops_oldest_beyond_capacity() {
+    func test_ring_buffer_drops_oldest_episodes_beyond_capacity() {
         let store = store()
-        for index in 0..<(Constants.eventLogCapacity + 10) {
+        for index in 0..<(Constants.eventLogEpisodeCapacity + 10) {
             store.record([event("событие \(index)")])
         }
-        XCTAssertEqual(store.events.count, Constants.eventLogCapacity)
-        XCTAssertEqual(store.events.first?.reasonText, "событие \(Constants.eventLogCapacity + 9)")
+        XCTAssertEqual(store.events.count, Constants.eventLogEpisodeCapacity)
+        XCTAssertEqual(store.events.first?.reasonText, "событие \(Constants.eventLogEpisodeCapacity + 9)")
         XCTAssertEqual(store.events.last?.reasonText, "событие 10")
     }
 
-    /// Сто записей, а не десять: запись теперь на процесс, и одно падение VPN
-    /// съедало прежний журнал целиком — тридцать четыре процесса вытесняли всё.
-    func test_capacity_is_a_hundred_records() {
-        XCTAssertEqual(Constants.eventLogCapacity, 100)
+    /// Ёмкость считается эпизодами, а не процессами, и эпизод никогда не режется.
+    ///
+    /// При ёмкости в сто записей одна пауза на ~170 процессах Claude.app вытесняла всю
+    /// историю и сама оставалась в файле обрезком: по журналу нельзя было сказать,
+    /// что встало и сколько. Файл — полный: объём не жалко, урезанный эпизод хуже.
+    func test_a_large_episode_is_kept_whole_and_old_ones_leave_whole() {
+        XCTAssertEqual(Constants.eventLogEpisodeCapacity, 50)
 
         let store = store()
-        for index in 0..<120 { store.record([event("событие \(index)")]) }
-        XCTAssertEqual(store.events.count, 100)
-        XCTAssertEqual(store.events.first?.reasonText, "событие 119")
-        XCTAssertEqual(store.events.last?.reasonText, "событие 20")
+        let oldest = UUID()
+        store.record((0..<3).map { event("старый", pid: Int32($0), episodeID: oldest) })
+        for index in 1..<Constants.eventLogEpisodeCapacity { store.record([event("событие \(index)")]) }
+        let large = UUID()
+        store.record((0..<170).map { event("пауза", pid: Int32(1_000 + $0), episodeID: large) })
+
+        XCTAssertEqual(store.events.filter { $0.episodeID == large }.count, 170, "эпизод целиком")
+        XCTAssertFalse(store.events.contains { $0.episodeID == oldest }, "старейший ушёл целиком")
+        XCTAssertEqual(Set(store.events.map(\.episodeID)).count, Constants.eventLogEpisodeCapacity)
+    }
+
+    /// Процесс, вставший под уже идущей паузой, дописывается в её эпизод позже.
+    /// Это не новый эпизод: место в журнале он не занимает.
+    func test_a_late_record_does_not_cost_an_episode() {
+        let store = store()
+        let paused = UUID()
+        store.record([event("пауза", pid: 1, episodeID: paused)])
+        for index in 1..<Constants.eventLogEpisodeCapacity { store.record([event("событие \(index)")]) }
+        store.record([event("пауза", pid: 2, episodeID: paused)])
+
+        XCTAssertEqual(store.events.filter { $0.episodeID == paused }.map(\.pid), [2, 1])
+        XCTAssertTrue(store.events.contains { $0.reasonText == "событие 1" }, "никто не вытеснен")
     }
 
     /// Причина уточняется у всех записей эпизода разом: процессов в нём десятки,

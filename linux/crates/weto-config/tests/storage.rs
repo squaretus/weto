@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 
 use weto_config::journal::{
-    episodes, visible_limit_caption, Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY,
-    VISIBLE_LIMIT,
+    episodes, visible_limit_caption, Journal, KillEvent, KillEventKind, MatchBasis,
+    EPISODE_CAPACITY, VISIBLE_LIMIT,
 };
 use weto_config::paths::Paths;
 use weto_config::settings::{
@@ -201,24 +201,85 @@ fn target_rules_keep_the_launch_path_and_its_resolution() {
     );
 }
 
-/// Сто записей, а не десять: запись теперь на процесс, и одно падение VPN
-/// на тридцати четырёх процессах вытесняло прежний журнал целиком.
+/// Ёмкость считается эпизодами, а не процессами: свежие сверху, старейший
+/// эпизод уходит целиком (`Constants.eventLogEpisodeCapacity` на macOS).
 #[test]
-fn journal_keeps_the_last_hundred_entries() {
-    assert_eq!(CAPACITY, 100);
+fn journal_keeps_the_last_fifty_episodes() {
+    assert_eq!(EPISODE_CAPACITY, 50);
 
     let mut journal = Journal::default();
-    for pid in 0..(CAPACITY as i32 + 5) {
-        journal.append(vec![event(pid, "VPN не поднят")]);
+    for pid in 0..(EPISODE_CAPACITY as i32 + 5) {
+        journal.append(vec![episode_event(
+            pid,
+            "VPN не поднят",
+            &format!("e{pid}"),
+        )]);
     }
 
-    assert_eq!(journal.entries().len(), CAPACITY);
+    assert_eq!(journal.entries().len(), EPISODE_CAPACITY);
     assert_eq!(
         journal.entries()[0].pid,
-        CAPACITY as i32 + 4,
+        EPISODE_CAPACITY as i32 + 4,
         "свежие сверху"
     );
-    assert_eq!(journal.entries()[CAPACITY - 1].pid, 5);
+    assert_eq!(journal.entries()[EPISODE_CAPACITY - 1].pid, 5);
+}
+
+/// Эпизод никогда не режется. При ёмкости в сто записей одна пауза на ~170
+/// процессах вытесняла всю историю и сама оставалась в файле обрезком:
+/// по журналу нельзя было сказать, что встало и сколько.
+#[test]
+fn a_large_episode_is_kept_whole_and_old_ones_leave_whole() {
+    let mut journal = Journal::default();
+    journal.append(
+        (0..3)
+            .map(|pid| episode_event(pid, "старый", "старейший"))
+            .collect(),
+    );
+    for n in 1..EPISODE_CAPACITY {
+        journal.append(vec![episode_event(n as i32, "r", &format!("e{n}"))]);
+    }
+    journal.append(
+        (0..170)
+            .map(|n| episode_event(1_000 + n, "пауза", "большой"))
+            .collect(),
+    );
+
+    let entries = journal.entries();
+    assert_eq!(
+        entries.iter().filter(|e| e.episode_id == "большой").count(),
+        170,
+        "эпизод целиком"
+    );
+    assert!(
+        entries.iter().all(|e| e.episode_id != "старейший"),
+        "старейший ушёл целиком"
+    );
+    assert_eq!(episodes(entries).len(), EPISODE_CAPACITY);
+}
+
+/// Процесс, вставший под уже идущей паузой, дописывается в её эпизод позже.
+/// Это не новый эпизод: места в журнале он не занимает.
+#[test]
+fn a_late_record_does_not_cost_an_episode() {
+    let mut journal = Journal::default();
+    journal.append(vec![episode_event(1, "пауза", "пауза")]);
+    for n in 1..EPISODE_CAPACITY {
+        journal.append(vec![episode_event(n as i32 + 10, "r", &format!("e{n}"))]);
+    }
+    journal.append(vec![episode_event(2, "пауза", "пауза")]);
+
+    let pids: Vec<i32> = journal
+        .entries()
+        .iter()
+        .filter(|e| e.episode_id == "пауза")
+        .map(|e| e.pid)
+        .collect();
+    assert_eq!(pids, [2, 1]);
+    assert!(
+        journal.entries().iter().any(|e| e.episode_id == "e1"),
+        "никто не вытеснен"
+    );
 }
 
 /// Проход охраны пишется целиком: завершили четыре процесса — четыре записи,
@@ -591,8 +652,8 @@ fn the_card_says_how_many_records_it_leaves_to_the_export() {
         Some("Показаны последние 20 из 21 — выгрузите журнал целиком")
     );
     assert_eq!(
-        visible_limit_caption(CAPACITY).as_deref(),
-        Some("Показаны последние 20 из 100 — выгрузите журнал целиком")
+        visible_limit_caption(EPISODE_CAPACITY).as_deref(),
+        Some("Показаны последние 20 из 50 — выгрузите журнал целиком")
     );
 }
 

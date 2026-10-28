@@ -16,7 +16,7 @@ use weto_cli::run::{app_conflict, app_is_running, scope_text, AppConflict, LockE
 use weto_cli::store::{Reload, Store, WatchedSettings};
 use weto_config::journal::KillContext;
 use weto_core::process::{MatchBasis, MatchedProcess};
-use weto_guard::controller::KillReporting;
+use weto_guard::controller::{KillReporting, OutcomeException};
 
 // --- замок и приложение рядом ----------------------------------------------------
 
@@ -195,7 +195,11 @@ fn pauses_and_kills_are_logged_with_names_pids_and_reason() {
 
     reporter.paused(&[matched(10, "claude"), matched(11, "claude")], &context);
     reporter.report(&[matched(12, "codex")], &[], &context);
-    reporter.pause_resolved("возобновлено проверкой", None, &context);
+    let standing = OutcomeException {
+        pids: [11].into_iter().collect(),
+        text: "не возобновлено: процесс остался остановленным".to_string(),
+    };
+    reporter.pause_resolved("возобновлено проверкой", None, &[standing], &context);
 
     assert_eq!(
         *lines.lock().unwrap(),
@@ -203,6 +207,7 @@ fn pauses_and_kills_are_logged_with_names_pids_and_reason() {
             "на паузе: claude ×2 (pid 10, 11) — VPN-туннель wg0 не поднят",
             "завершены: codex (pid 12) — VPN-туннель wg0 не поднят",
             "исход паузы: возобновлено проверкой",
+            "pid 11: не возобновлено: процесс остался остановленным",
         ]
     );
 }

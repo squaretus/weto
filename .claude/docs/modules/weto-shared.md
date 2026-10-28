@@ -18,13 +18,21 @@ this layer decides *when* to ask and *what to do* with the answer.
   «не возобновлено: …» when SIGCONT did not stick (background job) or was refused. An entry that
   answered with a stop `Constants.resumeRetryLimit` times stops being poked (zsh's `notify` would
   print `suspended (tty input)` to the user once a second) — it stays on the books, and
-  `terminate`/`stop` still signal it. `stop()` cannot observe anything after its own SIGCONT,
-  so its outcome is «продолжено при выходе из Weto — пошли ли процессы, Weto проверит при следующем
-  запуске» — neither the optimistic nor the pessimistic lie (the earlier «не подтверждено: сигнал
-  продолжения отправлен процессам […]» was read as "weto let the targets go under an unverified
-  VPN"). An observed resume at exit is «возобновлено при выходе из Weto». Episode outcomes carry no
-  pids (`shutdownEpisodeText`, `unresolvedEpisodeText(refused:)`): the text sits on every record of
-  the episode and is shown in the window; the texts match Linux verbatim. `confirmResumed()` is the one exception to that promise and
+  `terminate`/`stop` still signal it. Outcomes are written per process, not one text per episode:
+  `resolvePauseEpisode(_:shellOutcome:exceptions:)` writes the common outcome to the episode and
+  then refines the records of each `EpisodeException` (pids + text) through
+  `EventLogStore.refine(episodeID:pids:skipping:resolutionText:)`. A settled resume where some pids
+  stopped again or refused is «возобновлено: проверка подтвердила безопасный выход…» for the rest,
+  «не возобновлено: процесс остался остановленным — задание ушло в фон, продолжите его в терминале
+  командой fg» or «не возобновлено: сигнал продолжения не дошёл — недостаточно прав» for them
+  (`notResumedText(refused:)`). `stop()` cannot observe anything after its own SIGCONT: the common
+  outcome is «возобновлено при выходе из Weto», and `shutdownExceptions` gives the pids the scan
+  still caught standing «продолжено при выходе из Weto — пошёл ли процесс, Weto проверит при
+  следующем запуске» (refused ones — the refusal text) — neither the optimistic nor the pessimistic
+  lie (the earlier «не подтверждено: сигнал продолжения отправлен процессам […]» was read as "weto
+  let the targets go under an unverified VPN"). Texts name no pids (the record already is one
+  process) and match Linux verbatim; the window joins an episode's distinct outcomes into
+  «Итог: a; b». `confirmResumed()` is the one exception to that promise and
   belongs to uninstall alone: there is no next launch to keep it, so the obligation is discharged by
   observation instead (see invariants). Both it and `stop()` go through `resumeFromLedger()` with an
   empty `skipping`, so entries the tick gave up on get that last signal too. A pill whose target worked between episodes and was stopped
@@ -88,7 +96,9 @@ this layer decides *when* to ask and *what to do* with the answer.
   mutually exclusive with `vpnAppRule` — each setter clears the other side.
   `reloadFromDefaults()` re-reads the suite and applies only the differing fields through the
   normal setters (see invariants); `weto run` calls it once a second
-- `macos/Sources/WetoShared/EventLogStore.swift` — 100-entry ring buffer of `KillEvent`, one per killed process
+- `macos/Sources/WetoShared/EventLogStore.swift` — `KillEvent`, one per stopped/killed process; capacity
+  is in episodes — the latest `Constants.eventLogEpisodeCapacity` (50) kept whole, trimmed by
+  `JournalEpisode.keepingLatest` on `record`, on read and on migration (see invariants)
 - `macos/Sources/WetoShared/CheckLogStore.swift` — 50-entry ring buffer of `CheckEvent` (the second
   journal: every connectivity-check attempt, not just the ones that killed something).
   `CheckEvent.isWorthRecording` is the filter — see invariants
@@ -131,7 +141,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   `migrateLegacyVPNSelection(in:)`, `onGuardConfigurationChange(_)`, `guardConfig`
 - `SettingsStore.pauseCeiling` (`PauseCeiling`), `onPauseCeilingChange(_)`;
   `GuardController.pauseCeiling` — the machine's current value, read by `GuardVM.pauseDeadline`
-- `EventLogStore.record(_ batch: [KillEvent])`, `refine(episodeID:reasonText:resolutionText:…)`, `clear()`
+- `EventLogStore.record(_ batch: [KillEvent])`, `refine(episodeID:matchedBy:pids:skipping:reasonText:resolutionText:…)`, `clear()`
 - `JournalExporter.make(settings:events:at:osVersion:) → JournalExport`; `JournalExport.encoded()`,
   `JournalExport.fileName(at:)`
 - `LaunchAgentManaging.enable() / disable() / bootout()`, `isInstalled`, `pointsAtCurrentBundle`
@@ -320,6 +330,15 @@ this layer decides *when* to ask and *what to do* with the answer.
   20 из N» count episodes. Pids stay in `journal.json` and the export (`journal-export.json` did not
   change) — the row never names a pid, a parent or the basis («потомок N» is gone with
   `MatchBasis.detailText`).
+- **Capacity is counted in episodes, and an episode is never cut.** `journal.json` keeps the latest
+  `Constants.eventLogEpisodeCapacity` (50) episodes whole however many processes they hold; the
+  oldest leaves entirely. Order is by an episode's freshest record (same as `JournalEpisode.group`),
+  so a record appended to a running episode takes no new slot. With the former 100-record ring
+  one pause over ~170 Claude.app processes evicted the whole history and itself survived as a
+  stub (88 of ~170) — the file could no longer say what stopped. The file is deliberately large
+  (owner's call: megabytes are fine, the journal must be complete; the window is the short
+  version). Same number on Linux (`journal::EPISODE_CAPACITY`); the record format and the export
+  did not change.
 - Journal dedup is by the pair **reason + pid**; both that set and `recordedReasons` are cleared
   only on `safe`. The same process under the same reason writes nothing twice; a relaunched one
   always writes.

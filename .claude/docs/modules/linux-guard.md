@@ -31,7 +31,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
 | `weto-sys` | `notifications.rs` | notifications over D-Bus; the `default` action opens the status window |
 | `weto-sys` | `secret_store.rs` | token file, mode `0600` |
-| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings (`set_vpn_app` / `set_vpn_tunnel` clear each other, `add_target` with `TargetEntryError`, `validate_tunnel_name`), ring-buffer journal and its per-episode view (`episodes`, `Episode`), XDG paths (`from_env_named(APP_DIR \| CLI_DIR)`, `status_file`, `run_lock_file`) |
+| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings (`set_vpn_app` / `set_vpn_tunnel` clear each other, `add_target` with `TargetEntryError`, `validate_tunnel_name`), journal capped at `EPISODE_CAPACITY` (50) whole episodes and its per-episode view (`episodes`, `Episode`), XDG paths (`from_env_named(APP_DIR \| CLI_DIR)`, `status_file`, `run_lock_file`) |
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping; tunnel status next to `vpn_app_status`, from the same pass's snapshot; `GuardSnapshot` also carries `outgoing`, `vpn_app`, `vpn_tunnel`, `probed_at` for `weto-cli`'s status file |
 | `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger, terminal modes (`restore_terminal_modes`) |
@@ -347,8 +347,19 @@ Everything the policy decides is shared. What the system dictates is not:
   processes found standing at start-up, dated when they stopped rather than when weto noticed;
   `pause_resolved` appends the outcome to both. One episode per standing, no second record for the
   same pid, and a shell released while its target is killed gets «продолжен …» instead of
-  «завершено» — it is alive. Episode outcomes name no pids (`shutdown_episode_text`,
-  `unresolved_episode_text(refused: bool)`), verbatim with macOS.
+  «завершено» — it is alive. Outcomes are per process: `pause_resolved(outcome, shell_outcome,
+  exceptions, context)` writes the common outcome to the episode, then each `OutcomeException`
+  (`controller.rs`: `pids` + `text`, port of macOS `EpisodeException`) through
+  `Journal::refine_pids` (renamed from `refine_released`; it also writes the released-target
+  outcome), skipping released pids. A settled resume where some pids stopped again or refused is
+  «возобновлено …» for the rest and `not_resumed_text(refused)` for them; shutdown builds its pair
+  with `shutdown_exceptions`. Texts are about one process, name no pid, and match macOS verbatim;
+  the window joins distinct outcomes into «Итог: a; b».
+- **Capacity is counted in episodes.** `Journal::append` keeps the latest `EPISODE_CAPACITY` (50)
+  episodes whole, ordered by each episode's freshest record (so a record joining a running
+  episode takes no new slot), and never cuts one. The former `CAPACITY = 100` records let one
+  pause over ~170 processes evict all history and survive as a stub; the file is large on purpose
+  (the window is the short version). Same number as macOS `Constants.eventLogEpisodeCapacity`.
 - **Stored per process, shown per episode** — port of macOS `JournalEpisode`:
   `weto_config::journal::episodes` → `Episode` feeds `journal_page` / `weto_ui::components::journal_row`
   and `weto journal`. Title — distinct target names joined by «, »; summary and readout from the
@@ -585,13 +596,16 @@ one record the journal is kept for out of its fifty.
    process running (or gone). A real background job answers each `SIGCONT` with another stop; after
    `RESUME_RETRY_LIMIT` (3, same as macOS) observed stops it stops being signalled — `notify` in zsh
    would otherwise print `suspended (tty input)` once a second — but the entry stays on the books
-   and the journal says «не возобновлено … командой fg», never «возобновлено».
+   and its record says «не возобновлено: процесс остался остановленным … командой fg» (a refused
+   `SIGCONT` — «… сигнал продолжения не дошёл — недостаточно прав»), never «возобновлено», while
+   the processes that did resume share the episode's «возобновлено …».
 4. `recover_stopped()` runs before the first tick: `SIGCONT` by identity (pid **and** path, because
    pids get reused), a `startupRecovery` / `standingProcessesRemain` record in the checks journal,
    and its own kill-journal episode. An unreadable ledger leaves a `ledgerUnreadable` record.
 5. `shutdown()` resumes everything on a clean exit and admits it cannot observe the result: the
-   outcome is «продолжено при выходе из Weto — пошли ли процессы, Weto проверит при следующем
-   запуске» («возобновлено при выходе из Weto» when observed). It hangs off one funnel —
+   episode outcome is «возобновлено при выходе из Weto», and `shutdown_exceptions` gives the pids
+   the scan still caught standing «продолжено при выходе из Weto — пошёл ли процесс, Weto проверит
+   при следующем запуске» (refused ones — the refusal text). It hangs off one funnel —
    `application.connect_shutdown` in `main.rs` — because buttons are not an exit path: GApplication
    quits by itself once the last window is gone, and that route left the targets standing. A
    `SIGTERM` handler turns the session logout into the same `quit`, so it goes through the funnel

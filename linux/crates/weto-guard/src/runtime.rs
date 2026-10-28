@@ -32,7 +32,9 @@ use weto_sys::process_registry::ProcRegistry;
 use weto_sys::process_signaler::ProcessSignaler;
 use weto_sys::secret_store::FileSecretStore;
 
-use crate::controller::{CheckReporting, GuardController, KillReporting, SettingsProviding};
+use crate::controller::{
+    CheckReporting, GuardController, KillReporting, OutcomeException, SettingsProviding,
+};
 use crate::enforcer::ProcessEnforcer;
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
@@ -278,7 +280,7 @@ impl KillReporting for JournalWriter {
         let mut journal = self.journal.lock().expect("журнал");
         let mut touched = false;
         for episode_id in episodes {
-            touched |= journal.refine_released(&episode_id, &freed, outcome);
+            touched |= journal.refine_pids(&episode_id, &freed, outcome);
         }
         if touched {
             self.save(&journal);
@@ -287,7 +289,13 @@ impl KillReporting for JournalWriter {
 
     /// Чем стояние кончилось. Дописывается обоим эпизодам сразу, а запись шелла
     /// получает свой исход, если он расходится с исходом цели.
-    fn pause_resolved(&self, outcome: &str, shell_outcome: Option<&str>, context: &KillContext) {
+    fn pause_resolved(
+        &self,
+        outcome: &str,
+        shell_outcome: Option<&str>,
+        exceptions: &[OutcomeException],
+        context: &KillContext,
+    ) {
         let (episodes, released) = {
             let mut episodes = self.pause_episodes.lock().expect("эпизоды стояния");
             let open = episodes.open();
@@ -312,6 +320,10 @@ impl KillReporting for JournalWriter {
             );
             if let Some(shell_outcome) = shell_outcome {
                 journal.refine_basis(&episode_id, MatchBasis::Shell, shell_outcome, &released);
+            }
+            for exception in exceptions {
+                let pids: HashSet<i32> = exception.pids.difference(&released).copied().collect();
+                journal.refine_pids(&episode_id, &pids, &exception.text);
             }
         }
         if touched {

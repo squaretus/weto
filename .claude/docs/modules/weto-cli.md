@@ -92,7 +92,11 @@ directories `weto-cli`, asset prefix `weto-cli-`.
   Under root the process runs with umask `077`; public files and dirs get their modes explicitly.
 - `run` writes `status.json` atomically (temp + rename) once a second and on every phase change,
   removes it on orderly exit. One log line per phase change, journal event, outcome and new
-  release version.
+  release version. Outcomes are per process, so one episode can log several: Linux
+  (`LoggingReporter::pause_resolved`) writes «исход паузы: <common>» and then «pid N, M: <text>»
+  per non-empty `OutcomeException` (pids sorted); macOS (`GuardRunner.journalLogLines`) groups
+  resolved records by episode + outcome text, one «исход паузы: <text> (pid …)» line per distinct
+  outcome.
 - `service install`: Linux root → `/etc/systemd/system/weto.service` (`WantedBy=multi-user.target`,
   no `Environment=HOME`), user → `~/.config/systemd/user/weto.service`; `daemon-reload`, `enable`,
   then `restart` if active else `start`. macOS root → `/Library/LaunchDaemons/com.weto.cli.plist`

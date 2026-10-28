@@ -111,13 +111,15 @@ turns a decision into one of six phases and either keeps targets running, pauses
    `Constants.resumeRetryLimit` answers, after which it keeps the entry but stops being poked
    (zsh's `notify` prints `suspended (tty input)` on every answer).
    `resolvePauseEpisode` refines the open episode with how it ended — «возобновлено» only for an
-   observed resume, «не возобновлено: …» otherwise, and the popup keeps its badge with the `fg`
+   observed resume, and per process: records of pids that stopped again or refused `SIGCONT` get
+   their own «не возобновлено: …» (`exceptions`), the rest share the episode outcome; the popup keeps its badge with the `fg`
    hint instead of pretending the target came back. A `.terminate` effect
    instead kills whatever still matches the rules and resumes (never leaves stopped) anyone in the
    ledger that no longer does, so nothing is left frozen past the point where it stops being
    watched; reaching the pause ceiling with no answer resolves the same way, with
    `UnsafeEvidence.pauseExpired(ceiling:)` as the evidence (it names the ceiling that fired).
-10. **Record.** `EventLogStore` (`journal.json`, 100-entry ring buffer) holds one `KillEvent` per
+10. **Record.** `EventLogStore` (`journal.json`, the latest 50 *episodes* kept whole — an episode is
+    never cut, the oldest leaves entirely; `JournalEpisode.keepingLatest`) holds one `KillEvent` per
     process actually stopped or terminated, deduplicated by *both* pid and reason within an
     episode — a repeat reason with a new pid writes `.launchBlocked` rather than a fresh
     `.terminated`. The window and `weto journal` show one row per episode, not per process

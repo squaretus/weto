@@ -267,7 +267,7 @@ public final class GuardVM {
         // там, где SIGCONT почти всегда срабатывает. Отказ ядра — единственное, что
         // наблюдается и здесь, и он называется как обычно.
         let outcome = resumeFromLedger()
-        resolvePauseEpisode(shutdownEpisodeText(outcome))
+        resolvePauseEpisode("возобновлено при выходе из Weto", exceptions: shutdownExceptions(outcome))
         let stillStanding = Set(outcome.unresolved.map(\.pid))
         pausedProcesses.removeAll { !stillStanding.contains($0.pid) }
         // Фаза обязана уйти вместе с целями: «Пауза», оставленная после остановки,
@@ -286,20 +286,19 @@ public final class GuardVM {
         enforcer.resume()
     }
 
-    /// Чем кончился последний SIGCONT штатного выхода. Журнал говорит ровно то,
-    /// что установлено: наблюдать результат нечем, и «не возобновлено» было бы
-    /// такой же неправдой, как «возобновлено».
-    private func shutdownEpisodeText(_ outcome: ProcessEnforcer.ResumeOutcome) -> String {
-        if outcome.isComplete {
-            return "возобновлено при выходе из Weto"
-        }
-        if outcome.results.contains(where: { !$0.isDelivered }) {
-            return unresolvedEpisodeText(refused: true)
-        }
-        // «Продолжено», а не «не подтверждено»: второе читали как неподтверждённый
-        // выход VPN, под которым weto будто бы отпустил цели.
-        return "продолжено при выходе из Weto — пошли ли процессы, "
-            + "Weto проверит при следующем запуске"
+    /// Чем кончился последний SIGCONT штатного выхода у тех, кого обход застал
+    /// стоящими. Журнал говорит ровно то, что установлено: наблюдать результат нечем,
+    /// и «не возобновлено» было бы такой же неправдой, как «возобновлено».
+    /// «Продолжено», а не прежнее «не подтверждено»: второе читали как неподтверждённый
+    /// выход VPN, под которым weto будто бы отпустил цели.
+    private func shutdownExceptions(_ outcome: ProcessEnforcer.ResumeOutcome) -> [EpisodeException] {
+        let refused = Set(outcome.results.filter { !$0.isDelivered }.map(\.pid))
+        let unobserved = Set(outcome.unresolved.map(\.pid)).subtracting(refused)
+        return [
+            (refused, Self.notResumedText(refused: true)),
+            (unobserved, "продолжено при выходе из Weto — пошёл ли процесс, "
+                + "Weto проверит при следующем запуске"),
+        ]
     }
 
     /// Досылает SIGCONT оставшимся записям учёта и возвращает тех, кого обход всё
@@ -858,7 +857,13 @@ public final class GuardVM {
         surfaceStanding(outcome.unresolved, answered: Set(answered.map(\.pid)))
 
         guard !answered.isEmpty || !refused.isEmpty else { return }
-        resolvePauseEpisode(unresolvedEpisodeText(refused: !refused.isEmpty))
+        // Исход у каждого процесса свой: пошедший возобновлён, вставший обратно —
+        // нет. Общий текст на весь эпизод не говорил, кто из них кто.
+        let refusedPIDs = Set(refused)
+        resolvePauseEpisode(resumedEpisodeText, exceptions: [
+            (refusedPIDs, Self.notResumedText(refused: true)),
+            (Set(outcome.unresolved.map(\.pid)).subtracting(refusedPIDs), Self.notResumedText(refused: false)),
+        ])
     }
 
     /// Записи, которым SIGCONT больше не досылается: ответ «встал обратно» получен
@@ -983,17 +988,19 @@ public final class GuardVM {
         return "возобновлено: проверка подтвердила безопасный выход"
     }
 
+    /// Процессы эпизода, чей исход расходится с общим, и сам этот исход.
+    private typealias EpisodeException = (pids: Set<Int32>, text: String)
+
     /// Исход эпизода, у которого возобновления не случилось. Журнал обязан говорить
     /// правду: «возобновлено» пишется только про наблюдённое возобновление, иначе
     /// запись выдавала бы замороженную цель за живую.
     ///
-    /// Процессы не перечисляются: текст стоит у каждой записи эпизода и виден в окне,
-    /// где pid не говорит ничего, а стоящие и так названы пилюлями попапа.
-    private func unresolvedEpisodeText(refused: Bool) -> String {
+    /// Текст — про один процесс: он пишется только записям тех, кто не пошёл.
+    private static func notResumedText(refused: Bool) -> String {
         if refused {
             return "не возобновлено: сигнал продолжения не дошёл — недостаточно прав"
         }
-        return "не возобновлено: процессы остались остановленными — "
+        return "не возобновлено: процесс остался остановленным — "
             + "задание ушло в фон, продолжите его в терминале командой fg"
     }
 
@@ -1026,7 +1033,14 @@ public final class GuardVM {
     /// цели, возвращает SIGCONT — под общим «завершено» его запись лгала бы, ведь
     /// он жив и продолжен, а не мёртв. Второй, более узкий вызов `refine` переписывает
     /// исход только записи с этим основанием, не трогая остальные записи эпизода.
-    private func resolvePauseEpisode(_ outcome: String, shellOutcome: String? = nil) {
+    ///
+    /// `exceptions` — исходы отдельных процессов, расходящиеся с общим: кто не пошёл
+    /// после SIGCONT, тот не делит «возобновлено» с остальными.
+    private func resolvePauseEpisode(
+        _ outcome: String,
+        shellOutcome: String? = nil,
+        exceptions: [EpisodeException] = []
+    ) {
         let episodes = [pauseEpisodeID, recoveryEpisodeID].compactMap { $0 }
         guard !episodes.isEmpty else { return }
         for episodeID in episodes {
@@ -1054,6 +1068,10 @@ public final class GuardVM {
                     confirmSource: lastReading?.confirmSource?.rawValue,
                     diagnostics: currentDiagnostics(staleness: pauseStaleness)
                 )
+            }
+            for (pids, text) in exceptions where !pids.isEmpty {
+                eventLog.refine(episodeID: episodeID, pids: pids, skipping: releasedFromGuard,
+                                resolutionText: text)
             }
         }
         pauseEpisodeID = nil

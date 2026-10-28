@@ -27,6 +27,19 @@ public struct JournalEpisode: Identifiable, Equatable, Sendable {
         return order.map { JournalEpisode(id: $0, events: members[$0] ?? []) }
     }
 
+    /// Журнал без эпизодов старше последних `limit`. Эпизод уходит целиком
+    /// и никогда не режется: урезанный, он врёт о том, сколько процессов встало.
+    /// Порядок — тот же, что у склейки: по самой свежей записи эпизода.
+    public static func keepingLatest(_ limit: Int, of events: [KillEvent]) -> [KillEvent] {
+        var kept = Set<UUID>()
+        return events.filter { event in
+            if kept.contains(event.episodeID) { return true }
+            guard kept.count < limit else { return false }
+            kept.insert(event.episodeID)
+            return true
+        }
+    }
+
     /// Запись, с которой эпизод начался: её время, причина и выход объясняют,
     /// почему встали цели.
     private var opening: KillEvent { events[events.count - 1] }

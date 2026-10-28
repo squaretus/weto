@@ -56,7 +56,11 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   Title — distinct target names joined by «, »; summary and readout from the earliest record;
   `resolutionLine` — distinct outcomes of non-shell records joined by «; » (the shell's own only
   when there is nothing else); `diagnosticsText` adds «процессов: N» for N > 1, never a pid. Texts
-  match `weto_config::journal::Episode` verbatim
+  match `weto_config::journal::Episode` verbatim. `keepingLatest(_:of:)` is the journal's capacity
+  rule: keeps the newest `limit` episodes whole (by the same newest-record order), never cuts one —
+  a truncated episode lies about how many processes stopped. Used by `EventLogStore` with
+  `Constants.eventLogEpisodeCapacity` (50, mirrors Linux `journal::EPISODE_CAPACITY`; the former
+  record-count `eventLogCapacity = 100` is gone)
 - Tests: `macos/Tests/WetoCoreTests/` (~100 cases; `ProcessMatcherTests`, `GuardPolicyTests` and
   `GuardMachineTests` are the load-bearing ones)
 

@@ -2768,7 +2768,7 @@ final class GuardVMTests: XCTestCase {
                        "пока цель стоит, учёт её держит — иначе SIGCONT не пошлёт уже никто")
         XCTAssertEqual(
             h.log.events.first?.resolutionText,
-            "не возобновлено: процессы остались остановленными — "
+            "не возобновлено: процесс остался остановленным — "
                 + "задание ушло в фон, продолжите его в терминале командой fg",
             "журнал говорит, что случилось на самом деле"
         )
@@ -2783,6 +2783,43 @@ final class GuardVMTests: XCTestCase {
 
         XCTAssertEqual(ledgerStorage.load(), .entries([]), "обязательство снимает наблюдение")
         XCTAssertTrue(h.vm.pausedProcesses.isEmpty)
+        h.vm.stop()
+    }
+
+    /// Исход пишется каждому процессу свой. Общий текст на весь эпизод не говорил,
+    /// кто из процессов остался стоять, а кто пошёл: прежде это выручал список pid
+    /// внутри текста, но в окне он был простынёй. Файл журнала обязан отвечать
+    /// по каждой записи, окно склеивает разные исходы в одну строку.
+    func test_each_record_gets_the_outcome_of_its_own_process() async {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: backgroundJobTree(stopped: false)
+        )
+        let ledgerStorage = InMemoryStoppedLedger()
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"],
+                                   ledger: StoppedLedger(storage: ledgerStorage), locator: locator)
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = backgroundJobTree(stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+
+        // Потомок пошёл, сама цель встала обратно по SIGTTIN.
+        locator.processes = backgroundJobTree(stopped: true).map {
+            $0.pid == 201
+                ? ProcessSnapshot(pid: 201, parentPID: 200, executablePath: "/usr/bin/node",
+                                  processGroup: 200, terminalForegroundGroup: 100)
+                : $0
+        }
+        h.vm.handle(.tick)
+
+        let outcome = Dictionary(uniqueKeysWithValues: h.log.events.map { ($0.pid, $0.resolutionText) })
+        XCTAssertEqual(outcome[200], "не возобновлено: процесс остался остановленным — "
+                           + "задание ушло в фон, продолжите его в терминале командой fg")
+        XCTAssertEqual(outcome[201]??.hasPrefix("возобновлено: проверка подтвердила безопасный выход"), true,
+                       "пошедший процесс не обязан делить чужой исход: \(String(describing: outcome[201]))")
         h.vm.stop()
     }
 
@@ -3101,7 +3138,7 @@ final class GuardVMTests: XCTestCase {
                        "обязательство исполняется и на выходе: продолжение в обратном порядке")
         XCTAssertEqual(
             h.log.events.first?.resolutionText,
-            "продолжено при выходе из Weto — пошли ли процессы, "
+            "продолжено при выходе из Weto — пошёл ли процесс, "
                 + "Weto проверит при следующем запуске",
             "ни «возобновлено», ни «не возобновлено»: наблюдения не было вовсе"
         )
@@ -3255,7 +3292,7 @@ final class GuardVMTests: XCTestCase {
         // называет его, не выдавая отправку сигнала за возобновление.
         XCTAssertEqual(
             Set(h.log.events.map(\.resolutionText)),
-            ["не возобновлено: процессы остались остановленными — "
+            ["не возобновлено: процесс остался остановленным — "
                 + "задание ушло в фон, продолжите его в терминале командой fg"],
             "исход один на весь эпизод, включая шелл"
         )
