@@ -385,10 +385,7 @@ fn run_refuses_while_the_weto_app_is_running() {
     std::fs::copy("/bin/sleep", &app).unwrap();
     give_away(live.home.path());
     // Под тем же пользователем, что `weto`: чужой `/proc/<pid>/exe` он не прочтёт.
-    let mut fake_app = as_regular_user(&mut Command::new(&app))
-        .arg("30")
-        .spawn()
-        .unwrap();
+    let mut fake_app = spawn_freshly_written(as_regular_user(&mut Command::new(&app)).arg("30"));
 
     let output = live
         .command(&["run"])
@@ -408,4 +405,27 @@ fn run_refuses_while_the_weto_app_is_running() {
         "{error}"
     );
     assert!(!live.status_file().exists());
+}
+
+/// Запуск только что записанного бинарника переживает `ETXTBSY` — так же, как
+/// в `weto-sys/tests/process_registry.rs`.
+///
+/// `fs::copy` держит копию открытой на запись, а соседние тесты в это время
+/// порождают свои процессы: `fork` дублирует открытый дескриптор в потомка,
+/// и пока тот между `fork` и `exec`, у копии есть писатель — ядро отказывает
+/// в запуске, хотя свой дескриптор мы давно закрыли. На раннере GitHub это
+/// уронило релиз v1.17.1. Окно короткое и закрывается само, поэтому запуск
+/// повторяется; других ошибок повтор не глотает.
+fn spawn_freshly_written(command: &mut Command) -> std::process::Child {
+    const ATTEMPTS: u32 = 50;
+    for attempt in 1..=ATTEMPTS {
+        match command.spawn() {
+            Ok(child) => return child,
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempt < ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("копия бинарника не запустилась: {error}"),
+        }
+    }
+    unreachable!("последняя попытка возвращает или паникует")
 }
