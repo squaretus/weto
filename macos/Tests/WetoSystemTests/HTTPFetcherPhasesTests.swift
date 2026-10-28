@@ -114,6 +114,10 @@ final class HTTPFetcherPhasesTests: XCTestCase {
         let responder = Thread {
             let client = accept(fd, nil, nil)
             guard client >= 0 else { return }
+            // Запрос дочитывается до ответа: закрытый сокет с непрочитанными байтами
+            // ядро сбрасывает RST, URLSession повторяет GET новым соединением,
+            // а принять его уже некому — на раннере GitHub это кончилось таймаутом.
+            readRequestHeaders(client)
             let body = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
             _ = body.withCString { write(client, $0, strlen($0)) }
             close(client)
