@@ -343,13 +343,35 @@ fn the_real_proc_reports_a_deleted_binary_by_its_former_path() {
     fs::copy("/bin/sleep", &binary).unwrap();
     let binary = fs::canonicalize(&binary).unwrap();
     let child = Spawned(spawn_freshly_written(
-        std::process::Command::new(&binary).arg("86402"),
+        std::process::Command::new(&binary).arg("86405"),
     ));
     fs::remove_file(&binary).unwrap();
 
-    let snapshot = snapshot_of(child.pid()).expect("реестр обязан видеть потомка");
+    let snapshot = snapshot_after_exec(child.pid(), "86405");
 
     assert_eq!(snapshot.executable_path, binary.to_string_lossy());
+}
+
+/// Снимок потомка, уже сменившего образ.
+///
+/// `spawn` возвращается, когда потомок вошёл в `exec`, но `/proc/<pid>/exe`
+/// ещё мгновение называет бинарник родителя: на раннере GitHub тест однажды
+/// прочитал `…/deps/process_registry-…` вместо удалённой копии и упал на релизе.
+/// Аргументы меняются вместе с образом, поэтому ждём свою метку в них — по pid,
+/// а не по одной метке: соседние тесты порождают свои `sleep` параллельно.
+fn snapshot_after_exec(pid: i32, marker: &str) -> weto_core::process::ProcessSnapshot {
+    for _ in 0..100 {
+        let snapshot = snapshot_of(pid).expect("реестр обязан видеть потомка");
+        let execed = snapshot
+            .arguments
+            .as_ref()
+            .is_some_and(|argv| argv.iter().any(|argument| argument == marker));
+        if execed {
+            return snapshot;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("потомок {pid} так и не сменил образ");
 }
 
 /// Запуск только что записанного бинарника переживает `ETXTBSY`.
