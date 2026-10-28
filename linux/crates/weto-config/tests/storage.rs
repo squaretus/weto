@@ -204,8 +204,8 @@ fn target_rules_keep_the_launch_path_and_its_resolution() {
 /// Ёмкость считается эпизодами, а не процессами: свежие сверху, старейший
 /// эпизод уходит целиком (`Constants.eventLogEpisodeCapacity` на macOS).
 #[test]
-fn journal_keeps_the_last_fifty_episodes() {
-    assert_eq!(EPISODE_CAPACITY, 50);
+fn journal_keeps_the_last_hundred_episodes() {
+    assert_eq!(EPISODE_CAPACITY, 100);
 
     let mut journal = Journal::default();
     for pid in 0..(EPISODE_CAPACITY as i32 + 5) {
@@ -675,7 +675,7 @@ fn the_card_says_how_many_records_it_leaves_to_the_export() {
     );
     assert_eq!(
         visible_limit_caption(EPISODE_CAPACITY).as_deref(),
-        Some("Показаны последние 20 из 50 — выгрузите журнал целиком")
+        Some("Показаны последние 20 из 100 — выгрузите журнал целиком")
     );
 }
 

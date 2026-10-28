@@ -31,7 +31,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
 | `weto-sys` | `notifications.rs` | notifications over D-Bus; the `default` action opens the status window |
 | `weto-sys` | `secret_store.rs` | token file, mode `0600` |
-| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings (`set_vpn_app` / `set_vpn_tunnel` clear each other, `add_target` with `TargetEntryError`, `validate_tunnel_name`), journal capped at `EPISODE_CAPACITY` (50) whole episodes and its per-episode view (`episodes`, `Episode`), XDG paths (`from_env_named(APP_DIR \| CLI_DIR)`, `status_file`, `run_lock_file`) |
+| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings (`set_vpn_app` / `set_vpn_tunnel` clear each other, `add_target` with `TargetEntryError`, `validate_tunnel_name`), journal capped at `EPISODE_CAPACITY` (100) whole episodes and its per-episode view (`episodes`, `Episode`), XDG paths (`from_env_named(APP_DIR \| CLI_DIR)`, `status_file`, `run_lock_file`) |
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping; tunnel status next to `vpn_app_status`, from the same pass's snapshot; `GuardSnapshot` also carries `outgoing`, `vpn_app`, `vpn_tunnel`, `probed_at` for `weto-cli`'s status file |
 | `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger, terminal modes (`restore_terminal_modes`) |
@@ -355,7 +355,7 @@ Everything the policy decides is shared. What the system dictates is not:
   «возобновлено …» for the rest and `not_resumed_text(refused)` for them; shutdown builds its pair
   with `shutdown_exceptions`. Texts are about one process, name no pid, and match macOS verbatim;
   the window joins distinct outcomes into «Итог: a; b».
-- **Capacity is counted in episodes.** `Journal::append` keeps the latest `EPISODE_CAPACITY` (50)
+- **Capacity is counted in episodes.** `Journal::append` keeps the latest `EPISODE_CAPACITY` (100)
   episodes whole, ordered by each episode's freshest record (so a record joining a running
   episode takes no new slot), and never cuts one. The former `CAPACITY = 100` records let one
   pause over ~170 processes evict all history and survive as a stub; the file is large on purpose

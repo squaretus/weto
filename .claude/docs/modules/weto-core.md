@@ -65,7 +65,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   record and the export are unchanged. Texts match `weto_config::journal::Episode` verbatim. `keepingLatest(_:of:)` is the journal's capacity
   rule: keeps the newest `limit` episodes whole (by the same newest-record order), never cuts one —
   a truncated episode lies about how many processes stopped. Used by `EventLogStore` with
-  `Constants.eventLogEpisodeCapacity` (50, mirrors Linux `journal::EPISODE_CAPACITY`; the former
+  `Constants.eventLogEpisodeCapacity` (100, mirrors Linux `journal::EPISODE_CAPACITY`; the former
   record-count `eventLogCapacity = 100` is gone)
 - Tests: `macos/Tests/WetoCoreTests/` (~100 cases; `ProcessMatcherTests`, `GuardPolicyTests` and
   `GuardMachineTests` are the load-bearing ones)

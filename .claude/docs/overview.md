@@ -118,7 +118,7 @@ turns a decision into one of six phases and either keeps targets running, pauses
    ledger that no longer does, so nothing is left frozen past the point where it stops being
    watched; reaching the pause ceiling with no answer resolves the same way, with
    `UnsafeEvidence.pauseExpired(ceiling:)` as the evidence (it names the ceiling that fired).
-10. **Record.** `EventLogStore` (`journal.json`, the latest 50 *episodes* kept whole — an episode is
+10. **Record.** `EventLogStore` (`journal.json`, the latest 100 *episodes* kept whole — an episode is
     never cut, the oldest leaves entirely; `JournalEpisode.keepingLatest`) holds one `KillEvent` per
     process actually stopped or terminated, deduplicated by *both* pid and reason within an
     episode — a repeat reason with a new pid writes `.launchBlocked` rather than a fresh

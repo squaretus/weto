@@ -23,13 +23,13 @@ pub use weto_core::diagnostics::{
 };
 pub use weto_core::process::MatchBasis;
 
-/// Журнал хранит эпизоды, а не записи: последние пятьдесят целиком, сколько бы
+/// Журнал хранит эпизоды, а не записи: последние сто целиком, сколько бы
 /// процессов в них ни было. Ёмкость в сто записей одна пауза на ~170 процессах
 /// съедала целиком и сама оставалась обрезком — по файлу нельзя было понять,
 /// что встало. Файл объёмный намеренно: он для разбора, а краткую версию
 /// показывает окно.
 /// Число общее для обеих платформ — см. `Constants.eventLogEpisodeCapacity` в macOS-части.
-pub const EPISODE_CAPACITY: usize = 50;
+pub const EPISODE_CAPACITY: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

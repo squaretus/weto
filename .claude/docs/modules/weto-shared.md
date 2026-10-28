@@ -97,7 +97,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   `reloadFromDefaults()` re-reads the suite and applies only the differing fields through the
   normal setters (see invariants); `weto run` calls it once a second
 - `macos/Sources/WetoShared/EventLogStore.swift` — `KillEvent`, one per stopped/killed process; capacity
-  is in episodes — the latest `Constants.eventLogEpisodeCapacity` (50) kept whole, trimmed by
+  is in episodes — the latest `Constants.eventLogEpisodeCapacity` (100) kept whole, trimmed by
   `JournalEpisode.keepingLatest` on `record`, on read and on migration (see invariants)
 - `macos/Sources/WetoShared/CheckLogStore.swift` — 50-entry ring buffer of `CheckEvent` (the second
   journal: every connectivity-check attempt, not just the ones that killed something).
@@ -331,7 +331,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   change) — the row never names a pid, a parent or the basis («потомок N» is gone with
   `MatchBasis.detailText`).
 - **Capacity is counted in episodes, and an episode is never cut.** `journal.json` keeps the latest
-  `Constants.eventLogEpisodeCapacity` (50) episodes whole however many processes they hold; the
+  `Constants.eventLogEpisodeCapacity` (100) episodes whole however many processes they hold; the
   oldest leaves entirely. Order is by an episode's freshest record (same as `JournalEpisode.group`),
   so a record appended to a running episode takes no new slot. With the former 100-record ring
   one pause over ~170 Claude.app processes evicted the whole history and itself survived as a

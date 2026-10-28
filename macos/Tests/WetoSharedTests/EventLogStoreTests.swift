@@ -156,7 +156,7 @@ final class EventLogStoreTests: XCTestCase {
     /// историю и сама оставалась в файле обрезком: по журналу нельзя было сказать,
     /// что встало и сколько. Файл — полный: объём не жалко, урезанный эпизод хуже.
     func test_a_large_episode_is_kept_whole_and_old_ones_leave_whole() {
-        XCTAssertEqual(Constants.eventLogEpisodeCapacity, 50)
+        XCTAssertEqual(Constants.eventLogEpisodeCapacity, 100)
 
         let store = store()
         let oldest = UUID()
