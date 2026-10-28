@@ -146,8 +146,14 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - **The token is read per probe through a closure** (`TokenBox`), so editing it in settings takes
   effect without rebuilding `GeoProbe`. An empty/absent token short-circuits to `.unavailable`
   with zero network traffic.
-- **Confirmation gets its own fetcher with a shorter timeout** (`geoConfirmationTimeoutSeconds`,
-  2.5s vs 5s): it extends the fail-closed window, so it must not wait as long as ipinfo.
+- **Confirmation and the fallback own-address request get their own fetcher**
+  (`geoConfirmationTimeoutSeconds`, 5s — the same as ipinfo and as Linux, where all three share
+  one timeout). It used to be 2.5s to keep the fail-closed window short, but the probe never holds
+  the tick and targets run until the answer: through a fake-IP tunnel DNS alone takes ~1s and TLS
+  another ~1s, successful geojs answers sat right under the 2.5s cap (1.0–2.3s, up to 3.4s on Linux),
+  and while ipinfo stayed silent from the provider's exit for an hour, a truncated fallback answer
+  paused targets almost every minute with the VPN intact. Worst-case probe is now ~15s
+  (ipinfo + two confirmers) instead of ~10s.
 - **argv is opt-in.** `allProcesses(includeArguments: false)` is the default; `ProcessEnforcer`
   asks for argv only when at least one rule is `.script`. The full sweep of ~820 processes is
   ~2 ms (~5 ms with argv) and runs every 250 ms while unsafe, so this is a hot path.
