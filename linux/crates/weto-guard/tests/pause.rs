@@ -332,20 +332,14 @@ fn the_obligation_is_held_until_the_kernel_shows_the_process_running() {
         vec![200],
         "обязательство остаётся: запись из учёта не уходит"
     );
-    assert!(
-        s.reporter
-            .resolutions()
-            .iter()
-            .all(|text| !text.starts_with("возобновлено")),
-        "«возобновлено» пишется только про наблюдённое возобновление: {:?}",
-        s.reporter.resolutions()
-    );
-    assert!(
-        s.reporter
-            .resolutions()
-            .iter()
-            .any(|text| text.contains("не возобновлено: процессы [200]")
-                && text.contains("командой fg")),
+    // «Возобновлено» пишется только про наблюдённое возобновление, и исход у каждого
+    // процесса свой: общий текст эпизода не говорил, кто из процессов остался стоять.
+    assert_eq!(
+        s.reporter.outcome_of(200).as_deref(),
+        Some(
+            "не возобновлено: процесс остался остановленным — \
+             задание ушло в фон, продолжите его в терминале командой fg"
+        ),
         "{:?}",
         s.reporter.resolutions()
     );
@@ -471,11 +465,9 @@ fn a_refused_resume_is_named_as_a_refusal() {
     s.probe_now();
     s.tick();
 
-    assert!(
-        s.reporter
-            .resolutions()
-            .iter()
-            .any(|text| text.contains("не возобновлено: сигнал продолжения не дошёл")),
+    assert_eq!(
+        s.reporter.outcome_of(200).as_deref(),
+        Some("не возобновлено: сигнал продолжения не дошёл — недостаточно прав"),
         "{:?}",
         s.reporter.resolutions()
     );
@@ -1173,13 +1165,20 @@ fn shutdown_resumes_and_admits_it_cannot_observe_the_result() {
     s.controller.shutdown();
 
     assert_eq!(s.world.signalled(Resume), vec![201, 200, 100]);
-    let resolutions = s.reporter.resolutions();
-    assert_eq!(resolutions.len(), 1);
-    assert!(
-        resolutions[0].starts_with("не подтверждено: сигнал продолжения отправлен процессам")
-            && resolutions[0].contains("при следующем запуске"),
-        "{resolutions:?}"
+    assert_eq!(
+        s.reporter.resolutions(),
+        ["возобновлено при выходе из Weto"]
     );
+    for pid in [100, 200, 201] {
+        assert_eq!(
+            s.reporter.outcome_of(pid).as_deref(),
+            Some(
+                "продолжено при выходе из Weto — пошёл ли процесс, \
+                 Weto проверит при следующем запуске"
+            ),
+            "стоявшие до выхода получают свой исход: pid {pid}"
+        );
+    }
     assert_eq!(s.controller.phase(), GuardPhase::Disabled);
 }
 
@@ -1193,8 +1192,9 @@ fn shutdown_names_a_refusal_instead_of_silence() {
 
     s.controller.shutdown();
 
-    assert!(
-        s.reporter.resolutions()[0].contains("не возобновлено: сигнал продолжения не дошёл"),
+    assert_eq!(
+        s.reporter.outcome_of(200).as_deref(),
+        Some("не возобновлено: сигнал продолжения не дошёл — недостаточно прав"),
         "{:?}",
         s.reporter.resolutions()
     );

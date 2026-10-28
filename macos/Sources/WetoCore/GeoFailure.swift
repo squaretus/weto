@@ -8,6 +8,10 @@ public enum GeoFailure: Error, Equatable, Sendable {
     case noNetwork
     case unreachable
     case timedOut(NetworkPhase?)
+
+    /// Рукопожатие TLS не состоялось. Системный текст этой ошибки приходит
+    /// по-английски, и попап показывал «A TLS error caused…» как есть.
+    case tlsFailed
     case unauthorized(Int)
     case rateLimited(Int)
     case serviceError(Int)
@@ -22,6 +26,7 @@ public enum GeoFailure: Error, Equatable, Sendable {
         case .timedOut(let phase):
             guard let phase else { return "таймаут запроса" }
             return "таймаут запроса (\(phase.displayText))"
+        case .tlsFailed: return "ошибка защищённого соединения (TLS)"
         case .unauthorized(let status): return "токен отвергнут (\(status))"
         case .rateLimited(let status): return "лимит запросов (\(status))"
         case .serviceError(let status): return "сервис ответил ошибкой (\(status))"
@@ -44,6 +49,7 @@ extension GeoFailure {
         case -1009: self = .noNetwork
         case -1001: self = .timedOut(phases?.stalledPhase)
         case -1003, -1004, -1005, -1006: self = .unreachable
+        case -1200: self = .tlsFailed
         default: self = .other(description)
         }
     }

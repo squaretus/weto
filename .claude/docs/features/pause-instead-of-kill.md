@@ -91,7 +91,7 @@ ledger is deleted with the app — so the button now runs `stop()`/`shutdown()`,
 `confirmResumed()` / `confirm_resumed()`: `SIGCONT` re-sent and the scan re-read, six attempts
 300 ms apart on both platforms, with whoever is still standing named by name and pid behind
 «Удалить всё равно» / «Отмена». `MaintenanceCard.swift` and `settings_window.rs` drive it; the
-episode outcome is not rewritten, `stop()`'s «не подтверждено» stands as the record.
+episode outcome is not rewritten, `stop()`'s «продолжено при выходе из Weto …» stands as the record.
 
 ## Risks
 - **The pause window is real and accepted, not a bug.** Between a path change (or cold start) and

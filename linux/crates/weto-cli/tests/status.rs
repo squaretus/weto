@@ -525,7 +525,14 @@ fn the_journal_shows_the_latest_twenty_newest_first() {
     let bench = Bench::new();
     let mut journal = Journal::default();
     for pid in 0..25 {
-        journal.append(vec![event(pid, 1_000 + pid as u64)]);
+        let mut record = event(pid, 1_000 + pid as u64);
+        record.episode_id = format!("e{pid}");
+        record.target_name = format!("t{pid}");
+        // Потомок того же прохода — та же строка, а не своя.
+        let mut descendant = record.clone();
+        descendant.pid += 100;
+        descendant.matched_by = MatchBasis::Descendant;
+        journal.append(vec![record, descendant]);
     }
     journal.save(&bench.ctx.paths.journal_file()).unwrap();
 
@@ -535,14 +542,15 @@ fn the_journal_shows_the_latest_twenty_newest_first() {
     let records: Vec<&str> = output
         .out
         .lines()
-        .filter(|line| line.contains("claude · pid"))
+        .filter(|line| line.contains("на паузе —"))
         .collect();
-    assert_eq!(records.len(), 20);
+    assert_eq!(records.len(), 20, "строка на эпизод, а не на процесс");
     assert!(
-        records[0].contains("pid 24"),
+        records[0].contains("  t24  "),
         "свежие первыми: {}",
         records[0]
     );
+    assert!(!output.out.contains("pid"), "pid в выводе не нужен");
     assert!(output.out.contains("на паузе — VPN-туннель wg0 не поднят"));
     assert!(output.out.contains("Итог: возобновлено проверкой"));
     assert!(output

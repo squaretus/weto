@@ -2,58 +2,40 @@ import SwiftUI
 import WetoCore
 import WetoDesign
 
+/// Строка журнала — эпизод, а не процесс: pid в окне не говорит ничего,
+/// поимённо процессы остаются в выгрузке.
 struct JournalRow: View {
-    let event: KillEvent
+    let episode: JournalEpisode
 
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(Self.title(for: event))
+            Text(episode.title)
                 .font(WetoTokens.label)
                 .foregroundStyle(WetoTokens.ink.resolve(scheme))
 
-            Text(event.summaryText)
+            Text(episode.summaryText)
                 .font(WetoTokens.value)
                 .foregroundStyle(WetoTokens.dim.resolve(scheme))
                 .fixedSize(horizontal: false, vertical: true)
 
             // Исход эпизода стоит отдельной строкой: именно он объясняет запись
             // «подключение ещё не проверено», после которой всё оказалось в порядке.
-            if let resolution = event.resolutionText {
-                Text(verbatim: "Итог: \(resolution)")
+            if let resolution = episode.resolutionLine {
+                Text(verbatim: resolution)
                     .font(WetoTokens.value)
                     .foregroundStyle(WetoTokens.dim.resolve(scheme))
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text(verbatim: Self.diagnostics(for: event))
+            Text(verbatim: episode.diagnosticsText(timestamp: Self.timestamp.string(from: episode.date)))
                 .font(WetoTokens.diagnostics)
                 .foregroundStyle(WetoTokens.faint.resolve(scheme))
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, WetoTokens.space2)
-    }
-
-    /// Цель и её процесс: записей на одно падение теперь столько, сколько
-    /// процессов завершено, и различать их можно только по pid.
-    static func title(for event: KillEvent) -> String {
-        let name = event.targetName.isEmpty ? "неизвестная цель" : event.targetName
-        return "\(name) · pid \(event.pid)"
-    }
-
-    static func diagnostics(for event: KillEvent) -> String {
-        var parts = [Self.timestamp.string(from: event.date)]
-        parts.append("IP: \(event.ip ?? "неизвестен")")
-        if let country = event.country { parts.append("ipinfo: \(country)") }
-        if let confirmed = event.confirmedCountry {
-            parts.append("\(event.confirmSource ?? "подтверждение"): \(confirmed)")
-        }
-        // Чем процесс попал под охрану: потомок называет родителя, шелл объясняет,
-        // что целью он не был вовсе, а стоял ради её терминала.
-        if let basis = event.matchedBy.detailText(parentPID: event.parentPID) { parts.append(basis) }
-        return parts.joined(separator: " · ")
     }
 
     private static let timestamp: DateFormatter = {

@@ -89,19 +89,6 @@ pub enum MatchBasis {
     Shell,
 }
 
-impl MatchBasis {
-    /// Чем запись объясняет своё присутствие в журнале. У совпавшего по правилу
-    /// объяснять нечего — он и есть цель. Текст общий с macOS
-    /// (`MatchBasis.detailText(parentPID:)`).
-    pub fn detail_text(&self, parent_pid: i32) -> Option<String> {
-        match self {
-            MatchBasis::Rule => None,
-            MatchBasis::Descendant => Some(format!("потомок {parent_pid}")),
-            MatchBasis::Shell => Some("шелл терминала цели".to_string()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetRule {
     pub entry: String,

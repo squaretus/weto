@@ -719,11 +719,13 @@ final class CLI {
             out("Журнал пуст")
             return ExitCode.success
         }
-        for event in events.prefix(Self.journalLimit) {
-            for line in Self.journalLines(event) { out(line) }
+        // Строка — эпизод, а не процесс: поимённо процессы отдаёт `--json`.
+        let episodes = JournalEpisode.group(events)
+        for episode in episodes.prefix(Self.journalLimit) {
+            for line in Self.journalLines(episode) { out(line) }
         }
-        if events.count > Self.journalLimit {
-            out("Показаны последние \(Self.journalLimit) из \(events.count) — выгрузите журнал целиком: weto journal --json")
+        if episodes.count > Self.journalLimit {
+            out("Показаны последние \(Self.journalLimit) из \(episodes.count) — выгрузите журнал целиком: weto journal --json")
         }
         return ExitCode.success
     }
@@ -735,13 +737,12 @@ final class CLI {
         return formatter
     }()
 
-    /// Запись — строка «когда · кто · что и почему», под ней исход эпизода.
-    static func journalLines(_ event: KillEvent, timeZone: TimeZone = .current) -> [String] {
+    /// Эпизод — строка «когда · кто · что и почему», под ней исход.
+    static func journalLines(_ episode: JournalEpisode, timeZone: TimeZone = .current) -> [String] {
         let formatter = journalDate
         formatter.timeZone = timeZone
-        let name = event.targetName.isEmpty ? "неизвестная цель" : event.targetName
-        var lines = ["\(formatter.string(from: event.date))  \(name) · pid \(event.pid)  \(event.summaryText)"]
-        if let resolution = event.resolutionText { lines.append("    Итог: \(resolution)") }
+        var lines = ["\(formatter.string(from: episode.date))  \(episode.title)  \(episode.summaryText)"]
+        if let resolution = episode.resolutionLine { lines.append("    \(resolution)") }
         return lines
     }
 

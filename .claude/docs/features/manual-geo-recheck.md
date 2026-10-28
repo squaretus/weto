@@ -31,7 +31,7 @@ the service that actually answered (`freeipapi` / `geojs`), or `подтверж
   `checkedAt`. The guard verdict is `report.outcome`, so screen and enforcement can never
   disagree — there is one object behind both.
 - `GeoFailure` turns numbers into wording: `noNetwork`, `unreachable`, `timedOut`,
-  `unauthorized(401/403)`, `rateLimited(429)`, `serviceError(5xx)`, and `other(String)` as the
+  `tlsFailed` (`-1200`, the system text is English), `unauthorized(401/403)`, `rateLimited(429)`, `serviceError(5xx)`, and `other(String)` as the
   deliberate escape hatch — an unmapped code shows the system's own text rather than being
   silently filed as "no network". Classification lives in WetoCore; `WetoSystem` only hands it
   the HTTP status or `URLError` code, so the purity invariant holds.

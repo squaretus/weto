@@ -40,6 +40,16 @@ final class GeoFailureTests: XCTestCase {
         XCTAssertEqual(GeoFailure(urlErrorCode: -1006, description: "").displayText, "сервис недоступен")
     }
 
+    // Рухнувшее TLS-рукопожатие — частый ответ туннеля, бросившего соединение.
+    // Системный текст приходит по-английски («A TLS error caused the secure connection
+    // to fail»), и пользователь видел его в попапе как есть. Текст общий с Linux.
+    func test_failed_tls_handshake_is_named_in_russian() {
+        let failure = GeoFailure(urlErrorCode: -1200, description: "A TLS error caused the secure connection to fail.")
+
+        XCTAssertEqual(failure, .tlsFailed)
+        XCTAssertEqual(failure.displayText, "ошибка защищённого соединения (TLS)")
+    }
+
     // Страховка на случай, когда классификация промахнулась: показать сырой текст
     // системы честнее, чем выдать незнакомый код за отсутствие сети.
     func test_unmapped_code_keeps_the_original_wording() {

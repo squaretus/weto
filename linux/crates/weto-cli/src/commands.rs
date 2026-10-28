@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use weto_config::checks::CheckLog;
 use weto_config::export::JournalExport;
-use weto_config::journal::{visible_limit_caption, Journal, VISIBLE_LIMIT};
+use weto_config::journal::{episodes, visible_limit_caption, Journal, VISIBLE_LIMIT};
 use weto_config::settings::{validate_tunnel_name, GeoListKind, Settings, Target};
 use weto_core::geo::GeoOutcome;
 use weto_core::network::{tunnel_status, VpnAppStatus, VpnTunnelStatus};
@@ -861,19 +861,21 @@ pub fn journal(ctx: &Context, io: &mut Io, json: bool) -> i32 {
         return OK;
     }
     // Свежие записи первыми — так их хранит журнал на обеих платформах.
-    for event in entries.iter().take(VISIBLE_LIMIT) {
+    // Строка — эпизод, а не процесс: поимённо процессы отдаёт `--json`.
+    let episodes = episodes(entries);
+    for episode in episodes.iter().take(VISIBLE_LIMIT) {
         say!(
             io.out,
             "{}  {}  {}",
-            crate::log::stamp(event.at),
-            event.title(),
-            event.summary_text()
+            crate::log::stamp(episode.at()),
+            episode.title(),
+            episode.summary_text()
         );
-        if let Some(resolution) = event.resolution_line() {
+        if let Some(resolution) = episode.resolution_line() {
             say!(io.out, "    {resolution}");
         }
     }
-    if let Some(caption) = visible_limit_caption(entries.len()) {
+    if let Some(caption) = visible_limit_caption(episodes.len()) {
         say!(io.out, "{caption}: weto journal --json");
     }
     OK

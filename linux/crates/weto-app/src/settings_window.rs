@@ -1553,20 +1553,22 @@ fn journal_page(window: &ApplicationWindow, state: Arc<AppState>) -> ScrolledWin
 
             // Свежие сверху: журнал так и хранится, разворачивать нечего.
             // Линия стоит между записями, а не над первой.
-            let visible = entries.iter().take(weto_config::journal::VISIBLE_LIMIT);
-            for (index, event) in visible.enumerate() {
+            // Строка — эпизод, а не процесс: pid в окне не говорит ничего.
+            let episodes = weto_config::journal::episodes(entries);
+            let visible = episodes.iter().take(weto_config::journal::VISIBLE_LIMIT);
+            for (index, episode) in visible.enumerate() {
                 if index > 0 {
                     list.append(&ui::divider());
                 }
                 list.append(&ui::journal_row(
-                    &event.title(),
-                    &event.summary_text(),
-                    event.resolution_line().as_deref(),
-                    &event.diagnostics_text(&local_timestamp(event.at)),
+                    &episode.title(),
+                    &episode.summary_text(),
+                    episode.resolution_line().as_deref(),
+                    &episode.diagnostics_text(&local_timestamp(episode.at())),
                 ));
             }
 
-            if let Some(text) = weto_config::journal::visible_limit_caption(entries.len()) {
+            if let Some(text) = weto_config::journal::visible_limit_caption(episodes.len()) {
                 let row = ui::row(true);
                 row.append(&ui::caption(&text));
                 list.append(&row);

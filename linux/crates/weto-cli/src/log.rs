@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use weto_config::journal::KillContext;
 use weto_core::pause_plan::RecoveredProcess;
 use weto_core::process::MatchedProcess;
-use weto_guard::controller::KillReporting;
+use weto_guard::controller::{KillReporting, OutcomeException};
 use weto_sys::notifications::KillNotifying;
 
 /// Куда уходит строка лога. Метку времени ставит сам лог.
@@ -170,8 +170,25 @@ impl<R: KillReporting> KillReporting for LoggingReporter<R> {
         self.inner.released(pids, outcome, context);
     }
 
-    fn pause_resolved(&self, outcome: &str, shell_outcome: Option<&str>, context: &KillContext) {
+    fn pause_resolved(
+        &self,
+        outcome: &str,
+        shell_outcome: Option<&str>,
+        exceptions: &[OutcomeException],
+        context: &KillContext,
+    ) {
         (self.log)(&format!("исход паузы: {outcome}"));
-        self.inner.pause_resolved(outcome, shell_outcome, context);
+        for exception in exceptions.iter().filter(|e| !e.pids.is_empty()) {
+            let mut pids: Vec<i32> = exception.pids.iter().copied().collect();
+            pids.sort_unstable();
+            let list = pids
+                .iter()
+                .map(|pid| pid.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            (self.log)(&format!("pid {list}: {}", exception.text));
+        }
+        self.inner
+            .pause_resolved(outcome, shell_outcome, exceptions, context);
     }
 }

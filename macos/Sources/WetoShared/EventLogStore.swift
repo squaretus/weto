@@ -30,11 +30,9 @@ public final class EventLogStore {
         }
     }
 
-    /// Свежие сверху, лишнее снизу.
+    /// Свежие сверху, лишние эпизоды снизу — целиком.
     private static func capped(_ events: [KillEvent]) -> [KillEvent] {
-        events.count > Constants.eventLogCapacity
-            ? Array(events.prefix(Constants.eventLogCapacity))
-            : events
+        JournalEpisode.keepingLatest(Constants.eventLogEpisodeCapacity, of: events)
     }
 
     public convenience init() {
@@ -50,10 +48,7 @@ public final class EventLogStore {
     /// и записей. Порядок внутри прохода сохраняется, сам проход ложится наверх.
     public func record(_ batch: [KillEvent]) {
         guard !batch.isEmpty else { return }
-        events.insert(contentsOf: batch, at: 0)
-        if events.count > Constants.eventLogCapacity {
-            events.removeLast(events.count - Constants.eventLogCapacity)
-        }
+        events = Self.capped(batch + events)
         persist()
     }
 

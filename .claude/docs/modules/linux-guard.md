@@ -10,7 +10,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `policy.rs` | `decide`, `decide_local` — port of `GuardPolicy`, three-outcome `GuardDecision` |
 | `weto-core` | `network.rs` | `NetworkSnapshot` (`up_interfaces`, outside the fingerprint), `verdict_fingerprint`, `VpnTunnelStatus` + `tunnel_status` (terminal version only) |
 | `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
-| `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
+| `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing; `GeoFailure` mirrors macOS codes and texts (`from_transport(-1200)` → `TlsFailed`), though `weto-sys::translate_transport` never emits `-1200`: ureq TLS errors arrive as `Io`/`ConnectionFailed` and read «сервис недоступен» |
 | `weto-core` | `ip.rs` | address validation and CIDR |
 | `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the pause ceiling as a parameter (`set_pause_ceiling`) |
 | `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText` |
@@ -31,7 +31,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
 | `weto-sys` | `notifications.rs` | notifications over D-Bus; the `default` action opens the status window |
 | `weto-sys` | `secret_store.rs` | token file, mode `0600` |
-| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings (`set_vpn_app` / `set_vpn_tunnel` clear each other, `add_target` with `TargetEntryError`, `validate_tunnel_name`), ring-buffer journal, XDG paths (`from_env_named(APP_DIR \| CLI_DIR)`, `status_file`, `run_lock_file`) |
+| `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings (`set_vpn_app` / `set_vpn_tunnel` clear each other, `add_target` with `TargetEntryError`, `validate_tunnel_name`), journal capped at `EPISODE_CAPACITY` (100) whole episodes and its per-episode view (`episodes`, `Episode`), XDG paths (`from_env_named(APP_DIR \| CLI_DIR)`, `status_file`, `run_lock_file`) |
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping; tunnel status next to `vpn_app_status`, from the same pass's snapshot; `GuardSnapshot` also carries `outgoing`, `vpn_app`, `vpn_tunnel`, `probed_at` for `weto-cli`'s status file |
 | `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger, terminal modes (`restore_terminal_modes`) |
@@ -86,7 +86,8 @@ missing from it is a bug, not a platform trait.
 
 The settings window is the same six cards in the same order (`Цели`, `Сеть и гео`,
 `Чёрный список`, `Белый список`, `Внешний вид`, `Обслуживание`) plus the same footer (github link,
-version, update tile); the «Журнал» tab shows the latest 20 records with «Показаны последние 20 из N
+version, update tile); the «Журнал» tab shows the latest 20 episodes (one row per `episode_id`,
+`weto_config::journal::episodes`) with «Показаны последние 20 из N
 — выгрузите журнал целиком» when there are more. The status window, top to bottom:
 
 1. shield, title, «Проверить сейчас» (a spinner in its place while a probe flies), settings;
@@ -346,7 +347,29 @@ Everything the policy decides is shared. What the system dictates is not:
   processes found standing at start-up, dated when they stopped rather than when weto noticed;
   `pause_resolved` appends the outcome to both. One episode per standing, no second record for the
   same pid, and a shell released while its target is killed gets «продолжен …» instead of
-  «завершено» — it is alive. The reason "not verified yet" no longer exists as a journal entry:
+  «завершено» — it is alive. Outcomes are per process: `pause_resolved(outcome, shell_outcome,
+  exceptions, context)` writes the common outcome to the episode, then each `OutcomeException`
+  (`controller.rs`: `pids` + `text`, port of macOS `EpisodeException`) through
+  `Journal::refine_pids` (renamed from `refine_released`; it also writes the released-target
+  outcome), skipping released pids. A settled resume where some pids stopped again or refused is
+  «возобновлено …» for the rest and `not_resumed_text(refused)` for them; shutdown builds its pair
+  with `shutdown_exceptions`. Texts are about one process, name no pid, and match macOS verbatim;
+  the window joins distinct outcomes into «Итог: a; b».
+- **Capacity is counted in episodes.** `Journal::append` keeps the latest `EPISODE_CAPACITY` (100)
+  episodes whole, ordered by each episode's freshest record (so a record joining a running
+  episode takes no new slot), and never cuts one. The former `CAPACITY = 100` records let one
+  pause over ~170 processes evict all history and survive as a stub; the file is large on purpose
+  (the window is the short version). Same number as macOS `Constants.eventLogEpisodeCapacity`.
+- **Stored per process, shown per episode** — port of macOS `JournalEpisode`:
+  `weto_config::journal::episodes` → `Episode` feeds `journal_page` / `weto_ui::components::journal_row`
+  and `weto journal`. Title — distinct target names joined by «, »; summary and readout from the
+  earliest record; «Итог:» — distinct outcomes of non-shell records joined by «; » (the shell's own
+  only when there is nothing else); the readout adds «процессов: N» for N > 1 and never a pid;
+  with `diagnostics.verdict_origin == "established"` and a known IP it reads «последний
+  подтверждённый выход: <ip>, <country>» instead of «IP · ipinfo · <confirmer>» (a pause on silent
+  services carries the previous verdict, see `weto-core.md` → `JournalEpisode`).
+  The row sits where the episode last wrote, so a process stopped later in a running pause moves
+  its episode up. `MatchBasis::detail_text` is gone; pids live in the export only. The reason "not verified yet" no longer exists as a journal entry:
   «Проверка» does not touch targets, so a kill is explained by its real cause from the first record.
 - **Terminating uses `SIGKILL`, not `SIGTERM`.** A stopped process runs no handler, so `SIGTERM`
   would queue until something resumed it and the target would stay alive and frozen. The canon
@@ -576,12 +599,16 @@ one record the journal is kept for out of its fifty.
    process running (or gone). A real background job answers each `SIGCONT` with another stop; after
    `RESUME_RETRY_LIMIT` (3, same as macOS) observed stops it stops being signalled — `notify` in zsh
    would otherwise print `suspended (tty input)` once a second — but the entry stays on the books
-   and the journal says «не возобновлено … командой fg», never «возобновлено».
+   and its record says «не возобновлено: процесс остался остановленным … командой fg» (a refused
+   `SIGCONT` — «… сигнал продолжения не дошёл — недостаточно прав»), never «возобновлено», while
+   the processes that did resume share the episode's «возобновлено …».
 4. `recover_stopped()` runs before the first tick: `SIGCONT` by identity (pid **and** path, because
    pids get reused), a `startupRecovery` / `standingProcessesRemain` record in the checks journal,
    and its own kill-journal episode. An unreadable ledger leaves a `ledgerUnreadable` record.
 5. `shutdown()` resumes everything on a clean exit and admits it cannot observe the result: the
-   outcome is «не подтверждено …, Weto проверит их при следующем запуске». It hangs off one funnel —
+   episode outcome is «возобновлено при выходе из Weto», and `shutdown_exceptions` gives the pids
+   the scan still caught standing «продолжено при выходе из Weto — пошёл ли процесс, Weto проверит
+   при следующем запуске» (refused ones — the refusal text). It hangs off one funnel —
    `application.connect_shutdown` in `main.rs` — because buttons are not an exit path: GApplication
    quits by itself once the last window is gone, and that route left the targets standing. A
    `SIGTERM` handler turns the session logout into the same `quit`, so it goes through the funnel
@@ -609,7 +636,7 @@ one record the journal is kept for out of its fifty.
    300 ms apart — the same numbers as macOS `MaintenanceCard`, a `SIGCONT` that will land lands on
    the first one — and names the survivors by name and pid before offering «Удалить всё равно» /
    «Отмена». It takes no enforcement gate (a tick after the exit has nothing to do) and does **not**
-   rewrite the episode outcome a second time: `shutdown()`'s «не подтверждено» is the record of
+   rewrite the episode outcome a second time: `shutdown()`'s «продолжено при выходе из Weto …» is the record of
    that standing.
 
 ## Not here yet

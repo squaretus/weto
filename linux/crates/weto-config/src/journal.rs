@@ -23,10 +23,13 @@ pub use weto_core::diagnostics::{
 };
 pub use weto_core::process::MatchBasis;
 
-/// Сто записей, а не десять: запись теперь на процесс, и одно падение VPN
-/// на тридцати четырёх процессах вытесняло прежний журнал целиком.
-/// Число общее для обеих платформ — см. `Constants.eventLogCapacity` в macOS-части.
-pub const CAPACITY: usize = 100;
+/// Журнал хранит эпизоды, а не записи: последние сто целиком, сколько бы
+/// процессов в них ни было. Ёмкость в сто записей одна пауза на ~170 процессах
+/// съедала целиком и сама оставалась обрезком — по файлу нельзя было понять,
+/// что встало. Файл объёмный намеренно: он для разбора, а краткую версию
+/// показывает окно.
+/// Число общее для обеих платформ — см. `Constants.eventLogEpisodeCapacity` в macOS-части.
+pub const EPISODE_CAPACITY: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,63 +100,168 @@ impl KillEvent {
             lowercasing_first_word(&self.reason_text)
         )
     }
+}
 
-    /// Цель и её процесс: записей на одно падение столько, сколько процессов
-    /// завершено, и различать их можно только по pid.
+/// Проход охраны так, как его читают в окне: строка на эпизод, а не на процесс —
+/// порт `JournalEpisode` с macOS, тексты общие дословно.
+///
+/// Запись журнала описывает процесс, и для разбора это правильно: выгрузка
+/// отвечает, что именно встало и почему их столько. В окне pid не говорит ничего,
+/// а одно падение VPN на дереве claude давало десятки одинаковых строк подряд,
+/// и за ними не было видно истории.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Episode<'a> {
+    /// Записи эпизода в порядке журнала: свежие первыми. Не пуст никогда.
+    events: Vec<&'a KillEvent>,
+}
+
+/// Склейка журнала по эпизодам. Строка стоит там, где эпизод последний раз
+/// что-то записал: процесс, вставший под уже идущей паузой, пишется тем же
+/// эпизодом позже и поверх чужих записей.
+pub fn episodes(entries: &[KillEvent]) -> Vec<Episode<'_>> {
+    let mut lines: Vec<Episode<'_>> = Vec::new();
+    for event in entries {
+        match lines
+            .iter_mut()
+            .find(|line| line.episode_id() == event.episode_id)
+        {
+            Some(line) => line.events.push(event),
+            None => lines.push(Episode {
+                events: vec![event],
+            }),
+        }
+    }
+    lines
+}
+
+impl Episode<'_> {
+    pub fn episode_id(&self) -> &str {
+        &self.events[0].episode_id
+    }
+
+    /// Запись, с которой эпизод начался: её время, причина и выход объясняют,
+    /// почему встали цели.
+    fn opening(&self) -> &KillEvent {
+        self.events[self.events.len() - 1]
+    }
+
+    pub fn at(&self) -> SystemTime {
+        self.opening().at
+    }
+
+    /// Цели, а не процессы: каждая один раз, в порядке, в каком эпизод их задел.
     pub fn title(&self) -> String {
-        let name = if self.target_name.is_empty() {
-            "неизвестная цель"
-        } else {
-            &self.target_name
-        };
-        format!("{name} · pid {}", self.pid)
+        distinct(self.events.iter().rev().map(|e| e.target_name.as_str()))
+            .into_iter()
+            .map(|name| {
+                if name.is_empty() {
+                    "неизвестная цель"
+                } else {
+                    name
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
-    /// Исход эпизода отдельной строкой: именно он объясняет запись
-    /// «подключение ещё не проверено», после которой всё оказалось в порядке.
-    /// В блёклой строке показаний его не замечали.
+    pub fn summary_text(&self) -> String {
+        self.opening().summary_text()
+    }
+
+    /// Исход эпизода отдельной строкой: именно он объясняет запись «подключение
+    /// ещё не проверено», после которой всё оказалось в порядке.
+    ///
+    /// У шелла исход свой — «продолжен: цель завершена …», — а строка рассказывает
+    /// про цели, поэтому шелловый исход виден, только когда других нет.
     pub fn resolution_line(&self) -> Option<String> {
-        self.resolution_text
-            .as_ref()
-            .map(|resolution| format!("Итог: {resolution}"))
+        let resolutions = |shells: bool| {
+            distinct(
+                self.events
+                    .iter()
+                    .rev()
+                    .filter(|e| shells || e.matched_by != MatchBasis::Shell)
+                    .filter_map(|e| e.resolution_text.as_deref()),
+            )
+        };
+        let mut chosen = resolutions(false);
+        if chosen.is_empty() {
+            chosen = resolutions(true);
+        }
+        (!chosen.is_empty()).then(|| format!("Итог: {}", chosen.join("; ")))
     }
 
-    /// Строка показаний — дословно `JournalRow.diagnostics` на macOS.
+    pub fn process_count(&self) -> usize {
+        self.events
+            .iter()
+            .map(|e| e.pid)
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
+    /// Строка показаний — дословно `JournalEpisode.diagnosticsText` на macOS.
     ///
     /// Время приходит готовой строкой: местный пояс знает система, а не конфиг.
     /// Адрес назван всегда, даже неизвестный, — пропуск читался бы как «адрес
     /// не спрашивали». Подтверждённая страна без названного сервиса подписана
     /// «подтверждение», а не пропадает.
+    ///
+    /// Адрес и страны паузы по молчанию сервисов взяты из прошлого вердикта —
+    /// других нет, — и под причиной «таймаут запроса» строка «ipinfo: KZ · geojs: KZ»
+    /// читалась как «всё ответило KZ, а цели почему-то встали». Такой вердикт
+    /// назван прошлым.
     pub fn diagnostics_text(&self, timestamp: &str) -> String {
-        let mut parts = vec![
-            timestamp.to_string(),
-            format!("IP: {}", self.ip.as_deref().unwrap_or("неизвестен")),
-        ];
-        if let Some(country) = &self.country {
-            parts.push(format!("ipinfo: {country}"));
+        let opening = self.opening();
+        let established = opening
+            .diagnostics
+            .as_ref()
+            .and_then(|d| d.verdict_origin.as_deref())
+            == Some("established");
+        let mut parts = vec![timestamp.to_string()];
+        match (&opening.ip, established) {
+            (Some(ip), true) => {
+                let country = opening
+                    .country
+                    .as_ref()
+                    .map(|country| format!(", {country}"))
+                    .unwrap_or_default();
+                parts.push(format!("последний подтверждённый выход: {ip}{country}"));
+            }
+            _ => {
+                parts.push(format!(
+                    "IP: {}",
+                    opening.ip.as_deref().unwrap_or("неизвестен")
+                ));
+                if let Some(country) = &opening.country {
+                    parts.push(format!("ipinfo: {country}"));
+                }
+                if let Some(confirmed) = &opening.confirmed_country {
+                    let source = opening.confirm_source.as_deref().unwrap_or("подтверждение");
+                    parts.push(format!("{source}: {confirmed}"));
+                }
+            }
         }
-        if let Some(confirmed) = &self.confirmed_country {
-            let source = self.confirm_source.as_deref().unwrap_or("подтверждение");
-            parts.push(format!("{source}: {confirmed}"));
-        }
-        // Чем процесс попал под охрану: потомок называет родителя, шелл объясняет,
-        // что целью он не был вовсе, а стоял ради её терминала.
-        if let Some(basis) = self.matched_by.detail_text(self.parent_pid) {
-            parts.push(basis);
+        let count = self.process_count();
+        if count > 1 {
+            parts.push(format!("процессов: {count}"));
         }
         parts.join(" · ")
     }
 }
 
-/// Сколько записей показывает карточка «Журнал» — `JournalCard.visibleLimit`
+fn distinct<'a>(values: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut seen = HashSet::new();
+    values.filter(|value| seen.insert(*value)).collect()
+}
+
+/// Сколько эпизодов показывает карточка «Журнал» — `JournalCard.visibleLimit`
 /// на macOS.
 ///
-/// Хранится сто, а запись — на процесс: одно падение VPN — это десятки строк,
-/// и списком в окне настроек их не читают. Разбор идёт по выгрузке, поэтому
+/// Строка — эпизод, а не процесс, но и эпизодов за неделю набирается много,
+/// а списком в окне настроек их не читают. Разбор идёт по выгрузке, поэтому
 /// на экране последние двадцать и честная строка про остальные.
 pub const VISIBLE_LIMIT: usize = 20;
 
-/// Строка под списком, когда записей больше, чем показано.
+/// Строка под списком, когда эпизодов больше, чем показано.
 pub fn visible_limit_caption(total: usize) -> Option<String> {
     (total > VISIBLE_LIMIT).then(|| {
         format!("Показаны последние {VISIBLE_LIMIT} из {total} — выгрузите журнал целиком")
@@ -218,9 +326,24 @@ impl Journal {
     /// Свежие сверху — так же, как на macOS. Порядок здесь не косметика: файл
     /// выгрузки общий и уходит на разбор, и «первая запись» обязана значить
     /// одно и то же на обеих платформах.
+    ///
+    /// Старые эпизоды уходят целиком и никогда не режутся: урезанный, эпизод врёт
+    /// о том, сколько процессов встало. Порядок — тот же, что у склейки: по самой
+    /// свежей записи эпизода, поэтому процесс, вставший под уже идущей паузой,
+    /// места нового эпизода не занимает.
     pub fn append(&mut self, events: Vec<KillEvent>) {
         self.entries.splice(0..0, events);
-        self.entries.truncate(CAPACITY);
+        let mut kept: HashSet<String> = HashSet::new();
+        self.entries.retain(|event| {
+            if kept.contains(&event.episode_id) {
+                return true;
+            }
+            if kept.len() >= EPISODE_CAPACITY {
+                return false;
+            }
+            kept.insert(event.episode_id.clone());
+            true
+        });
     }
 
     /// Исход, честный для записей одного основания.
@@ -250,12 +373,13 @@ impl Journal {
         touched
     }
 
-    /// Исход записи, чьё стояние кончилось раньше эпизода: цель сняли с охраны,
-    /// и держать процесс стало не за чем. Исход у неё свой, поэтому и проход свой —
-    /// по перечисленным pid, а не по всему эпизоду.
+    /// Исход перечисленных процессов эпизода, расходящийся с общим: цель сняли
+    /// с охраны раньше, чем эпизод кончился, или процесс не пошёл после SIGCONT,
+    /// когда остальные пошли. Исход у них свой, поэтому и проход свой — по pid,
+    /// а не по всему эпизоду.
     ///
     /// `false` — записей с такими pid у эпизода нет.
-    pub fn refine_released(
+    pub fn refine_pids(
         &mut self,
         episode_id: &str,
         pids: &HashSet<i32>,

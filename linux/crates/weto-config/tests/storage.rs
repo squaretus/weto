@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 
 use weto_config::journal::{
-    visible_limit_caption, Journal, KillEvent, KillEventKind, MatchBasis, CAPACITY, VISIBLE_LIMIT,
+    episodes, visible_limit_caption, Journal, KillDiagnostics, KillEvent, KillEventKind,
+    MatchBasis, EPISODE_CAPACITY, VISIBLE_LIMIT,
 };
 use weto_config::paths::Paths;
 use weto_config::settings::{
@@ -200,24 +201,85 @@ fn target_rules_keep_the_launch_path_and_its_resolution() {
     );
 }
 
-/// Сто записей, а не десять: запись теперь на процесс, и одно падение VPN
-/// на тридцати четырёх процессах вытесняло прежний журнал целиком.
+/// Ёмкость считается эпизодами, а не процессами: свежие сверху, старейший
+/// эпизод уходит целиком (`Constants.eventLogEpisodeCapacity` на macOS).
 #[test]
-fn journal_keeps_the_last_hundred_entries() {
-    assert_eq!(CAPACITY, 100);
+fn journal_keeps_the_last_hundred_episodes() {
+    assert_eq!(EPISODE_CAPACITY, 100);
 
     let mut journal = Journal::default();
-    for pid in 0..(CAPACITY as i32 + 5) {
-        journal.append(vec![event(pid, "VPN не поднят")]);
+    for pid in 0..(EPISODE_CAPACITY as i32 + 5) {
+        journal.append(vec![episode_event(
+            pid,
+            "VPN не поднят",
+            &format!("e{pid}"),
+        )]);
     }
 
-    assert_eq!(journal.entries().len(), CAPACITY);
+    assert_eq!(journal.entries().len(), EPISODE_CAPACITY);
     assert_eq!(
         journal.entries()[0].pid,
-        CAPACITY as i32 + 4,
+        EPISODE_CAPACITY as i32 + 4,
         "свежие сверху"
     );
-    assert_eq!(journal.entries()[CAPACITY - 1].pid, 5);
+    assert_eq!(journal.entries()[EPISODE_CAPACITY - 1].pid, 5);
+}
+
+/// Эпизод никогда не режется. При ёмкости в сто записей одна пауза на ~170
+/// процессах вытесняла всю историю и сама оставалась в файле обрезком:
+/// по журналу нельзя было сказать, что встало и сколько.
+#[test]
+fn a_large_episode_is_kept_whole_and_old_ones_leave_whole() {
+    let mut journal = Journal::default();
+    journal.append(
+        (0..3)
+            .map(|pid| episode_event(pid, "старый", "старейший"))
+            .collect(),
+    );
+    for n in 1..EPISODE_CAPACITY {
+        journal.append(vec![episode_event(n as i32, "r", &format!("e{n}"))]);
+    }
+    journal.append(
+        (0..170)
+            .map(|n| episode_event(1_000 + n, "пауза", "большой"))
+            .collect(),
+    );
+
+    let entries = journal.entries();
+    assert_eq!(
+        entries.iter().filter(|e| e.episode_id == "большой").count(),
+        170,
+        "эпизод целиком"
+    );
+    assert!(
+        entries.iter().all(|e| e.episode_id != "старейший"),
+        "старейший ушёл целиком"
+    );
+    assert_eq!(episodes(entries).len(), EPISODE_CAPACITY);
+}
+
+/// Процесс, вставший под уже идущей паузой, дописывается в её эпизод позже.
+/// Это не новый эпизод: места в журнале он не занимает.
+#[test]
+fn a_late_record_does_not_cost_an_episode() {
+    let mut journal = Journal::default();
+    journal.append(vec![episode_event(1, "пауза", "пауза")]);
+    for n in 1..EPISODE_CAPACITY {
+        journal.append(vec![episode_event(n as i32 + 10, "r", &format!("e{n}"))]);
+    }
+    journal.append(vec![episode_event(2, "пауза", "пауза")]);
+
+    let pids: Vec<i32> = journal
+        .entries()
+        .iter()
+        .filter(|e| e.episode_id == "пауза")
+        .map(|e| e.pid)
+        .collect();
+    assert_eq!(pids, [2, 1]);
+    assert!(
+        journal.entries().iter().any(|e| e.episode_id == "e1"),
+        "никто не вытеснен"
+    );
 }
 
 /// Проход охраны пишется целиком: завершили четыре процесса — четыре записи,
@@ -383,15 +445,6 @@ fn a_shell_record_round_trips_and_legacy_flag_still_reads() {
         serde_json::json!("shell"),
         "имя в файле — часть общего с macOS формата"
     );
-    assert_eq!(
-        MatchBasis::Shell.detail_text(1).as_deref(),
-        Some("шелл терминала цели")
-    );
-    assert_eq!(
-        MatchBasis::Descendant.detail_text(200).as_deref(),
-        Some("потомок 200")
-    );
-    assert!(MatchBasis::Rule.detail_text(1).is_none());
 
     let legacy = tmp.path().join("legacy.json");
     std::fs::write(
@@ -442,65 +495,170 @@ fn summary_lowercases_the_first_word_but_spares_abbreviations() {
     );
 }
 
+/// Одно падение VPN на дереве claude — десятки записей, по одной на процесс.
+/// В окне это одна строка: pid там не говорит ничего, а шесть одинаковых строк
+/// подряд прятали всю остальную историю (`JournalEpisode` на macOS).
 #[test]
-fn nameless_target_still_reads_as_something() {
-    let mut nameless = event(1, "VPN не поднят");
-    nameless.target_name.clear();
+fn records_of_one_pass_make_one_line() {
+    let mut log: Vec<KillEvent> = (0..6)
+        .map(|n| episode_event(56710 + n, "r", "первый"))
+        .collect();
+    log.push(episode_event(4000, "r", "второй"));
 
-    assert_eq!(nameless.title(), "неизвестная цель · pid 1");
+    let lines = episodes(&log);
+
+    assert_eq!(
+        lines.iter().map(|e| e.episode_id()).collect::<Vec<_>>(),
+        ["первый", "второй"]
+    );
+    assert_eq!(
+        lines.iter().map(|e| e.process_count()).collect::<Vec<_>>(),
+        [6, 1]
+    );
 }
 
-/// Строка показаний — дословно `JournalRow.diagnostics` на macOS: время первым,
-/// адрес всегда, даже неизвестный, затем страны и основание.
+/// Процесс, вставший под уже идущей паузой, пишется тем же эпизодом позже —
+/// поверх записей других эпизодов. Строка от этого не раздваивается, а время
+/// у неё — когда цели встали.
 #[test]
-fn diagnostics_open_with_the_time_and_always_name_the_address() {
-    let bare = event(1, "VPN не поднят");
+fn a_late_record_joins_its_episode_instead_of_opening_a_line() {
+    let at = |seconds| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    let mut late = episode_event(3, "r", "первый");
+    late.at = at(30);
+    let mut other = episode_event(2, "r", "второй");
+    other.at = at(20);
+    let mut opening = episode_event(1, "r", "первый");
+    opening.at = at(10);
+    let log = [late, other, opening];
+
+    let lines = episodes(&log);
+
     assert_eq!(
-        bare.diagnostics_text("06.10.2026 14:03:09"),
+        lines.iter().map(|e| e.episode_id()).collect::<Vec<_>>(),
+        ["первый", "второй"]
+    );
+    assert_eq!(lines[0].process_count(), 2);
+    assert_eq!(lines[0].at(), at(10));
+}
+
+/// Заголовок — цели, а не процессы: каждая один раз, в порядке, в каком
+/// эпизод их задел.
+#[test]
+fn the_title_names_each_target_once() {
+    let mut codex = event(3, "r");
+    codex.target_name = "codex".to_string();
+    let log = [codex, event(2, "r"), event(1, "r")];
+    assert_eq!(episodes(&log)[0].title(), "nano, codex");
+
+    let mut nameless = event(1, "r");
+    nameless.target_name.clear();
+    assert_eq!(episodes(&[nameless])[0].title(), "неизвестная цель");
+}
+
+/// У шелла свой исход — «продолжен: цель завершена …», — а строка рассказывает
+/// про цели. Исход шелла показывается только тогда, когда других нет; без
+/// исхода строки нет вовсе.
+#[test]
+fn the_outcome_is_the_targets_one_and_said_once() {
+    let resolved = |pid, basis, text: &str| {
+        let mut e = event(pid, "r");
+        e.matched_by = basis;
+        e.resolution_text = Some(text.to_string());
+        e
+    };
+
+    let log = [
+        resolved(3, MatchBasis::Shell, "продолжен: цель завершена по потолку"),
+        resolved(2, MatchBasis::Descendant, "завершено по потолку"),
+        resolved(1, MatchBasis::Rule, "завершено по потолку"),
+    ];
+    assert_eq!(
+        episodes(&log)[0].resolution_line().as_deref(),
+        Some("Итог: завершено по потолку")
+    );
+
+    let released = [
+        resolved(2, MatchBasis::Rule, "продолжен: цель снята с охраны"),
+        resolved(1, MatchBasis::Rule, "завершено по потолку"),
+    ];
+    assert_eq!(
+        episodes(&released)[0].resolution_line().as_deref(),
+        Some("Итог: завершено по потолку; продолжен: цель снята с охраны")
+    );
+
+    let only_shell = [resolved(1, MatchBasis::Shell, "продолжен")];
+    assert_eq!(
+        episodes(&only_shell)[0].resolution_line().as_deref(),
+        Some("Итог: продолжен")
+    );
+
+    assert_eq!(episodes(&[event(1, "r")])[0].resolution_line(), None);
+}
+
+/// Строка показаний — дословно `JournalEpisode.diagnosticsText` на macOS: время
+/// первым, адрес всегда, даже неизвестный, затем страны и число процессов, если
+/// их больше одного. Ни pid, ни «потомок N».
+#[test]
+fn diagnostics_name_the_exit_and_how_many_processes_stood() {
+    assert_eq!(
+        episodes(&[event(1, "VPN не поднят")])[0].diagnostics_text("06.10.2026 14:03:09"),
         "06.10.2026 14:03:09 · IP: неизвестен"
     );
 
-    let mut full = event(2, "Страна ipinfo заблокирована");
-    full.ip = Some("203.0.113.7".to_string());
-    full.country = Some("KZ".to_string());
-    full.confirmed_country = Some("KZ".to_string());
-    full.confirm_source = Some("geojs".to_string());
-    full.matched_by = MatchBasis::Descendant;
-    full.parent_pid = 40;
+    let with_exit = |pid, basis| {
+        let mut e = event(pid, "Страна ipinfo заблокирована");
+        e.ip = Some("203.0.113.7".to_string());
+        e.country = Some("KZ".to_string());
+        e.confirmed_country = Some("KZ".to_string());
+        e.confirm_source = Some("geojs".to_string());
+        e.matched_by = basis;
+        e
+    };
+    let log = [
+        with_exit(2, MatchBasis::Descendant),
+        with_exit(1, MatchBasis::Rule),
+    ];
     assert_eq!(
-        full.diagnostics_text("06.10.2026 14:03:09"),
-        "06.10.2026 14:03:09 · IP: 203.0.113.7 · ipinfo: KZ · geojs: KZ · потомок 40"
+        episodes(&log)[0].diagnostics_text("t"),
+        "t · IP: 203.0.113.7 · ipinfo: KZ · geojs: KZ · процессов: 2"
+    );
+
+    let mut unnamed = event(1, "Расхождение стран");
+    unnamed.confirmed_country = Some("RU".to_string());
+    assert_eq!(
+        episodes(&[unnamed])[0].diagnostics_text("t"),
+        "t · IP: неизвестен · подтверждение: RU",
+        "подтверждённая страна без названного сервиса не пропадает"
     );
 }
 
-/// Подтверждённая страна без названного сервиса не пропадает: на macOS
-/// она подписана «подтверждение».
+/// Пауза по молчанию сервисов несёт адрес и страны прошлого вердикта — других
+/// нет. Строка «IP … · ipinfo: KZ · geojs: KZ» под причиной «таймаут запроса»
+/// читалась как «всё ответило KZ, а цели почему-то встали». Прошлый вердикт
+/// назван прошлым — дословно как на macOS.
 #[test]
-fn a_confirmation_without_a_named_source_is_still_shown() {
-    let mut event = event(1, "Расхождение стран");
-    event.confirmed_country = Some("RU".to_string());
+fn an_established_verdict_is_not_passed_off_as_this_probes_answer() {
+    let mut silent = event(1, "Не удалось определить внешний адрес: таймаут запроса");
+    silent.ip = Some("176.12.76.15".to_string());
+    silent.country = Some("KZ".to_string());
+    silent.confirmed_country = Some("KZ".to_string());
+    silent.confirm_source = Some("freeipapi".to_string());
+    silent.diagnostics = Some(KillDiagnostics {
+        verdict_origin: Some("established".to_string()),
+        ..KillDiagnostics::default()
+    });
 
     assert_eq!(
-        event.diagnostics_text("t"),
-        "t · IP: неизвестен · подтверждение: RU"
+        episodes(&[silent])[0].diagnostics_text("t"),
+        "t · последний подтверждённый выход: 176.12.76.15, KZ"
     );
 }
 
-/// Исход эпизода — своя строка «Итог: …», а не хвост блёклой диагностики:
-/// именно он объясняет запись, после которой всё оказалось в порядке.
 #[test]
-fn the_outcome_stands_on_a_line_of_its_own() {
-    let mut event = event(1, "Подключение ещё не проверено");
-    assert_eq!(event.resolution_line(), None);
-
-    event.resolution_text = Some("возобновлено проверкой".to_string());
+fn the_summary_is_the_kind_and_the_reason() {
     assert_eq!(
-        event.resolution_line().as_deref(),
-        Some("Итог: возобновлено проверкой")
-    );
-    assert!(
-        !event.diagnostics_text("t").contains("тог"),
-        "исход не дублируется в строке показаний"
+        episodes(&[event(1, "VPN не поднят")])[0].summary_text(),
+        "завершено — VPN не поднят"
     );
 }
 
@@ -516,7 +674,7 @@ fn the_card_says_how_many_records_it_leaves_to_the_export() {
         Some("Показаны последние 20 из 21 — выгрузите журнал целиком")
     );
     assert_eq!(
-        visible_limit_caption(CAPACITY).as_deref(),
+        visible_limit_caption(EPISODE_CAPACITY).as_deref(),
         Some("Показаны последние 20 из 100 — выгрузите журнал целиком")
     );
 }
