@@ -10,7 +10,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `policy.rs` | `decide`, `decide_local` — port of `GuardPolicy`, three-outcome `GuardDecision` |
 | `weto-core` | `network.rs` | `NetworkSnapshot` (`up_interfaces`, outside the fingerprint), `verdict_fingerprint`, `VpnTunnelStatus` + `tunnel_status` (terminal version only) |
 | `weto-core` | `process.rs` | target matching, descendant walk — port of `ProcessMatcher`/`ProcessTree` |
-| `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing |
+| `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing; `GeoFailure` mirrors macOS codes and texts (`from_transport(-1200)` → `TlsFailed`), though `weto-sys::translate_transport` never emits `-1200`: ureq TLS errors arrive as `Io`/`ConnectionFailed` and read «сервис недоступен» |
 | `weto-core` | `ip.rs` | address validation and CIDR |
 | `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the pause ceiling as a parameter (`set_pause_ceiling`) |
 | `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText` |
@@ -364,7 +364,10 @@ Everything the policy decides is shared. What the system dictates is not:
   `weto_config::journal::episodes` → `Episode` feeds `journal_page` / `weto_ui::components::journal_row`
   and `weto journal`. Title — distinct target names joined by «, »; summary and readout from the
   earliest record; «Итог:» — distinct outcomes of non-shell records joined by «; » (the shell's own
-  only when there is nothing else); the readout adds «процессов: N» for N > 1 and never a pid.
+  only when there is nothing else); the readout adds «процессов: N» for N > 1 and never a pid;
+  with `diagnostics.verdict_origin == "established"` and a known IP it reads «последний
+  подтверждённый выход: <ip>, <country>» instead of «IP · ipinfo · <confirmer>» (a pause on silent
+  services carries the previous verdict, see `weto-core.md` → `JournalEpisode`).
   The row sits where the episode last wrote, so a process stopped later in a running pause moves
   its episode up. `MatchBasis::detail_text` is gone; pids live in the export only. The reason "not verified yet" no longer exists as a journal entry:
   «Проверка» does not touch targets, so a kill is explained by its real cause from the first record.

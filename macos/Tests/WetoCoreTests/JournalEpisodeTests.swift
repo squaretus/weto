@@ -112,6 +112,21 @@ final class JournalEpisodeTests: XCTestCase {
                        "28.10.2026 08:29:00 · IP: 212.19.134.212 · ipinfo: KZ · geojs: KZ · процессов: 2")
     }
 
+    /// Пауза по молчанию сервисов несёт адрес и страны прошлого вердикта — других нет.
+    /// Строка «IP … · ipinfo: KZ · geojs: KZ» под причиной «таймаут запроса» читалась
+    /// как «всё ответило KZ, а цели почему-то встали». Прошлый вердикт назван прошлым.
+    func test_an_established_verdict_is_not_passed_off_as_this_probes_answer() {
+        let silent = KillEvent(
+            episodeID: first, date: Date(timeIntervalSince1970: 0), targetName: "Claude", pid: 1,
+            kind: .paused, reasonText: "Не удалось определить внешний адрес: таймаут запроса (соединение)",
+            ip: "176.12.76.15", country: "KZ", confirmedCountry: "KZ", confirmSource: "freeipapi",
+            diagnostics: KillDiagnostics(verdictOrigin: .established)
+        )
+
+        XCTAssertEqual(JournalEpisode.group([silent])[0].diagnosticsText(timestamp: "t"),
+                       "t · последний подтверждённый выход: 176.12.76.15, KZ")
+    }
+
     func test_summary_is_the_kind_and_the_reason() {
         XCTAssertEqual(JournalEpisode.group([event(first, pid: 1)]).first?.summaryText,
                        "на паузе — не удалось определить внешний адрес: таймаут запроса")

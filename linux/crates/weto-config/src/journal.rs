@@ -204,18 +204,41 @@ impl Episode<'_> {
     /// Адрес назван всегда, даже неизвестный, — пропуск читался бы как «адрес
     /// не спрашивали». Подтверждённая страна без названного сервиса подписана
     /// «подтверждение», а не пропадает.
+    ///
+    /// Адрес и страны паузы по молчанию сервисов взяты из прошлого вердикта —
+    /// других нет, — и под причиной «таймаут запроса» строка «ipinfo: KZ · geojs: KZ»
+    /// читалась как «всё ответило KZ, а цели почему-то встали». Такой вердикт
+    /// назван прошлым.
     pub fn diagnostics_text(&self, timestamp: &str) -> String {
         let opening = self.opening();
-        let mut parts = vec![
-            timestamp.to_string(),
-            format!("IP: {}", opening.ip.as_deref().unwrap_or("неизвестен")),
-        ];
-        if let Some(country) = &opening.country {
-            parts.push(format!("ipinfo: {country}"));
-        }
-        if let Some(confirmed) = &opening.confirmed_country {
-            let source = opening.confirm_source.as_deref().unwrap_or("подтверждение");
-            parts.push(format!("{source}: {confirmed}"));
+        let established = opening
+            .diagnostics
+            .as_ref()
+            .and_then(|d| d.verdict_origin.as_deref())
+            == Some("established");
+        let mut parts = vec![timestamp.to_string()];
+        match (&opening.ip, established) {
+            (Some(ip), true) => {
+                let country = opening
+                    .country
+                    .as_ref()
+                    .map(|country| format!(", {country}"))
+                    .unwrap_or_default();
+                parts.push(format!("последний подтверждённый выход: {ip}{country}"));
+            }
+            _ => {
+                parts.push(format!(
+                    "IP: {}",
+                    opening.ip.as_deref().unwrap_or("неизвестен")
+                ));
+                if let Some(country) = &opening.country {
+                    parts.push(format!("ipinfo: {country}"));
+                }
+                if let Some(confirmed) = &opening.confirmed_country {
+                    let source = opening.confirm_source.as_deref().unwrap_or("подтверждение");
+                    parts.push(format!("{source}: {confirmed}"));
+                }
+            }
         }
         let count = self.process_count();
         if count > 1 {

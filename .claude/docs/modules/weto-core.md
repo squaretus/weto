@@ -14,7 +14,9 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `macos/Sources/WetoCore/ProcessTree.swift` — parent/child index shared by both matcher passes
 - `macos/Sources/WetoCore/IPAddress.swift`, `IPRange.swift` — `inet_pton` parsing, CIDR containment
 - `macos/Sources/WetoCore/GeoResponses.swift` — DTOs and decoding for ipinfo / freeipapi / geojs
-- `macos/Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user
+- `macos/Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user;
+  `-1200` → `.tlsFailed` «ошибка защищённого соединения (TLS)» (the system text is English), the other
+  certificate codes (`-1201…-1206`) still go through `.other` with the system text
 - `macos/Sources/WetoCore/VoidResult.swift`, `Constants.swift`
 - `macos/Sources/WetoCore/GuardMachine.swift` — `GuardPhase` (six phases, five titles — see
   `docs/design-system.md` "Щит статуса"), `GuardInput`, `GuardEffect`, the pure reducer
@@ -55,8 +57,12 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   read it: `group(_:)` folds `KillEvent`s by `episodeID`, ordered by the episode's newest record.
   Title — distinct target names joined by «, »; summary and readout from the earliest record;
   `resolutionLine` — distinct outcomes of non-shell records joined by «; » (the shell's own only
-  when there is nothing else); `diagnosticsText` adds «процессов: N» for N > 1, never a pid. Texts
-  match `weto_config::journal::Episode` verbatim. `keepingLatest(_:of:)` is the journal's capacity
+  when there is nothing else); `diagnosticsText` adds «процессов: N» for N > 1, never a pid. When
+  `diagnostics.verdictOrigin == .established` and the IP is known, the readout is «последний
+  подтверждённый выход: <ip>, <ipinfo country>» instead of «IP · ipinfo · <confirmer>»: a pause on
+  silent services carries the previous verdict's address and countries, and «ipinfo: KZ · geojs: KZ»
+  under «таймаут запроса» read as "everything said KZ, yet targets stopped". Display only — the
+  record and the export are unchanged. Texts match `weto_config::journal::Episode` verbatim. `keepingLatest(_:of:)` is the journal's capacity
   rule: keeps the newest `limit` episodes whole (by the same newest-record order), never cuts one —
   a truncated episode lies about how many processes stopped. Used by `EventLogStore` with
   `Constants.eventLogEpisodeCapacity` (50, mirrors Linux `journal::EPISODE_CAPACITY`; the former

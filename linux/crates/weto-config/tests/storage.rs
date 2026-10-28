@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 
 use weto_config::journal::{
-    episodes, visible_limit_caption, Journal, KillEvent, KillEventKind, MatchBasis,
-    EPISODE_CAPACITY, VISIBLE_LIMIT,
+    episodes, visible_limit_caption, Journal, KillDiagnostics, KillEvent, KillEventKind,
+    MatchBasis, EPISODE_CAPACITY, VISIBLE_LIMIT,
 };
 use weto_config::paths::Paths;
 use weto_config::settings::{
@@ -629,6 +629,28 @@ fn diagnostics_name_the_exit_and_how_many_processes_stood() {
         episodes(&[unnamed])[0].diagnostics_text("t"),
         "t · IP: неизвестен · подтверждение: RU",
         "подтверждённая страна без названного сервиса не пропадает"
+    );
+}
+
+/// Пауза по молчанию сервисов несёт адрес и страны прошлого вердикта — других
+/// нет. Строка «IP … · ipinfo: KZ · geojs: KZ» под причиной «таймаут запроса»
+/// читалась как «всё ответило KZ, а цели почему-то встали». Прошлый вердикт
+/// назван прошлым — дословно как на macOS.
+#[test]
+fn an_established_verdict_is_not_passed_off_as_this_probes_answer() {
+    let mut silent = event(1, "Не удалось определить внешний адрес: таймаут запроса");
+    silent.ip = Some("176.12.76.15".to_string());
+    silent.country = Some("KZ".to_string());
+    silent.confirmed_country = Some("KZ".to_string());
+    silent.confirm_source = Some("freeipapi".to_string());
+    silent.diagnostics = Some(KillDiagnostics {
+        verdict_origin: Some("established".to_string()),
+        ..KillDiagnostics::default()
+    });
+
+    assert_eq!(
+        episodes(&[silent])[0].diagnostics_text("t"),
+        "t · последний подтверждённый выход: 176.12.76.15, KZ"
     );
 }
 

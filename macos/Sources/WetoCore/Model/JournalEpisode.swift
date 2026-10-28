@@ -72,11 +72,20 @@ public struct JournalEpisode: Identifiable, Equatable, Sendable {
 
     /// Время приходит готовой строкой: формат — забота интерфейса. Адрес назван
     /// всегда, даже неизвестный, — пропуск читался бы как «адрес не спрашивали».
+    ///
+    /// Адрес и страны паузы по молчанию сервисов взяты из прошлого вердикта — других
+    /// нет, — и под причиной «таймаут запроса» строка «ipinfo: KZ · geojs: KZ» читалась
+    /// как «всё ответило KZ, а цели почему-то встали». Такой вердикт назван прошлым.
     public func diagnosticsText(timestamp: String) -> String {
-        var parts = [timestamp, "IP: \(opening.ip ?? "неизвестен")"]
-        if let country = opening.country { parts.append("ipinfo: \(country)") }
-        if let confirmed = opening.confirmedCountry {
-            parts.append("\(opening.confirmSource ?? "подтверждение"): \(confirmed)")
+        var parts = [timestamp]
+        if opening.diagnostics?.verdictOrigin == .established, let ip = opening.ip {
+            parts.append("последний подтверждённый выход: \(ip)" + (opening.country.map { ", \($0)" } ?? ""))
+        } else {
+            parts.append("IP: \(opening.ip ?? "неизвестен")")
+            if let country = opening.country { parts.append("ipinfo: \(country)") }
+            if let confirmed = opening.confirmedCountry {
+                parts.append("\(opening.confirmSource ?? "подтверждение"): \(confirmed)")
+            }
         }
         if processCount > 1 { parts.append("процессов: \(processCount)") }
         return parts.joined(separator: " · ")

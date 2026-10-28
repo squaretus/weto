@@ -85,6 +85,9 @@ pub enum GeoFailure {
     NoNetwork,
     Unreachable,
     TimedOut,
+    /// Рукопожатие TLS не состоялось — текстом macOS дословно, где системное
+    /// описание этой ошибки приходит по-английски.
+    TlsFailed,
     Unauthorized(u16),
     RateLimited(u16),
     ServiceError(u16),
@@ -108,6 +111,7 @@ impl GeoFailure {
             -1009 => GeoFailure::NoNetwork,
             -1001 => GeoFailure::TimedOut,
             -1006..=-1003 => GeoFailure::Unreachable,
+            -1200 => GeoFailure::TlsFailed,
             _ => GeoFailure::Other(description.to_string()),
         }
     }
@@ -117,6 +121,7 @@ impl GeoFailure {
             GeoFailure::NoNetwork => "нет сети".to_string(),
             GeoFailure::Unreachable => "сервис недоступен".to_string(),
             GeoFailure::TimedOut => "таймаут запроса".to_string(),
+            GeoFailure::TlsFailed => "ошибка защищённого соединения (TLS)".to_string(),
             GeoFailure::Unauthorized(status) => format!("токен отвергнут ({status})"),
             GeoFailure::RateLimited(status) => format!("лимит запросов ({status})"),
             GeoFailure::ServiceError(status) => format!("сервис ответил ошибкой ({status})"),
@@ -328,6 +333,18 @@ mod tests {
     fn unknown_transport_code_keeps_the_system_wording() {
         let failure = GeoFailure::from_transport(-9999, "хост неизвестен");
         assert_eq!(failure.display_text(), "хост неизвестен");
+    }
+
+    /// Рухнувшее TLS-рукопожатие называется по-русски, текстом macOS дословно:
+    /// системный текст там приходит по-английски, и попап показывал его как есть.
+    #[test]
+    fn failed_tls_handshake_is_named_in_russian() {
+        let failure = GeoFailure::from_transport(-1200, "TLS handshake failed");
+        assert_eq!(failure, GeoFailure::TlsFailed);
+        assert_eq!(
+            failure.display_text(),
+            "ошибка защищённого соединения (TLS)"
+        );
     }
 
     #[test]
