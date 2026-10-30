@@ -37,44 +37,71 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertEqual(machine.pauseCeiling, PauseCeiling.standard.seconds)
     }
 
-    // MARK: - Вердикта нет: цели работают, пока не пришёл плохой результат
+    // MARK: - Вердикта нет: цели стоят до ответа пробы
 
-    // Холодный старт целей не трогает: проба спрашивается первой, отвечает она.
-    // Принятая цена — до ~5 с работы без вердикта.
-    func test_cold_start_leaves_the_targets_running() {
+    // Холодный старт про выход не знает ничего: цели стоят до первого ответа,
+    // и потолок считается от старта.
+    func test_cold_start_pauses_the_targets_until_the_probe_answers() {
         var machine = GuardMachine(pauseCeiling: 60)
-        XCTAssertEqual(machine.apply(.verdictLost(.coldStart), at: t0), .none)
-        XCTAssertEqual(machine.phase, .verifying(cause: .coldStart))
+        XCTAssertEqual(machine.apply(.verdictLost(.coldStart), at: t0), .pause)
+        XCTAssertEqual(machine.phase, .paused(since: t0, reason: .exitNotVerified(.coldStart)))
+        XCTAssertEqual(machine.remainingPause(at: at(20)), 40)
+        XCTAssertEqual(machine.apply(.verdict(.safe, geo: .resolved(kz)), at: at(2)), .resume)
+        XCTAssertEqual(machine.phase, .protected(kz))
+    }
+
+    // Смена пути — так выглядит выключенный в клиенте VPN: цели встают сразу,
+    // а не после ответа, который шёл бы уже мимо туннеля.
+    func test_a_path_change_pauses_the_targets() {
+        var machine = protectedMachine()
+        XCTAssertEqual(machine.apply(.verdictLost(.networkChanged), at: at(5)), .pause)
+        XCTAssertEqual(machine.phase, .paused(since: at(5), reason: .exitNotVerified(.networkChanged)))
+    }
+
+    func test_a_path_change_out_of_interference_pauses_the_targets() {
+        var machine = protectedMachine()
+        _ = machine.apply(.verdict(.safe, geo: .degraded(previous: kz, detail: "HTTP 429")), at: at(5))
+        XCTAssertEqual(machine.apply(.verdictLost(.networkChanged), at: at(6)), .pause)
+        XCTAssertEqual(machine.phase, .paused(since: at(6), reason: .exitNotVerified(.networkChanged)))
+    }
+
+    // Правка одних настроек про выход не говорит ничего: цели работают, отвечает проба.
+    func test_a_settings_only_loss_leaves_the_targets_running() {
+        var machine = protectedMachine()
+        XCTAssertEqual(machine.apply(.verdictLost(.configurationChanged), at: at(5)), .none)
+        XCTAssertEqual(machine.phase, .verifying(cause: .configurationChanged))
         XCTAssertEqual(machine.phase.action, .run)
         XCTAssertNil(machine.remainingPause(at: at(600)), "в проверке считать нечего")
     }
 
-    // Смена пути — тоже не повод останавливать цели.
-    func test_a_path_change_leaves_the_targets_running() {
-        var machine = protectedMachine()
-        XCTAssertEqual(machine.apply(.verdictLost(.networkChanged), at: at(5)), .none)
-        XCTAssertEqual(machine.phase, .verifying(cause: .networkChanged))
-        XCTAssertEqual(machine.phase.action, .run)
-    }
-
-    func test_a_path_change_out_of_interference_leaves_the_targets_running() {
-        var machine = protectedMachine()
-        _ = machine.apply(.verdict(.safe, geo: .degraded(previous: kz, detail: "HTTP 429")), at: at(5))
-        XCTAssertEqual(machine.apply(.verdictLost(.networkChanged), at: at(6)), .none)
-        XCTAssertEqual(machine.phase, .verifying(cause: .networkChanged))
-    }
-
-    // Повторное «вердикта нет» — не новость, и такту в проверке считать нечего:
-    // отсчёт до завершения появляется только вместе с паузой.
-    func test_a_repeated_verdict_loss_changes_nothing_and_never_expires() {
+    // Повторное «вердикта нет» — не новость: ни причину, ни отсчёт оно не трогает.
+    func test_a_repeated_verdict_loss_keeps_the_first_reason_and_the_ceiling() {
         var machine = GuardMachine(pauseCeiling: 60)
         _ = machine.apply(.verdictLost(.coldStart), at: t0)
         XCTAssertEqual(machine.apply(.verdictLost(.coldStart), at: at(30)), .none)
-        XCTAssertEqual(machine.phase, .verifying(cause: .coldStart))
         XCTAssertEqual(machine.apply(.verdictLost(.networkChanged), at: at(50)), .none)
-        XCTAssertEqual(machine.phase, .verifying(cause: .networkChanged))
-        XCTAssertEqual(machine.apply(.tick, at: at(3_600)), .none, "без результата пауза не начинается")
-        XCTAssertEqual(machine.phase, .verifying(cause: .networkChanged))
+        XCTAssertEqual(machine.phase, .paused(since: t0, reason: .exitNotVerified(.coldStart)))
+        XCTAssertEqual(machine.apply(.tick, at: at(60)), .terminate)
+        XCTAssertEqual(machine.phase, .danger(.pauseExpired(ceiling: 60)))
+    }
+
+    // Ответ «не доказано» — настоящая причина паузы, ждавшей ответа; отсчёт прежний.
+    func test_an_unproven_answer_names_the_reason_of_a_waiting_pause() {
+        var machine = protectedMachine()
+        _ = machine.apply(.verdictLost(.networkChanged), at: at(5))
+        XCTAssertEqual(machine.apply(.verdict(silence, geo: silentGeo), at: at(9)), .none)
+        XCTAssertEqual(machine.phase, .paused(since: at(5), reason: .geoUnavailable("таймаут запроса")))
+    }
+
+    // Доказанно тот же адрес снимает паузу, ждавшую ответа, — в Помехи.
+    func test_the_same_address_resumes_a_waiting_pause_into_interference() {
+        var machine = protectedMachine()
+        _ = machine.apply(.verdictLost(.networkChanged), at: at(5))
+        XCTAssertEqual(
+            machine.apply(.verdict(.safe, geo: .degraded(previous: kz, detail: "HTTP 429")), at: at(7)),
+            .resume
+        )
+        XCTAssertEqual(machine.phase, .interference(kz, reason: .geoUnavailable("HTTP 429")))
     }
 
     // MARK: - Пауза начинается с плохого результата и только с него
@@ -103,8 +130,8 @@ final class GuardMachineTests: XCTestCase {
 
     // Неответ в проверке — тот самый плохой результат: вот здесь цели и встают.
     func test_a_silent_result_in_verification_pauses() {
-        var machine = GuardMachine(pauseCeiling: 60)
-        _ = machine.apply(.verdictLost(.coldStart), at: t0)
+        var machine = protectedMachine()
+        _ = machine.apply(.verdictLost(.configurationChanged), at: t0)
         XCTAssertEqual(machine.apply(.verdict(.unproven(.confirmationUnavailable), geo: silentGeo), at: at(4)), .pause)
         XCTAssertEqual(machine.phase, .paused(since: at(4), reason: .confirmationUnavailable))
     }
@@ -225,10 +252,18 @@ final class GuardMachineTests: XCTestCase {
     }
 
     func test_safe_without_a_reading_keeps_a_verification() {
+        var machine = protectedMachine()
+        _ = machine.apply(.verdictLost(.configurationChanged), at: t0)
+        XCTAssertEqual(machine.apply(.verdict(.safe, geo: silentGeo), at: at(2)), .none)
+        XCTAssertEqual(machine.phase, .verifying(cause: .configurationChanged))
+    }
+
+    // Safe без чтения не снимает и паузу, ждавшую ответа.
+    func test_safe_without_a_reading_keeps_a_waiting_pause() {
         var machine = GuardMachine(pauseCeiling: 60)
         _ = machine.apply(.verdictLost(.coldStart), at: t0)
         XCTAssertEqual(machine.apply(.verdict(.safe, geo: silentGeo), at: at(2)), .none)
-        XCTAssertEqual(machine.phase, .verifying(cause: .coldStart))
+        XCTAssertEqual(machine.phase, .paused(since: t0, reason: .exitNotVerified(.coldStart)))
     }
 
     // MARK: - Доказательство завершает и держится до ответа пробы
@@ -342,8 +377,8 @@ final class GuardMachineTests: XCTestCase {
         XCTAssertEqual(machine.apply(.disarmed, at: at(1)), .none)
         XCTAssertEqual(machine.phase, .disabled)
 
-        var verifying = GuardMachine(pauseCeiling: 60)
-        _ = verifying.apply(.verdictLost(.coldStart), at: t0)
+        var verifying = protectedMachine()
+        _ = verifying.apply(.verdictLost(.configurationChanged), at: t0)
         XCTAssertEqual(verifying.apply(.disarmed, at: at(1)), .none)
         XCTAssertEqual(verifying.phase, .disabled)
     }

@@ -194,6 +194,7 @@ fn pauses_and_kills_are_logged_with_names_pids_and_reason() {
     };
 
     reporter.paused(&[matched(10, "claude"), matched(11, "claude")], &context);
+    reporter.pause_reason_named("Не удалось определить внешний адрес: таймаут запроса");
     reporter.report(&[matched(12, "codex")], &[], &context);
     let standing = OutcomeException {
         pids: [11].into_iter().collect(),
@@ -205,6 +206,7 @@ fn pauses_and_kills_are_logged_with_names_pids_and_reason() {
         *lines.lock().unwrap(),
         [
             "на паузе: claude ×2 (pid 10, 11) — VPN-туннель wg0 не поднят",
+            "причина паузы: Не удалось определить внешний адрес: таймаут запроса",
             "завершены: codex (pid 12) — VPN-туннель wg0 не поднят",
             "исход паузы: возобновлено проверкой",
             "pid 11: не возобновлено: процесс остался остановленным",

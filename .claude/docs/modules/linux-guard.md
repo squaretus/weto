@@ -543,7 +543,19 @@ every tick asks again, and cancelling would mean the verdict never arrives on a 
 is recorded only for the button — automatic reasons ask every tick, and their skips would push the
 one record the journal is kept for out of its fifty.
 
-1. A probe answers *unproven* → the phase becomes `Paused`, whose action is `Pause`.
+1. A probe answers *unproven*, or `announce_loss` feeds `VerdictLost` for a network cause
+   (cold start, path change — everything but `ConfigurationChanged`, which a settings edit
+   produces by bumping the revision and which stays in the running `Verifying`) → the phase
+   becomes `Paused`, whose action is `Pause`. A pause opened by the loss carries
+   `ExitNotVerified(cause)` («Выход ещё не проверен: …»), and `announce_loss` arms
+   `pending_staleness` for it when `feed` returns `GuardEffect::Pause`. The first *unproven*
+   answer replaces that reason (same `since`); `name_awaited_reason` (on every pass applying `Pause`, guarded
+   by `PauseBook::episode_awaits_answer`) renames the episode and calls
+   `KillReporting::pause_reason_named`, which `JournalWriter` turns into `refine_episode` on the
+   pause episode only — the recovery episode keeps its own reason — and `weto-cli` logs as
+   «причина паузы: …». A `Degraded` answer (geojs-self names the established IP) is admissible
+   on any fingerprint and re-keys `established` to the current one with the old reading and
+   revision, so the next tick does not announce the loss again.
    `ProcessEnforcer::pause` builds the plan (`pause_plan::plan`) and sends `SIGSTOP` in order —
    shell, target, descendants — writing every delivered pid into `stopped.json`. Processes the user
    had already stopped (`T`) are in `plan.skipped` and get nothing. `StoppedLedger::add` keys on pid
@@ -584,8 +596,8 @@ one record the journal is kept for out of its fifty.
    process is not `T`, not in the ledger and holds the foreground again (`pause_plan::holds_foreground`);
    gone, another path or another tty drops the mode. In memory only, same as macOS.
    [bugs/tmux-takes-the-terminal-from-a-paused-target](../bugs/tmux-takes-the-terminal-from-a-paused-target.md).
-2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the bad
-   result: `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
+2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the start
+   of the pause (the bad result or the loss): `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
    restart it. At the ceiling (the user's setting, 1 min by default) the phase becomes
    `Danger(PauseExpired(ceiling))` and the targets are killed; the evidence names the ceiling that
    fired («Подтверждение не получено за 5 мин»). `ProcessEnforcer::terminate` kills what matches

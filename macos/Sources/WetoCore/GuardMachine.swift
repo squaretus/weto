@@ -13,8 +13,9 @@ public enum GuardAction: Equatable, Sendable {
 public enum GuardPhase: Equatable, Sendable {
     /// Охрана выключена или целей нет.
     case disabled
-    /// Проба в полёте, вердикта про текущий путь ещё нет. Цели работают:
-    /// пауза начинается с плохого результата, а не с его ожидания.
+    /// Изменились одни настройки, проба в полёте. Цели работают: про выход
+    /// правка не говорит ничего. Потеря вердикта по сети сюда не ведёт — она
+    /// ставит цели на паузу (`exitNotVerified`).
     case verifying(cause: VerdictStaleness.Cause)
     /// Свежий safe. Цели работают.
     case protected(GeoReading)
@@ -44,6 +45,9 @@ public enum GuardPhase: Equatable, Sendable {
         case .verifying: return "Проверяю выход"
         case .protected: return "На страже"
         case .interference: return "На страже"
+        // Пауза, ждущая первого ответа, плохого результата не видела: это проверка,
+        // во время которой цели стоят, а не отказ.
+        case .paused(_, .exitNotVerified): return "Проверяю выход"
         case .paused: return "Выход не подтверждён"
         case .danger: return "Небезопасно"
         }
@@ -55,6 +59,12 @@ public enum GuardPhase: Equatable, Sendable {
         case .paused(let since, _): return since
         default: return nil
         }
+    }
+
+    /// Причина стояния. `nil` — не стоят.
+    public var pausedReason: UnprovenReason? {
+        if case .paused(_, let reason) = self { return reason }
+        return nil
     }
 
     /// Чтение, на котором стоит фаза. У стоящих и опасных фаз его нет.
@@ -94,12 +104,11 @@ public enum GuardEffect: Equatable, Sendable {
 /// контроллер — единственный владелец экземпляра, но правила живут здесь и проверяются
 /// синхронно, без единой границы. Голден-фикстура — `shared/fixtures/guard-transitions.json`.
 ///
-/// Пауза начинается с плохого результата пробы и ничем другим. Ни холодный старт,
-/// ни смена пути целей не трогают: они лишь обесценивают вердикт и просят пробу,
-/// а решает ответ. Цена известна и принята владельцем: между сменой пути (или
-/// холодным стартом) и ответом пробы есть до ~5 с, когда цели работают без вердикта.
-/// Счёта неудачных проб нет вовсе — первый же ответ «сервисы не ответили» ставит
-/// на паузу, потолок считается только от её начала.
+/// Цели работают только по ответу пробы. Холодный старт и смена пути обесценивают
+/// вердикт и ставят цели на паузу сразу, до ответа: выключенный в клиенте VPN иначе
+/// выпускал бы их напрямую всё время запроса. Снимает паузу safe — свежий или
+/// доказанно тот же адрес. Счёта неудачных проб нет вовсе — первый же ответ
+/// «сервисы не ответили» ставит на паузу, потолок считается только от её начала.
 public struct GuardMachine: Equatable, Sendable {
 
     public private(set) var phase: GuardPhase
@@ -138,10 +147,9 @@ public struct GuardMachine: Equatable, Sendable {
         case .verdictLost(let cause):
             switch phase {
             case .paused:
-                // Стоим по плохому результату, и потолок считается от него.
-                // «Вердикта нет» — не результат: ни возобновить, ни перезапустить
-                // отсчёт оно не вправе, иначе минуту можно было бы продлевать вечно
-                // сменами пути.
+                // Уже стоим, и потолок считается от первого плохого известия.
+                // Новая потеря ни возобновить, ни перезапустить отсчёт не вправе,
+                // иначе минуту можно было бы продлевать вечно сменами пути.
                 return .none
             case .danger:
                 // Из «Опасно» выпускает только настоящий ответ пробы. Прежде
@@ -149,9 +157,15 @@ public struct GuardMachine: Equatable, Sendable {
                 // теперь он разрешал бы запуск целей без единой улики в пользу этого.
                 return .none
             case .disabled, .protected, .interference, .verifying:
-                // Цели работают и продолжают: проба спрашивается первой, отвечает она.
-                phase = .verifying(cause: cause)
-                return .none
+                // Правка одних настроек про выход не говорит ничего: цели работают,
+                // а проба отвечает.
+                guard cause != .configurationChanged else {
+                    phase = .verifying(cause: cause)
+                    return .none
+                }
+                // Сеть сменилась или вердикта не было вовсе — цели стоят до ответа.
+                phase = .paused(since: now, reason: .exitNotVerified(cause))
+                return .pause
             }
 
         case .evidence(let evidence):
@@ -217,6 +231,11 @@ public struct GuardMachine: Equatable, Sendable {
                 // что молчание временное.
                 phase = .paused(since: now, reason: reason)
                 return .pause
+            case .paused(let since, .exitNotVerified):
+                // Пауза ждала ответа, и ответ «не доказано» — её настоящая причина.
+                // Отсчёт остаётся от потери вердикта.
+                phase = .paused(since: since, reason: reason)
+                return .none
             case .paused, .danger:
                 // Стоим или уже завершили: непроверенность ничего не добавляет,
                 // потолок считает `tick` от начала паузы.

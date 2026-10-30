@@ -8,10 +8,12 @@
 //!
 //! # Три инварианта
 //!
-//! 1. **Пауза начинается с результата, а не с его ожидания.** Нет вердикта про
-//!    текущий путь — объявляем потерю и просим пробу, а цели работают: решает
-//!    ответ. Первый же ответ «не доказано» ставит на паузу; счёта неудачных проб
-//!    нет, потолок паузы — завершение.
+//! 1. **Цели работают только по ответу пробы.** Нет вердикта про текущий путь
+//!    (холодный старт, сменился выход) — объявляем потерю, цели встают сразу
+//!    и стоят до ответа: выключенный в клиенте VPN иначе выпускал бы их напрямую
+//!    всё время запроса. Правка одних настроек про выход не говорит ничего —
+//!    цели работают. Ответ «не доказано» оставляет на паузе, счёта неудачных
+//!    проб нет, потолок паузы — завершение.
 //! 2. **Устаревший результат не возвращает safe.** У каждой пробы своя ревизия
 //!    и свой отпечаток: результат применяется, только пока оба актуальны.
 //! 3. **Обязательство «вернуть из паузы» снимает наблюдение, а не отправка
@@ -33,7 +35,8 @@
 //! Сетевой вердикт годен, пока не изменились две вещи: ревизия настроек
 //! и отпечаток снимка сети. Отпечаток берётся по выбранному интерфейсу, а не по
 //! всей сети: иначе чужой VPN, переподключившийся сам по себе, стоил бы
-//! пользователю целей. Потеря свежести целей больше не трогает — она просит пробу.
+//! пользователю целей. Потеря свежести по сети ставит цели на паузу и просит
+//! пробу; потеря по одним настройкам только просит пробу.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -44,12 +47,12 @@ use weto_config::settings::Settings;
 use weto_core::check::{CheckEvent, CheckOutcome, CheckTrigger};
 use weto_core::diagnostics::{GeoReadingPatch, KillContext, KillDiagnostics, VerdictStaleness};
 use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading};
-use weto_core::guard_machine::{GuardAction, GuardInput, GuardMachine, GuardPhase};
+use weto_core::guard_machine::{GuardAction, GuardEffect, GuardInput, GuardMachine, GuardPhase};
 use weto_core::network::{tunnel_status, NetworkSnapshot, OutgoingRoute};
 use weto_core::network::{VpnAppStatus, VpnTunnelStatus};
 use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
 use weto_core::policy::GuardSignals;
-use weto_core::policy::{decide, decide_local, GuardDecision, UnsafeEvidence};
+use weto_core::policy::{decide, decide_local, GuardDecision, UnprovenReason, UnsafeEvidence};
 use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget, TargetRule};
 use weto_sys::background::{BackgroundDispatching, ThreadDispatcher};
 use weto_sys::geo_probe::GeoProbing;
@@ -160,6 +163,11 @@ pub trait KillReporting: Send + Sync {
     /// и переписать его не имеет права.
     fn released(&self, _pids: &[i32], _outcome: &str, _context: &KillContext) {}
 
+    /// Пауза, начатая потерей вердикта, узнала из ответа пробы свою настоящую
+    /// причину: записи открытого эпизода паузы получают её вместо временной
+    /// «Выход ещё не проверен: …».
+    fn pause_reason_named(&self, _reason: &str) {}
+
     /// Чем стояние кончилось: возобновлено, завершено по доказательству,
     /// завершено по потолку, остановлена охрана.
     ///
@@ -236,6 +244,10 @@ struct PauseBook {
     /// Причина берётся у эпизода, а не у фазы: новорождённый под паузой обязан
     /// встать в один ряд с остальными, а не принести свой текст.
     episode_reason: Option<String>,
+    /// Эпизод открыла потеря вердикта, и ответа пробы он ещё не видел: причина
+    /// у него временная («Выход ещё не проверен»), и первый же ответ «не доказано»
+    /// назовёт эпизоду настоящую.
+    episode_awaits_answer: bool,
     /// Разбор свежести эпизода: чем прежний вердикт перестал описывать наш выход
     /// в тот момент, когда цели встали.
     staleness: Option<VerdictStaleness>,
@@ -265,13 +277,15 @@ struct Inner {
     /// чем прежний вердикт перестал описывать наш выход. Отказ сервисов его
     /// не трогает — иначе изменение настроек стало бы неотличимо от холодного
     /// старта, а в журнале это два разных ответа на «почему цели встали».
+    /// Доказанно тот же адрес (`Degraded`) переносит его на текущий отпечаток
+    /// с прежним чтением: тот же адрес — тот же выход, через какой бы интерфейс.
     established: Option<Established>,
     /// Потеря вердикта, про которую показания на экране уже погашены. Гасить
     /// второй раз нельзя: такт идёт раз в секунду и затирал бы свежий отчёт.
     announced_loss: Option<(String, String)>,
-    /// Разбор свежести на время применения плохого результата: он взводится
-    /// перед вердиктом и гаснет сразу после, чтобы достаться ровно тому эпизоду,
-    /// который этот результат и завёл.
+    /// Разбор свежести на время применения плохого результата или потери вердикта:
+    /// он взводится перед входом и гаснет сразу после применения, чтобы достаться
+    /// ровно тому эпизоду, который этот вход и завёл.
     pending_staleness: Option<VerdictStaleness>,
     last_probe_finished: Option<Instant>,
     last_report: Option<GeoProbeReport>,
@@ -601,7 +615,7 @@ impl GuardController {
 
         if !has_verdict {
             // Вердикта про этот путь нет: объявляем потерю и просим пробу — цели
-            // при этом работают, паузу принесёт только плохой результат. Потолок
+            // стоят до ответа (правка одних настроек их не трогает). Потолок
             // считает лишь `Tick`, поэтому он идёт тем же тактом: пауза, начатая
             // до смены пути, иначе не доехала бы до завершения.
             self.announce_loss(&settings, &fingerprint);
@@ -650,32 +664,34 @@ impl GuardController {
         phase
     }
 
-    /// Объявление потери вердикта: цели не трогаем, потолок паузы считается тем же
-    /// тактом — `Tick` уезжает редьюсеру здесь, а применяет его решение
-    /// единственное на такт `enforce`.
+    /// Объявление потери вердикта: цели встают до ответа пробы (кроме правки одних
+    /// настроек — тогда работают), потолок паузы считается тем же тактом — `Tick`
+    /// уезжает редьюсеру здесь, а применяет решение единственное на такт `enforce`.
     ///
-    /// Разбор свежести здесь не взводится: записи журнала эта потеря не заводит —
-    /// заводит её плохой результат пробы, и разбор считается там, где применяется.
+    /// Эпизод паузы заводит сама потеря, поэтому разбор свежести взводится здесь —
+    /// на время применения, как и у плохого результата пробы: гасит его `enforce`.
     fn announce_loss(&self, settings: &Settings, fingerprint: &str) {
         let staleness = self.staleness_now(settings.revision, fingerprint);
         let loss = (format!("{:?}", staleness.cause), fingerprint.to_string());
-        let (should_forget, cause) = {
+        let should_forget = {
             let mut inner = self.inner.lock().expect("состояние охраны");
             let changed = inner.announced_loss.as_ref() != Some(&loss);
             let had_verdict = inner.established.is_some();
             inner.announced_loss = Some(loss);
-            // `VerdictLost` во всех ветках возвращает `None` (см. `GuardMachine`),
-            // поэтому эффект здесь не нужен: наружу уходит только `Tick`.
-            inner
-                .machine
-                .apply(GuardInput::VerdictLost(staleness.cause), (self.now)());
-            (changed && had_verdict, staleness.cause)
+            changed && had_verdict
         };
         // Показания гасим один раз на потерю: они про путь, которого уже нет.
         if should_forget {
             self.forget_report();
         }
-        let _ = cause;
+        // Пауза, начатая этой потерей, — новый эпизод, и разбор достаётся ему.
+        // Уже стоящим потеря ничего не добавляет: эпизод у них свой, со своим разбором.
+        if self.feed(GuardInput::VerdictLost(staleness.cause)) == GuardEffect::Pause {
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .pending_staleness = Some(staleness);
+        }
         self.feed(GuardInput::Tick);
     }
 
@@ -733,10 +749,14 @@ impl GuardController {
     /// Ворота берутся и здесь: после штатного выхода редьюсеру не место двигаться
     /// вовсе — фаза у остановленной охраны обнулена, и такт, доехавший сюда следом
     /// за выходом, вернул бы на экран «Пауза» с отсчётом, которого никто не считает.
-    fn feed(&self, input: GuardInput) {
+    ///
+    /// Эффект перехода возвращается лишь затем, чтобы вход мог взвести то, что
+    /// достанется эпизоду (разбор свежести у потери вердикта); применяется
+    /// по-прежнему действие фазы.
+    fn feed(&self, input: GuardInput) -> GuardEffect {
         let gate = self.enforcement.lock().expect("ворота применения");
         if *gate {
-            return;
+            return GuardEffect::None;
         }
         let moment = (self.now)();
         // Потолок — параметр машины, источник у него один: настройки. Выставляется
@@ -745,10 +765,10 @@ impl GuardController {
         let ceiling = self.settings.settings().pause_ceiling().duration();
         let mut inner = self.inner.lock().expect("состояние охраны");
         inner.machine.set_pause_ceiling(ceiling);
-        // Эффект перехода здесь не нужен: применяется действие текущей фазы,
-        // и на переходе оно даёт ровно то же самое. Редьюсеру важно, что
-        // вход применён, — фаза после этого и есть решение.
-        inner.machine.apply(input, moment);
+        // Применяется действие текущей фазы, а не этот эффект: на переходе оно
+        // даёт ровно то же самое. Редьюсеру важно, что вход применён, — фаза
+        // после этого и есть решение.
+        inner.machine.apply(input, moment)
     }
 
     /// Решение редьюсера — процессам, а происшедшее — журналу. Один раз на проход,
@@ -771,6 +791,17 @@ impl GuardController {
         }
 
         let phase = self.phase();
+
+        // Ответа ждала только пауза: у снятой переименовывать уже нечего, даже пока
+        // эпизод открыт до наблюдения возобновления. Иначе плохой результат,
+        // пришедший следом, переписал бы причину уже отвеченного эпизода.
+        if phase.action() != GuardAction::Pause {
+            self.inner
+                .lock()
+                .expect("состояние охраны")
+                .pause
+                .episode_awaits_answer = false;
+        }
 
         // Применяется действие фазы, а не эффект перехода: цель, родившаяся
         // под паузой или под запретом, перехода не вызывает, и поймать её больше
@@ -834,9 +865,9 @@ impl GuardController {
 
     /// Причина эпизода паузы человеческим текстом: она же уходит в журнал.
     ///
-    /// Стоящая фаза ровно одна, и приходит она с готовой причиной: «подключение
-    /// ещё не проверено» больше не бывает причиной стояния — до ответа пробы цели
-    /// работают.
+    /// Стоящая фаза ровно одна, и приходит она с готовой причиной. Пауза, начатая
+    /// потерей вердикта, стоит с временной — «Выход ещё не проверен: …», — пока
+    /// ответ пробы не назовёт настоящую (`name_awaited_reason`).
     fn pause_reason_text(phase: &GuardPhase) -> String {
         match phase {
             GuardPhase::Paused { reason, .. } => reason.display_text(),
@@ -860,6 +891,9 @@ impl GuardController {
         // а не исходом эпизода — до него процесс стоял бы уже ничьим.
         self.release_unguarded(scan, settings);
 
+        // Новичков может и не быть, а эпизод узнать свою причину обязан.
+        self.name_awaited_reason(phase);
+
         // Про pid, уже описанный этим эпизодом, второй записи не бывает.
         // Шеллы идут тем же списком: объяснён обязан быть каждый SIGSTOP,
         // а не только посланный цели.
@@ -881,6 +915,10 @@ impl GuardController {
             if !inner.pause.episode_open {
                 inner.pause.episode_open = true;
                 inner.pause.episode_reason = Some(Self::pause_reason_text(phase));
+                inner.pause.episode_awaits_answer = matches!(
+                    phase.paused_reason(),
+                    Some(UnprovenReason::ExitNotVerified(_))
+                );
                 inner.pause.staleness = inner.pending_staleness.clone();
                 // Новое стояние — новое снятие паузы: pid, которым SIGCONT уходил
                 // в прошлый раз, не имеют права сойти за «сигнал не прижился»
@@ -938,6 +976,33 @@ impl GuardController {
         for target_name in &newly_backgrounded {
             self.reporter.backgrounded(target_name);
         }
+    }
+
+    /// Пауза, ждавшая ответа, узнала свою настоящую причину — эпизод называет её
+    /// всем своим записям. «Выход ещё не проверен» не отвечало бы, кто именно
+    /// промолчал: ради этого вопроса журнал и читают, когда цели завершились
+    /// по потолку. Порт `GuardVM.nameWaitingPauseReason` с macOS.
+    ///
+    /// Разбор свежести не трогается: он описывает момент, когда цели встали,
+    /// а встали они на потере вердикта.
+    fn name_awaited_reason(&self, phase: &GuardPhase) {
+        let text = {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            let Some(reason) = phase.paused_reason() else {
+                return;
+            };
+            if !inner.pause.episode_open
+                || !inner.pause.episode_awaits_answer
+                || matches!(reason, UnprovenReason::ExitNotVerified(_))
+            {
+                return;
+            }
+            let text = reason.display_text();
+            inner.pause.episode_awaits_answer = false;
+            inner.pause.episode_reason = Some(text.clone());
+            text
+        };
+        self.reporter.pause_reason_named(&text);
     }
 
     /// Цель, снятую с охраны, отпускаем немедленно: weto не держит того, кого больше
@@ -1198,6 +1263,7 @@ impl GuardController {
                 inner.pause.recovery_open = false;
                 inner.pause.episode_pids.clear();
                 inner.pause.episode_reason = None;
+                inner.pause.episode_awaits_answer = false;
                 inner.pause.staleness = None;
                 inner.pause.released_from_guard.clear();
             }
@@ -1859,7 +1925,7 @@ impl GuardController {
             return;
         }
 
-        let outcome = self.admissible_outcome(&report, &fingerprint);
+        let outcome = self.admissible_outcome(&report);
         let result = if matches!(outcome, GeoOutcome::Resolved(_)) {
             CheckOutcome::Answered
         } else {
@@ -1886,7 +1952,21 @@ impl GuardController {
                 inner.announced_loss = None;
             }
             if let GeoOutcome::Degraded { previous, .. } = &outcome {
+                // Тот же адрес — тот же выход, через какой бы интерфейс он ни шёл:
+                // вердикт переходит на новый путь, иначе разбор свежести и правка
+                // настроек считали бы прежний путь всё ещё нашим. Ревизия остаётся
+                // от установившегося вердикта: настроек этот довод не проверял.
+                let revision = inner
+                    .established
+                    .as_ref()
+                    .map_or(settings.revision, |e| e.revision);
+                inner.established = Some(Established {
+                    reading: previous.clone(),
+                    fingerprint: fingerprint.clone(),
+                    revision,
+                });
                 inner.last_reading = Some(previous.clone());
+                inner.announced_loss = None;
             }
             inner.verdict = Some((settings.revision, fingerprint.clone()));
             inner.last_report = Some(report.clone());
@@ -1948,20 +2028,16 @@ impl GuardController {
     /// страна та же и перепроверять нечего. Это доказательство неизменности,
     /// а не снисхождение к давности, и каждый круг доказывается заново.
     ///
-    /// Сменился отпечаток сети — снисхождения нет ни при каком совпадении адреса:
-    /// вердикт при смене пути недействителен по построению.
-    fn admissible_outcome(&self, report: &GeoProbeReport, fingerprint: &str) -> GeoOutcome {
+    /// Путь значения не имеет: тот же адрес означает тот же выход и после смены
+    /// интерфейса — так возвращаются цели, вставшие на потере вердикта.
+    fn admissible_outcome(&self, report: &GeoProbeReport) -> GeoOutcome {
         let outcome = report.outcome();
         let GeoOutcome::Unavailable(detail) = &outcome else {
             return outcome;
         };
 
         let inner = self.inner.lock().expect("состояние охраны");
-        let Some(established) = inner
-            .established
-            .as_ref()
-            .filter(|e| e.fingerprint == fingerprint)
-        else {
+        let Some(established) = inner.established.as_ref() else {
             return outcome;
         };
         let Some(address) = report.ip.as_deref() else {

@@ -74,6 +74,10 @@ public enum UnprovenReason: Equatable, Sendable {
     case addressChanged(observed: String)
     /// ipinfo ответил, подтверждающие сервисы молчат. Safe без подтверждения не бывает.
     case confirmationUnavailable
+    /// Прежний вердикт перестал описывать выход — сменилась сеть или его не было вовсе,
+    /// — а ответа пробы ещё нет. Решением политики не бывает: причину ставит потеря
+    /// вердикта, и до ответа пробы цели стоят.
+    case exitNotVerified(VerdictStaleness.Cause)
 }
 
 /// Положительное доказательство опасности. Только оно завершает цели.

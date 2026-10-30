@@ -123,6 +123,9 @@ final class GuardRunner {
     private var lastLoggedPhase: GuardPhase?
     private var seenEvents: Set<UUID> = []
     private var loggedResolutions: Set<UUID> = []
+    /// Причина, с которой запись ушла в лог: пауза, ждавшая ответа, получает настоящую
+    /// причину позже, и лог обязан это сказать.
+    private var loggedReasons: [UUID: String] = [:]
     private var lastStatusWrite = Date.distantPast
     private var lastReload = Date.distantPast
     private var reportedWriteFailure = false
@@ -191,6 +194,7 @@ final class GuardRunner {
         self.eventLog = eventLog
         seenEvents = Set(eventLog.events.map(\.id))
         loggedResolutions = Set(eventLog.events.filter { $0.resolutionText != nil }.map(\.id))
+        loggedReasons = Dictionary(eventLog.events.map { ($0.id, $0.reasonText) }, uniquingKeysWith: { first, _ in first })
 
         vm = GuardVM(
             settings: settings,
@@ -365,19 +369,29 @@ final class GuardRunner {
 
         let fresh = events.filter { !seenEvents.contains($0.id) }
         let resolved = events.filter { $0.resolutionText != nil && !loggedResolutions.contains($0.id) }
-        for line in Self.journalLogLines(fresh: fresh, resolved: resolved) { log.line(line) }
+        let renamed = events.filter { event in
+            loggedReasons[event.id].map { $0 != event.reasonText } ?? false
+        }
+        for line in Self.journalLogLines(fresh: fresh, resolved: resolved, renamed: renamed) { log.line(line) }
         seenEvents.formUnion(fresh.map(\.id))
         loggedResolutions.formUnion(resolved.map(\.id))
+        for event in fresh + renamed { loggedReasons[event.id] = event.reasonText }
     }
 
     /// Строки лога по записям журнала, от старых к новым: событие (эпизод и вид)
-    /// — одна строка, исход эпизода — одна строка.
-    nonisolated static func journalLogLines(fresh: [KillEvent], resolved: [KillEvent]) -> [String] {
+    /// — одна строка, уточнённая причина паузы — одна строка, исход эпизода — одна строка.
+    nonisolated static func journalLogLines(
+        fresh: [KillEvent], resolved: [KillEvent], renamed: [KillEvent] = []
+    ) -> [String] {
         var lines: [String] = []
         for group in grouped(fresh, by: { "\($0.episodeID)|\($0.kind.rawValue)" }) {
             guard let first = group.first else { continue }
             let verb = first.kind == .paused ? "на паузе" : "завершены"
             lines.append("\(verb): \(names(group)) (pid \(pids(group))) — \(first.reasonText)")
+        }
+        for group in grouped(renamed, by: { "\($0.episodeID)|\($0.reasonText)" }) {
+            guard let first = group.first else { continue }
+            lines.append("причина паузы: \(first.reasonText)")
         }
         for group in grouped(resolved, by: { "\($0.episodeID)|\($0.resolutionText ?? "")" }) {
             guard let outcome = group.first?.resolutionText else { continue }

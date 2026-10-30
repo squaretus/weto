@@ -256,8 +256,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   change applies to the current pause on the next tick (see `weto-core.md`).
 - **A manual recheck must not cost the user their targets.** `GuardController.probeNow()`
   skips the debounce window *and* leaves `freshVerdict` alone, so pressing the button on a
-  healthy VPN keeps the current `.safe` state instead of dropping into `verificationPending`
-  (which would terminate everything before the request even left). Its answer is applied the
+  healthy VPN keeps the current `.safe` state instead of a lost-verdict pause (which would stop
+  everything before the request even left). Its answer is applied the
   normal way, so a recovered ipinfo lifts the block without waiting for the next tick.
 - **A manual recheck always goes to the network.** Local grounds (VPN down, no VPN chosen,
   guard off, no targets) decide the fate of the targets and are applied immediately, but they
@@ -398,7 +398,21 @@ this layer decides *when* to ask and *what to do* with the answer.
   stored value for the `.refine` call, never re-asking the controller — outside `.paused` the
   controller answers `nil`, and a safe resume would otherwise silently erase the freshness
   diagnosis from an already-written record (`GuardVMTests.test_a_bad_result_on_a_cold_start_pauses…`
-  asserts it survives).
+  asserts it survives). Since 2026-10-30 the loss itself opens the episode, so `announceLoss`
+  arms `lastStaleness` for the application of a `.verdictLost` that returned `.pause`, exactly as
+  for a bad result.
+- **A pause opened by a lost verdict learns its reason from the answer.** The episode starts as
+  «Выход ещё не проверен: …» (`exitNotVerified`); when the reducer moves that pause to a real
+  `UnprovenReason` (same `since`), `GuardVM.nameWaitingPauseReason` rewrites `pauseEpisodeReason`
+  and every record via `eventLog.refine` — the journal is read to learn who was silent, and the
+  placeholder would not say it. The staleness stays the one from the loss.
+- **The same address re-keys the verdict to the new path.** `admissibleOutcome` no longer
+  compares fingerprints: geojs-self naming the established IP is `.degraded` on any path, and
+  `applyLatestNetworkOutcome` then rewrites `established` with the old reading, the new
+  fingerprint and the old revision, clearing `announcedLoss` — otherwise the next tick would
+  announce the loss and pause again (`test_the_same_address_on_a_new_path_resumes_the_targets_into_interference`).
+  Trade-off: with per-destination split routing geojs may still go through the tunnel while the
+  route to ipinfo left it; needs ipinfo silent at the same moment.
 - **The stopped ledger is the only thing standing between a weto crash and a target frozen
   forever.** `GuardVM.start()` calls `enforcer.resumeOrphans()` once, before the event source and
   the tick loop start. A clean or absent `stopped.json` needs no journal entry — an empty read is a
@@ -449,7 +463,10 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `GuardController.evaluate` / `applyLatestNetworkOutcome` — revision bookkeeping; errors here show
   up as either kills on a healthy VPN or a stale `safe` after the VPN dropped. Since the pause
   model landed, a lost verdict routes through `GuardMachine.apply(.verdictLost)` — a wrong branch
-  there shows up as targets pausing when they should keep running, or the reverse.
+  there shows up as targets pausing when they should keep running, or the reverse. Network causes
+  pause, `configurationChanged` does not; a `.degraded` answer that fails to re-key `established`
+  shows up as the next tick announcing the loss again and re-pausing targets just resumed into
+  «Помехи» after a path change.
 - `GuardVM.applyCurrentAction` journal dedup (`pauseTargets`/`terminateTargets`) — the classic
   regression is a stale reason swallowing the real one, a relaunch leaving no trace, or a pause
   episode's `diagnostics.staleness` getting recomputed at resolution instead of reused from the

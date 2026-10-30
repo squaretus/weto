@@ -99,9 +99,9 @@ impl KillNotifying for LogNotifier {
     }
 }
 
-/// Писатель журнала с логом поверх: завершение, пауза, исход паузы,
-/// освобождение и восстановление — строкой с именами и pid, журнал — как
-/// у приложения.
+/// Писатель журнала с логом поверх: завершение, пауза, причина паузы, названная
+/// ответом пробы, исход паузы, освобождение и восстановление — строкой с именами
+/// и pid, журнал — как у приложения.
 pub struct LoggingReporter<R: KillReporting> {
     pub inner: R,
     pub log: LogSink,
@@ -156,6 +156,11 @@ impl<R: KillReporting> KillReporting for LoggingReporter<R> {
             ));
         }
         self.inner.recovered(standing, context);
+    }
+
+    fn pause_reason_named(&self, reason: &str) {
+        (self.log)(&format!("причина паузы: {reason}"));
+        self.inner.pause_reason_named(reason);
     }
 
     fn released(&self, pids: &[i32], outcome: &str, context: &KillContext) {

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use harness::{build, detached, harness, harness_with_window, FakeSettings, Harness, World};
 use weto_core::check::{CheckOutcome, CheckTrigger};
+use weto_core::diagnostics::StalenessCause;
 use weto_core::guard_machine::{GuardAction, GuardPhase};
 use weto_core::network::{VpnAppStatus, VpnTunnelStatus};
 use weto_core::policy::{UnprovenReason, UnsafeEvidence};
@@ -37,34 +38,48 @@ fn walks_in(h: &Harness, pass: impl FnOnce()) -> usize {
 
 // --- тесты -----------------------------------------------------------------
 
-/// Холодный старт целей не трогает: вердикта нет, проба спрашивается первой,
-/// и отвечает она. Принятая цена — до ~5 с работы без вердикта; прежнее
-/// «сперва убили, потом спросили» стоило дороже.
+/// Холодный старт про выход не знает ничего: цели стоят до первого ответа,
+/// а safe возвращает их. Не завершение — доказательства нет, — и не работа
+/// без вердикта: выключенный в клиенте VPN выпускал бы их напрямую всё время
+/// запроса.
 #[test]
-fn the_first_tick_leaves_the_targets_running_until_the_probe_answers() {
+fn the_first_tick_stops_the_targets_until_the_probe_answers() {
     let h = harness();
 
-    let phase = h.tick();
+    let waiting = h.controller.tick();
+
+    assert_eq!(
+        waiting,
+        GuardPhase::Paused {
+            since: waiting.paused_since().expect("стоят"),
+            reason: UnprovenReason::ExitNotVerified(StalenessCause::ColdStart),
+        }
+    );
+    assert_eq!(waiting.title(), "Проверяю выход");
+    assert_eq!(h.world.signalled(ProcessSignal::Stop), vec![42]);
+    assert_eq!(
+        h.reporter.recorded().paused[0].reason,
+        "Выход ещё не проверен: вердикта ещё не было"
+    );
+
+    let phase = h.settle();
 
     assert!(is_protected(&phase), "{phase:?}");
     assert_eq!(h.geo.call_count(), 1);
-    assert!(
-        h.world.signals().is_empty(),
-        "до ответа сети целям не посылают ничего: {:?}",
-        h.world.signals()
-    );
+    assert_eq!(h.world.signalled(ProcessSignal::Resume), vec![42]);
+    assert!(h.world.signalled(ProcessSignal::Kill).is_empty());
 }
 
 /// Без признака свежести цели вставали бы каждые пять секунд при исправном VPN.
 #[test]
 fn a_routine_tick_with_a_healthy_vpn_does_not_touch_the_targets() {
     let h = harness();
-    h.tick();
+    h.guarded();
 
     let phase = h.tick();
 
     assert!(is_protected(&phase));
-    assert!(h.world.signals().is_empty());
+    assert!(h.world.signals().is_empty(), "{:?}", h.world.signals());
     assert_eq!(
         h.geo.call_count(),
         1,
@@ -80,7 +95,7 @@ fn a_routine_tick_with_a_healthy_vpn_does_not_touch_the_targets() {
 #[test]
 fn a_foreign_vpn_reconnecting_does_not_touch_the_targets() {
     let h = harness();
-    h.tick();
+    h.guarded();
 
     // Снимок пересобран заново, носитель трафика тот же.
     h.network.route_moves_to("wg0");
@@ -95,28 +110,176 @@ fn a_foreign_vpn_reconnecting_does_not_touch_the_targets() {
     );
 }
 
-/// Смена владельца маршрута обесценивает вердикт — но целей не трогает:
-/// она просит пробу, а решает ответ. Запрос уходит и за показаниями: экран
-/// обязан сказать, где пользователь оказался.
+/// Смена владельца маршрута обесценивает вердикт и ставит цели на паузу сразу,
+/// до ответа: так выглядит выключенный в клиенте VPN. Эпизод паузы называет
+/// причину «Выход ещё не проверен» и несёт разбор свежести — чем прежний вердикт
+/// перестал описывать выход. Ответ safe возвращает цели, а запрос уходит и
+/// за показаниями: экран обязан сказать, где пользователь оказался.
 #[test]
-fn moving_the_route_off_the_tunnel_re_verifies_without_touching_the_targets() {
+fn moving_the_route_off_the_tunnel_pauses_until_the_probe_answers() {
     let h = harness();
-    h.tick();
+    h.guarded();
     let probes_before = h.geo.call_count();
 
     h.geo.now_reports("KZ");
     h.network.route_moves_to("eth0");
-    h.tick();
+    let waiting = h.controller.tick();
 
     assert!(
-        h.world.signals().is_empty(),
-        "смена пути целей не трогает: отвечает проба, а не отпечаток"
+        matches!(
+            waiting,
+            GuardPhase::Paused {
+                reason: UnprovenReason::ExitNotVerified(StalenessCause::NetworkChanged),
+                ..
+            }
+        ),
+        "{waiting:?}"
     );
+    assert_eq!(
+        h.world.signalled(ProcessSignal::Stop),
+        vec![42],
+        "смена пути ставит цели сразу, а не после ответа"
+    );
+    {
+        let recorded = h.reporter.recorded();
+        assert_eq!(
+            recorded.paused[0].reason,
+            "Выход ещё не проверен: сменился выход в сеть"
+        );
+        let staleness = recorded.pause_contexts[0]
+            .diagnostics
+            .staleness
+            .clone()
+            .expect("эпизод, заведённый потерей, несёт разбор свежести");
+        assert_eq!(staleness.cause, StalenessCause::NetworkChanged);
+        assert_ne!(staleness.previous_fingerprint, Some(staleness.fingerprint));
+    }
+
+    let phase = h.settle();
+
+    assert!(is_protected(&phase), "{phase:?}");
+    assert_eq!(h.world.signalled(ProcessSignal::Resume), vec![42]);
     assert!(
         h.geo.call_count() > probes_before,
         "вердикт обязан быть выведен заново, а не наследован"
     );
     assert!(h.controller.snapshot().report.is_some());
+}
+
+/// Ответ «не доказано» на паузе, ждавшей ответа, называет эпизоду настоящую
+/// причину — всем его записям, — а отсчёт до потолка остаётся от потери.
+#[test]
+fn an_unproven_answer_names_the_reason_of_the_waiting_pause() {
+    let h = harness();
+    h.guarded();
+
+    h.network.tunnel_goes_down();
+    let waiting = h.controller.tick();
+    let since = waiting.paused_since().expect("стоят до ответа");
+
+    h.geo.everything_goes_silent();
+    let phase = h.settle();
+
+    let GuardPhase::Paused {
+        since: answered_since,
+        reason,
+    } = &phase
+    else {
+        panic!("неответ оставляет цели стоять: {phase:?}");
+    };
+    assert!(
+        matches!(reason, UnprovenReason::GeoUnavailable(_)),
+        "{reason:?}"
+    );
+    assert_eq!(
+        *answered_since, since,
+        "потолок считается от потери вердикта"
+    );
+    assert_eq!(phase.title(), "Выход не подтверждён");
+    assert_eq!(
+        h.reporter.recorded().named_reasons,
+        vec![reason.display_text()],
+        "эпизод узнал настоящую причину ровно один раз"
+    );
+    assert_eq!(h.world.signalled(ProcessSignal::Stop), vec![42]);
+    assert!(h.world.signalled(ProcessSignal::Resume).is_empty());
+
+    // Следующий неответ ничего не переименовывает: причина уже настоящая.
+    h.probe_now();
+    assert_eq!(h.reporter.recorded().named_reasons.len(), 1);
+}
+
+/// Доказанно тот же адрес возвращает цели и после смены пути: тот же адрес —
+/// тот же выход, через какой бы интерфейс он ни шёл. Вердикт переезжает
+/// на новый путь, поэтому следующий такт потерю заново не объявляет, а правка
+/// настроек после этого — правка одних настроек, а не смена сети.
+#[test]
+fn the_same_address_on_a_new_path_resumes_into_interference() {
+    let h = harness();
+    h.guarded();
+
+    h.geo.ipinfo_goes_silent("203.0.113.7");
+    h.network.tunnel_goes_down();
+    let phase = h.tick();
+
+    assert!(
+        matches!(phase, GuardPhase::Interference { .. }),
+        "адрес тот же — выход тот же: {phase:?}"
+    );
+    assert_eq!(h.world.signalled(ProcessSignal::Stop), vec![42]);
+    assert_eq!(h.world.signalled(ProcessSignal::Resume), vec![42]);
+
+    // Следующий такт — тот, что снимает обязательство наблюдением; паузы в нём нет.
+    h.world.forget_signals();
+    let probes = h.geo.call_count();
+    let phase = h.tick();
+    assert!(
+        matches!(phase, GuardPhase::Interference { .. }),
+        "{phase:?}"
+    );
+    assert!(
+        h.world.signalled(ProcessSignal::Stop).is_empty(),
+        "вердикт переехал на новый путь — второй паузы нет: {:?}",
+        h.world.signals()
+    );
+    assert_eq!(h.geo.call_count(), probes, "и второго запроса тоже");
+
+    h.settings
+        .edit(|s| s.blocked_countries.push("DE".to_string()));
+    let phase = h.controller.tick();
+    assert_eq!(
+        phase,
+        GuardPhase::Verifying {
+            cause: StalenessCause::ConfigurationChanged
+        },
+        "прежний путь вердикту больше не принадлежит"
+    );
+    assert!(h.world.signalled(ProcessSignal::Stop).is_empty());
+}
+
+/// Другой адрес на новом пути — не тот же выход: пауза, ждавшая ответа,
+/// остаётся стоять, и причина у неё теперь настоящая.
+#[test]
+fn a_new_address_on_a_new_path_keeps_the_targets_paused() {
+    let h = harness();
+    h.guarded();
+
+    h.geo.ipinfo_goes_silent("198.51.100.231");
+    h.network.tunnel_goes_down();
+    let phase = h.tick();
+
+    assert!(
+        matches!(
+            phase,
+            GuardPhase::Paused {
+                reason: UnprovenReason::AddressChanged { .. },
+                ..
+            }
+        ),
+        "{phase:?}"
+    );
+    assert_eq!(h.world.signalled(ProcessSignal::Stop), vec![42]);
+    assert!(h.world.signalled(ProcessSignal::Resume).is_empty());
 }
 
 /// Закрытый VPN-клиент — доказательство, а доказательство завершает, и завершает
@@ -332,13 +495,13 @@ fn editing_the_whitelist_invalidates_the_verdict() {
     assert_eq!(h.geo.call_count(), calls_before + 1);
 }
 
-/// У подтверждающего сервиса лимит 60 запросов в минуту. Всплеск событий сети
-/// не должен превращаться во всплеск запросов — и цели в это окно продолжают
-/// работать: вердикта нет, но и результата нет, а трогает цели только результат.
+/// У подтверждающего сервиса лимит 60 запросов в минуту. Всплеск событий
+/// не должен превращаться во всплеск запросов — и при правке одних настроек
+/// цели в это окно продолжают работать: про выход правка не говорит ничего.
 #[test]
 fn a_burst_of_changes_does_not_become_a_burst_of_requests() {
     let h = harness_with_window(Duration::from_millis(300));
-    h.tick();
+    h.guarded();
     let calls_after_first = h.geo.call_count();
 
     h.settings
@@ -350,9 +513,12 @@ fn a_burst_of_changes_does_not_become_a_burst_of_requests() {
         calls_after_first,
         "второй запрос придержан окном"
     );
-    assert!(
-        matches!(phase, GuardPhase::Verifying { .. }),
-        "придержали запрос — значит вердикта нет: {phase:?}"
+    assert_eq!(
+        phase,
+        GuardPhase::Verifying {
+            cause: StalenessCause::ConfigurationChanged
+        },
+        "придержали запрос — значит вердикта нет"
     );
     assert_eq!(phase.action(), GuardAction::Run);
     assert!(h.world.signals().is_empty());
@@ -390,8 +556,9 @@ fn a_blocked_country_kills_and_names_the_source() {
         .any(|r| r.contains("RU")));
 }
 
-/// Записи «подключение ещё не проверено» в журнале больше не бывает: до ответа
-/// пробы цели работают, и завершение объясняется настоящей причиной сразу.
+/// Завершение объясняется настоящей причиной, а не отговоркой «ещё не проверено»:
+/// причину завершения называет доказательство. Здесь вердикт обесценила правка
+/// настроек — цели работали до ответа, и он же их завершил.
 #[test]
 fn the_journal_never_starts_with_an_unverified_excuse() {
     let h = harness();
@@ -482,7 +649,7 @@ fn the_button_asks_the_network_even_when_the_verdict_is_local() {
 #[test]
 fn the_button_does_not_cost_the_user_their_targets() {
     let h = harness();
-    h.tick();
+    h.guarded();
 
     let phase = h.probe_now();
 
@@ -593,7 +760,7 @@ fn a_settled_verdict_does_not_probe_every_tick() {
 #[test]
 fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
     let h = harness();
-    assert!(is_protected(&h.tick()));
+    assert!(is_protected(&h.guarded()));
 
     h.geo.ipinfo_goes_silent("203.0.113.7");
     let phase = h.probe_now();
@@ -611,7 +778,7 @@ fn silent_ipinfo_with_the_same_address_keeps_the_targets() {
 #[test]
 fn silent_ipinfo_with_a_new_address_pauses() {
     let h = harness();
-    assert!(is_protected(&h.tick()));
+    assert!(is_protected(&h.guarded()));
 
     h.geo.ipinfo_goes_silent("198.51.100.231");
     let phase = h.probe_now();
@@ -672,9 +839,12 @@ fn a_tick_that_probes_walks_the_processes_once() {
         "такт, отпустивший пробу, лишнего обхода не делает"
     );
     assert_eq!(answering, quiet, "и проход ответа — один проход, а не два");
+    // Холодный проход ставит цели (одна запись паузы), ответ и тихий такт
+    // их не трогают и закрывают эпизод — по одному применению на проход.
+    let recorded = h.reporter.recorded();
+    assert_eq!(recorded.pause_contexts.len(), 1, "холодный проход — пауза");
     assert_eq!(
-        h.reporter.recorded().finished,
-        3,
+        recorded.finished, 2,
         "по одному применению на проход, а не по два"
     );
 }
@@ -839,7 +1009,7 @@ fn a_target_born_under_danger_is_killed_without_waiting_for_the_answer() {
 #[test]
 fn a_target_born_under_the_pause_is_stopped_without_waiting_for_the_answer() {
     let h = harness();
-    h.tick();
+    h.guarded();
 
     h.geo.everything_goes_silent();
     let paused = h.probe_now();

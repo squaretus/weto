@@ -33,7 +33,8 @@ a timeout means a black hole, not a leak.
    user ever sees. The reason is attached as evidence; it does not define the state. The
    policy stays a pure function (`GuardPolicy.decide` → safe / unproven / kill); the
    transitions live in a pure reducer (`GuardMachine`) owned by `GuardController`.
-3. **The pause starts from a bad result, never from waiting for one.** «Проверка» is a *running*
+3. **The pause starts from a bad result, never from waiting for one.** *(Reversed 2026-10-30 —
+   see the last amendment: a lost verdict for network reasons now pauses at once.)* «Проверка» is a *running*
    phase: a cold start and a path change invalidate the verdict and ask for a probe, and the
    answer decides. The first result that says «not proven» pauses the targets — there is no count
    of failed probes and no tolerance window. «Помехи» survives with evidence semantics only:
@@ -122,3 +123,47 @@ Consequences of the amendment:
   fields. The popup wording for «Проверка» was fixed by the wording follow-up (`80be667`):
   it now reads «Проверяю выход», «Цели работают», with no countdown — a running phase reads
   as one.
+
+## Amendment 2026-10-30 (owner): a lost verdict pauses until the probe answers
+
+The 2026-09-09 acceptance of «up to ~5 s without a verdict» is withdrawn. Any loss of the
+verdict for network reasons — cold start (no verdict yet), a change of the outgoing interface
+or of its local address (fingerprint `out=<iface>/<addr>`), the network reappearing — now
+pauses the targets immediately with `UnprovenReason.exitNotVerified(cause)` («Выход ещё
+не проверен: <cause>»). The title stays «Проверяю выход», the action line reads «Цели
+остановлены», and the ceiling counts from the loss.
+
+Why: Happ can switch its tunnel off while the app stays alive; the traffic then left via `en0`
+for 1–5.5 s before the probe answered — exactly the window that had been accepted. The pause
+storms that made the owner remove «stop first, ask later» in September came from a
+whole-machine fingerprint (a second VPN, Cisco, reconnecting on its own). That fingerprint is
+long gone: it is now only the interface and address of the route to ipinfo, so on a healthy
+VPN it changes rarely.
+
+What the probe answer does to a waiting pause:
+
+- safe on the full chain (ipinfo + confirmation + black/white lists) → resume;
+- ipinfo silent, but the fallback self-address service (geojs-self) names the same IP as the
+  established verdict → resume into «Помехи». This is accepted on **any** path now, not only
+  on the same fingerprint, and the established verdict is re-keyed to the new fingerprint with
+  the old reading (and the old revision), otherwise the next tick would announce the loss again;
+- unproven → stays paused; the phase reason and every record of the open pause episode get the
+  real reason (`GuardVM.nameWaitingPauseReason` / `name_awaited_reason` →
+  `KillReporting::pause_reason_named`), `since` unchanged;
+- kill evidence → terminate, the episode resolves «завершено по доказательству: …».
+
+A settings-only staleness (`configurationChanged`, reachable on Linux because an edit bumps the
+revision) does not pause: phase `verifying`, targets run. On macOS a settings edit still
+reassesses synchronously. Startup crash recovery is unchanged: ledger orphans get SIGCONT, the
+cold-start pause then adopts the ones still stopped, and the recovery episode's outcome is
+written when that pause resolves.
+
+Consequences:
+
+- `guard-transitions.json` moves to version 3: the `exitNotVerified{cause}` reason, which only
+  `verdictLost` produces (never the policy), and cases for the loss.
+- A pause episode can now open on the loss itself, so `diagnostics.staleness` is armed in
+  `announceLoss` / `announce_loss` when the loss returns `.pause`, not only at a bad result.
+- Known trade-off: the «same IP on a new path» resume relies on geojs-self. With per-destination
+  split routing geojs could still go through the tunnel while the route to ipinfo left it. Low
+  probability: it needs ipinfo silent at the same moment.

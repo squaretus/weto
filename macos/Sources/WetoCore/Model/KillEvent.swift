@@ -227,6 +227,7 @@ extension UnprovenReason {
         case .geoUnavailable(let detail): return "Не удалось определить внешний адрес: \(detail)"
         case .addressChanged(let observed): return "Адрес сменился на \(observed), страна не проверена"
         case .confirmationUnavailable: return "Подтверждающие сервисы недоступны"
+        case .exitNotVerified(let cause): return "Выход ещё не проверен: \(cause.displayText)"
         }
     }
 }

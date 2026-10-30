@@ -672,6 +672,9 @@ pub struct Recorded {
     pub released: Vec<(Vec<i32>, String)>,
     /// Контексты записей паузы: разбор свежести живёт здесь.
     pub pause_contexts: Vec<KillContext>,
+    /// Причины, названные эпизоду паузы ответом пробы вместо «Выход ещё
+    /// не проверен»: в журнале ими переписываются все записи эпизода.
+    pub named_reasons: Vec<String>,
     /// Цели, о потере терминала которых уведомили: порт `notifyBackgrounded`.
     pub backgrounded: Vec<String>,
 }
@@ -679,6 +682,11 @@ pub struct Recorded {
 impl RecordingReporter {
     pub fn recorded(&self) -> std::sync::MutexGuard<'_, Recorded> {
         self.0.lock().unwrap()
+    }
+
+    /// Забыть записанное — как `World::forget_signals` для сигналов.
+    pub fn forget(&self) {
+        *self.0.lock().unwrap() = Recorded::default();
     }
 
     pub fn paused_pids(&self) -> Vec<i32> {
@@ -745,6 +753,14 @@ impl KillReporting for RecordingReporter {
             .recovered
             .extend(entries(&processes, &context.reason));
         recorded.pause_contexts.push(context.clone());
+    }
+
+    fn pause_reason_named(&self, reason: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .named_reasons
+            .push(reason.to_string());
     }
 
     fn released(&self, pids: &[i32], outcome: &str, _context: &KillContext) {
@@ -817,6 +833,22 @@ impl Harness {
     pub fn probe_now(&self) -> GuardPhase {
         self.controller.probe_now();
         self.settle()
+    }
+
+    /// Довести охрану до «На страже» и забыть вступление.
+    ///
+    /// Холодный старт ставит цели до первого ответа, ответ их возвращает, а снимает
+    /// обязательство следующий проход — по наблюдению. Это история своего эпизода:
+    /// тестам дальше нужна чистая доска — ни сигналов, ни записей, ни режимов
+    /// терминала вступления. Сама эта история проверяется отдельно, без забывания.
+    pub fn guarded(&self) -> GuardPhase {
+        self.tick();
+        let phase = self.controller.tick();
+        self.settle();
+        self.world.forget_signals();
+        self.reporter.forget();
+        self.terminal_modes.forget();
+        phase
     }
 
     /// Ответ пришёл: фаза после того, как проход ответа применил его к целям.
@@ -1022,6 +1054,13 @@ impl RecordingTerminalModes {
             .iter()
             .map(|mode| mode.device)
             .collect()
+    }
+
+    /// Забыть снятые и возвращённые режимы — как `World::forget_signals`.
+    pub fn forget(&self) {
+        let mut modes = self.0.lock().unwrap();
+        modes.0.clear();
+        modes.1.clear();
     }
 }
 

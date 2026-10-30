@@ -544,8 +544,10 @@ public final class GuardVM {
         }
         defer { if ownsScan { currentScan = nil } }
 
+        let previous = self.phase
         self.phase = phase
         lastOrigin = origin
+        nameWaitingPauseReason(from: previous, to: phase)
 
         switch effect {
         case .pause: pauseTargets()
@@ -617,6 +619,18 @@ public final class GuardVM {
             return phase.title
         }
         return reason.displayText
+    }
+
+    /// Пауза, ждавшая ответа, узнала свою настоящую причину — эпизод называет её.
+    /// «Выход ещё не проверен» не отвечало бы, кто именно промолчал: ради этого
+    /// вопроса журнал и читают, когда цели завершились по потолку.
+    private func nameWaitingPauseReason(from previous: GuardPhase, to phase: GuardPhase) {
+        guard case .paused(_, .exitNotVerified) = previous,
+              case .paused(_, let reason) = phase, reason != previous.pausedReason,
+              let episodeID = pauseEpisodeID
+        else { return }
+        pauseEpisodeReason = reason.displayText
+        eventLog.refine(episodeID: episodeID, reasonText: reason.displayText)
     }
 
     /// Разбор свежести спрашивается у контроллера ровно в тот миг, когда плохой результат
@@ -902,6 +916,10 @@ public final class GuardVM {
                                                  since: entry.stoppedAt, isBackgrounded: false))
         }
         recordRecoveryEpisode(standing, in: scan)
+        // Их стояние объяснено эпизодом восстановления. Пауза холодного старта ставит
+        // пошедших от нашего SIGCONT снова — второй записи про те же pid не бывает,
+        // и пилюля помнит стояние с прошлой жизни, а не с этого стопа.
+        pausedEpisodePIDs.formUnion(standing.map(\.pid))
         // Сигнал этим записям уже ушёл, поэтому следующее наблюдение — их ответ,
         // а не ожидание: иначе такт молча слал бы SIGCONT по второму разу.
         signalledForResume.formUnion(standing.map(\.pid))

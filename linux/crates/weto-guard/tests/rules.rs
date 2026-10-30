@@ -121,8 +121,10 @@ fn guarded_pids(s: &Stand) -> Vec<i32> {
     pids
 }
 
+/// «На страже» без следов вступления: холодный старт ставит цели до ответа,
+/// и сигналы того эпизода тестам правил не нужны.
 fn guarded(s: &Stand) {
-    let phase = s.tick();
+    let phase = s.guarded();
     assert!(matches!(phase, GuardPhase::Protected(_)), "{phase:?}");
 }
 

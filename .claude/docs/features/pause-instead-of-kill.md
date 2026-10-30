@@ -84,6 +84,9 @@ reconnecting on its own (not evidence of anything), and the tolerance window let
 start or path change asks for a probe and changes nothing while it is in flight; the first
 `unproven` result pauses immediately, with no count and no window. `GuardPhase.verifying` carries
 only a cause, no moment — nothing is timed from it. Wording landed in commit `80be667`.
+Partly reversed 2026-10-30: a lost verdict for network reasons pauses at once
+(`exitNotVerified`), only a settings-only staleness stays in the running «Проверка» — see the
+decision's last amendment.
 
 ### Amendment: uninstall discharges the obligation by observation
 Every other exit hands an unresolved ledger entry to the next launch. Uninstall has none — the
@@ -94,10 +97,11 @@ ledger is deleted with the app — so the button now runs `stop()`/`shutdown()`,
 episode outcome is not rewritten, `stop()`'s «продолжено при выходе из Weto …» stands as the record.
 
 ## Risks
-- **The pause window is real and accepted, not a bug.** Between a path change (or cold start) and
-  the probe's answer, targets run for up to ~5 s with no verdict. This was traded deliberately
-  against the previous "stop first, ask later", which stopped targets on every flap of a
-  perfectly healthy VPN.
+- **A lost verdict stops the targets until the probe answers** (since 2026-10-30; the earlier
+  accepted ~5 s window without a verdict let traffic leave via `en0` when Happ switched its tunnel
+  off). The cost is a pause on every change of the outgoing interface or its address — rare now
+  that the fingerprint is only the route to ipinfo. Reasons and the same-IP-on-any-path resume —
+  `decisions/pause-instead-of-kill.md`, last amendment.
 - **Pid reuse is the recurring hazard on both the pause and resume sides.** `StoppedLedger`
   entries are pid **and** `executablePath`; `resumeOrphans` and `ProcessEnforcer.pause`'s
   already-stopped check both re-verify the path before trusting a pid.
