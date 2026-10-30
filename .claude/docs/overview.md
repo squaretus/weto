@@ -33,12 +33,15 @@ turns a decision into one of six phases and either keeps targets running, pauses
    `GuardMachine.apply(.evidence(evidence))` directly, bypassing the probe — a closed VPN client
    needs no network call to be noticed, and `didTerminateApplicationNotification` makes it
    instant.
-4. **No verdict for this path keeps targets running.** With no local answer and no established
-   verdict for the current fingerprint (cold start, path change, a lost verdict), `announceLoss`
-   feeds `GuardMachine.apply(.verdictLost(cause))`, which moves the phase to `.verifying(cause)` —
-   a *running* phase — and asks for a probe after the 300 ms debounce
-   (`Constants.networkEventDebounceSeconds`). Nothing pauses or terminates before that probe
-   answers: the accepted cost is a window of up to ~5 s with no verdict at all. Freshness is the
+4. **No verdict for this path pauses the targets until the probe answers.** With no local answer
+   and no established verdict for the current fingerprint (cold start, path change, a lost
+   verdict), `announceLoss` feeds `GuardMachine.apply(.verdictLost(cause))`. A network cause
+   (`coldStart`, `networkChanged`, `configurationAndNetworkChanged`) moves the phase to
+   `.paused(since: now, reason: .exitNotVerified(cause))` and returns `.pause` — the targets get
+   SIGSTOP at once, the episode opens with «Выход ещё не проверен: …» and the staleness armed
+   for it, and the ceiling counts from this moment. Only `configurationChanged` (Linux, where a
+   settings edit bumps the revision) moves to the *running* `.verifying(cause)`. The probe is
+   asked after the 300 ms debounce (`Constants.networkEventDebounceSeconds`). Freshness is the
    pair «config revision + network snapshot fingerprint» (`NetworkSnapshot.verdictFingerprint`:
    the interface the kernel picks for the verdict request plus that interface's local address),
    not plain snapshot equality — the set of interfaces is deliberately absent, since a
@@ -67,10 +70,14 @@ turns a decision into one of six phases and either keeps targets running, pauses
    `admissibleOutcome` to turn a silent ipinfo into something `GuardPolicy.decide` can read: the
    reference service naming the same address as the established verdict becomes
    `.degraded(previous:, detail:)` — an answer, not silence, so `decide` treats it like a resolved
-   reading (targets keep running; the phase becomes `interference`, shield amber, evidence
-   attached) — while a *different* address becomes `.addressChanged(observed:, previous:)`, which
-   `decide` reports as `.unproven(.addressChanged)` with no tolerance: it pauses on this first
-   probe like any other unproven answer. The decision (`safe` / `unproven(reason)` /
+   reading (targets keep running or resume; the phase becomes `interference`, shield amber,
+   evidence attached) — while a *different* address becomes `.addressChanged(observed:, previous:)`,
+   which `decide` reports as `.unproven(.addressChanged)` with no tolerance: it pauses on this
+   first probe like any other unproven answer. The same-address match is accepted on any
+   fingerprint — the same address is the same exit — and the established verdict is then
+   re-keyed to the new fingerprint with the old reading. An `unproven` answer to a pause opened
+   by the loss only renames its reason (the phase and every record of the episode,
+   `GuardVM.nameWaitingPauseReason`), keeping `since`. The decision (`safe` / `unproven(reason)` /
    `kill(evidence)`) becomes a `GuardInput` (`.verdict`, `.reassessment`, `.evidence`,
    `.verdictLost`, `.tick` or `.disarmed`) fed to `GuardMachine.apply(_:at:)` — a pure function,
    pinned by the shared golden fixture `shared/fixtures/guard-transitions.json` and run by both

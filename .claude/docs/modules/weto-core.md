@@ -21,7 +21,7 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `macos/Sources/WetoCore/GuardMachine.swift` — `GuardPhase` (six phases, five titles — see
   `docs/design-system.md` "Щит статуса"), `GuardInput`, `GuardEffect`, the pure reducer
   `GuardMachine.apply(_:at:)`. Pinned by the shared golden fixture
-  `shared/fixtures/guard-transitions.json` (version 2), run by both `GuardMachineTests` here
+  `shared/fixtures/guard-transitions.json` (version 3), run by both `GuardMachineTests` here
   and the Rust counterpart in `linux-guard`.
 - `macos/Sources/WetoCore/PauseCeiling.swift` — the four pause-ceiling choices (1/2/5/10 min,
   `standard` = 1 min), `init(storedSeconds:)` (unknown → 1 min) and `durationText` («5 мин»,
@@ -134,6 +134,15 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   what makes a disabled switch inert; it is duplicated on purpose in `decide` and `decideLocal`.
   `GuardMachine.apply(.disarmed)` is the reducer's own version of the same check — it always wins
   and returns to `.disabled` regardless of the current phase.
+- **`.verdictLost` pauses unless the cause is `configurationChanged`.** From `disabled`,
+  `protected`, `interference` or `verifying`, a network cause (`coldStart`, `networkChanged`,
+  `configurationAndNetworkChanged`) goes to `.paused(since: now, reason: .exitNotVerified(cause))`
+  with `.pause`; only `configurationChanged` goes to the running `.verifying`. `exitNotVerified`
+  is never a policy decision — only this input sets it. Its title is «Проверяю выход», not «Выход
+  не подтверждён». An `.unproven` verdict on such a pause replaces the reason and keeps `since`
+  (effect `.none`); `.safe` without a reading keeps it standing. Already `paused`/`danger` —
+  `.verdictLost` changes nothing, so a path change can neither resume nor restart the ceiling.
+  Decision: the 2026-10-30 amendment in `decisions/pause-instead-of-kill.md`.
 - **Country comparison is case-insensitive at compare time**, not at storage time: both the blocked
   and the allowed sets, and the readings, are uppercased inside `decide`, so persisted settings may
   hold any casing.

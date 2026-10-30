@@ -14,10 +14,12 @@ Killing requires *proof* (`UnsafeEvidence`) — everything else pauses (`Unprove
 `kind: .paused` record for the same episode means the guard is only *waiting*, not accusing
 anything, and belongs in the section below instead.
 
-- **A lost verdict (no evidence yet, `GuardPhase.verifying`, «Проверяю выход»)** — the previous
-  verdict was declared stale by a fingerprint or revision change. Targets keep running here (this
-  is the whole point of the 2026-09-09 re-spec — see `decisions/pause-instead-of-kill.md`); if
-  something died anyway, the bad actor is a `.paused` episode's ceiling (the chosen 1–10 min with no answer,
+- **A lost verdict (no evidence yet, «Проверяю выход»)** — the previous verdict was declared stale
+  by a fingerprint or revision change. A network cause (cold start, path change) pauses the targets
+  at once with `exitNotVerified` («Выход ещё не проверен: …», «Цели остановлены»); only a
+  settings-only revision bump (`GuardPhase.verifying`, Linux) keeps them running — see the
+  2026-10-30 amendment in `decisions/pause-instead-of-kill.md`. If something died, the bad actor
+  is that pause's ceiling (the chosen 1–10 min with no answer, counted from the loss,
   `UnsafeEvidence.pauseExpired(ceiling:)`) or actual proof, not the lost verdict itself. Suspect the
   freshness pair: `GuardController.evaluate`/`applyLatestNetworkOutcome` and
   `NetworkSnapshot.verdictFingerprint` (Linux: `controller.rs::run`,
@@ -36,8 +38,9 @@ anything, and belongs in the section below instead.
   long-lived target silently unkillable, which looks like nothing at all rather than a wrong reason.
 - **A lost verdict right after the tunnel came up or went down** — the traffic carrier changed,
   so the fingerprint changed. Suspects: `KernelRouteProbe` (is the ipinfo host resolved? `out=-`
-  means it is not) and the `PF_ROUTE` subscription. This alone only re-enters `verifying` (targets
-  keep running); it becomes a kill only via a `.paused` episode's pause ceiling.
+  means it is not) and the `PF_ROUTE` subscription. This alone pauses the targets until the probe
+  answers (the same address from geojs-self resumes them into «Помехи» on the new path); it
+  becomes a kill only via proof or the pause ceiling.
 - **`notWhitelistedIP` / `notWhitelistedCountry` («… не входит в белый список»)** — not a
   malfunction: a non-empty whitelist is in the settings and the exit matched none of it. The list
   lives under `allowedCountryCodes` / `allowedIPRangeTexts` (Linux: `allowed_countries` /
