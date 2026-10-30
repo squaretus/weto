@@ -181,10 +181,10 @@ final class GuardController {
         }
 
         guard hasVerdictForPath, let established else {
-            // Вердикта про этот путь нет: объявляем потерю и просим пробу — цели при этом
-            // работают, паузу принесёт только плохой результат. Потолок считает лишь `.tick`,
-            // поэтому он идёт тем же тактом: пауза, начатая до смены пути, иначе не доехала бы
-            // до завершения — «вердикта нет» её не снимает и не продлевает.
+            // Вердикта про этот путь нет: объявляем потерю и просим пробу — цели стоят
+            // до ответа. Потолок считает лишь `.tick`, поэтому он идёт тем же тактом: пауза,
+            // начатая до смены пути, иначе не доехала бы до завершения — «вердикта нет»
+            // её не снимает и не продлевает.
             announceLoss(fingerprint: fingerprint, at: moment)
             startProbe(after: debounceInterval, trigger: probeTrigger)
             return
@@ -229,11 +229,11 @@ final class GuardController {
         startProbe(after: 0, trigger: trigger)
     }
 
-    /// Объявление потери вердикта: цели не трогаем, потолок паузы считается тем же
-    /// тактом, наружу уходит один эффект.
+    /// Объявление потери вердикта: цели встают до ответа пробы, потолок паузы
+    /// считается тем же тактом, наружу уходит один эффект.
     ///
-    /// Разбор свежести здесь не взводится: записи журнала эта потеря не заводит —
-    /// заводит её плохой результат пробы, и разбор считается там, где применяется.
+    /// Эпизод паузы заводит сама потеря, поэтому разбор свежести взводится здесь —
+    /// на время применения, как и у плохого результата пробы.
     private func announceLoss(fingerprint: String, at moment: Date) {
         let staleness = stalenessNow(fingerprint: fingerprint)
         let loss = AnnouncedLoss(cause: staleness.cause, fingerprint: fingerprint)
@@ -242,10 +242,13 @@ final class GuardController {
         if announcedLoss != loss, established != nil { onReport(nil) }
         announcedLoss = loss
 
-        // `.verdictLost` возвращает `.none` во всех ветках (см. `GuardMachine.apply`) —
-        // вызов здесь ради мутации фазы, а не ради эффекта; наружу уходит только `.tick`.
-        _ = machine.apply(.verdictLost(staleness.cause), at: moment)
-        emit(machine.apply(.tick, at: moment), origin: nil)
+        // Эффекта на проход один: потеря ставит на паузу, а такт сразу за ней
+        // ничего к этому не добавит — потолок от только что начатой паузы не истёк.
+        let lost = machine.apply(.verdictLost(staleness.cause), at: moment)
+        let tick = machine.apply(.tick, at: moment)
+        if lost == .pause { lastStaleness = staleness }
+        emit(lost == .none ? tick : lost, origin: nil)
+        lastStaleness = nil
     }
 
     /// Чем прежний вердикт перестал описывать наш выход — на этот самый момент.
@@ -392,10 +395,20 @@ final class GuardController {
         // Отчёт отдаётся и при отказе: попап обязан показать, кто именно молчал.
         onReport(report)
 
-        let geo = admissibleOutcome(of: report, fingerprint: fingerprint)
-        if case .resolved(let reading) = geo {
+        let geo = admissibleOutcome(of: report)
+        switch geo {
+        case .resolved(let reading):
             established = EstablishedReading(reading: reading, fingerprint: fingerprint, revision: revision)
             announcedLoss = nil
+        case .degraded(let previous, _):
+            // Тот же адрес — тот же выход, через какой бы интерфейс он ни шёл: вердикт
+            // переходит на новый путь, иначе следующий же такт снова объявил бы потерю.
+            established = EstablishedReading(
+                reading: previous, fingerprint: fingerprint, revision: established?.revision ?? revision
+            )
+            announcedLoss = nil
+        default:
+            break
         }
         lastSnapshot = snapshot
 
@@ -438,11 +451,12 @@ final class GuardController {
 
     /// ipinfo молчит — совпал ли адрес от резервного сервиса с адресом установленного вердикта.
     /// Совпал — `.degraded` (доказательство неизменности); другой — `.addressChanged` (страна не проверена);
-    /// адреса нет или отпечаток другой — как есть.
-    private func admissibleOutcome(of report: GeoProbeReport, fingerprint: String) -> GeoOutcome {
+    /// адреса нет — как есть. Путь значения не имеет: тот же адрес означает тот же выход
+    /// и после смены интерфейса — так возвращаются цели, вставшие на потере вердикта.
+    private func admissibleOutcome(of report: GeoProbeReport) -> GeoOutcome {
         let outcome = report.outcome
         guard case .unavailable(let detail) = outcome else { return outcome }
-        guard let established, established.fingerprint == fingerprint, let address = report.ip else { return outcome }
+        guard let established, let address = report.ip else { return outcome }
         guard address == established.reading.ip else {
             return .addressChanged(observed: address, previous: established.reading)
         }

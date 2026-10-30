@@ -579,20 +579,20 @@ final class GuardVMTests: XCTestCase {
         )
     }
 
-    /// Холодный старт целей не трогает: пауза начинается с плохого результата пробы,
-    /// а не с её ожидания. Цена принята владельцем — до ~5 с цели работают без вердикта.
-    func test_start_leaves_targets_running_while_the_initial_probe_is_suspended() async {
+    /// Холодный старт про выход не знает ничего: цели стоят, пока проба не ответит,
+    /// и отсчёт до потолка идёт от старта.
+    func test_start_pauses_targets_while_the_initial_probe_is_suspended() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
 
         h.vm.start()
         await h.probe.waitUntilStarted()
 
         XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
-        XCTAssertEqual(h.vm.phase.action, .run)
-        XCTAssertTrue(h.signaler.batches.isEmpty, "ни одного сигнала до ответа пробы")
-        XCTAssertNil(h.vm.pauseDeadline, "отсчёт до завершения появляется только вместе с паузой")
+        XCTAssertEqual(h.vm.phase.action, .pause)
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop], "цели встали до ответа пробы")
+        XCTAssertNotNil(h.vm.pauseDeadline, "отсчёт до завершения идёт со старта")
 
-        // А вот неответ — уже результат: цели встают, но не умирают.
+        // Неответ цели не возвращает и не завершает: они стоят дальше.
         await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
         await h.vm.awaitPendingProbe()
 
@@ -1173,13 +1173,12 @@ final class GuardVMTests: XCTestCase {
         h.vm.handle(.networkPath)
         XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
         XCTAssertEqual(
-            h.log.events.count, eventsAfterFirstEpisode,
-            "смена пути целей не трогает — и записывать про них нечего"
+            h.log.events.count, eventsAfterFirstEpisode + 2,
+            "смена пути заводит новый эпизод сама — по записи на процесс"
         )
 
-        // Эпизод на новом пути заводит его собственный плохой результат. Показаний
-        // про этот путь нет вовсе — ни свежих, ни прошлых, — и подписывать в записи
-        // нечего: «текущее» от давно отвеченной пробы наследоваться не имеет права.
+        // Показаний про новый путь нет вовсе — ни свежих, ни прошлых, — и подписывать
+        // в записи нечего: «текущее» от давно отвеченной пробы наследоваться не имеет права.
         await h.probe.waitUntilStarted(atLeast: started + 2)
         await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
         await h.vm.awaitPendingProbe()
@@ -1225,9 +1224,11 @@ final class GuardVMTests: XCTestCase {
         h.vm.stop()
     }
 
-    /// Сменился путь в сеть — снисхождение отменяется, даже когда адрес совпал:
-    /// вердикт при смене пути недействителен по построению.
-    func test_route_change_cancels_the_grace_even_on_the_same_address() async {
+    /// Сменился путь в сеть — цели встают. ipinfo молчит, а резервный сервис назвал
+    /// прежний адрес: тот же адрес — тот же выход, через какой бы интерфейс он ни шёл,
+    /// и цели возвращаются в Помехи. Вердикт переезжает на новый путь, поэтому
+    /// следующий такт потерю заново не объявляет.
+    func test_the_same_address_on_a_new_path_resumes_the_targets_into_interference() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
         h.vm.handle(.networkPath)
         await h.probe.waitUntilStarted()
@@ -1239,6 +1240,7 @@ final class GuardVMTests: XCTestCase {
             outgoing: OutgoingRoute(interface: "utun9", address: "198.18.0.1")
         )
         h.vm.handle(.networkPath)
+        XCTAssertEqual(h.signaler.batches.last?.signal, .stop, "цели встали на смене пути")
 
         await h.probe.waitUntilStarted(atLeast: 2)
         await h.probe.resumeFirst(with: .degraded(
@@ -1252,11 +1254,17 @@ final class GuardVMTests: XCTestCase {
         ))
         await h.vm.awaitPendingProbe()
 
-        XCTAssertEqual(
-            h.vm.phase.title, "Выход не подтверждён",
-            "безопасный ответ про прежний выход не открывает цели на новом — он их ставит"
-        )
-        XCTAssertEqual(h.signaler.batches.last?.signal, .stop)
+        XCTAssertEqual(h.vm.phase, .interference(
+            GeoReading(ip: "203.0.113.28", primaryCountry: "KZ", confirmedCountry: "KZ",
+                       confirmSource: .freeipapi),
+            reason: .geoUnavailable("HTTP 429")
+        ))
+        XCTAssertEqual(h.signaler.batches.last?.signal, .resume)
+
+        let batches = h.signaler.batches.count
+        h.vm.handle(.tick)
+        XCTAssertEqual(h.vm.phase.action, .run, "вердикт переехал на новый путь")
+        XCTAssertEqual(h.signaler.batches.count, batches, "второй паузы нет")
         h.vm.stop()
     }
 
@@ -1378,13 +1386,13 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.log.events.first { $0.pid == 500 }?.matchedBy, .rule)
     }
 
-    /// Смена пути вердикт обесценивает, но целей не трогает: пауза приходит только
-    /// с плохим результатом пробы, и до него эпизода нет вовсе.
+    /// Смена пути — так выглядит выключенный в клиенте VPN: цели встают сразу,
+    /// не дожидаясь ответа пробы, и эпизод заводит сама смена.
     ///
-    /// А когда эпизод всё-таки заводится, разбор свежести (`diagnostics.staleness`)
-    /// обязан быть в нём: без него выгрузка не отвечает, что именно случилось с выходом,
-    /// и смена интерфейса неотличима от правки настроек.
-    func test_a_path_change_alone_starts_no_episode() async {
+    /// Разбор свежести (`diagnostics.staleness`) обязан быть в нём: без него выгрузка
+    /// не отвечает, что именно случилось с выходом, и смена интерфейса неотличима
+    /// от правки настроек. А ответ пробы называет настоящую причину всему эпизоду.
+    func test_a_path_change_pauses_at_once_and_the_answer_names_the_reason() async {
         let h = makeDelayedHarness(snapshot: healthySnapshot())
 
         h.vm.handle(.networkPath)
@@ -1392,24 +1400,30 @@ final class GuardVMTests: XCTestCase {
         await h.probe.resumeFirst(with: geoOutcome(primary: "KZ", confirmed: "KZ"))
         await h.vm.awaitPendingProbe()
         XCTAssertEqual(h.vm.phase.title, "На страже")
+        let signalsBefore = h.signaler.batches.count
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
+        let newest = { h.log.events.filter { $0.episodeID == h.log.events.first?.episodeID } }
 
-        XCTAssertEqual(h.vm.phase, .verifying(cause: .networkChanged))
-        XCTAssertEqual(h.vm.phase.action, .run, "цели работают, пока проба не ответила")
-        XCTAssertTrue(h.log.events.isEmpty, "эпизода без плохого результата не бывает")
-        XCTAssertTrue(h.signaler.batches.isEmpty, "ни одного сигнала")
+        XCTAssertEqual(h.vm.phase.pausedReason, .exitNotVerified(.networkChanged))
+        XCTAssertEqual(h.vm.phase.title, "Проверяю выход")
+        XCTAssertEqual(h.signaler.batches.dropFirst(signalsBefore).map(\.signal), [.stop],
+                       "цели встали до ответа")
+        XCTAssertEqual(newest().first?.kind, .paused, "цели стоят, а не завершены")
+        XCTAssertEqual(Set(newest().map(\.reasonText)), ["Выход ещё не проверен: сменился выход в сеть"])
 
-        // А ответ по новому пути уже заводит эпизод — и он про паузу, не про завершение.
         // Проба по смене пути уже в полёте, поэтому отвечаем ей, а не просим новую.
         await h.probe.waitUntilStarted(atLeast: 2)
         await h.probe.resumeFirst(with: .unavailable("таймаут запроса"))
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
-        XCTAssertEqual(h.log.events.first?.kind, .paused, "цели стоят, а не завершены")
-        XCTAssertEqual(h.signaler.batches.last?.signal, .stop)
+        XCTAssertEqual(h.signaler.batches.dropFirst(signalsBefore).map(\.signal), [.stop],
+                       "стоят дальше, второго стопа нет")
+        XCTAssertEqual(Set(newest().map(\.reasonText)),
+                       ["Не удалось определить внешний адрес: таймаут запроса"],
+                       "ответ назвал причину всему эпизоду")
 
         // Разбор свежести доехал до записи и описывает выход на момент постановки:
         // прежний вердикт был про другой интерфейс, и запись обязана это назвать.
@@ -1465,20 +1479,19 @@ final class GuardVMTests: XCTestCase {
 
         h.network.snapshotValue = directSnapshot()
         h.vm.handle(.networkPath)
-        XCTAssertEqual(h.vm.phase, .verifying(cause: .networkChanged), "fail-closed объявлен")
-        XCTAssertTrue(
-            h.log.events.isEmpty,
-            "смена пути целей не трогает: эпизода, а с ним и разбора свежести, ещё нет"
-        )
+        XCTAssertEqual(h.vm.phase.pausedReason, .exitNotVerified(.networkChanged), "fail-closed объявлен")
+        XCTAssertNotNil(h.log.events.first?.diagnostics?.staleness, "эпизод смены пути несёт разбор")
 
         await h.probe.waitUntilStarted(atLeast: 2)
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
         XCTAssertEqual(h.vm.phase.title, "На страже", "вердикт на новом пути состоялся")
+        let episodeOfThePathChange = h.log.events.first?.episodeID
 
         await pauseWithABadResult(h, after: 2)
 
         XCTAssertEqual(h.vm.phase.title, "Выход не подтверждён")
+        XCTAssertNotEqual(h.log.events.first?.episodeID, episodeOfThePathChange, "это новый эпизод")
         XCTAssertNil(
             h.log.events.first?.diagnostics?.staleness,
             "таймаут по установленному вердикту не наследует смену пути из прошлого эпизода"
@@ -1992,9 +2005,9 @@ final class GuardVMTests: XCTestCase {
         XCTAssertEqual(h.vm.currentCountryCode, "KZ")
     }
 
-    /// Доказательство пришло к целям, которые работали: холодный старт их больше
-    /// не останавливает, и завершение — первое, что с ними случилось. SIGKILL один,
-    /// записей две — по процессу, — и уведомление одно.
+    /// Доказательство пришло к целям, стоявшим с потери вердикта: завершение — исход
+    /// того же эпизода, а не новый. SIGKILL один, записей две — по процессу, —
+    /// и уведомление одно.
     func test_blocked_country_kills_and_records_event() async {
         let h = makeHarness(
             snapshot: healthySnapshot(),
@@ -2005,20 +2018,20 @@ final class GuardVMTests: XCTestCase {
         await h.vm.awaitPendingProbe()
 
         XCTAssertEqual(h.vm.phase, .danger(.blockedCountry(code: "RU", source: "ipinfo")))
-        XCTAssertEqual(h.signaler.batches.map(\.signal), [.kill], "ни одной паузы до вердикта")
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.stop, .kill], "стояли до вердикта")
         XCTAssertEqual(h.signaler.killedBatches, [[500, 501]])
 
         XCTAssertEqual(h.log.events.count, 2, "два процесса — две записи")
         XCTAssertEqual(Set(h.log.events.map(\.episodeID)).count, 1)
-        XCTAssertEqual(Set(h.log.events.map(\.kind)), [.terminated], "эпизод сразу про завершение")
-        XCTAssertEqual(Set(h.log.events.map(\.country)), ["RU"])
+        XCTAssertEqual(Set(h.log.events.map(\.kind)), [.paused], "эпизод начался паузой")
         XCTAssertEqual(
             Set(h.log.events.map(\.reasonText)),
-            [UnsafeEvidence.blockedCountry(code: "RU", source: "ipinfo").displayText]
+            ["Выход ещё не проверен: вердикта ещё не было"]
         )
         XCTAssertEqual(
-            Set(h.log.events.map(\.resolutionText)), [nil],
-            "эпизоду, начавшемуся завершением, дописывать исход не нужно"
+            Set(h.log.events.map(\.resolutionText)),
+            ["завершено по доказательству: "
+                + UnsafeEvidence.blockedCountry(code: "RU", source: "ipinfo").displayText]
         )
         XCTAssertEqual(h.notifier.terminated.count, 1, "одно завершение — одно уведомление")
         XCTAssertEqual(
@@ -2456,17 +2469,18 @@ final class GuardVMTests: XCTestCase {
 
     // MARK: - Регрессия по журналу 2026-09-07 и п. 11
 
-    /// 18:03:21Z: холодный старт, вердикт через 2 с. Прежде цели встали и через две
-    /// секунды возобновились — теперь их никто не трогает: пауза начинается с плохого
-    /// результата, а этот вердикт хороший. Журнал молчит, потому что рассказывать нечего.
-    func test_episode_1803_cold_start_touches_nothing_and_the_verdict_confirms_it() async {
+    /// 18:03:21Z: холодный старт, вердикт через 2 с. Цели стоят до ответа — про выход
+    /// на старте неизвестно ничего, — и хороший вердикт их возвращает: SIGCONT,
+    /// а в журнале эпизод с исходом.
+    func test_episode_1803_cold_start_pauses_until_the_verdict_resumes() async {
         let harness = makeDelayedHarness(snapshot: utun5Snapshot())
         harness.vm.start()
 
         XCTAssertEqual(harness.vm.phase.title, "Проверяю выход")
-        XCTAssertEqual(harness.vm.phase.action, .run)
-        XCTAssertTrue(harness.signaler.batches.isEmpty, "ни стопа, ни завершения до ответа")
-        XCTAssertTrue(harness.log.events.isEmpty, "эпизода нет: с целями ничего не случилось")
+        XCTAssertEqual(harness.vm.phase.action, .pause)
+        XCTAssertEqual(harness.signaler.batches.map(\.signal), [.stop], "цели встали до ответа")
+        XCTAssertEqual(Set(harness.log.events.map(\.reasonText)),
+                       ["Выход ещё не проверен: вердикта ещё не было"])
 
         await harness.probe.waitUntilStarted()
         await harness.probe.resumeFirst(with: .resolved(GeoReading(
@@ -2474,8 +2488,7 @@ final class GuardVMTests: XCTestCase {
         await harness.vm.awaitPendingProbe()
 
         XCTAssertEqual(harness.vm.phase.title, "На страже")
-        XCTAssertTrue(harness.signaler.batches.isEmpty, "возобновлять нечего — цели и не стояли")
-        XCTAssertTrue(harness.log.events.isEmpty)
+        XCTAssertEqual(harness.signaler.batches.map(\.signal), [.stop, .resume])
         XCTAssertTrue(harness.vm.pausedProcesses.isEmpty)
         harness.vm.stop()
     }
@@ -3104,6 +3117,15 @@ final class GuardVMTests: XCTestCase {
 
     /// Тот же сеанс с фоновым заданием, но собранный один раз: локатор меняет состояние
     /// процессов по ходу теста, учёт живёт своим хранилищем.
+    /// Хороший ответ на пробу холодного старта и такт после него: цели снова идут,
+    /// и обязательства учёта разбирает наблюдение, как при любом снятии паузы.
+    private func answerTheColdStart(_ h: DelayedHarness) async {
+        await h.probe.waitUntilStarted()
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        h.vm.handle(.tick)
+    }
+
     private func makeBackgroundJobHarness(
         stopped: Bool = false,
         checkLog: CheckLogStore = CheckLogStore(storage: InMemoryCheckLog()),
@@ -3234,6 +3256,9 @@ final class GuardVMTests: XCTestCase {
                                                  ledgerStorage: ledgerStorage)
 
         h.vm.start()
+        // Холодный старт держит цели до ответа: стоящую с прошлой жизни он забирает
+        // к себе, а наблюдать её ответ на SIGCONT можно, только когда цели снова идут.
+        await answerTheColdStart(h)
 
         XCTAssertEqual(h.vm.pausedProcesses.map(\.pid), [200], "стоящая цель обязана быть в попапе")
         XCTAssertEqual(h.vm.pausedProcesses.first?.isBackgrounded, true,
@@ -3269,6 +3294,7 @@ final class GuardVMTests: XCTestCase {
         let (h, locator, _) = makeForegroundJobHarness(stopped: true, ledgerStorage: ledgerStorage)
 
         h.vm.start()
+        await answerTheColdStart(h)
 
         XCTAssertEqual(Set(h.log.events.map(\.pid)), [100, 200, 201],
                        "объяснён каждый, кого weto застал стоящим")
@@ -3421,13 +3447,13 @@ final class GuardVMTests: XCTestCase {
                        "штатный выход исполняет обязательство несмотря на остановленные попытки")
     }
 
-    /// Потолок паузы виден интерфейсу только пока цели стоят — то есть с плохого
-    /// результата пробы и до его отмены. У «Проверки» отсчёта нет вовсе.
+    /// Потолок паузы виден интерфейсу только пока цели стоят — со старта, который
+    /// ставит их до ответа, и до отмены паузы.
     func test_pause_deadline_exists_only_while_the_targets_stand() async {
         let harness = makeDelayedHarness(snapshot: utun5Snapshot())
         harness.vm.start()
 
-        XCTAssertNil(harness.vm.pauseDeadline, "в проверке цели работают — считать нечего")
+        XCTAssertNotNil(harness.vm.pauseDeadline, "цели стоят с холодного старта")
 
         await harness.probe.waitUntilStarted()
         await harness.probe.resumeFirst(with: .unavailable("таймаут запроса"))

@@ -11,7 +11,7 @@ final class GuardMachineFixtureTests: XCTestCase {
 
     func test_every_fixture_case_matches_the_machine() throws {
         let suite = try loadSuite()
-        XCTAssertEqual(suite.version, 2, "версия фикстур разъехалась с раннером")
+        XCTAssertEqual(suite.version, 3, "версия фикстур разъехалась с раннером")
         XCTAssertFalse(suite.cases.isEmpty, "фикстуры пусты — файл не найден или испорчен")
 
         let reading = suite.reading.asReading
@@ -233,6 +233,7 @@ final class GuardMachineFixtureTests: XCTestCase {
         let kind: String
         let detail: String?
         let observed: String?
+        let cause: String?
 
         var asUnproven: UnprovenReason {
             get throws {
@@ -244,6 +245,11 @@ final class GuardMachineFixtureTests: XCTestCase {
                     guard let observed else { throw Failure("addressChanged без наблюдаемого адреса") }
                     return .addressChanged(observed: observed)
                 case "confirmationUnavailable": return .confirmationUnavailable
+                case "exitNotVerified":
+                    guard let cause, let parsed = VerdictStaleness.Cause(rawValue: cause) else {
+                        throw Failure("exitNotVerified с неизвестной причиной «\(cause ?? "—")»")
+                    }
+                    return .exitNotVerified(parsed)
                 default:
                     throw Failure("неизвестная unproven-причина «\(kind)»")
                 }
