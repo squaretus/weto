@@ -916,6 +916,10 @@ public final class GuardVM {
                                                  since: entry.stoppedAt, isBackgrounded: false))
         }
         recordRecoveryEpisode(standing, in: scan)
+        // Их стояние объяснено эпизодом восстановления. Пауза холодного старта ставит
+        // пошедших от нашего SIGCONT снова — второй записи про те же pid не бывает,
+        // и пилюля помнит стояние с прошлой жизни, а не с этого стопа.
+        pausedEpisodePIDs.formUnion(standing.map(\.pid))
         // Сигнал этим записям уже ушёл, поэтому следующее наблюдение — их ответ,
         // а не ожидание: иначе такт молча слал бы SIGCONT по второму разу.
         signalledForResume.formUnion(standing.map(\.pid))

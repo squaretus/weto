@@ -32,6 +32,19 @@ final class GuardLogTests: XCTestCase {
         ])
     }
 
+    /// Пауза, ждавшая ответа, узнала настоящую причину — строка про это одна на эпизод,
+    /// как на Linux: без неё лог сервера навсегда говорил бы «выход ещё не проверен».
+    func test_a_renamed_pause_reason_is_one_line_per_episode() {
+        let pause = UUID()
+        func renamed(_ pid: Int32) -> KillEvent {
+            KillEvent(episodeID: pause, date: Date(), targetName: "claude", pid: pid, kind: .paused,
+                      reasonText: "Не удалось определить внешний адрес: таймаут запроса",
+                      ip: nil, country: nil)
+        }
+        let lines = GuardRunner.journalLogLines(fresh: [], resolved: [], renamed: [renamed(4120), renamed(4133)])
+        XCTAssertEqual(lines, ["причина паузы: Не удалось определить внешний адрес: таймаут запроса"])
+    }
+
     /// Завершение в лог пишет журнал; уведомитель о нём молчит, иначе событие легло бы дважды.
     func test_the_notifier_does_not_duplicate_terminations() {
         var written: [String] = []

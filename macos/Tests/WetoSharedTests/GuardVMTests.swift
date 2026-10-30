@@ -211,6 +211,10 @@ private final class SpySignaler: ProcessSignaling, @unchecked Sendable {
         return stored.filter { $0.signal == .kill }.map(\.pids)
     }
 
+    /// Ответ «ядра» на сигнал: тест, которому важно, что процесс после SIGCONT
+    /// пошёл, меняет здесь обход.
+    var onSend: ((ProcessSignal, [Int32]) -> Void)?
+
     func setError(_ code: Int32, forPID pid: Int32) {
         lock.lock(); errors[pid] = code; lock.unlock()
     }
@@ -219,7 +223,9 @@ private final class SpySignaler: ProcessSignaling, @unchecked Sendable {
         lock.lock()
         stored.append((signal: signal, pids: pids))
         let snapshot = errors
+        let reaction = onSend
         lock.unlock()
+        reaction?(signal, pids)
         return pids.map { SignalResult(pid: $0, errorCode: snapshot[$0]) }
     }
 }
@@ -3276,6 +3282,33 @@ final class GuardVMTests: XCTestCase {
                        "журнал завершений объясняет каждое стояние, а не только своё")
         XCTAssertEqual(ledgerStorage.load().entries.map(\.pid), [200, 201],
                        "обязательство держится до наблюдения и после перезапуска")
+        h.vm.stop()
+    }
+
+    /// Стоявшие с прошлой жизни weto пошли от SIGCONT восстановления, и пауза холодного
+    /// старта ставит их снова. Их стояние уже объяснено эпизодом восстановления: второй
+    /// записи про те же pid нет, а пилюля помнит, с какого времени они стоят.
+    func test_the_cold_start_pause_after_recovery_writes_no_second_record() async {
+        let ledgerStorage = InMemoryStoppedLedger()
+        let moment = Date(timeIntervalSince1970: 1_000)
+        ledgerStorage.save([
+            StoppedProcess(pid: 100, executablePath: "/bin/zsh", stoppedAt: moment, isShell: true),
+            StoppedProcess(pid: 200, executablePath: "/usr/bin/pico", stoppedAt: moment, isShell: false),
+            StoppedProcess(pid: 201, executablePath: "/usr/bin/node", stoppedAt: moment, isShell: false)
+        ])
+        let (h, locator, _) = makeForegroundJobHarness(stopped: true, ledgerStorage: ledgerStorage)
+        h.signaler.onSend = { signal, _ in
+            if signal == .resume { locator.processes = self.foregroundJobTree(stopped: false) }
+        }
+
+        h.vm.start()
+
+        XCTAssertEqual(h.signaler.batches.map(\.signal), [.resume, .stop],
+                       "восстановление продолжило, холодный старт поставил снова")
+        XCTAssertEqual(Set(h.log.events.map(\.reasonText)), [GuardVM.recoveryReasonText],
+                       "стояние объяснено эпизодом восстановления, второй записи нет")
+        XCTAssertEqual(h.log.events.count, 3)
+        XCTAssertEqual(h.vm.pausedProcesses.first?.since, moment, "стоит она с прошлой жизни weto")
         h.vm.stop()
     }
 
