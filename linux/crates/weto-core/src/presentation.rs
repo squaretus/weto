@@ -23,6 +23,9 @@ impl UnprovenReason {
             UnprovenReason::ConfirmationUnavailable => {
                 "Подтверждающие сервисы недоступны".to_string()
             }
+            UnprovenReason::ExitNotVerified(cause) => {
+                format!("Выход ещё не проверен: {}", cause.display_text())
+            }
         }
     }
 }
@@ -105,9 +108,10 @@ pub fn explanation(phase: &GuardPhase) -> StatusExplanation {
             evidence: "Цели не выбраны — охрана ничего не завершает".to_string(),
             next: "Добавьте приложение или команду в настройках".to_string(),
         },
-        // Проба в полёте, вердикта про текущий путь ещё нет — и цели работают:
-        // пауза начинается с плохого результата, а не с его ожидания. Ни «на
-        // паузе», ни отсчёта здесь быть не может — считать нечего, пока ответа нет.
+        // Изменились одни настройки, проба в полёте — и цели работают: про выход
+        // правка не говорит ничего. Ни «на паузе», ни отсчёта здесь быть не может.
+        // Потеря вердикта по сети сюда не ведёт — она ставит на паузу, и строки
+        // у неё паузные: «Цели остановлены» и «Выход ещё не проверен: …».
         GuardPhase::Verifying { cause } => StatusExplanation {
             title: phase.title().to_string(),
             action: "Цели работают".to_string(),
@@ -454,8 +458,20 @@ mod tests {
         ];
 
         let mut phases = vec![GuardPhase::Disabled, GuardPhase::Protected(reading())];
-        for cause in [StalenessCause::ColdStart, StalenessCause::NetworkChanged] {
-            phases.push(GuardPhase::Verifying { cause });
+        phases.push(GuardPhase::Verifying {
+            cause: StalenessCause::ConfigurationChanged,
+        });
+        // Пауза, ждущая ответа, — у каждой причины несвежести, кроме правки одних
+        // настроек: та до паузы не доводит.
+        for cause in [
+            StalenessCause::ColdStart,
+            StalenessCause::NetworkChanged,
+            StalenessCause::ConfigurationAndNetworkChanged,
+        ] {
+            phases.push(GuardPhase::Paused {
+                since: t0(),
+                reason: UnprovenReason::ExitNotVerified(cause),
+            });
         }
         for reason in &reasons {
             phases.push(GuardPhase::Paused {
@@ -480,19 +496,44 @@ mod tests {
         }
     }
 
+    /// «Проверка» осталась только у правки одних настроек: про выход она
+    /// не говорит ничего, и цели работают.
     #[test]
     fn verifying_explains_the_lost_verdict_while_targets_keep_running() {
         let phase = GuardPhase::Verifying {
-            cause: StalenessCause::ColdStart,
+            cause: StalenessCause::ConfigurationChanged,
         };
         let text = explanation(&phase);
         assert_eq!(text.title, "Проверяю выход");
         assert_eq!(text.action, "Цели работают");
         assert_eq!(
             text.evidence,
-            "Прежний вердикт не годится: вердикта ещё не было"
+            "Прежний вердикт не годится: изменились настройки"
         );
         assert_eq!(text.next, "Жду ответа сервисов о безопасности выхода");
+    }
+
+    /// Пауза, ждущая первого ответа, — та же проверка в заголовке, но цели
+    /// стоят, и строка улики называет, чем прежний вердикт перестал годиться.
+    /// Тексты дословно с macOS (`UnprovenReason.displayText`).
+    #[test]
+    fn a_pause_awaiting_the_answer_is_a_check_while_targets_stand() {
+        let phase = GuardPhase::Paused {
+            since: t0(),
+            reason: UnprovenReason::ExitNotVerified(StalenessCause::NetworkChanged),
+        };
+        let text = explanation(&phase);
+        assert_eq!(text.title, "Проверяю выход");
+        assert_eq!(text.action, "Цели остановлены");
+        assert_eq!(
+            text.evidence,
+            "Выход ещё не проверен: сменился выход в сеть"
+        );
+        assert_eq!(shield_color(&phase), GuardStatusColor::Yellow);
+        assert_eq!(
+            UnprovenReason::ExitNotVerified(StalenessCause::ColdStart).display_text(),
+            "Выход ещё не проверен: вердикта ещё не было"
+        );
     }
 
     #[test]

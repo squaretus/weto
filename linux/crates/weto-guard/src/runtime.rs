@@ -287,6 +287,24 @@ impl KillReporting for JournalWriter {
         }
     }
 
+    /// Пауза, ждавшая ответа, узнала свою причину: она достаётся всем записям
+    /// эпизода паузы. Эпизод восстановления не трогается — его причина
+    /// («найдены остановленными от прошлого запуска») от ответа пробы не зависит.
+    fn pause_reason_named(&self, reason: &str) {
+        let episode_id = {
+            let episodes = self.pause_episodes.lock().expect("эпизоды стояния");
+            let Some(episode) = episodes.pause.as_ref() else {
+                return;
+            };
+            episode.id.clone()
+        };
+
+        let mut journal = self.journal.lock().expect("журнал");
+        if journal.refine_episode(&episode_id, Some(reason), None, None, None, &HashSet::new()) {
+            self.save(&journal);
+        }
+    }
+
     /// Чем стояние кончилось. Дописывается обоим эпизодам сразу, а запись шелла
     /// получает свой исход, если он расходится с исходом цели.
     fn pause_resolved(
@@ -663,6 +681,72 @@ mod tests {
                 4,
             )]
         );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Пауза, начатая потерей вердикта, узнаёт причину из ответа пробы — и её
+    /// получают все записи эпизода паузы, а эпизод восстановления остаётся
+    /// со своей: его стояние от ответа пробы не зависит.
+    #[test]
+    fn a_named_pause_reason_rewrites_every_record_of_the_pause_episode_only() {
+        let home = std::env::temp_dir().join(format!(
+            "weto-state-named-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = weto_config::paths::Paths::rooted(home.clone());
+        let journal = Arc::new(Mutex::new(Journal::load(&paths.journal_file())));
+        let writer = JournalWriter::new(
+            paths.clone(),
+            journal.clone(),
+            Box::new(RecordingNotifier(Arc::new(Mutex::new(Vec::new())))),
+        );
+        let waiting = KillContext {
+            reason: "Выход ещё не проверен: сменился выход в сеть".to_string(),
+            ..KillContext::default()
+        };
+        let recovery = KillContext {
+            reason: "найдены остановленными".to_string(),
+            ..KillContext::default()
+        };
+
+        writer.recovered(
+            &[RecoveredProcess {
+                process: process(9),
+                stopped_at: std::time::SystemTime::UNIX_EPOCH,
+            }],
+            &recovery,
+        );
+        writer.paused(&[process(10)], &waiting);
+        writer.paused(&[process(11)], &waiting);
+        writer.pause_reason_named("Не удалось определить внешний адрес: таймаут запроса");
+
+        let reasons: HashMap<i32, String> = journal
+            .lock()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(|event| (event.pid, event.reason_text.clone()))
+            .collect();
+        assert_eq!(
+            reasons[&10],
+            "Не удалось определить внешний адрес: таймаут запроса"
+        );
+        assert_eq!(
+            reasons[&11],
+            "Не удалось определить внешний адрес: таймаут запроса"
+        );
+        assert_eq!(reasons[&9], "найдены остановленными");
+        // Уточнение сохранено на диск, а не только в памяти.
+        let saved = Journal::load(&paths.journal_file());
+        assert!(saved
+            .entries()
+            .iter()
+            .filter(|event| event.pid != 9)
+            .all(|event| event.reason_text.starts_with("Не удалось")));
         let _ = std::fs::remove_dir_all(home);
     }
 

@@ -17,8 +17,9 @@ use harness::{
 };
 use weto_config::stopped::{StoppedLedger, StoppedProcess};
 use weto_core::check::{CheckOutcome, CheckTrigger};
+use weto_core::diagnostics::StalenessCause;
 use weto_core::guard_machine::{GuardAction, GuardPhase};
-use weto_core::policy::UnsafeEvidence;
+use weto_core::policy::{UnprovenReason, UnsafeEvidence};
 use weto_core::process::{MatchBasis, ProcessSnapshot};
 use weto_sys::process_signaler::ProcessSignal::{Kill, Resume, Stop};
 use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
@@ -86,11 +87,16 @@ fn stand() -> Stand {
     stand_with(World::of(terminal_session()), &[])
 }
 
-/// Довести охрану до «На страже»: первый такт спрашивает и получает ответ.
+/// Довести охрану до «На страже»: холодный старт ставит цели до первого ответа,
+/// ответ возвращает их, следующий проход снимает обязательство наблюдением.
+/// Вступление — свой эпизод, и тестам паузы дальше нужна чистая доска.
 fn guarded(stand: &Stand) {
-    let phase = stand.tick();
+    let phase = stand.guarded();
     assert!(matches!(phase, GuardPhase::Protected(_)), "{phase:?}");
-    assert!(stand.world.signals().is_empty());
+    assert!(
+        ledger_pids(stand).is_empty(),
+        "вступление обязательств не оставило"
+    );
 }
 
 /// Сервисы замолчали, и охрана это узнала: первый же такой ответ — пауза.
@@ -1106,6 +1112,69 @@ fn processes_found_standing_at_startup_are_resumed_and_explained() {
     assert_eq!(paused.len(), 1);
     assert_eq!(paused[0].pid, 200);
     assert_eq!(paused[0].since, UNIX_EPOCH + Duration::from_secs(999_000));
+}
+
+/// Холодный старт сразу за восстановлением: стоящие с прошлой жизни уже получили
+/// SIGCONT, а пауза до первого ответа ставит их снова — второй записи про них
+/// не заводя: объяснил их стояние эпизод восстановления. Ответ возвращает всех,
+/// и наблюдение закрывает этот эпизод тем же исходом, что и паузу.
+#[test]
+fn the_cold_start_pause_after_recovery_adopts_the_recovered_until_the_answer() {
+    let world = World::of(vec![
+        ProcessSnapshot {
+            is_stopped: true,
+            ..process(100, 1, "/usr/bin/zsh", 100, 200)
+        },
+        ProcessSnapshot {
+            is_stopped: true,
+            ..process(200, 100, CLAUDE, 200, 200)
+        },
+        detached(77, 1, "/usr/bin/happ"),
+    ]);
+    let s = stand_with(
+        world,
+        &[
+            standing_entry(100, "/usr/bin/zsh", true),
+            standing_entry(200, CLAUDE, false),
+        ],
+    );
+    s.controller.recover_stopped();
+    assert_eq!(s.world.signalled(Resume), vec![200, 100]);
+    s.world.forget_signals();
+
+    let waiting = s.controller.tick();
+
+    assert!(
+        matches!(
+            waiting,
+            GuardPhase::Paused {
+                reason: UnprovenReason::ExitNotVerified(StalenessCause::ColdStart),
+                ..
+            }
+        ),
+        "{waiting:?}"
+    );
+    assert_eq!(
+        s.world.signalled(Stop),
+        vec![100, 200],
+        "до ответа стоят и они: шелл, затем цель"
+    );
+    assert!(
+        s.reporter.recorded().paused.is_empty(),
+        "их стояние уже объяснено эпизодом восстановления"
+    );
+
+    let phase = s.settle();
+    assert!(matches!(phase, GuardPhase::Protected(_)), "{phase:?}");
+    assert_eq!(s.world.signalled(Resume), vec![200, 100]);
+
+    s.tick();
+    assert_eq!(
+        s.reporter.resolutions(),
+        vec!["возобновлено: проверка подтвердила безопасный выход: 203.0.113.7, NL".to_string()]
+    );
+    assert!(ledger_pids(&s).is_empty(), "учёт опустел по наблюдению");
+    assert!(s.controller.snapshot().paused.is_empty());
 }
 
 /// pid переиспользуются: по тому же числу может жить уже другой процесс,

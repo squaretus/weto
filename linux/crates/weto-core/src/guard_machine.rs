@@ -6,12 +6,11 @@
 //! её читают оба раннера: политика пришпилена своей фикстурой, но политика
 //! отвечает про один момент, а расхождение реализаций живёт в переходах.
 //!
-//! Пауза начинается с плохого результата пробы и ничем другим. Ни холодный старт,
-//! ни смена пути целей не трогают: они лишь обесценивают вердикт и просят пробу,
-//! а решает ответ. Цена известна и принята владельцем: между сменой пути (или
-//! холодным стартом) и ответом пробы есть до ~5 с, когда цели работают без вердикта.
-//! Счёта неудачных проб нет вовсе — первый же ответ «сервисы не ответили» ставит
-//! на паузу, потолок считается только от её начала.
+//! Цели работают только по ответу пробы. Холодный старт и смена пути обесценивают
+//! вердикт и ставят цели на паузу сразу, до ответа: выключенный в клиенте VPN иначе
+//! выпускал бы их напрямую всё время запроса. Снимает паузу safe — свежий или
+//! доказанно тот же адрес. Счёта неудачных проб нет вовсе — первый же ответ
+//! «сервисы не ответили» ставит на паузу, потолок считается только от её начала.
 
 use std::time::{Duration, SystemTime};
 
@@ -35,8 +34,9 @@ pub enum GuardAction {
 pub enum GuardPhase {
     /// Охрана выключена или целей нет.
     Disabled,
-    /// Проба в полёте, вердикта про текущий путь ещё нет. Цели работают:
-    /// пауза начинается с плохого результата, а не с его ожидания.
+    /// Изменились одни настройки, проба в полёте. Цели работают: про выход
+    /// правка не говорит ничего. Потеря вердикта по сети сюда не ведёт — она
+    /// ставит цели на паузу (`ExitNotVerified`).
     Verifying { cause: StalenessCause },
     /// Свежий safe. Цели работают.
     Protected(GeoReading),
@@ -46,7 +46,8 @@ pub enum GuardPhase {
         reading: GeoReading,
         reason: UnprovenReason,
     },
-    /// Проба вернула «не доказано». Цели стоят, идёт отсчёт до потолка.
+    /// Проба вернула «не доказано» или вердикт потерян по сети и ответа ещё нет.
+    /// Цели стоят, идёт отсчёт до потолка.
     Paused {
         since: SystemTime,
         reason: UnprovenReason,
@@ -85,6 +86,12 @@ impl GuardPhase {
             GuardPhase::Verifying { .. } => "Проверяю выход",
             GuardPhase::Protected(_) => "На страже",
             GuardPhase::Interference { .. } => "На страже",
+            // Пауза, ждущая первого ответа, плохого результата не видела: это проверка,
+            // во время которой цели стоят, а не отказ.
+            GuardPhase::Paused {
+                reason: UnprovenReason::ExitNotVerified(_),
+                ..
+            } => "Проверяю выход",
             GuardPhase::Paused { .. } => "Выход не подтверждён",
             GuardPhase::Danger(_) => "Небезопасно",
         }
@@ -94,6 +101,14 @@ impl GuardPhase {
     pub fn paused_since(&self) -> Option<SystemTime> {
         match self {
             GuardPhase::Paused { since, .. } => Some(*since),
+            _ => None,
+        }
+    }
+
+    /// Причина стояния. `None` — не стоят.
+    pub fn paused_reason(&self) -> Option<&UnprovenReason> {
+        match self {
+            GuardPhase::Paused { reason, .. } => Some(reason),
             _ => None,
         }
     }
@@ -197,22 +212,35 @@ impl GuardMachine {
             }
 
             GuardInput::VerdictLost(cause) => match &self.phase {
-                // Стоим по плохому результату, и потолок считается от него.
-                // «Вердикта нет» — не результат: ни возобновить, ни перезапустить
-                // отсчёт оно не вправе, иначе минуту можно было бы продлевать вечно
-                // сменами пути.
+                // Уже стоим, и потолок считается от первого плохого известия.
+                // Новая потеря ни возобновить, ни перезапустить отсчёт не вправе,
+                // иначе минуту можно было бы продлевать вечно сменами пути.
                 //
                 // Из «Опасно» выпускает только настоящий ответ пробы. Прежде
                 // «Проверка» была стоящей фазой и переход туда был послаблением,
                 // теперь он разрешал бы запуск целей без единой улики в пользу этого.
                 GuardPhase::Paused { .. } | GuardPhase::Danger(_) => GuardEffect::None,
-                // Цели работают и продолжают: проба спрашивается первой, отвечает она.
+                // Правка одних настроек про выход не говорит ничего: цели работают,
+                // а проба отвечает.
+                GuardPhase::Disabled
+                | GuardPhase::Protected(_)
+                | GuardPhase::Interference { .. }
+                | GuardPhase::Verifying { .. }
+                    if cause == StalenessCause::ConfigurationChanged =>
+                {
+                    self.phase = GuardPhase::Verifying { cause };
+                    GuardEffect::None
+                }
+                // Сеть сменилась или вердикта не было вовсе — цели стоят до ответа.
                 GuardPhase::Disabled
                 | GuardPhase::Protected(_)
                 | GuardPhase::Interference { .. }
                 | GuardPhase::Verifying { .. } => {
-                    self.phase = GuardPhase::Verifying { cause };
-                    GuardEffect::None
+                    self.phase = GuardPhase::Paused {
+                        since: now,
+                        reason: UnprovenReason::ExitNotVerified(cause),
+                    };
+                    GuardEffect::Pause
                 }
             },
 
@@ -298,6 +326,18 @@ impl GuardMachine {
             }
 
             GuardDecision::Unproven(reason) => match &self.phase {
+                // Пауза ждала ответа, и ответ «не доказано» — её настоящая причина.
+                // Отсчёт остаётся от потери вердикта.
+                GuardPhase::Paused {
+                    since,
+                    reason: UnprovenReason::ExitNotVerified(_),
+                } => {
+                    self.phase = GuardPhase::Paused {
+                        since: *since,
+                        reason,
+                    };
+                    GuardEffect::None
+                }
                 // Стоим или уже завершили: непроверенность ничего не добавляет,
                 // потолок считает `Tick` от начала паузы.
                 GuardPhase::Paused { .. } | GuardPhase::Danger(_) => GuardEffect::None,
@@ -382,7 +422,7 @@ mod tests {
         machine
     }
 
-    /// Единственный способ встать: плохой результат пробы.
+    /// Встать по плохому результату пробы — по ответу, а не по потере вердикта.
     fn paused_machine(moment: u64) -> GuardMachine {
         let mut machine = protected_machine();
         machine.apply(verdict(silence(), silent_geo()), at(moment));
@@ -406,52 +446,69 @@ mod tests {
         assert_eq!(machine.pause_ceiling(), Duration::from_secs(60));
     }
 
-    // Вердикта нет: цели работают, пока не пришёл плохой результат.
+    // Вердикта нет: цели стоят до ответа пробы.
 
-    /// Холодный старт целей не трогает: проба спрашивается первой, отвечает она.
-    /// Принятая цена — до ~5 с работы без вердикта.
+    /// Холодный старт про выход не знает ничего: цели стоят до первого ответа,
+    /// и потолок считается от старта.
     #[test]
-    fn cold_start_leaves_the_targets_running() {
+    fn cold_start_pauses_the_targets_until_the_probe_answers() {
         let mut machine = disabled_machine();
         assert_eq!(
             machine.apply(GuardInput::VerdictLost(StalenessCause::ColdStart), t0()),
-            GuardEffect::None
+            GuardEffect::Pause
         );
         assert_eq!(
             machine.phase(),
-            &GuardPhase::Verifying {
-                cause: StalenessCause::ColdStart
+            &GuardPhase::Paused {
+                since: t0(),
+                reason: UnprovenReason::ExitNotVerified(StalenessCause::ColdStart)
             }
         );
-        assert_eq!(machine.phase().action(), GuardAction::Run);
         assert_eq!(
-            machine.remaining_pause(at(600)),
-            None,
-            "в проверке считать нечего"
+            machine.remaining_pause(at(20)),
+            Some(Duration::from_secs(40))
         );
+        assert_eq!(
+            machine.apply(
+                verdict(GuardDecision::Safe, GeoOutcome::Resolved(kz())),
+                at(2)
+            ),
+            GuardEffect::Resume
+        );
+        assert_eq!(machine.phase(), &GuardPhase::Protected(kz()));
     }
 
+    /// Смена пути — так выглядит выключенный в клиенте VPN: цели встают сразу,
+    /// а не после ответа, который шёл бы уже мимо туннеля.
     #[test]
-    fn a_path_change_leaves_the_targets_running() {
+    fn a_path_change_pauses_the_targets() {
         let mut machine = protected_machine();
         assert_eq!(
             machine.apply(
                 GuardInput::VerdictLost(StalenessCause::NetworkChanged),
                 at(5)
             ),
-            GuardEffect::None
+            GuardEffect::Pause
         );
         assert_eq!(
             machine.phase(),
-            &GuardPhase::Verifying {
-                cause: StalenessCause::NetworkChanged
+            &GuardPhase::Paused {
+                since: at(5),
+                reason: UnprovenReason::ExitNotVerified(StalenessCause::NetworkChanged)
             }
         );
-        assert_eq!(machine.phase().action(), GuardAction::Run);
+        assert_eq!(machine.phase().action(), GuardAction::Pause);
+        assert_eq!(
+            machine.phase().paused_reason(),
+            Some(&UnprovenReason::ExitNotVerified(
+                StalenessCause::NetworkChanged
+            ))
+        );
+        assert_eq!(GuardPhase::Protected(kz()).paused_reason(), None);
     }
 
     #[test]
-    fn a_path_change_out_of_interference_leaves_the_targets_running() {
+    fn a_path_change_out_of_interference_pauses_the_targets() {
         let mut machine = protected_machine();
         machine.apply(
             verdict(
@@ -468,31 +525,68 @@ mod tests {
                 GuardInput::VerdictLost(StalenessCause::NetworkChanged),
                 at(6)
             ),
+            GuardEffect::Pause
+        );
+        assert_eq!(
+            machine.phase(),
+            &GuardPhase::Paused {
+                since: at(6),
+                reason: UnprovenReason::ExitNotVerified(StalenessCause::NetworkChanged)
+            }
+        );
+    }
+
+    /// Правка одних настроек про выход не говорит ничего: цели работают, отвечает
+    /// проба. Правка вместе со сменой сети — уже потеря выхода.
+    #[test]
+    fn a_settings_only_loss_leaves_the_targets_running() {
+        let mut machine = protected_machine();
+        assert_eq!(
+            machine.apply(
+                GuardInput::VerdictLost(StalenessCause::ConfigurationChanged),
+                at(5)
+            ),
             GuardEffect::None
         );
         assert_eq!(
             machine.phase(),
             &GuardPhase::Verifying {
-                cause: StalenessCause::NetworkChanged
+                cause: StalenessCause::ConfigurationChanged
+            }
+        );
+        assert_eq!(machine.phase().action(), GuardAction::Run);
+        assert_eq!(
+            machine.remaining_pause(at(600)),
+            None,
+            "в проверке считать нечего"
+        );
+
+        assert_eq!(
+            machine.apply(
+                GuardInput::VerdictLost(StalenessCause::ConfigurationAndNetworkChanged),
+                at(6)
+            ),
+            GuardEffect::Pause
+        );
+        assert_eq!(
+            machine.phase(),
+            &GuardPhase::Paused {
+                since: at(6),
+                reason: UnprovenReason::ExitNotVerified(
+                    StalenessCause::ConfigurationAndNetworkChanged
+                )
             }
         );
     }
 
-    /// Повторное «вердикта нет» — не новость, и такту в проверке считать нечего:
-    /// отсчёт до завершения появляется только вместе с паузой.
+    /// Повторное «вердикта нет» — не новость: ни причину, ни отсчёт оно не трогает.
     #[test]
-    fn a_repeated_verdict_loss_changes_nothing_and_never_expires() {
+    fn a_repeated_verdict_loss_keeps_the_first_reason_and_the_ceiling() {
         let mut machine = disabled_machine();
         machine.apply(GuardInput::VerdictLost(StalenessCause::ColdStart), t0());
         assert_eq!(
             machine.apply(GuardInput::VerdictLost(StalenessCause::ColdStart), at(30)),
             GuardEffect::None
-        );
-        assert_eq!(
-            machine.phase(),
-            &GuardPhase::Verifying {
-                cause: StalenessCause::ColdStart
-            }
         );
         assert_eq!(
             machine.apply(
@@ -502,19 +596,74 @@ mod tests {
             GuardEffect::None
         );
         assert_eq!(
-            machine.apply(GuardInput::Tick, at(3_600)),
-            GuardEffect::None,
-            "без результата пауза не начинается"
+            machine.phase(),
+            &GuardPhase::Paused {
+                since: t0(),
+                reason: UnprovenReason::ExitNotVerified(StalenessCause::ColdStart)
+            }
+        );
+        assert_eq!(
+            machine.apply(GuardInput::Tick, at(60)),
+            GuardEffect::Terminate
         );
         assert_eq!(
             machine.phase(),
-            &GuardPhase::Verifying {
-                cause: StalenessCause::NetworkChanged
+            &GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60)))
+        );
+    }
+
+    /// Ответ «не доказано» — настоящая причина паузы, ждавшей ответа; отсчёт прежний.
+    #[test]
+    fn an_unproven_answer_names_the_reason_of_a_waiting_pause() {
+        let mut machine = protected_machine();
+        machine.apply(
+            GuardInput::VerdictLost(StalenessCause::NetworkChanged),
+            at(5),
+        );
+        assert_eq!(
+            machine.apply(verdict(silence(), silent_geo()), at(9)),
+            GuardEffect::None
+        );
+        assert_eq!(
+            machine.phase(),
+            &GuardPhase::Paused {
+                since: at(5),
+                reason: silent_reason()
             }
         );
     }
 
-    // Пауза начинается с плохого результата и только с него.
+    /// Доказанно тот же адрес снимает паузу, ждавшую ответа, — в Помехи.
+    #[test]
+    fn the_same_address_resumes_a_waiting_pause_into_interference() {
+        let mut machine = protected_machine();
+        machine.apply(
+            GuardInput::VerdictLost(StalenessCause::NetworkChanged),
+            at(5),
+        );
+        assert_eq!(
+            machine.apply(
+                verdict(
+                    GuardDecision::Safe,
+                    GeoOutcome::Degraded {
+                        previous: kz(),
+                        detail: "HTTP 429".to_string()
+                    }
+                ),
+                at(7)
+            ),
+            GuardEffect::Resume
+        );
+        assert_eq!(
+            machine.phase(),
+            &GuardPhase::Interference {
+                reading: kz(),
+                reason: UnprovenReason::GeoUnavailable("HTTP 429".to_string())
+            }
+        );
+    }
+
+    // Плохой результат пробы ставит на паузу и при работающих целях.
 
     /// Эпизод 19:31: молчат оба сервиса — первый же неответ ставит на паузу,
     /// через 60 с завершение по потолку. Терпимости к молчанию больше нет.
@@ -647,8 +796,11 @@ mod tests {
     /// Неответ в проверке — тот самый плохой результат: вот здесь цели и встают.
     #[test]
     fn a_silent_result_in_verification_pauses() {
-        let mut machine = disabled_machine();
-        machine.apply(GuardInput::VerdictLost(StalenessCause::ColdStart), t0());
+        let mut machine = protected_machine();
+        machine.apply(
+            GuardInput::VerdictLost(StalenessCause::ConfigurationChanged),
+            t0(),
+        );
         assert_eq!(
             machine.apply(
                 verdict(
@@ -863,6 +1015,26 @@ mod tests {
 
     #[test]
     fn safe_without_a_reading_keeps_a_verification() {
+        let mut machine = protected_machine();
+        machine.apply(
+            GuardInput::VerdictLost(StalenessCause::ConfigurationChanged),
+            t0(),
+        );
+        assert_eq!(
+            machine.apply(verdict(GuardDecision::Safe, silent_geo()), at(2)),
+            GuardEffect::None
+        );
+        assert_eq!(
+            machine.phase(),
+            &GuardPhase::Verifying {
+                cause: StalenessCause::ConfigurationChanged
+            }
+        );
+    }
+
+    /// Safe без чтения не снимает и паузу, ждавшую ответа.
+    #[test]
+    fn safe_without_a_reading_keeps_a_waiting_pause() {
         let mut machine = disabled_machine();
         machine.apply(GuardInput::VerdictLost(StalenessCause::ColdStart), t0());
         assert_eq!(
@@ -871,8 +1043,9 @@ mod tests {
         );
         assert_eq!(
             machine.phase(),
-            &GuardPhase::Verifying {
-                cause: StalenessCause::ColdStart
+            &GuardPhase::Paused {
+                since: t0(),
+                reason: UnprovenReason::ExitNotVerified(StalenessCause::ColdStart)
             }
         );
     }
@@ -1107,8 +1280,11 @@ mod tests {
     }
 
     fn machine_in_verification() -> GuardMachine {
-        let mut machine = disabled_machine();
-        machine.apply(GuardInput::VerdictLost(StalenessCause::ColdStart), t0());
+        let mut machine = protected_machine();
+        machine.apply(
+            GuardInput::VerdictLost(StalenessCause::ConfigurationChanged),
+            t0(),
+        );
         machine
     }
 
@@ -1277,6 +1453,15 @@ mod tests {
             }
             .title(),
             "Выход не подтверждён"
+        );
+        // Пауза, ждущая первого ответа, — проверка, во время которой цели стоят.
+        assert_eq!(
+            GuardPhase::Paused {
+                since: t0(),
+                reason: UnprovenReason::ExitNotVerified(StalenessCause::NetworkChanged)
+            }
+            .title(),
+            "Проверяю выход"
         );
         assert_eq!(
             GuardPhase::Danger(UnsafeEvidence::PauseExpired(Duration::from_secs(60))).title(),

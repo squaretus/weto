@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use crate::diagnostics::StalenessCause;
 use crate::geo::GeoOutcome;
 use crate::ip::IpRange;
 use crate::network::{VpnAppStatus, VpnTunnelStatus};
@@ -60,6 +61,10 @@ pub enum UnprovenReason {
     AddressChanged { observed: String },
     /// ipinfo ответил, подтверждающие сервисы молчат. Safe без подтверждения не бывает.
     ConfirmationUnavailable,
+    /// Прежний вердикт перестал описывать выход — сменилась сеть или его не было вовсе,
+    /// — а ответа пробы ещё нет. Решением политики не бывает: причину ставит потеря
+    /// вердикта, и до ответа пробы цели стоят.
+    ExitNotVerified(StalenessCause),
 }
 
 /// Положительное доказательство опасности. Только оно завершает цели.

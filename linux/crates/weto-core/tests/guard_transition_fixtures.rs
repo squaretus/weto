@@ -17,7 +17,7 @@ use weto_core::policy::{GuardDecision, UnprovenReason, UnsafeEvidence};
 
 /// Версия схемы, под которую написан раннер. Расхождение — отказ, а не молчаливый
 /// пропуск: иначе новая версия фикстур прогонялась бы старыми правилами.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 #[test]
 fn every_fixture_case_matches_the_machine() {
@@ -83,6 +83,7 @@ fn the_runner_rejects_a_phase_that_differs() {
             kind: "confirmationUnavailable".to_string(),
             detail: None,
             observed: None,
+            cause: None,
         }),
     };
     let ceiling = Duration::from_secs(60);
@@ -183,8 +184,8 @@ impl Reading {
 /// иначе проверка выродилась бы в сверку вида, и подменённая причина паузы
 /// прошла бы мимо обоих раннеров сразу.
 /// Полезная нагрузка заданного узла (`detail`, `observed`, `ip`, `code`, `source`,
-/// `primary`, `confirmed`, `cause`) обязательна: молчаливое умолчание в пустую строку
-/// означало бы, что раннер разойдётся с macOS на первом же случае с нагрузкой,
+/// `primary`, `confirmed`, `cause` — и у фазы, и у причины `exitNotVerified`)
+/// обязательна: молчаливое умолчание в пустую строку означало бы, что раннер разойдётся с macOS на первом же случае с нагрузкой,
 /// и оба останутся зелёными.
 /// Момент постановки на паузу не сверяется — он вычисляется из `at` шага, и сверять
 /// его значило бы сверять раннер с самим собой.
@@ -388,6 +389,7 @@ struct Reason {
     kind: String,
     detail: Option<String>,
     observed: Option<String>,
+    cause: Option<String>,
 }
 
 impl Reason {
@@ -405,6 +407,14 @@ impl Reason {
                     .unwrap_or_else(|| panic!("«{case}»: addressChanged без наблюдаемого адреса")),
             },
             "confirmationUnavailable" => UnprovenReason::ConfirmationUnavailable,
+            // Решением политики не бывает — её ставит только `verdictLost`, — но фазу
+            // паузы она называет, и сверяется вместе с причиной несвежести.
+            "exitNotVerified" => UnprovenReason::ExitNotVerified(parse_cause(
+                case,
+                self.cause
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("«{case}»: exitNotVerified без причины несвежести")),
+            )),
             other => panic!("«{case}»: неизвестная unproven-причина «{other}»"),
         }
     }
