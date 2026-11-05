@@ -111,9 +111,16 @@ final class LiveTmuxReturnTests: XCTestCase {
         let waiting = enforcer.awaitingForeground()
         let target = try XCTUnwrap(waiting.first, "цель обязана ждать возврата")
 
-        // Набранное в строке шелла не должно склеиться с `fg`.
+        // Набранное в строке шелла не должно склеиться с `fg`. Цель включила отслеживание мыши
+        // и выключить его не может, поэтому в строку без конца идут отчёты, в том числе между
+        // любыми двумя нашими командами. Точки с запятой в них — разделители команд.
         sh("\(tmux) send-keys 'half typed'")
-        Thread.sleep(forTimeInterval: 0.3)
+        let mouse = Process()
+        mouse.executableURL = URL(fileURLWithPath: "/bin/bash")
+        mouse.arguments = ["-c", "while :; do \(tmux) send-keys -l $'\\e[<35;173;10M'; done"]
+        try mouse.run()
+        defer { mouse.terminate() }
+        Thread.sleep(forTimeInterval: 0.5)
 
         let processes = locator.allProcesses(includeArguments: false)
         let shell = try XCTUnwrap(PausePlanner.shellHoldingTerminal(of: target, among: processes))
@@ -123,8 +130,12 @@ final class LiveTmuxReturnTests: XCTestCase {
 
         Thread.sleep(forTimeInterval: 0.3)
         enforcer.restoreTerminalModes()
+        mouse.terminate()
+        mouse.waitUntilExit()
 
-        XCTAssertTrue(enforcer.awaitingForeground().isEmpty, "цель снова впереди, режим возвращён")
+        let screen = sh("\(tmux) capture-pane -p")
+        XCTAssertFalse(screen.contains("command not found"), "строка выполнилась как команды:\n\(screen)")
+        XCTAssertTrue(enforcer.awaitingForeground().isEmpty, "цель снова впереди, режим возвращён:\n\(screen)")
         XCTAssertTrue(isRaw(), "терминал обязан быть в сыром режиме цели")
 
         if live == nil {

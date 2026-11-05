@@ -219,15 +219,12 @@ fn type_through_tmux(binary: &str, tty: &str, euid: u32) -> Result<(), TerminalR
             continue;
         };
 
-        // C-u отдельной командой: набранное в строке шелла иначе склеилось бы с `fg`.
-        let _ = run(
-            binary,
-            &["-S", &socket, "send-keys", "-t", pane, "C-u"],
-            COMMAND_CEILING,
-        );
+        // Строка шелла редко пуста: цель включила отслеживание мыши и выключить его не может,
+        // и отчёты идут в шелл без конца. C-u стирает их, и всё одной командой: в зазор между
+        // двумя вклинились бы новые, склеились с `fg`, а Enter выполнил бы это как команды.
         return run(
             binary,
-            &["-S", &socket, "send-keys", "-t", pane, "fg", "Enter"],
+            &["-S", &socket, "send-keys", "-t", pane, "C-u", "fg", "Enter"],
             COMMAND_CEILING,
         )
         .map(|_| ());

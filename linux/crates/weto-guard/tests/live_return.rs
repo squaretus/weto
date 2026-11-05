@@ -78,12 +78,16 @@ fn a_paused_target_under_tmux_comes_back_with_the_keyboard() {
         live_shell()
     ));
     wait(1_500);
-    paused_target_comes_back(&|text, enter| {
-        sh(&format!("{tmux} send-keys -l '{text}'"));
-        if enter {
-            sh(&format!("{tmux} send-keys Enter"));
-        }
-    });
+    paused_target_comes_back(
+        &|text, enter| {
+            sh(&format!("{tmux} send-keys -l '{text}'"));
+            if enter {
+                sh(&format!("{tmux} send-keys Enter"));
+            }
+        },
+        &format!("{tmux} send-keys -l $'\\e[<35;173;10M'"),
+        &format!("{tmux} capture-pane -p"),
+    );
 }
 
 #[test]
@@ -95,14 +99,20 @@ fn a_paused_target_under_screen_comes_back_with_the_keyboard() {
     let _server = Server(format!("screen -S {session} -X quit"));
     sh(&format!("screen -dmS {session} {}", live_shell()));
     wait(1_500);
-    paused_target_comes_back(&|text, enter| {
-        let end = if enter { "\\n" } else { "" };
-        sh(&format!("screen -S {session} -X stuff '{text}'$'{end}'"));
-    });
+    let dump = format!("{}/screen.txt", std::env::temp_dir().display());
+    paused_target_comes_back(
+        &|text, enter| {
+            let end = if enter { "\\n" } else { "" };
+            sh(&format!("screen -S {session} -X stuff '{text}'$'{end}'"));
+        },
+        &format!("screen -S {session} -X stuff $'\\e[<35;173;10M'"),
+        &format!("screen -S {session} -X hardcopy {dump}; sleep 0.2; cat {dump}"),
+    );
 }
 
 /// `type_keys` вводит текст в единственное окно сервера, как с клавиатуры, с Enter или без.
-fn paused_target_comes_back(type_keys: &dyn Fn(&str, bool)) {
+/// `mouse_report` — команда, дающая один отчёт мыши, `read_screen` — показывающая экран.
+fn paused_target_comes_back(type_keys: &dyn Fn(&str, bool), mouse_report: &str, read_screen: &str) {
     let home = tempfile::tempdir().expect("временный каталог");
     let dir = home.path().to_string_lossy().into_owned();
     let out = format!("{dir}/probe.out");
@@ -162,9 +172,15 @@ fn paused_target_comes_back(type_keys: &dyn Fn(&str, bool)) {
     let waiting = enforcer.awaiting_foreground(None);
     assert_eq!(waiting.len(), 1, "цель обязана ждать возврата");
 
-    // Набранное в строке шелла не должно склеиться с `fg`.
+    // Набранное в строке шелла не должно склеиться с `fg`. Цель включила отслеживание мыши
+    // и выключить его не может, поэтому в строку без конца идут отчёты, в том числе между
+    // любыми двумя нашими командами. Точки с запятой в них — разделители команд.
     type_keys("half typed", false);
-    wait(300);
+    let mut mouse = Command::new("/bin/bash")
+        .args(["-c", &format!("while :; do {mouse_report}; done")])
+        .spawn()
+        .expect("поток отчётов мыши");
+    wait(500);
 
     let processes = ProcRegistry::new().snapshot();
     let target = processes
@@ -178,10 +194,17 @@ fn paused_target_comes_back(type_keys: &dyn Fn(&str, bool)) {
 
     wait(300);
     enforcer.restore_terminal_modes(None);
+    mouse.kill().expect("поток отчётов мыши");
+    mouse.wait().expect("поток отчётов мыши");
 
+    let screen = sh(read_screen);
+    assert!(
+        !screen.contains("not found"),
+        "строка выполнилась как команды:\n{screen}"
+    );
     assert!(
         enforcer.awaiting_foreground(None).is_empty(),
-        "цель снова впереди, режим возвращён"
+        "цель снова впереди, режим возвращён:\n{screen}"
     );
     assert!(is_raw(), "терминал обязан быть в сыром режиме цели");
 

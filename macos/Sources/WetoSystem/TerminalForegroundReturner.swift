@@ -83,9 +83,10 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
                 binary, ["-S", socket, "list-panes", "-a", "-F", "#{pane_tty} #{pane_id} #{pane_synchronized}"], timeout: 2
             ), let pane = Self.paneID(forTTY: tty, in: listing) else { continue }
 
-            // C-u отдельной командой: набранное в строке шелла иначе склеилось бы с `fg`.
-            _ = Self.run(binary, ["-S", socket, "send-keys", "-t", pane, "C-u"], timeout: 2)
-            return Self.run(binary, ["-S", socket, "send-keys", "-t", pane, "fg", "Enter"], timeout: 2).map { _ in }
+            // Строка шелла редко пуста: цель включила отслеживание мыши и выключить его не может,
+            // и отчёты идут в шелл без конца. C-u стирает их, и всё одной командой: в зазор между
+            // двумя вклинились бы новые, склеились с `fg`, а Enter выполнил бы это как команды.
+            return Self.run(binary, ["-S", socket, "send-keys", "-t", pane, "C-u", "fg", "Enter"], timeout: 2).map { _ in }
         }
         return .failure(.paneNotFound)
     }
@@ -136,6 +137,8 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
         return nil
     }
 
+    /// Control-U (`character id 21`) и `fg` одной записью: строку шелла надо стереть раньше, чем
+    /// Enter её выполнит, а в зазор вклинились бы новые отчёты мыши.
     static func automationScript(bundleID: String, tty: String) -> String? {
         switch bundleID {
         case "com.apple.Terminal":
@@ -144,7 +147,7 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
                 repeat with w in windows
                     repeat with t in tabs of w
                         if tty of t is "\(tty)" then
-                            do script "fg" in t
+                            do script ((character id 21) & "fg") in t
                             return
                         end if
                     end repeat
@@ -159,7 +162,7 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
                     repeat with t in tabs of w
                         repeat with s in sessions of t
                             if tty of s is "\(tty)" then
-                                tell s to write text "fg"
+                                tell s to write text ((character id 21) & "fg" & linefeed) newline NO
                                 return
                             end if
                         end repeat
