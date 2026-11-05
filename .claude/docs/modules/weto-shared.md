@@ -76,7 +76,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   `freed` is who got the signal, `released` is who was observed and left the ledger.
   `pause` also captures the terminal mode of every `PausePlan.foregroundRoots` pid it is about to
   stop (`TerminalModeKeeping.capture`, by `ProcessSnapshot.terminalDevice`) into `savedModes`,
-  keyed by `StoppedIdentity`; `restoreTerminalModes(observing:)` writes it back — see invariants
+  keyed by `StoppedIdentity`; `restoreTerminalModes(observing:ignoringLedger:)` writes it back,
+  `awaitingForeground(observing:)` names the targets still waiting for `fg` — see invariants
 - `macos/Sources/WetoShared/StoppedLedger.swift` — `StoppedProcess` (pid + path + `isShell`),
   `StoppedLedgerPersisting` (`StoppedFile` at `stopped.json`, atomic temp+rename, next to the
   journals; `InMemoryStoppedLedger` for tests), `StoppedLedgerReadout` (`.entries`/`.corrupted` —
@@ -157,8 +158,10 @@ this layer decides *when* to ask and *what to do* with the answer.
   and `.protected`, where there is nothing to explain. No countdown in the «what's next» line:
   each standing target's pill already shows one, and a second timer above them only repeated them
 - `StatusPresentation.lines(for:reading:)`, `lines(for:report:timeZone:)`, `detail(for:reading:)`
-- `GuardVM.showTerminal(for pid:) → Bool` — the popup's "Показать терминал" button, delegates to
-  `TerminalLocating`
+- `GuardVM.terminalReturns: [Int32: TerminalReturnState]` — цели, оставшиеся в фоне после снятия паузы;
+  `GuardVM.returnToTerminal(pid:)` — кнопка «Вернуть в терминал», живёт до первого нажатия
+- `GuardVM.showTerminal(for pid:) → Bool` — поднимает окно через `TerminalLocating`, когда нажатие
+  не вернуло цель. Своей кнопки у этого действия больше нет
 - `StoppedLedger.add(_:)`/`.remove(_:)`/`.clear()`, `.pids`, `.startedFromCorruptedFile`
 - `CheckLogStore.record(_:)` (drops anything `!isWorthRecording`), `.all`, `.clear()`
 - `GuardNotifying.notifyTerminated(reasonText:killedCount:)`, `.notifyBackgrounded(targetName:)`;
@@ -171,7 +174,8 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `WetoSystem` protocols (injected, mocked in tests): `NetworkSnapshotReading`, `NetworkEventSourcing`,
   `GeoProbing`, `ProcessLocating`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`,
   `TargetResolving`, `SecretStoring`, `HTTPFetching`, `TerminalModeKeeping` (`ProcessEnforcer`,
-  defaults to the real `TerminalModeKeeper`)
+  defaults to the real `TerminalModeKeeper`), `TerminalForegroundReturning` (`GuardVM`, defaults to
+  `TerminalForegroundReturner()`)
 - `StoppedLedgerPersisting` (injected, mocked in tests as `InMemoryStoppedLedger`)
 - `UpdateKit` / `UpdateKitUI`: `UpdateController`, `HelperUpdateInstaller`, `UserDefaultsUpdateStore`,
   `UpdateWindowPresenter` (see `modules/update-kit.md`)
@@ -198,6 +202,8 @@ this layer decides *when* to ask and *what to do* with the answer.
   (`EventLogStore.refine(skipping:)`), because its standing ended earlier and for another reason.
 - Reads and writes the `termios` of a paused foreground target's tty (`ProcessEnforcer`, through
   `TerminalModeKeeping`): captured before `SIGSTOP`, written back once after `fg`. In memory only.
+- Types `fg` into the target's shell after a pause (`GuardVM`, through `TerminalForegroundReturning`).
+  Первый AppleScript спрашивает разрешение Automation.
 - Writes `stopped.json` on every ledger `add`/`remove`/`clear` — atomic temp+rename, same pattern
   as the journals. `add` dedupes by the same identity the rest of the code uses — pid **and**
   path — and an entry whose pid matches but whose path differs is provably dead (one pid, one live
@@ -230,10 +236,24 @@ this layer decides *when* to ask and *what to do* with the answer.
   stopped again already stands in the shell's mode). `restoreTerminalModes(observing:)` runs
   last in `GuardVM.handle`, on the pass's own scan, and restores exactly once, when the process
   is not stopped, is not in the ledger and `PausePlanner.holdsForeground` is true — i.e. the
-  pause is over and the user typed `fg`. Never during the pause. Gone, another path on the pid, or
+  pause is over and `fg` was typed, by weto or by the user. Never during the pause. Gone, another path on the pid, or
   another `terminalDevice` → the saved mode is dropped, never imposed on a stranger's tty. Not
   persisted: a weto restart between pause and `fg` loses it.
   [bugs/tmux-takes-the-terminal-from-a-paused-target](../bugs/tmux-takes-the-terminal-from-a-paused-target.md).
+- **Снятая пауза возвращает цель в терминал сама.** `GuardVM.settleTerminalReturns()` на каждом проходе
+  берёт у `ProcessEnforcer.awaitingForeground` цели с сохранённым режимом, живые, на том же терминале
+  и не впереди, и отдаёт их `TerminalReturnTracker`. Под паузой список пуст, поэтому новая пауза
+  обнуляет историю. Ввод идёт задачами по одному (`returnTasks`): у двух целей конвейера терминал один,
+  и каждая смотрит, кто его держит, уже после предыдущей. Вводим, только если
+  `PausePlanner.shellHoldingTerminal` вернул шелл, иначе ввод достался бы чужой программе: тогда отказ
+  и кнопка. Режим терминала возвращается через 200 мс после команды, не дожидаясь такта: иначе первые
+  клавиши ушли бы в канонический режим. Нажатие не вернуло цель — `showTerminal` и подсказка.
+  Перезапуск weto между паузой и возвратом отменяет всё это: `savedModes` живёт в памяти,
+  и `awaitingForeground` такую цель не видит.
+- **На выходе цель возвращается тоже.** Следующего такта не будет, и без `fg` цель останется
+  нарисованной, но без клавиатуры. `returnTargetsBeforeExit` идёт из `stop()`, синхронно и без
+  AppleScript: ждать окно разрешения посреди выхода нельзя. На один шелл — один `fg`. Режим —
+  `restoreTerminalModes(ignoringLedger: true)`: записи остаются в учёте до следующего запуска.
 <!-- generated, verify -->
 - **Two processes share one settings suite in the terminal version** (`com.weto.cli` — the user's, or root's in whole-machine mode): commands
   write through the setters, `weto run` picks the edit up with `reloadFromDefaults()`. It
@@ -427,8 +447,7 @@ this layer decides *when* to ask and *what to do* with the answer.
   the tick loop keeps signalling it — that is the bug that left three of the owner's processes
   in state `T` for hours with an empty `stopped.json`. An entry that survives that recovery is
   made visible in the same call, off the walk `resumeOrphans` already made:
-  `GuardVM.surfaceRecovered` seeds `pausedProcesses` from it (badge, `fg` hint and «Показать
-  терминал»), opens a kill-journal episode of its own for everything still standing
+  `GuardVM.surfaceRecovered` seeds `pausedProcesses` from it (the pause badge), opens a kill-journal episode of its own for everything still standing
   (`GuardVM.recordRecoveryEpisode`: `kind: paused`, reason «найдены остановленными от прошлого
   запуска weto…», date from the ledger, `matchedBy: .shell` for a shell entry, resolution appended
   by the same `resolvePauseEpisode`) and writes one `CheckEvent(trigger: .startupRecovery,
@@ -447,7 +466,8 @@ this layer decides *when* to ask and *what to do* with the answer.
 - **Two notifications, two purposes, one delegate.** `notifyTerminated` is the pre-existing "your
   targets died" banner; `notifyBackgrounded` exists because a paused terminal target that loses its
   foreground job otherwise just vanishes from its terminal with no explanation — the notification
-  is the only place the user learns `fg` will bring it back. Both must show even while weto's own
+  is the only place the user learns `fg` will bring it back (после снятия паузы `fg` вводит сама
+  охрана, см. выше). Both must show even while weto's own
   window has focus (`presentationWhileActive`), because "the popup is open" is exactly when the
   user is looking for the explanation, not when they've stopped caring.
 - **Not every check is worth a journal entry.** `CheckEvent.isWorthRecording`: a button press, a
@@ -493,5 +513,7 @@ this layer decides *when* to ask and *what to do* with the answer.
 - `decisions/pause-instead-of-kill.md` — why unproven pauses instead of killing
 - `modules/weto-cli.md` — the second composition root over `GuardVM` (the terminal version)
 - `bugs/tmux-takes-the-terminal-from-a-paused-target.md` — why `ProcessEnforcer` keeps terminal modes
+  and `GuardVM` types `fg`
+- `features/terminal-target-returns-after-pause.md` — весь путь возврата цели
 - `docs/design-system.md` — for the UI that consumes `StatusPresentation`, the pause badge and
-  the "Показать терминал" affordance
+  the «Вернуть в терминал» button

@@ -44,9 +44,57 @@ The guard keeps the terminal mode itself. `PausePlan.foregroundRoots` lists the 
 the foreground when paused; `ProcessEnforcer` captures their terminal mode (`TerminalModeKeeping`,
 by the controlling-tty device from the snapshot) before `SIGSTOP`, and restores it exactly once when
 the process runs again, is no longer held by the stopped-ledger, and holds the foreground — i.e. the
-pause is over and the user typed `fg`. Never during the pause. A process that is gone, or a pid now
+pause is over and `fg` was typed, by the user or, since the follow-up below, by weto. Never during the pause. A process that is gone, or a pid now
 owned by another binary or another terminal, drops the saved mode. Not persisted: after a weto crash
 the mode cannot be returned. Same on Linux.
 
 The «shell first» order stays: on a bare terminal it does keep the target in front; under tmux it no
 longer pretends to.
+
+## Follow-up: weto types `fg` itself
+
+Возвращённого режима оказалось мало. Шелл посреди паузы забирает терминал, и SIGCONT оставляет цель
+в фоне: интерфейс нарисован, клавиши идут шеллу, при вводе цель встаёт. Ручной `fg` помогает.
+
+| где | после снятия паузы |
+|---|---|
+| tmux, macOS и Linux | цель в фоне |
+| GNU screen 4.09, Linux | цель в фоне, как под tmux |
+| системный screen 4.00.03, macOS | цель впереди, как в голом терминале |
+| Homebrew-screen, macOS | не проверялся |
+| голый терминал: pty с bash и zsh на Linux; pty, Terminal.app и iTerm2 на macOS | цель впереди: хватает порядка «сначала шелл» и SIGCONT |
+
+Снаружи сессии терминал не отдать: `tcsetpgrp` работает только изнутри неё, а `TIOCSTI` не от root
+запрещён. Остаётся ввод через того, кто терминал ведёт:
+
+- tmux, обе платформы: `send-keys C-u`, затем `fg Enter`;
+- GNU screen, только Linux: `screen -S $STY -p $WINDOW -X stuff`, значения из `/proc/<shell>/environ`;
+- AppleScript, только macOS: по точному tty `do script "fg" in t` в Terminal.app и `write text "fg"`
+  в iTerm2. Первое использование спрашивает разрешение Automation, набранный текст этот путь
+  не очищает. Сессии iTerm под `tmux -CC` идут путём tmux.
+
+Ввод опасен, поэтому ограничен:
+
+- только пока терминал у шелла этой цели (`shellHoldingTerminal` / `shell_holding_terminal`), иначе ввод
+  достался бы чужой программе. По одному: у двух целей конвейера терминал один;
+- от root ввода нет;
+- бинарник мультиплексора — обычный файл, владелец root или мы, без записи для группы и остальных;
+  каталог сокетов tmux — наш, без прав для группы и остальных, проверяется `lstat`.
+
+Отправленная команда возвратом не считается, решает наблюдение, что цель снова впереди. Цикл —
+`TerminalReturnTracker` в ядре обеих платформ: `returning`, затем `offered` (кнопка «Вернуть в терминал»
+до первого нажатия или 5 минут от снятия паузы), затем `failed` (нажатие не помогло) или `expired`
+(не нажали). Новая пауза обнуляет историю, на самой паузе кнопки нет. На выходе из Weto цель
+возвращается тоже, без AppleScript; на Linux выход ждёт ввода не дольше 3 с.
+
+## Regression checks
+
+- [ ] macOS: `WETO_LIVE_TMUX=1 swift test --filter LiveTmuxReturnTests`, с настоящей программой ещё
+      `WETO_LIVE_TARGET=$HOME/.local/bin/claude`.
+- [ ] Linux, не от root: `linux/crates/weto-guard/tests/live_return.rs` с
+      `WETO_LIVE_TMUX=1 WETO_LIVE_SCREEN=1 WETO_LIVE_SHELL=...`.
+
+## Related files
+
+- `macos/Sources/WetoSystem/TerminalForegroundReturner.swift`, `linux/crates/weto-sys/src/terminal_return.rs`
+- `macos/Sources/WetoCore/TerminalReturnTracker.swift`, `linux/crates/weto-core/src/terminal_return.rs`

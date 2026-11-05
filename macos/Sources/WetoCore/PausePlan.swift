@@ -111,6 +111,12 @@ public enum PausePlanner {
                          backgrounded: backgrounded, skipped: skipped, foregroundRoots: foregroundRoots)
     }
 
+    /// Держит ли процесс передний план своего терминала — тем же правилом, что план паузы.
+    public static func holdsForeground(_ target: ProcessSnapshot, among processes: [ProcessSnapshot]) -> Bool {
+        guard target.terminalForegroundGroup != 0 else { return false }
+        return holdsForeground(target, tree: ProcessTree(processes: processes))
+    }
+
     /// Цель в переднем плане своего терминала, если лидер передней группы tty — сама цель
     /// или её потомок. Сравнивать группы на равенство нельзя: группу, держащую терминал,
     /// цель могла отдать инструменту, запущенному в собственной группе (`sh -c` → потомок
@@ -124,6 +130,11 @@ public enum PausePlanner {
     /// своего лидера, так что этот случай — то же равенство групп сверху.
     /// Лидера может не быть в снимке (успел выйти) — тогда предков у него нет и передний
     /// план поддереву цели не принадлежит.
+    private static func holdsForeground(_ target: ProcessSnapshot, tree: ProcessTree) -> Bool {
+        if target.processGroup == target.terminalForegroundGroup { return true }
+        return tree.ancestors(of: target.terminalForegroundGroup).contains(target.pid)
+    }
+
     /// Шелл, которому можно ввести `fg` за пользователя: ближайший предок цели, сам шелл
     /// по имени, на её терминале и сейчас держащий этот терминал — то есть стоящий
     /// на приглашении. Держит терминал кто-то другой (пользователь запустил там `vim`) — `nil`:
@@ -138,17 +149,6 @@ public enum PausePlanner {
             return candidate.processGroup == candidate.terminalForegroundGroup ? candidate : nil
         }
         return nil
-    }
-
-    /// Держит ли процесс передний план своего терминала — тем же правилом, что план паузы.
-    public static func holdsForeground(_ target: ProcessSnapshot, among processes: [ProcessSnapshot]) -> Bool {
-        guard target.terminalForegroundGroup != 0 else { return false }
-        return holdsForeground(target, tree: ProcessTree(processes: processes))
-    }
-
-    private static func holdsForeground(_ target: ProcessSnapshot, tree: ProcessTree) -> Bool {
-        if target.processGroup == target.terminalForegroundGroup { return true }
-        return tree.ancestors(of: target.terminalForegroundGroup).contains(target.pid)
     }
 
     /// Шеллы, которые ведут job control. Список имён — неприятная, но единственная

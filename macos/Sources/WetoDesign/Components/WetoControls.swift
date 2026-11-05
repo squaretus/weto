@@ -67,9 +67,7 @@ public struct WetoPillButtonStyle: ButtonStyle {
 
     @Environment(\.colorScheme) private var scheme
     @Environment(\.isEnabled) private var isEnabled
-    // Значок паузы просит `.controlSize(.small)` для кнопки «Показать терминал»:
-    // рядом с ней уже стоят отсчёт и (i), и полноразмерная пилюля там не влезает
-    // без спора с длинным заголовком цели.
+    // `.controlSize(.small)` даёт компактную пилюлю для тесных строк.
     @Environment(\.controlSize) private var controlSize
 
     /// `matchesRow` — кнопка рядом с пилюлей процесса: та же высота и тот же радиус,

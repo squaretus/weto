@@ -1,0 +1,57 @@
+# Terminal target returns after a pause
+
+## Goal
+Под tmux и GNU screen на Linux снятая пауза оставляла цель в фоне: интерфейс нарисован, клавиши идут
+шеллу, при вводе цель встаёт. Теперь цель возвращается сама как рабочая сессия, а ручной `fg` остаётся
+последним запасным путём.
+
+## Scope
+Обе платформы, поведение одинаковое. Что выяснено про каждое окружение и почему ввод ограничен —
+в `bugs/tmux-takes-the-terminal-from-a-paused-target.md`.
+
+Путь: автоматическая попытка → кнопка «Вернуть в терминал» → подсказка про `fg`.
+
+| состояние | что на экране | дальше |
+|---|---|---|
+| `returning` | подпись «в фоне» | цель впереди — история окончена; команда не ушла или за 3 с ничего не изменилось — `offered` |
+| `offered` | «в фоне» и кнопка после пилюли | нажатие — снова `returning`; 5 минут от снятия паузы — `expired` |
+| `returning` после нажатия | подпись «в фоне» | не вышло — `failed` и поднятое окно терминала |
+| `failed` | «в фоне» и под строкой «Не удалось вернуть автоматически. Окно терминала открыто, введите fg» | только ручной `fg` |
+| `expired` | «в фоне: введите fg» | только ручной `fg` |
+
+На паузе только значок с отсчётом, и новая пауза обнуляет историю. На выходе из Weto цель возвращается
+тоже, без AppleScript. От root ввода нет (`modules/weto-cli.md`).
+
+## Changes
+- Added: `TerminalReturnTracker` в ядре обеих платформ; `TerminalForegroundReturning` с реализациями
+  `TerminalForegroundReturner` (macOS: tmux, AppleScript) и `MultiplexerForegroundReturner` (Linux: tmux,
+  GNU screen); `shellHoldingTerminal` / `shell_holding_terminal`; `awaitingForeground` /
+  `awaiting_foreground`; `WetoBackgroundLabel` / `background_label`;
+  `NSAppleEventsUsageDescription` в `Weto-Info.plist`; живые тесты.
+- Modified: попап шире, `popupWidth` 480; значок паузы только с отсчётом; кнопка в размер строки
+  (`matchesRow`, `weto-row-button`); на Linux строки целей пересобираются только при смене содержимого.
+- Removed: кнопка «Показать терминал» и значок (i) с подсказкой про `fg` на паузе. Подъём окна остался
+  запасным действием после неудачного нажатия.
+
+## Risks
+- Ввод идёт в чужой терминал. Шелл проверяется на момент ввода, но между проверкой и вводом пользователь
+  может запустить программу, и `fg` достанется ей.
+- AppleScript не очищает набранное в строке шелла: оно склеится с `fg`.
+- Подсказка говорит «Окно терминала открыто», даже если окно поднять не удалось: на Linux так у эмулятора
+  вне сессионной шины.
+- Перезапуск weto между паузой и возвратом теряет сохранённый режим, и цель автоматика уже не видит.
+- Homebrew-screen на macOS не проверялся: пути для него нет.
+
+## How to test
+- [ ] Живые проверки: `runbooks/tests.md`, раздел 6.
+- [ ] macOS: Terminal.app и iTerm2 спрашивают разрешение Automation один раз; отказ ведёт к кнопке.
+- [ ] Linux: `linux/docs/manual-ui-check.md`, «Возврат в терминал после паузы».
+
+## Related modules
+- modules/weto-core.md
+- modules/weto-system.md
+- modules/weto-shared.md
+- modules/weto-menubar.md
+- modules/weto-design.md
+- modules/linux-guard.md
+- modules/weto-cli.md

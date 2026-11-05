@@ -14,7 +14,8 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-core` | `ip.rs` | address validation and CIDR |
 | `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the pause ceiling as a parameter (`set_pause_ceiling`) |
 | `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText` |
-| `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `foreground_roots`, public `holds_foreground`; `PausedProcess`, `RecoveredProcess` |
+| `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `foreground_roots`, public `holds_foreground`; `shell_holding_terminal` — шелл, в который можно ввести `fg`; `PausedProcess`, `RecoveredProcess` |
+| `weto-core` | `terminal_return.rs` | `TerminalReturnTracker`, порт macOS: `Returning`, `Offered`, `Failed`, `Expired`; `VERIFY_WINDOW` 3 с, `OFFER_WINDOW` 5 минут |
 | `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation(phase)`/`should_explain` (no countdown — that is on the pills), `status_lines`, `idle_targets` |
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic; `InterfaceListing` / `KernelInterfaces` (`getifaddrs`, `IFF_UP` and `IFF_RUNNING`) |
 | `weto-sys` | `network_events.rs` | netlink subscription |
@@ -22,6 +23,7 @@ the Swift side — only shared data (`shared/fixtures`, `shared/icon`, `shared/t
 | `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order |
 | `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq; `ureq::get` builds an agent per call, so no connection pool between probes |
 | `weto-sys` | `terminal_mode.rs` | `TerminalModeKeeping` / `TerminalModeKeeper`: `termios` of a target's tty captured before the pause, restored after `fg`; `path_of` finds the device by the kernel's `tty_nr` encoding |
+| `weto-sys` | `terminal_return.rs` | `TerminalForegroundReturning` / `MultiplexerForegroundReturner`: ввод `fg` через tmux и GNU screen; проверки бинарника и каталога сокетов; потолок 2 с на команду |
 | `weto-sys` | `background.rs` | the background track: one thread per probe, so a pass never waits for a request |
 | `weto-core` | `terminal.rs` | which ancestor is the terminal; bus name and object path from a desktop id |
 | `weto-core` | `launcher.rs` | `.desktop` text: `DesktopCommand`, `name_from_desktop_entry`, wrapper stripping |
@@ -78,7 +80,8 @@ missing from it is a bug, not a platform trait.
 | target picker: `NSOpenPanel` in `/Applications` | «Выбрать…» opens `Gtk.FileDialog` in the first XDG applications directory; a `.desktop` entry stands in for a bundle | the platform's own picker and its own notion of an app |
 | VPN app: «не выбрано» + «Выбрать…» with a file panel; chosen → name over description and a trash «Снять выбор» | the same two states, but the unchosen one is «не выбрано», a «Команда или путь» field and «Выбрать» | deliberate (2026-10-06): the client is named the way a target is typed, by command or path |
 | pill icon: app, brand or Terminal.app icon | `Icon=` of the target's `.desktop` entry (theme name or absolute file), else `utilities-terminal-symbolic`; the `terminal` label on every target not added through a `.desktop` entry (`presentation::is_command_line_target`) | no bundles: whether a target is an app is known only from what the user picked |
-| the "Показать терминал" button raises any terminal | the button is there only for an emulator that comes out on the session bus | raising a window means asking the application itself (`org.freedesktop.Application.Activate`); an emulator that owns no bus name — xterm, alacritty, kitty, foot, xfce4-terminal, mate-terminal, terminator — cannot be asked, and nothing short of `wmctrl`/`xdotool` would change that. The `(i)` hint stays: it is the answer the user needs. See "Raising the terminal" below |
+| `fg` is typed through tmux or AppleScript (Terminal.app, iTerm2) | через tmux и GNU screen, AppleScript нет | GNU screen 4.09 на Linux забирает терминал, как tmux; системный screen 4.00.03 на macOS ведёт себя как голый терминал. В голом терминале цель остаётся впереди сама |
+| a failed press raises any terminal | окно поднимается только у эмулятора на сессионной шине, подсказка под строкой одна на всех | raising a window means asking the application itself (`org.freedesktop.Application.Activate`); an emulator that owns no bus name — xterm, alacritty, kitty, foot, xfce4-terminal, mate-terminal, terminator — cannot be asked, and nothing short of `wmctrl`/`xdotool` would change that. See "Raising the terminal" below |
 | tapping the notification always opens the popup | tapping opens the status window when the notification server announces `actions` | the capability is the server's, not ours (`GetCapabilities`); without it the notification is still delivered, just not clickable |
 | — | a second dialog asks for the program file when the picked entry launches through Steam or flatpak | a `.app` always *is* the program; a `.desktop` entry need not name one at all, and guessing would guard the launcher — see the `appBundle` row under "Contracts that differ from macOS" |
 | «Автозапуск указывает на другую копию…» in Maintenance | no such line | the autostart entry always names the one launcher path, `~/.local/bin/weto` (`Paths::launcher`), so there is no other copy to point at |
@@ -101,8 +104,9 @@ version, update tile); the «Журнал» tab shows the latest 20 episodes (on
    релиза…», «Загрузка X… N %», «Установка…», the failure in the Warning tone, otherwise
    «Доступно обновление X» with «Подробнее»; a spinner replaces the button while in flight);
 6. a divider and the live targets: one single-line pill each — name ellipsised in the middle,
-   `terminal` label, the pause badge with its countdown, `(i)` outside the amber capsule,
-   «Показать терминал» where it can work, `+N`; with nothing running, the idle line in the shield
+   `terminal` label, the pause badge with its countdown under a pause or the «в фоне» label after it,
+   `+N`; after the pill «Вернуть в терминал» at the row's height, under it the «Не удалось вернуть
+   автоматически…» hint; with nothing running, the idle line in the shield
    colour; with no targets configured, neither the divider nor the list.
 
 **There is no guard on/off switch, and that is deliberate.** `is_enabled` exists in the
@@ -111,8 +115,10 @@ settings model on both platforms and is exposed by neither. The same goes for a
 
 ## Raising the terminal
 
-A target that lost its foreground job under pause gets the `fg` hint and, next to it, the
-"Показать терминал" button — the same affordance as macOS. What differs is the mechanism:
+Окно терминала поднимается в одном случае: нажатие «Вернуть в терминал» не вернуло цель
+(`GuardController::take_failed_returns` → `AppState::raise_terminals_of_failed_returns`). Своей кнопки
+у этого действия больше нет, а на паузе нет ни кнопки, ни подсказки. Сам ввод `fg` описан в "How a
+pause plays out here". What differs from macOS is the mechanism:
 macOS activates an `NSRunningApplication`, here the application is asked over the session bus.
 
 Two facts are collected about every ancestor of the standing target, and neither is enough
@@ -144,13 +150,13 @@ What the mechanism covers, from the desktop files as shipped by Debian trixie: G
 same rule, KDE's Konsole, which registers `org.kde.konsole-<pid>` (the `-<pid>` tail is stripped
 when the object path is derived — the KDE convention). What it cannot cover: xterm, alacritty,
 kitty, foot, xfce4-terminal, mate-terminal, terminator — they never appear on the session bus,
-so there is no one to ask. Those targets keep the hint and lose the button, which is the honest
-outcome: a button that does nothing is worse than no button.
+so there is no one to ask. Окно такой цели не поднимется, а подсказка «Не удалось вернуть автоматически.
+Окно терминала открыто, введите fg» останется: текст один на всех и про неподнятое окно не знает.
 
-The answer is cached per pid by the popup: it costs a `/proc` pass plus one `ListNames` and a
-`GetConnectionUnixProcessID` per name, and the popup refreshes twice a second. Every bus call
-is capped at 3 s (`session_bus::METHOD_TIMEOUT`) instead of zbus's 25 s default — the lookup runs
-on the GTK main loop — and `Activate` itself is sent from a detached thread, so a hung emulator
+The answer costs a `/proc` pass plus one `ListNames` and a `GetConnectionUnixProcessID` per name,
+поэтому спрашивается только после неудачного нажатия и своим потоком: такт охраны его не ждёт.
+Every bus call is capped at 3 s (`session_bus::METHOD_TIMEOUT`) instead of zbus's 25 s default,
+and `Activate` itself is sent from a detached thread, so a hung emulator
 cannot freeze the window.
 
 Notifications moved to the same bus for the same reason: `notify-send` cannot report a click,
@@ -477,6 +483,11 @@ Everything that cannot be faked — a real WireGuard tunnel, the look of the tra
 actually coming to the front — is covered by the checklists in `linux/docs/manual-check.md`
 and `linux/docs/manual-ui-check.md`.
 
+Возврат в терминал: `weto-core/tests/terminal_return.rs` (цикл), `weto-guard/tests/pause.rs` (с записывающим
+`TerminalForegroundReturning`, `GuardController::with_terminal_returner`), `weto-ui/tests/pill_row.rs`
+(форма строки с кнопкой). `weto-guard/tests/live_return.rs` идёт на настоящих tmux и GNU screen только
+руками, не от root: в CI и контейнере разработки их нет — см. `runbooks/tests.md`.
+
 The hold is tested in two files on purpose: the rule itself is pure (`weto-app/tests/lifecycle.rs`,
 no display), while `tests/held_window.rs` runs a real `Application` and asserts all three halves at
 once — the app outlives its last window, `active_window` is then empty so a tray click takes the
@@ -596,6 +607,19 @@ one record the journal is kept for out of its fifty.
    process is not `T`, not in the ledger and holds the foreground again (`pause_plan::holds_foreground`);
    gone, another path or another tty drops the mode. In memory only, same as macOS.
    [bugs/tmux-takes-the-terminal-from-a-paused-target](../bugs/tmux-takes-the-terminal-from-a-paused-target.md).
+
+   Цель, потерявшую передний план, охрана возвращает сама, когда пауза снята. Сервер tmux и GNU screen 4.09
+   сразу продолжают остановленный шелл, поэтому SIGCONT оставляет цель в фоне. `settle_terminal_returns`
+   идёт сразу за `restore_terminal_modes`: `awaiting_foreground` отдаёт ждущих `TerminalReturnTracker`
+   (под паузой список пуст, и новая пауза обнуляет историю), а ввод уходит на дорожку `weto-return`:
+   запуск tmux не имеет права идти ни в такте, ни на главном потоке GTK. `type_fg` держит мьютекс `typing`,
+   потому что у двух целей конвейера терминал один. Вводит, только если `shell_holding_terminal` вернул
+   шелл. Окно и сессию screen берёт из `/proc/<shell>/environ` (`STY`, `WINDOW`). Через `FG_SETTLE`
+   (200 мс) режим терминала возвращается, не дожидаясь такта. `shutdown` отпускает ворота применения
+   и зовёт `return_targets_before_exit`: ввод ждётся не дольше `EXIT_RETURN_CEILING` (3 с), потому что выход
+   идёт с главного потока GTK, а режим возвращает `restore_terminal_modes_on_exit`, мимо учёта.
+   Строки целей пересобираются только при смене того, что они говорят (`TargetsView`): кнопка,
+   пересозданная посреди нажатия, нажатия не получила бы.
 2. Every tick re-announces the loss if the verdict is stale, but the ceiling counts from the start
    of the pause (the bad result or the loss): `GuardInput::Tick` is the only thing that expires it, and a repeated announcement cannot
    restart it. At the ceiling (the user's setting, 1 min by default) the phase becomes
@@ -663,6 +687,5 @@ the paused «what next» line names no countdown, the badges do) (`weto_core::pr
 `explanation`, `should_explain` — the same texts as macOS `GuardVM.statusColor` and
 `StatusPresentation.explanation`, word for word), and every standing target gets a pause
 badge with a live countdown (`weto_ui::components::pause_badge`/`pause_countdown_text`; «4:59»
-above a minute, «43 с» in the last one — same as macOS),
-the `fg` hint and the "Показать терминал" button where the emulator can be raised —
-see "Raising the terminal" above.
+above a minute, «43 с» in the last one — same as macOS). Цель, оставшаяся в фоне после паузы, получает
+подпись, кнопку и подсказку — см. "How a pause plays out here" и "Raising the terminal".

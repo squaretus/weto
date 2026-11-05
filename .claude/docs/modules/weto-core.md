@@ -44,7 +44,12 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   from a stopped target, so SIGSTOP to it is a signal off the point. `foregroundRoots` lists the
   rule roots that held the foreground when paused — the ones whose terminal mode `ProcessEnforcer`
   captures and later restores; `PausePlanner.holdsForeground(_:among:)` is the same foreground
-  rule made public for that restore check
+  rule made public for that restore check. `PausePlanner.shellHoldingTerminal(of:among:)` — шелл, в который
+  можно ввести `fg`: ближайший предок-шелл на терминале цели, и только пока терминал у него
+- `macos/Sources/WetoCore/TerminalReturnTracker.swift` — история возврата цели в терминал, чистая и
+  с `now` снаружи: `returning`, затем `offered` (кнопка) и `expired` (5 минут от снятия паузы),
+  или `failed` (нажатие не помогло). `observe(waiting:at:)` на такт, `press`, `finished`.
+  Порт — `weto-core/src/terminal_return.rs`
 - `macos/Sources/WetoCore/Model/GeoModels.swift` — also `VPNAppStatus` and `VPNTunnelStatus`
   (`notChosen | down | bypassed(via:) | carrying`, built by `init(chosen:snapshot:)`)
 - `macos/Sources/WetoCore/Model/` — `GeoModels`, `GeoProbeReport`, `NetworkSnapshot`, `ProcessSnapshot`
@@ -194,10 +199,14 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   `carrying`, not `bypassed`: nothing leaves, so there is no leak — geo answers (probe fails →
   pause). Fixtures: `guard-policy.json` v5, two tunnel cases in `guard-transitions.json`.
 - **`ProcessSnapshot.arguments` stays an array.** A joined command line must never be used for matching.
-- **"Shell first" keeps the foreground only on a bare pty.** Under tmux the server continues the
-  stopped pane shell at once and it takes the terminal anyway; the order is kept (it still works
-  without tmux), and the damage — the terminal mode — is undone by `foregroundRoots` + the
-  enforcer, not by the plan.
+- **"Shell first" keeps the foreground only on a bare pty.** Under tmux, and GNU screen on Linux, the
+  server continues the stopped shell at once and it takes the terminal anyway; the order is kept (it
+  still works without them). Последствия чинит не план: режим терминала возвращают `foregroundRoots`
+  и enforcer, передний план — ввод `fg` после паузы.
+- **Отправленная команда возвратом не считается.** `fg` мог достаться другому заданию, поэтому
+  `TerminalReturnTracker.finished(succeeded: true)` только запускает окно проверки в 3 с, а историю
+  заканчивает наблюдение: цели больше нет в `waiting`. Срок кнопки считается от снятия паузы, а не от
+  её показа. Пустой `waiting` на паузе стирает записи, и после новой паузы положена новая попытка.
   [bugs/tmux-takes-the-terminal-from-a-paused-target](../bugs/tmux-takes-the-terminal-from-a-paused-target.md).
 - **The pause ceiling is a machine parameter, not an input.** `setPauseCeiling` touches neither
   the phase nor `pausedSince`; only the `.tick` threshold moves, and the deadline is always

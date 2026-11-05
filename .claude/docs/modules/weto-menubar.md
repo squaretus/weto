@@ -14,7 +14,9 @@ parsing, validation and persistence happen in the stores.
 - `macos/Sources/WetoMenuBar/StatusPopupView.swift` — shield + title + refresh/gear, the three
   explanation lines (`StatusPresentation.explanation(for:)`, shown when `.shouldExplain`; the
   paused «what's next» line carries no countdown — the pills do), the geo readout, live target
-  pills each with a `WetoPauseBadge` when paused
+  pills. Под паузой у пилюли `WetoPauseBadge`, у цели в фоне после неё `WetoBackgroundLabel`. Кнопка
+  «Вернуть в терминал» стоит после пилюли и только при `.offered`, вне паузы; подсказка «Не удалось
+  вернуть автоматически…» стоит под строкой при `.failed` (`GuardVM.terminalReturns`)
 - `macos/Sources/WetoMenuBar/MenuBarPopupPresenter.swift` — `PopupPresenting` implementation:
   finds the menu-bar-extra status button and popup window by class-name substring (no public
   AppKit/SwiftUI API for either) and toggles the popup open from code, the way a notification tap
@@ -29,7 +31,8 @@ parsing, validation and persistence happen in the stores.
 - `macos/Sources/WetoMenuBar/Settings/MaintenanceCard.swift`
 - `macos/Sources/WetoMenuBar/Settings/JournalCard.swift` — latest 20 episodes; «Показаны последние 20 из N» counts episodes
 - `macos/Sources/WetoMenuBar/Settings/SettingsFooter.swift`
-- `macos/Resources/Weto-Info.plist` — bundle identity plus residency flags (copied by `macos/scripts/make-app.sh`)
+- `macos/Resources/Weto-Info.plist` — bundle identity plus residency flags (copied by `macos/scripts/make-app.sh`);
+  `NSAppleEventsUsageDescription` — текст запроса Automation на ввод `fg` в Terminal.app и iTerm2
 
 ## Entry points
 - `WetoMenuBarApp` (`@main`) → `MenuBarExtra` with `.menuBarExtraStyle(.window)` +
@@ -162,7 +165,7 @@ parsing, validation and persistence happen in the stores.
 ## Related docs
 - `.claude/rules/ARCHITECTURE.md` — module index and key contracts
 - `docs/design-system.md` — visual language the cards and popup must follow, including the pause
-  badge and "Показать терминал"
+  badge and «Вернуть в терминал»
 - `features/geo-whitelist.md` — the whitelist card (the screen has six cards)
 - `features/pause-ceiling-setting.md` — the «Таймаут» row in «Сеть и гео»
 - `features/pause-instead-of-kill.md` — the popup states this view renders
