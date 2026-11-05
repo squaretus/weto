@@ -393,21 +393,27 @@ public final class GuardVM {
     /// Ввод `fg` идёт с потолком времени и может ждать окно разрешения, поэтому не на главном
     /// потоке. Вводим, только если терминал сейчас у шелла этой цели: иначе введённое
     /// досталось бы чужой программе, и вместо этого — честный отказ, дальше кнопка.
+    ///
+    /// По одному: у двух целей одного конвейера терминал один, и `fg` второй ушёл бы в цель как
+    /// ввод. Поэтому каждая смотрит, кто держит терминал, уже после предыдущей.
     private func startTerminalReturn(_ pid: Int32) {
-        let processes = locator.allProcesses(includeArguments: false)
-        guard let target = processes.first(where: { $0.pid == pid }),
-              let shell = PausePlanner.shellHoldingTerminal(of: target, among: processes)
-        else {
-            finishTerminalReturn(pid, succeeded: false)
-            return
-        }
-
+        let previous = returnTasks.last
         let returner = terminalReturner
         returnTasks.append(Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            let processes = self.locator.allProcesses(includeArguments: false)
+            guard let target = processes.first(where: { $0.pid == pid }) else {
+                self.finishTerminalReturn(pid, succeeded: false)
+                return
+            }
+            guard let shell = PausePlanner.shellHoldingTerminal(of: target, among: processes) else {
+                self.finishTerminalReturn(pid, succeeded: PausePlanner.holdsForeground(target, among: processes))
+                return
+            }
             let result = await Task.detached {
                 returner.returnToForeground(target: target, shell: shell, processes: processes, usingAutomation: true)
             }.value
-            guard let self else { return }
             guard case .success = result else {
                 self.finishTerminalReturn(pid, succeeded: false)
                 return
@@ -439,8 +445,11 @@ public final class GuardVM {
     private func returnTargetsBeforeExit() {
         let processes = locator.allProcesses(includeArguments: false)
         var typed = false
+        var shells = Set<Int32>()
         for target in enforcer.awaitingForeground() {
-            guard let shell = PausePlanner.shellHoldingTerminal(of: target, among: processes) else { continue }
+            guard let shell = PausePlanner.shellHoldingTerminal(of: target, among: processes),
+                  shells.insert(shell.pid).inserted
+            else { continue }
             if case .success = terminalReturner.returnToForeground(
                 target: target, shell: shell, processes: processes, usingAutomation: false
             ) { typed = true }

@@ -3,8 +3,8 @@ import AppKit
 import WetoCore
 
 /// Показать терминал, в котором живёт цель, ушедшая в фон по запасному пути паузы.
-/// Ввод `fg` за пользователя не делаем: это возможно только для Terminal.app и iTerm2
-/// через AppleScript с разрешением Automation, остальные эмуляторы этого не умеют.
+/// Запасной путь и есть: `fg` за пользователя вводит `TerminalForegroundReturner`, а сюда
+/// приходят, когда ввести нечем и остаётся подсказка.
 public protocol TerminalLocating: Sendable {
     func activateTerminal(owning pid: Int32, in processes: [ProcessSnapshot]) -> Bool
 }

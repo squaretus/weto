@@ -3912,6 +3912,55 @@ extension GuardVMTests {
         h.vm.stop()
     }
 
+    /// Две цели одного конвейера: терминал один и `fg` один, второй ушёл бы в цель как ввод.
+    func test_two_targets_on_one_terminal_get_one_fg() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+        func tree(foreground: Int32, stopped: Bool = false) -> [ProcessSnapshot] {
+            tmuxPaneTree(foreground: foreground, stopped: stopped) + [
+                ProcessSnapshot(pid: 210, parentPID: 100, executablePath: "/usr/bin/pico",
+                                processGroup: 200, terminalForegroundGroup: foreground, terminalDevice: 7,
+                                isStopped: stopped),
+            ]
+        }
+        locator.processes = tree(foreground: 200)
+        returner.onReturn = { locator.processes = tree(foreground: 200) }
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tree(foreground: 100, stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        locator.processes = tree(foreground: 100)
+        h.vm.handle(.tick)
+        await h.vm.awaitPendingTerminalReturns()
+
+        XCTAssertEqual(returner.calls.count, 1, "\(returner.calls)")
+        h.vm.stop()
+    }
+
+    /// То же на выходе: следующего такта нет, а обход один на всех.
+    func test_quitting_types_one_fg_for_two_targets_on_one_terminal() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+        func tree(foreground: Int32) -> [ProcessSnapshot] {
+            tmuxPaneTree(foreground: foreground) + [
+                ProcessSnapshot(pid: 210, parentPID: 100, executablePath: "/usr/bin/pico",
+                                processGroup: 200, terminalForegroundGroup: foreground, terminalDevice: 7),
+            ]
+        }
+        locator.processes = tree(foreground: 200)
+        returner.onReturn = { locator.processes = tree(foreground: 200) }
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tree(foreground: 100)
+
+        h.vm.stop()
+
+        XCTAssertEqual(returner.calls.count, 1, "\(returner.calls)")
+    }
+
     /// На паузе цели возвращаться не должны, даже если терминал уже у шелла.
     func test_nothing_returns_while_the_pause_lasts() async {
         let returner = FakeTerminalReturner()

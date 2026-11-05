@@ -87,14 +87,15 @@ final class LiveTmuxReturnTests: XCTestCase {
             ledger: StoppedLedger(storage: InMemoryStoppedLedger()), terminalModes: TerminalModeKeeper()
         )
 
-        // Правило совпадает со всеми такими процессами на машине, а тронуть можно только свой.
-        let scan = enforcer.scan()
-        let roots = ProcessMatcher.matches(in: scan.processes, rules: scan.rules).filter { $0.matchedBy == .rule }
-        let devices = Set(roots.compactMap { root in scan.processes.first { $0.pid == root.pid }?.terminalDevice })
-        guard devices.count == 1, !devices.contains(0) else {
-            XCTFail("цель запущена не только в панели теста, останавливать её нельзя: \(roots.map(\.pid))")
-            return
-        }
+        // Правило совпадает со всеми такими процессами на машине, а останавливать можно только
+        // процессы панели теста: рядом может работать настоящая сессия пользователя.
+        var paneInfo = stat()
+        XCTAssertEqual(stat(paneTTY, &paneInfo), 0)
+        let full = enforcer.scan()
+        let scan = ProcessEnforcer.Scan(
+            processes: full.processes.filter { $0.terminalDevice == paneInfo.st_rdev },
+            rules: full.rules
+        )
 
         let paused = enforcer.pause(scan)
         XCTAssertEqual(paused.plan.foregroundRoots.count, 1, "цель держала терминал")
