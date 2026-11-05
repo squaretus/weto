@@ -34,11 +34,15 @@ public struct WetoProcessPill<Accessory: View>: View {
                 .foregroundStyle(WetoTokens.ink.resolve(scheme))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                // Иначе `Spacer` делит остаток поровну с заголовком, и имя сжимается,
+                // хотя места хватает.
+                .layoutPriority(1)
 
             if isCommandLine {
                 Text(verbatim: "terminal")
                     .font(WetoTokens.data)
                     .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                    .fixedSize()
             }
 
             Spacer(minLength: WetoTokens.space2)
@@ -49,6 +53,7 @@ public struct WetoProcessPill<Accessory: View>: View {
                 Text(verbatim: "+\(childCount)")
                     .font(WetoTokens.data)
                     .foregroundStyle(WetoTokens.faint.resolve(scheme))
+                    .fixedSize()
                     .accessibilityLabel("дочерних процессов: \(childCount)")
             }
         }

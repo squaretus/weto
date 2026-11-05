@@ -315,12 +315,15 @@ final class ProcessEnforcer {
     /// не доходят. Поэтому режим возвращает weto: один раз, когда цель не стоит, не держится
     /// учётом (пауза для неё кончилась) и держит передний план своего терминала — то есть
     /// пользователь ввёл `fg`. Под паузой — никогда: `fg` в это время weto всё равно перебьёт.
-    func restoreTerminalModes(observing scan: Scan? = nil) {
+    ///
+    /// `ignoringLedger` — только для выхода из Weto: там записи остаются в учёте до следующего
+    /// запуска, а вернуть режим потом будет уже некому.
+    func restoreTerminalModes(observing scan: Scan? = nil, ignoringLedger: Bool = false) {
         guard !savedModes.isEmpty else { return }
         let processes = observedProcesses(scan)
         var byPID: [Int32: ProcessSnapshot] = [:]
         for process in processes { byPID[process.pid] = process }
-        let held = Set(ledger.entries.map(\.pid))
+        let held = ignoringLedger ? [] : Set(ledger.entries.map(\.pid))
 
         for (identity, mode) in savedModes {
             guard let process = byPID[identity.pid], process.executablePath == identity.executablePath,
@@ -334,6 +337,23 @@ final class ProcessEnforcer {
             else { continue }
             _ = terminalModes.restore(mode)
             savedModes[identity] = nil
+        }
+    }
+
+    /// Цели, державшие передний план при паузе и потерявшие его: живы, на том же терминале,
+    /// а терминал не у них. Режим у них ещё не возвращён — значит, и `fg` ещё не было.
+    /// Цель, сама оставшаяся впереди, сюда не попадает: у неё `restoreTerminalModes`
+    /// забрал запись на первом же такте.
+    func awaitingForeground(observing scan: Scan? = nil) -> [ProcessSnapshot] {
+        guard !savedModes.isEmpty else { return [] }
+        let processes = observedProcesses(scan)
+        return savedModes.compactMap { identity, mode in
+            guard let process = processes.first(where: { $0.pid == identity.pid }),
+                  process.executablePath == identity.executablePath,
+                  process.terminalDevice == mode.device,
+                  !PausePlanner.holdsForeground(process, among: processes)
+            else { return nil }
+            return process
         }
     }
 

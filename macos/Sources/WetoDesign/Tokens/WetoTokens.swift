@@ -75,7 +75,7 @@ public enum WetoTokens {
     public static let radiusPill: CGFloat = 11
     public static let radiusTile: CGFloat = 10
 
-    public static let popupWidth: CGFloat = 352
+    public static let popupWidth: CGFloat = 480
     public static let windowWidth: CGFloat = 500
     public static let windowHeight: CGFloat = 640
     public static let controlHeight: CGFloat = 32

@@ -52,6 +52,9 @@ public final class GuardVM {
     /// Корни целей, стоящих сейчас.
     public private(set) var pausedProcesses: [PausedProcess] = []
 
+    /// Цели, оставшиеся в фоне после снятия паузы, и что с ними сейчас: по pid.
+    public private(set) var terminalReturns: [Int32: TerminalReturnState] = [:]
+
     /// Когда истечёт потолок паузы. `nil` — цели не стоят.
     public var pauseDeadline: Date? {
         phase.pausedSince.map { $0.addingTimeInterval(controller.pauseCeiling) }
@@ -67,6 +70,9 @@ public final class GuardVM {
     @ObservationIgnored private let signaler: ProcessSignaling
     @ObservationIgnored private let ledger: StoppedLedger
     @ObservationIgnored private let terminalLocator: TerminalLocating
+    @ObservationIgnored private let terminalReturner: TerminalForegroundReturning
+    @ObservationIgnored private var returnTracker = TerminalReturnTracker()
+    @ObservationIgnored private var returnTasks: [Task<Void, Never>] = []
     @ObservationIgnored private let notifier: GuardNotifying
     @ObservationIgnored private let events: NetworkEventSourcing
     @ObservationIgnored private let launchAgent: LaunchAgentManaging
@@ -158,6 +164,8 @@ public final class GuardVM {
         // а выражение по умолчанию считается вне него.
         ledger: StoppedLedger? = nil,
         terminalLocator: TerminalLocating = TerminalLocator(),
+        terminalModes: TerminalModeKeeping = TerminalModeKeeper(),
+        terminalReturner: TerminalForegroundReturning = TerminalForegroundReturner(),
         notifier: GuardNotifying,
         events: NetworkEventSourcing,
         launchAgent: LaunchAgentManaging = LaunchAgentController(),
@@ -175,6 +183,7 @@ public final class GuardVM {
         let ledger = ledger ?? StoppedLedger(storage: InMemoryStoppedLedger())
         self.ledger = ledger
         self.terminalLocator = terminalLocator
+        self.terminalReturner = terminalReturner
         self.notifier = notifier
         self.events = events
         self.launchAgent = launchAgent
@@ -186,6 +195,7 @@ public final class GuardVM {
             locator: locator,
             signaler: signaler,
             ledger: ledger,
+            terminalModes: terminalModes,
             now: now
         )
 
@@ -268,6 +278,7 @@ public final class GuardVM {
         // наблюдается и здесь, и он называется как обычно.
         let outcome = resumeFromLedger()
         resolvePauseEpisode("возобновлено при выходе из Weto", exceptions: shutdownExceptions(outcome))
+        returnTargetsBeforeExit()
         let stillStanding = Set(outcome.unresolved.map(\.pid))
         pausedProcesses.removeAll { !stillStanding.contains($0.pid) }
         // Фаза обязана уйти вместе с целями: «Пауза», оставленная после остановки,
@@ -356,6 +367,87 @@ public final class GuardVM {
             // как «я всё ещё под VPN».
             return evidence.isLocal ? nil : lastReading?.primaryCountry
         }
+    }
+
+    // MARK: - Возврат цели в терминал
+
+    /// Такт возврата: кому положена автоматическая попытка, у кого вышло время.
+    ///
+    /// Под паузой ждать нечего: цели не возвращаются, и новая пауза обнуляет историю,
+    /// а после неё положена новая попытка.
+    private func settleTerminalReturns() {
+        let waiting = phase.action == .run ? enforcer.awaitingForeground(observing: currentScan) : []
+        let step = returnTracker.observe(waiting: Set(waiting.map(\.pid)), at: now())
+        for pid in step.attempts { startTerminalReturn(pid) }
+        for pid in step.failed { showTerminal(for: pid) }
+        terminalReturns = returnTracker.states
+    }
+
+    /// Кнопка «Вернуть в терминал». Живёт до первого нажатия.
+    public func returnToTerminal(pid: Int32) {
+        guard returnTracker.press(pid, at: now()) else { return }
+        startTerminalReturn(pid)
+        terminalReturns = returnTracker.states
+    }
+
+    /// Ввод `fg` идёт с потолком времени и может ждать окно разрешения, поэтому не на главном
+    /// потоке. Вводим, только если терминал сейчас у шелла этой цели: иначе введённое
+    /// досталось бы чужой программе, и вместо этого — честный отказ, дальше кнопка.
+    private func startTerminalReturn(_ pid: Int32) {
+        let processes = locator.allProcesses(includeArguments: false)
+        guard let target = processes.first(where: { $0.pid == pid }),
+              let shell = PausePlanner.shellHoldingTerminal(of: target, among: processes)
+        else {
+            finishTerminalReturn(pid, succeeded: false)
+            return
+        }
+
+        let returner = terminalReturner
+        returnTasks.append(Task { [weak self] in
+            let result = await Task.detached {
+                returner.returnToForeground(target: target, shell: shell, processes: processes, usingAutomation: true)
+            }.value
+            guard let self else { return }
+            guard case .success = result else {
+                self.finishTerminalReturn(pid, succeeded: false)
+                return
+            }
+            // Шеллу нужно мгновение на `fg`; режим терминала возвращаем сразу, не ожидая такта:
+            // иначе первые клавиши после возврата ушли бы в канонический режим.
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            self.enforcer.restoreTerminalModes()
+            self.finishTerminalReturn(pid, succeeded: true)
+        })
+    }
+
+    private func finishTerminalReturn(_ pid: Int32, succeeded: Bool) {
+        returnTracker.finished(pid, succeeded: succeeded, at: now())
+        if returnTracker.state(of: pid) == .failed { showTerminal(for: pid) }
+        terminalReturns = returnTracker.states
+    }
+
+    /// Дождаться отправленных команд возврата.
+    func awaitPendingTerminalReturns() async {
+        let tasks = returnTasks
+        returnTasks.removeAll()
+        for task in tasks { await task.value }
+    }
+
+    /// На выходе из Weto следующего такта не будет: то, что не вернём сейчас, останется
+    /// призраком — нарисованным, но без клавиатуры. Только tmux: ждать окно разрешения
+    /// Automation посреди выхода нельзя.
+    private func returnTargetsBeforeExit() {
+        let processes = locator.allProcesses(includeArguments: false)
+        var typed = false
+        for target in enforcer.awaitingForeground() {
+            guard let shell = PausePlanner.shellHoldingTerminal(of: target, among: processes) else { continue }
+            if case .success = terminalReturner.returnToForeground(
+                target: target, shell: shell, processes: processes, usingAutomation: false
+            ) { typed = true }
+        }
+        guard typed else { return }
+        Thread.sleep(forTimeInterval: 0.2)
+        enforcer.restoreTerminalModes(ignoringLedger: true)
     }
 
     /// Показать пользователю терминал стоящей цели: под паузой процесс не отвечает,
@@ -488,6 +580,7 @@ public final class GuardVM {
         releaseUnguarded()
         settleResume()
         enforcer.restoreTerminalModes(observing: scan)
+        settleTerminalReturns()
     }
 
     /// Проверка по кнопке из попапа. Повторное нажатие, пока ответ не пришёл,
@@ -576,6 +669,7 @@ public final class GuardVM {
             // После сброса, а не до: отказ в правах на SIGCONT — сообщение про сигнал,
             // который только что не дошёл, и гасить его тем же проходом нельзя.
             settleResume()
+            settleTerminalReturns()
         case .pause, .terminate:
             startWatchdog()
         }

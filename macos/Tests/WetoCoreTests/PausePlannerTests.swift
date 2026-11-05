@@ -227,4 +227,43 @@ final class PausePlannerTests: XCTestCase {
         XCTAssertEqual(plan.shells, [100])
         XCTAssertTrue(plan.backgrounded.isEmpty)
     }
+
+    // MARK: - Кому можно ввести `fg`
+
+    private func tree(foreground: Int32) -> [ProcessSnapshot] {
+        [
+            ProcessSnapshot(pid: 90, parentPID: 1, executablePath: "/opt/homebrew/bin/tmux"),
+            ProcessSnapshot(pid: 100, parentPID: 90, executablePath: "/bin/zsh",
+                            processGroup: 100, terminalForegroundGroup: foreground, terminalDevice: 7),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/Users/me/.local/share/claude/versions/2.1.312",
+                            processGroup: 200, terminalForegroundGroup: foreground, terminalDevice: 7),
+        ]
+    }
+
+    /// Терминал у шелла — он стоит на приглашении, и `fg` достанется именно ему.
+    func test_the_shell_holding_the_terminal_may_be_typed_into() {
+        let processes = tree(foreground: 100)
+        XCTAssertEqual(PausePlanner.shellHoldingTerminal(of: processes[2], among: processes)?.pid, 100)
+    }
+
+    /// Пользователь запустил в этом шелле другую программу: терминал у неё,
+    /// и введённое досталось бы ей, а не шеллу.
+    func test_nothing_is_typed_while_another_program_holds_the_terminal() {
+        let processes = tree(foreground: 300)
+        XCTAssertNil(PausePlanner.shellHoldingTerminal(of: processes[2], among: processes))
+    }
+
+    /// Шелл на другом терминале цели не ведёт: так выглядит шелл, запустивший tmux.
+    func test_a_shell_on_another_terminal_is_not_the_one() {
+        var processes = tree(foreground: 100)
+        processes[1] = ProcessSnapshot(pid: 100, parentPID: 90, executablePath: "/bin/zsh",
+                                       processGroup: 100, terminalForegroundGroup: 100, terminalDevice: 8)
+        XCTAssertNil(PausePlanner.shellHoldingTerminal(of: processes[2], among: processes))
+    }
+
+    /// Без терминала вводить некуда.
+    func test_a_target_without_a_terminal_has_no_shell_to_type_into() {
+        let daemon = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/node")
+        XCTAssertNil(PausePlanner.shellHoldingTerminal(of: daemon, among: tree(foreground: 100)))
+    }
 }
