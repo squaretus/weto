@@ -120,11 +120,33 @@ private struct StubLocator: ProcessLocating {
 
 private final class MutableLocator: ProcessLocating, @unchecked Sendable {
     let bundlePaths: [String: String]
-    var processes: [ProcessSnapshot]
+    private let lock = NSLock()
+    private var stored: [ProcessSnapshot]
+
+    /// Мир меняют и тест, и ввод `fg` со своего потока.
+    var processes: [ProcessSnapshot] {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
 
     init(bundlePaths: [String: String], processes: [ProcessSnapshot]) {
         self.bundlePaths = bundlePaths
-        self.processes = processes
+        self.stored = processes
+    }
+
+    /// SIGCONT дошёл. Передний план не трогает: его мог уже вернуть ввод `fg`, идущий своим
+    /// потоком, и порядок этих двух событий не должен влиять на исход.
+    func markAllRunning() {
+        lock.lock()
+        stored = stored.map { process in
+            ProcessSnapshot(
+                pid: process.pid, parentPID: process.parentPID, executablePath: process.executablePath,
+                arguments: process.arguments, processGroup: process.processGroup,
+                terminalForegroundGroup: process.terminalForegroundGroup,
+                terminalDevice: process.terminalDevice, isStopped: false
+            )
+        }
+        lock.unlock()
     }
 
     func bundlePath(forBundleID bundleID: String) -> String? { bundlePaths[bundleID] }
@@ -3887,7 +3909,7 @@ extension GuardVMTests {
         await h.probe.waitUntilStarted(atLeast: 2)
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        locator.processes = tmuxPaneTree(foreground: 100)
+        locator.markAllRunning()
         h.vm.handle(.tick)
         await h.vm.awaitPendingTerminalReturns()
     }
@@ -3932,7 +3954,7 @@ extension GuardVMTests {
         await h.probe.waitUntilStarted(atLeast: 2)
         await h.probe.resumeFirst(with: geoOutcome())
         await h.vm.awaitPendingProbe()
-        locator.processes = tree(foreground: 100)
+        locator.markAllRunning()
         h.vm.handle(.tick)
         await h.vm.awaitPendingTerminalReturns()
 
