@@ -61,7 +61,7 @@ use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::process_signaler::SignalResult;
 use weto_sys::secret_store::SecretStoring;
 use weto_sys::target_resolver::{LaunchTargetResolver, TargetResolving};
-use weto_sys::terminal_return::{TerminalForegroundReturning, TmuxForegroundReturner};
+use weto_sys::terminal_return::{MultiplexerForegroundReturner, TerminalForegroundReturning};
 
 use crate::enforcer::{ProcessEnforcer, ResumeOutcome, Scan};
 use crate::rules::RuleCache;
@@ -441,7 +441,7 @@ impl GuardController {
             checks,
             probes: Box::new(ThreadDispatcher::named("weto-probe")),
             returns: Box::new(ThreadDispatcher::named("weto-return")),
-            returner: Box::new(TmuxForegroundReturner),
+            returner: Box::new(MultiplexerForegroundReturner),
             typing: Mutex::new(()),
             inner: Mutex::new(Inner {
                 machine: GuardMachine::default(),
@@ -957,18 +957,18 @@ impl GuardController {
     fn type_fg(&self, pid: i32) -> bool {
         let _one_at_a_time = self.typing.lock().expect("ввод fg");
         let processes = self.enforcer.processes();
-        let sent = processes
-            .iter()
-            .find(|process| process.pid == pid)
-            .and_then(|target| {
-                let shell = pause_plan::shell_holding_terminal(target, &processes)?;
-                Some(
-                    self.returner
-                        .return_to_foreground(target, shell, &processes)
-                        .is_ok(),
-                )
-            })
-            .unwrap_or(false);
+        let Some(target) = processes.iter().find(|process| process.pid == pid) else {
+            return false;
+        };
+        // Вернулся `fg` предыдущей цели того же конвейера: вводить незачем, и это успех.
+        if pause_plan::holds_foreground(target, &processes) {
+            return true;
+        }
+        let sent = pause_plan::shell_holding_terminal(target, &processes).is_some_and(|shell| {
+            self.returner
+                .return_to_foreground(target, shell, &processes)
+                .is_ok()
+        });
         if sent {
             std::thread::sleep(FG_SETTLE);
         }

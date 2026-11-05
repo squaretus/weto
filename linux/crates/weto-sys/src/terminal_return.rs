@@ -3,8 +3,10 @@
 //! Порт `macos/Sources/WetoSystem/TerminalForegroundReturner.swift`. Снаружи сессии терминал
 //! не отдать: `tcsetpgrp` требует быть в этой сессии, а `TIOCSTI` не от root запрещён и с ядра
 //! 6.2 закрыт вовсе. Остаётся ввод через того, кто терминал ведёт. AppleScript на Linux нет,
-//! поэтому путь один — tmux, он же единственный, под кем шелл и забирает терминал у стоящей цели.
-//! Вне tmux — честный отказ, дальше кнопка и окно терминала с подсказкой.
+//! поэтому пути два — tmux и GNU screen: сервер каждого сразу продолжает остановленный шелл,
+//! и тот забирает терминал у стоящей цели. В голом терминале шелл стоит вместе с целью, и она
+//! остаётся впереди сама (проверено на bash и zsh). Под остальными — честный отказ, дальше
+//! кнопка и окно терминала с подсказкой.
 //!
 //! Вызывать только когда шелл стоит на приглашении (`pause_plan::shell_holding_terminal`):
 //! иначе введённое досталось бы чужой программе.
@@ -27,7 +29,7 @@ const COMMAND_CEILING: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TerminalReturnError {
-    /// Цель не под tmux, или запускать его нельзя: ввести `fg` за пользователя нечем.
+    /// Цель не под tmux и не под screen, или запускать их нельзя: ввести `fg` нечем.
     #[error("ввести fg нечем")]
     NoWayToType,
     /// tmux есть, а панели с терминалом цели на его сокетах нет.
@@ -49,9 +51,9 @@ pub trait TerminalForegroundReturning: Send + Sync {
     ) -> Result<(), TerminalReturnError>;
 }
 
-pub struct TmuxForegroundReturner;
+pub struct MultiplexerForegroundReturner;
 
-impl TerminalForegroundReturning for TmuxForegroundReturner {
+impl TerminalForegroundReturning for MultiplexerForegroundReturner {
     fn return_to_foreground(
         &self,
         target: &ProcessSnapshot,
@@ -63,19 +65,24 @@ impl TerminalForegroundReturning for TmuxForegroundReturner {
         if !may_type(euid) {
             return Err(TerminalReturnError::NoWayToType);
         }
-        let tty = terminal_mode::path_of(target.terminal_device)
-            .ok_or(TerminalReturnError::NoWayToType)?;
-        let tmux = processes
+        let host = processes
             .iter()
             .find(|process| process.pid == shell.parent_pid)
-            .filter(|process| program_name(&process.executable_path) == "tmux")
             .filter(|process| {
                 std::fs::metadata(&process.executable_path)
                     .is_ok_and(|meta| is_trusted_executable(meta.uid(), meta.mode(), euid))
             })
             .ok_or(TerminalReturnError::NoWayToType)?;
 
-        type_through_tmux(&tmux.executable_path, &tty.to_string_lossy(), euid)
+        match program_name(&host.executable_path) {
+            "tmux" => {
+                let tty = terminal_mode::path_of(target.terminal_device)
+                    .ok_or(TerminalReturnError::NoWayToType)?;
+                type_through_tmux(&host.executable_path, &tty.to_string_lossy(), euid)
+            }
+            name if is_screen(name) => type_through_screen(&host.executable_path, shell.pid),
+            _ => Err(TerminalReturnError::NoWayToType),
+        }
     }
 }
 
@@ -101,6 +108,40 @@ pub fn is_trusted_socket_directory(owner: u32, mode: u32, euid: u32) -> bool {
     mode & libc::S_IFMT == libc::S_IFDIR
         && owner == euid
         && mode & (libc::S_IRWXG | libc::S_IRWXO) == 0
+}
+
+/// Двоичный файл screen на части дистрибутивов лежит с версией в имени.
+pub fn is_screen(program: &str) -> bool {
+    program == "screen"
+        || program
+            .strip_prefix("screen-")
+            .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// Сессия и окно screen из окружения шелла (`/proc/<pid>/environ`). Им можно верить: родитель
+/// шелла уже проверен, это сам сервер screen, и выставил их он.
+pub fn screen_window(environ: &[u8]) -> Option<(&str, &str)> {
+    let variable = |name: &[u8]| {
+        environ
+            .split(|byte| *byte == 0)
+            .find_map(|entry| entry.strip_prefix(name))
+            .and_then(|value| std::str::from_utf8(value).ok())
+    };
+    Some((variable(b"STY=")?, variable(b"WINDOW=")?))
+}
+
+/// Control-U впереди: набранное в строке шелла иначе склеилось бы с `fg`. Каталог сокетов
+/// проверяет сам screen и с чужим или открытым работать отказывается.
+fn type_through_screen(binary: &str, shell: i32) -> Result<(), TerminalReturnError> {
+    let environ = std::fs::read(format!("/proc/{shell}/environ"))
+        .map_err(|_| TerminalReturnError::NoWayToType)?;
+    let (session, window) = screen_window(&environ).ok_or(TerminalReturnError::NoWayToType)?;
+    run(
+        binary,
+        &["-S", session, "-p", window, "-X", "stuff", "\u{15}fg\n"],
+        COMMAND_CEILING,
+    )
+    .map(|_| ())
 }
 
 /// Строка `list-panes`: `#{pane_tty} #{pane_id}`. Панель ищется по терминалу цели, а не по
@@ -307,6 +348,26 @@ mod tests {
         assert!(tmux_sockets(&directory, euid).is_empty(), "права у группы");
     }
 
+    /// Двоичный файл screen на части дистрибутивов лежит с версией в имени.
+    #[test]
+    fn screen_is_recognised_with_or_without_a_version() {
+        assert!(is_screen("screen"));
+        assert!(is_screen("screen-4.9.1"));
+        assert!(!is_screen("screenfetch"));
+        assert!(!is_screen("screen-saver"));
+        assert!(!is_screen("tmux"));
+    }
+
+    /// Окно screen называет окружение шелла: `STY` и `WINDOW` выставляет сам сервер.
+    #[test]
+    fn the_screen_window_comes_from_the_shell_environment() {
+        let environ = b"HOME=/h\0STY=123.pts-0.host\0TERM=screen\0WINDOW=2\0";
+        assert_eq!(screen_window(environ), Some(("123.pts-0.host", "2")));
+        assert_eq!(screen_window(b"HOME=/h\0STY=1.a\0"), None, "нет окна");
+        assert_eq!(screen_window(b"WINDOW=2\0"), None, "нет сессии");
+        assert_eq!(screen_window(b"STY=\xff\0WINDOW=2\0"), None, "не текст");
+    }
+
     /// Цель не под tmux: отказ сразу, без запуска чего-либо.
     #[test]
     fn without_tmux_the_return_is_refused() {
@@ -331,7 +392,11 @@ mod tests {
             ..ProcessSnapshot::default()
         };
         assert_eq!(
-            TmuxForegroundReturner.return_to_foreground(&target, &shell, &[host, shell.clone()]),
+            MultiplexerForegroundReturner.return_to_foreground(
+                &target,
+                &shell,
+                &[host, shell.clone()]
+            ),
             Err(TerminalReturnError::NoWayToType)
         );
     }

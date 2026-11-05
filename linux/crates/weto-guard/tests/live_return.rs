@@ -1,12 +1,13 @@
-//! Живая проверка на настоящем tmux: настоящие обход, сигналы, режим терминала и ввод `fg`.
-//! Порт `macos/Tests/WetoSharedTests/LiveTmuxReturnTests.swift`.
+//! Живая проверка на настоящих tmux и GNU screen: настоящие обход, сигналы, режим терминала
+//! и ввод `fg`. Порт `macos/Tests/WetoSharedTests/LiveTmuxReturnTests.swift`.
 //!
-//! Под tmux шелл панели забирает терминал у стоящей цели, и SIGCONT оставляет её в фоне:
-//! интерфейс нарисован, а клавиши идут шеллу. Моки этого не покажут.
+//! Сервер каждого сразу продолжает остановленный шелл, тот забирает терминал у стоящей цели,
+//! и SIGCONT оставляет её в фоне: интерфейс нарисован, а клавиши идут шеллу. Моки этого
+//! не покажут.
 //!
 //! Запускается руками и не от root (от root возврат отказывает, ничего не запуская):
-//! `WETO_LIVE_TMUX=1 WETO_LIVE_SHELL=/usr/bin/zsh <бинарник теста>`.
-//! В CI и контейнере разработки tmux нет.
+//! `WETO_LIVE_TMUX=1 WETO_LIVE_SCREEN=1 WETO_LIVE_SHELL=/usr/bin/zsh <бинарник теста>`.
+//! В CI и контейнере разработки ни tmux, ни screen нет.
 
 use std::collections::HashSet;
 use std::process::Command;
@@ -17,7 +18,7 @@ use weto_core::process::{TargetKind, TargetRule};
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_sys::process_registry::{ProcRegistry, ProcessRegistryReading};
 use weto_sys::process_signaler::ProcessSignaler;
-use weto_sys::terminal_return::{TerminalForegroundReturning, TmuxForegroundReturner};
+use weto_sys::terminal_return::{MultiplexerForegroundReturner, TerminalForegroundReturning};
 
 const RAW_PROBE: &str = r#"
 #include <stdio.h>
@@ -52,19 +53,56 @@ fn wait(milliseconds: u64) {
     std::thread::sleep(Duration::from_millis(milliseconds));
 }
 
+/// Закрывает сервер даже при упавшей проверке.
 struct Server(String);
 
 impl Drop for Server {
     fn drop(&mut self) {
-        sh(&format!("{} kill-server", self.0));
+        sh(&self.0);
     }
 }
 
+fn live_shell() -> String {
+    std::env::var("WETO_LIVE_SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+}
+
 #[test]
-fn a_paused_target_comes_back_with_the_keyboard() {
+fn a_paused_target_under_tmux_comes_back_with_the_keyboard() {
     if std::env::var("WETO_LIVE_TMUX").as_deref() != Ok("1") {
         return;
     }
+    let tmux = format!("tmux -L wetolive{} -f /dev/null", std::process::id());
+    let _server = Server(format!("{tmux} kill-server"));
+    sh(&format!(
+        "SHELL={} {tmux} new-session -d -x 120 -y 30",
+        live_shell()
+    ));
+    wait(1_500);
+    paused_target_comes_back(&|text, enter| {
+        sh(&format!("{tmux} send-keys -l '{text}'"));
+        if enter {
+            sh(&format!("{tmux} send-keys Enter"));
+        }
+    });
+}
+
+#[test]
+fn a_paused_target_under_screen_comes_back_with_the_keyboard() {
+    if std::env::var("WETO_LIVE_SCREEN").as_deref() != Ok("1") {
+        return;
+    }
+    let session = format!("wetolive{}", std::process::id());
+    let _server = Server(format!("screen -S {session} -X quit"));
+    sh(&format!("screen -dmS {session} {}", live_shell()));
+    wait(1_500);
+    paused_target_comes_back(&|text, enter| {
+        let end = if enter { "\\n" } else { "" };
+        sh(&format!("screen -S {session} -X stuff '{text}'$'{end}'"));
+    });
+}
+
+/// `type_keys` вводит текст в единственное окно сервера, как с клавиатуры, с Enter или без.
+fn paused_target_comes_back(type_keys: &dyn Fn(&str, bool)) {
     let home = tempfile::tempdir().expect("временный каталог");
     let dir = home.path().to_string_lossy().into_owned();
     let out = format!("{dir}/probe.out");
@@ -72,15 +110,17 @@ fn a_paused_target_comes_back_with_the_keyboard() {
     std::fs::write(format!("{dir}/rawprobe.c"), RAW_PROBE).unwrap();
     assert_eq!(sh(&format!("cc -o {probe} {dir}/rawprobe.c")), "");
 
-    let shell = std::env::var("WETO_LIVE_SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    let tmux = format!("tmux -L wetolive{} -f /dev/null", std::process::id());
-    let _server = Server(tmux.clone());
-    sh(&format!("SHELL={shell} {tmux} new-session -d -x 120 -y 30"));
-    wait(1_500);
-    sh(&format!("{tmux} send-keys '{probe} {out}' Enter"));
+    type_keys(&format!("{probe} {out}"), true);
 
-    let pane_tty = sh(&format!("{tmux} display -p '#{{pane_tty}}'"));
-    let is_raw = || sh(&format!("stty -a -F {pane_tty}")).contains("-icanon");
+    let tty = || {
+        ProcRegistry::new()
+            .snapshot()
+            .iter()
+            .find(|process| process.executable_path == probe)
+            .and_then(|process| std::fs::read_link(format!("/proc/{}/fd/0", process.pid)).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+    };
+    let is_raw = || tty().is_some_and(|tty| sh(&format!("stty -a -F {tty}")).contains("-icanon"));
     for _ in 0..150 {
         if is_raw() {
             break;
@@ -123,7 +163,7 @@ fn a_paused_target_comes_back_with_the_keyboard() {
     assert_eq!(waiting.len(), 1, "цель обязана ждать возврата");
 
     // Набранное в строке шелла не должно склеиться с `fg`.
-    sh(&format!("{tmux} send-keys 'half typed'"));
+    type_keys("half typed", false);
     wait(300);
 
     let processes = ProcRegistry::new().snapshot();
@@ -132,7 +172,7 @@ fn a_paused_target_comes_back_with_the_keyboard() {
         .find(|process| process.pid == waiting[0])
         .expect("цель жива");
     let holder = shell_holding_terminal(target, &processes).expect("терминал у шелла");
-    TmuxForegroundReturner
+    MultiplexerForegroundReturner
         .return_to_foreground(target, holder, &processes)
         .expect("возврат настоящим кодом");
 
@@ -145,15 +185,11 @@ fn a_paused_target_comes_back_with_the_keyboard() {
     );
     assert!(is_raw(), "терминал обязан быть в сыром режиме цели");
 
-    sh(&format!("{tmux} send-keys x"));
+    type_keys("x", false);
     wait(700);
     let seen = std::fs::read_to_string(&out).unwrap_or_default();
     assert!(
         seen.contains("got:x"),
         "клавиша обязана дойти до цели: {seen:?}"
-    );
-    println!(
-        "[live] панель:\n{}",
-        sh(&format!("{tmux} capture-pane -p | grep -v '^$' | tail -6"))
     );
 }
