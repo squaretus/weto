@@ -10,7 +10,9 @@ import WetoSystem
 ///
 /// Запускается руками, в CI tmux нет:
 /// `WETO_LIVE_TMUX=1 swift test --filter LiveTmuxReturnTests`
-/// С настоящей программой: `WETO_LIVE_TARGET=$HOME/.local/bin/claude` в придачу.
+/// С настоящей программой: `WETO_LIVE_TARGET=$HOME/.local/bin/claude` в придачу. Она стартует
+/// в корне репозитория: в новой папке claude остановился бы на вопросе о доверии, и рабочей
+/// сессии тест бы не увидел. Никакого запроса она не отправляет: текст набирается без Enter.
 @MainActor
 final class LiveTmuxReturnTests: XCTestCase {
 
@@ -63,7 +65,11 @@ final class LiveTmuxReturnTests: XCTestCase {
         sh("\(tmux) new-session -d -x 120 -y 30")
         defer { sh("\(tmux) kill-server") }
         Thread.sleep(forTimeInterval: 1.5)
-        sh("\(tmux) send-keys 'cd \(dir)/work && \(live ?? "\(probe) \(out)")' Enter")
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().path
+        let workingDirectory = live == nil ? "\(dir)/work" : "'\(repository)'"
+        sh("\(tmux) send-keys \"cd \(workingDirectory) && \(live ?? "\(probe) \(out)")\" Enter")
 
         let paneTTY = sh("\(tmux) display -p '#{pane_tty}'")
         func isRaw() -> Bool { sh("stty -a -f \(paneTTY)").contains("-icanon") }
@@ -81,7 +87,16 @@ final class LiveTmuxReturnTests: XCTestCase {
             ledger: StoppedLedger(storage: InMemoryStoppedLedger()), terminalModes: TerminalModeKeeper()
         )
 
-        let paused = enforcer.pause(enforcer.scan())
+        // Правило совпадает со всеми такими процессами на машине, а тронуть можно только свой.
+        let scan = enforcer.scan()
+        let roots = ProcessMatcher.matches(in: scan.processes, rules: scan.rules).filter { $0.matchedBy == .rule }
+        let devices = Set(roots.compactMap { root in scan.processes.first { $0.pid == root.pid }?.terminalDevice })
+        guard devices.count == 1, !devices.contains(0) else {
+            XCTFail("цель запущена не только в панели теста, останавливать её нельзя: \(roots.map(\.pid))")
+            return
+        }
+
+        let paused = enforcer.pause(scan)
         XCTAssertEqual(paused.plan.foregroundRoots.count, 1, "цель держала терминал")
         Thread.sleep(forTimeInterval: 1)
 
@@ -115,6 +130,17 @@ final class LiveTmuxReturnTests: XCTestCase {
             sh("\(tmux) send-keys x")
             Thread.sleep(forTimeInterval: 0.7)
             XCTAssertTrue(sh("cat \(out)").contains("got:x"), "клавиша обязана дойти до цели")
+        } else {
+            // Призрак тоже рисует интерфейс, но набранное до него не доходит.
+            let marker = "wetolivemarker"
+            sh("\(tmux) send-keys -l \(marker)")
+            Thread.sleep(forTimeInterval: 2)
+            let pane = sh("\(tmux) capture-pane -p")
+            print("[live] state: \(sh("ps -o stat= -p \(target.pid)"))")
+            XCTAssertFalse(pane.contains("trust this folder"), "сессия не дошла до работы:\n\(pane)")
+            XCTAssertTrue(pane.contains(marker), "набранное обязано дойти до цели:\n\(pane)")
+            XCTAssertFalse(pane.contains("command not found"), "клавиши ушли шеллу:\n\(pane)")
+            XCTAssertFalse(sh("ps -o stat= -p \(target.pid)").hasPrefix("T"), "цель обязана идти")
         }
         print("[live] pane:\n\(sh("\(tmux) capture-pane -p | grep -v '^$' | tail -6"))")
     }
