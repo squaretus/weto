@@ -19,9 +19,9 @@ Test targets declared in `macos/Package.swift` (`macos/Tests/<name>/`):
 | Target | Depends on | Covers |
 | --- | --- | --- |
 | `module-boundary-contract.sh` | все модули macOS | разрешённые импорты по слоям: ядро без системы, `WetoSystem` без UI |
-| `WetoCoreTests` | `WetoCore` | policy decisions (`GuardPolicy`, `GuardPolicyLocal`), `ProcessMatcher`, `IPRange`, geo response parsing, `GuardMachineTests` (the pause/kill reducer against `shared/fixtures/guard-transitions.json`), `VPNTunnelStatusTests` |
-| `WetoSystemTests` | `WetoSystem`, `WetoCore` | boundary adapters: `GeoProbe` (`HTTPFetcherPhasesTests` for DNS/connect/TLS/first-byte timing and `test_a_silent_pooled_connection_is_not_reused_by_the_next_request` — a local server that answers only on a second connection), `KeychainStore`, `FileSecretStoreTests`, `NetworkEventSource`, `NetworkSnapshotReader` (route + raised interfaces), process listing, `ProcessSignalerTests` (signal order and delivery), `TerminalLocatorTests`, `TerminalModeKeeperTests` (raw mode captured on a real pty comes back after a shell-like change), `ForegroundJobPlanTests` (real pty job: `terminalDevice` from `e_tdev` resolves to `/dev/ttys*`) |
-| `WetoSharedTests` | `WetoShared`, `WetoCore`, `WetoSystem`, `UpdateKit*` | VM layer: `GuardVM` (pause/resume, journal episodes), `ProcessEnforcerTests` (terminal mode captured before `SIGSTOP`, restored once in front again, dropped for a background or vanished target — through a recording `TerminalModeKeeping`), `SettingsStore`, `EventLogStore`, `CheckLogStoreTests`, `StoppedLedgerTests`, `GuardNotifyingTests`, `LaunchAgentController`, `Maintenance`, `StatusPresentation`, `WetoUpdateTheme`, update banner texts |
+| `WetoCoreTests` | `WetoCore` | policy decisions (`GuardPolicy`, `GuardPolicyLocal`), `ProcessMatcher`, `IPRange`, geo response parsing, `GuardMachineTests` (the pause/kill reducer against `shared/fixtures/guard-transitions.json`), `VPNTunnelStatusTests`, `TerminalReturnTrackerTests` (цикл возврата цели в терминал) |
+| `WetoSystemTests` | `WetoSystem`, `WetoCore` | boundary adapters: `GeoProbe` (`HTTPFetcherPhasesTests` for DNS/connect/TLS/first-byte timing and `test_a_silent_pooled_connection_is_not_reused_by_the_next_request` — a local server that answers only on a second connection), `KeychainStore`, `FileSecretStoreTests`, `NetworkEventSource`, `NetworkSnapshotReader` (route + raised interfaces), process listing, `ProcessSignalerTests` (signal order and delivery), `TerminalLocatorTests`, `TerminalForegroundReturnerTests` (панель по терминалу, скрипты AppleScript, проверки бинарника и каталога сокетов, отказ от root), `TerminalModeKeeperTests` (raw mode captured on a real pty comes back after a shell-like change), `ForegroundJobPlanTests` (real pty job: `terminalDevice` from `e_tdev` resolves to `/dev/ttys*`) |
+| `WetoSharedTests` | `WetoShared`, `WetoCore`, `WetoSystem`, `UpdateKit*` | VM layer: `GuardVM` (pause/resume, journal episodes), `ProcessEnforcerTests` (terminal mode captured before `SIGSTOP`, restored once in front again, dropped for a background or vanished target — through a recording `TerminalModeKeeping`), `LiveTmuxReturnTests` (настоящий tmux, только руками, см. раздел 6), `SettingsStore`, `EventLogStore`, `CheckLogStoreTests`, `StoppedLedgerTests`, `GuardNotifyingTests`, `LaunchAgentController`, `Maintenance`, `StatusPresentation`, `WetoUpdateTheme`, update banner texts |
 | `WetoCLITests` | `WetoCLI`, `WetoCore`, `WetoSystem`, `WetoShared` | terminal version `weto`: `CommandParserTests` (grammar, help, parse errors), `CLICommandsTests` (every settings command against a temporary suite and directory, `vpn set` auto-detection), `SystemModeTests` (system paths under a temp root, non-root refusal hint, which commands stay open), `GuardStatusTests` (`status.json`, liveness by age and pid, `updateAvailable`), `ServiceTests` (plist text, idempotent install, `launchctl` calls), `UpdateTests` (asset names, `SHA256SUMS`, trusted hosts, refusal texts, daily check), `GuardLogTests` |
 | `WetoDesignTests` | `WetoDesign` | `DesignResources` bundle resolution, `MenuBarImageRenderer`, `WetoPauseBadgeTests` (countdown rounding), `WetoPillButtonStyleTests` (`.controlSize(.small)` is genuinely more compact than the default) |
 
@@ -50,6 +50,7 @@ Both packaging failures the project has shipped so far ("the app never appeared"
 
 Only system boundaries are substituted, and only through their protocols:
 `GeoProbing`, `ProcessSignaling` (was `ProcessKilling`), `TerminalLocating`, `TerminalModeKeeping`,
+`TerminalForegroundReturning`,
 `StoppedLedgerPersisting`, `NetworkSnapshotReading`, `TargetResolving`, `NetworkEventSourcing`
 (plus the adjacent `HTTPFetching`, `SecretStoring`, `ProcessLocating`, `InterfaceListing` in `macos/Sources/WetoSystem/`;
 in `WetoCLI` — `ServiceControlling` (`launchctl`), `WetoAppDetecting`, `GuardProcessSignaling`, `CLIOutput`,
@@ -59,7 +60,8 @@ In the update package the boundaries are `ReleaseFetching`, `UpdateInstalling`,
 On Linux the same terminal-mode boundary is `weto_sys::terminal_mode::TerminalModeKeeping`,
 injected with `ProcessEnforcer::with_terminal_modes` and recorded in
 `weto-guard/tests/harness/mod.rs`: the real keeper would write to real ttys by invented device
-numbers.
+numbers. Ввод `fg` там — `weto_sys::terminal_return::TerminalForegroundReturning`, подставляется через
+`GuardController::with_terminal_returner`: настоящий запускал бы настоящий tmux.
 
 Internal types are never substituted: `GuardPolicy`, `GuardController`, `ProcessEnforcer`, `ProcessMatcher` are exercised for real. This is what keeps the bulk of `WetoCoreTests` synchronous and double-free — `WetoCore` imports no system framework at all (project invariant, see `.claude/rules/ARCHITECTURE.md`). Test doubles live inline in the test file that needs them (`FakeFetcher` in `GeoProbeTests`, doubles in `GuardVMTests`, `LaunchAgentControllerTests`, `TestDoubles.swift` of `UpdateKitTests`); there is no shared mock/support target.
 
@@ -122,6 +124,24 @@ the static musl CLI and fails on a dynamic binary.
 <!-- generated, verify -->
 
 Every invariant above lives in artifacts that XCTest never sees: shell installer scripts (`preinstall`, `postinstall`, `macos/Resources/uninstall-weto.sh`), the `pkgbuild` payload layout, and the generated `Info.plist`. A Swift process cannot observe how `installer` will lay out `/Library`, whether the staged plist got the version, or whether `postinstall` picked the console user's home instead of root's — and the failure mode of each is silent (app installed but never guarded, agent registered in the wrong domain, unsigned bundle). The contracts are grep-and-plist assertions on real build output, which is the only place that evidence exists.
+
+### 6. Живые проверки возврата в терминал
+
+Моки не покажут, что шелл забирает терминал у стоящей цели, поэтому есть проверки на настоящих
+мультиплексорах. Они запускаются только руками: без переменных тесты пропускаются, в CI и контейнере
+разработки Linux ни tmux, ни screen нет.
+
+```bash
+# macOS
+cd macos && WETO_LIVE_TMUX=1 swift test --filter LiveTmuxReturnTests
+# с настоящей программой, никакого запроса она не отправляет: текст набирается без Enter
+cd macos && WETO_LIVE_TMUX=1 WETO_LIVE_TARGET=$HOME/.local/bin/claude swift test --filter LiveTmuxReturnTests
+
+# Linux, не от root: от root возврат отказывает, ничего не запуская
+WETO_LIVE_TMUX=1 WETO_LIVE_SCREEN=1 WETO_LIVE_SHELL=/usr/bin/zsh <бинарник теста live_return>
+```
+
+Тест на Linux — `linux/crates/weto-guard/tests/live_return.rs`. `WETO_LIVE_SHELL` по умолчанию `/bin/bash`.
 
 ## Common issues
 

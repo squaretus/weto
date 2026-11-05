@@ -63,17 +63,19 @@ public struct WetoPillButtonStyle: ButtonStyle {
 
     private let kind: Kind
     private let expands: Bool
+    private let matchesRow: Bool
 
     @Environment(\.colorScheme) private var scheme
     @Environment(\.isEnabled) private var isEnabled
-    // Значок паузы просит `.controlSize(.small)` для кнопки «Показать терминал»:
-    // рядом с ней уже стоят отсчёт и (i), и полноразмерная пилюля там не влезает
-    // без спора с длинным заголовком цели.
+    // `.controlSize(.small)` даёт компактную пилюлю для тесных строк.
     @Environment(\.controlSize) private var controlSize
 
-    public init(_ kind: Kind, expands: Bool = false) {
+    /// `matchesRow` — кнопка рядом с пилюлей процесса: та же высота и тот же радиус,
+    /// что у строки, иначе рядом стоят две разные по высоте формы. Высоту задаёт ряд.
+    public init(_ kind: Kind, expands: Bool = false, matchesRow: Bool = false) {
         self.kind = kind
         self.expands = expands
+        self.matchesRow = matchesRow
     }
 
     public func makeBody(configuration: Configuration) -> some View {
@@ -84,14 +86,14 @@ public struct WetoPillButtonStyle: ButtonStyle {
             // Высота — из токена, а не из суммы шрифта и вертикального паддинга:
             // подписи в ряду разной длины и с разными выносными, и кнопки
             // выходили разной высоты. Ряд обязан стоять на одной линии.
-            .frame(height: height)
-            .frame(maxWidth: expands ? .infinity : nil)
+            .frame(height: matchesRow ? nil : height)
+            .frame(maxWidth: expands ? .infinity : nil, maxHeight: matchesRow ? .infinity : nil)
             .background(
-                RoundedRectangle(cornerRadius: WetoTokens.radiusPill, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(background)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: WetoTokens.radiusPill, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(border, lineWidth: kind == .ghost ? 1 : 0)
             )
             .opacity(opacity(pressed: configuration.isPressed))
@@ -119,7 +121,10 @@ public struct WetoPillButtonStyle: ButtonStyle {
     }
 
     private var height: CGFloat { Self.height(for: controlSize) }
-    private var horizontalPadding: CGFloat { Self.horizontalPadding(for: controlSize) }
+    private var horizontalPadding: CGFloat {
+        matchesRow ? WetoTokens.space4 : Self.horizontalPadding(for: controlSize)
+    }
+    private var cornerRadius: CGFloat { matchesRow ? WetoTokens.radiusCard : WetoTokens.radiusPill }
 
     /// Пилюля обычного размера держит `controlHeight` (32 pt); `.small` — компактный
     /// токен, а не пересчёт от системного `ControlSize`, чтобы метрика была той же,

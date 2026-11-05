@@ -20,6 +20,8 @@
     <string>0.1.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Weto возвращает приостановленный процесс в терминал: вводит fg во вкладку этого процесса.</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSSupportsAutomaticTermination</key>

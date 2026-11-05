@@ -264,6 +264,44 @@ private final class CorruptedStoppedLedger: StoppedLedgerPersisting, @unchecked 
 }
 
 /// Кого попросили показать терминал: граница активации чужого окна.
+private final class FakeTerminalModes: TerminalModeKeeping, @unchecked Sendable {
+    private let lock = NSLock()
+    private var restores = 0
+    var restored: Int { lock.lock(); defer { lock.unlock() }; return restores }
+
+    func capture(device: Int32) -> Result<TerminalMode, TerminalModeError> {
+        .success(TerminalMode(device: device, path: "/dev/ttys007", attributes: Data([1])))
+    }
+
+    func restore(_ mode: TerminalMode) -> Result<Void, TerminalModeError> {
+        lock.lock(); restores += 1; lock.unlock()
+        return .success(())
+    }
+}
+
+private final class FakeTerminalReturner: TerminalForegroundReturning, @unchecked Sendable {
+    struct Call { let target: Int32; let shell: Int32; let usingAutomation: Bool }
+
+    private let lock = NSLock()
+    private var recorded: [Call] = []
+    private let result: Result<Void, TerminalReturnError>
+    var onReturn: (() -> Void)?
+
+    init(result: Result<Void, TerminalReturnError> = .success(())) { self.result = result }
+
+    var calls: [Call] { lock.lock(); defer { lock.unlock() }; return recorded }
+
+    func returnToForeground(
+        target: ProcessSnapshot, shell: ProcessSnapshot, processes: [ProcessSnapshot], usingAutomation: Bool
+    ) -> Result<Void, TerminalReturnError> {
+        lock.lock()
+        recorded.append(Call(target: target.pid, shell: shell.pid, usingAutomation: usingAutomation))
+        lock.unlock()
+        onReturn?()
+        return result
+    }
+}
+
 private final class SpyTerminalLocator: TerminalLocating, @unchecked Sendable {
     private let lock = NSLock()
     private var stored: [Int32] = []
@@ -441,7 +479,10 @@ final class GuardVMTests: XCTestCase {
         processes: [ProcessSnapshot]? = nil,
         executables: [String] = [],
         ledger: StoppedLedger? = nil,
-        locator: ProcessLocating? = nil
+        locator: ProcessLocating? = nil,
+        terminalLocator: TerminalLocating = TerminalLocator(),
+        terminalModes: TerminalModeKeeping = TerminalModeKeeper(),
+        terminalReturner: TerminalForegroundReturning = TerminalForegroundReturner(allowsAutomation: false)
     ) -> DelayedHarness {
         let settings = SettingsStore(defaults: defaults, secrets: InMemorySecretStore())
         settings.isEnabled = true
@@ -473,6 +514,9 @@ final class GuardVMTests: XCTestCase {
             ]),
             signaler: signaler,
             ledger: ledger ?? StoppedLedger(storage: InMemoryStoppedLedger()),
+            terminalLocator: terminalLocator,
+            terminalModes: terminalModes,
+            terminalReturner: terminalReturner,
             notifier: notifier,
             events: ManualEventSource(),
             debounceInterval: 0,
@@ -3804,5 +3848,263 @@ extension GuardVMTests {
         XCTAssertEqual(h.vm.phase, .danger(.trafficBypassesTunnel(tunnel: "wg0", via: "en0")))
         XCTAssertEqual(h.signaler.killedBatches.last, [500, 501])
         XCTAssertEqual(h.vm.currentVPNTunnelStatus(), .bypassed(via: "en0"))
+    }
+
+    // MARK: - Возврат цели в терминал
+
+    /// Дерево панели tmux: сервер, шелл, цель. `foreground` — у кого сейчас терминал.
+    private func tmuxPaneTree(foreground: Int32, stopped: Bool = false) -> [ProcessSnapshot] {
+        [
+            ProcessSnapshot(pid: 90, parentPID: 1, executablePath: "/opt/homebrew/bin/tmux"),
+            ProcessSnapshot(pid: 100, parentPID: 90, executablePath: "/bin/zsh",
+                            processGroup: 100, terminalForegroundGroup: foreground, terminalDevice: 7),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/pico",
+                            processGroup: 200, terminalForegroundGroup: foreground, terminalDevice: 7,
+                            isStopped: stopped),
+            ProcessSnapshot(pid: 700, executablePath: "\(vpnAppPath)/Contents/MacOS/Happ"),
+        ]
+    }
+
+    private func makeReturnHarness(
+        returner: FakeTerminalReturner,
+        terminals: SpyTerminalLocator = SpyTerminalLocator(),
+        modes: FakeTerminalModes = FakeTerminalModes()
+    ) -> (DelayedHarness, MutableLocator) {
+        let locator = MutableLocator(
+            bundlePaths: [targetBundleID: targetPath, vpnAppID: vpnAppPath],
+            processes: tmuxPaneTree(foreground: 200)
+        )
+        let h = makeDelayedHarness(snapshot: utun5Snapshot(), executables: ["nano"], locator: locator,
+                                   terminalLocator: terminals, terminalModes: modes, terminalReturner: returner)
+        return (h, locator)
+    }
+
+    /// Пауза, под которой шелл панели забрал терминал, и её снятие проверкой: цель идёт, но в фоне.
+    private func liftPauseLeavingTargetInBackground(_ h: DelayedHarness, _ locator: MutableLocator) async {
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tmuxPaneTree(foreground: 100, stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        locator.processes = tmuxPaneTree(foreground: 100)
+        h.vm.handle(.tick)
+        await h.vm.awaitPendingTerminalReturns()
+    }
+
+    /// Живой случай: SIGCONT оставил `claude` в фоне, интерфейс нарисован, а клавиши идут
+    /// шеллу. Охрана вводит `fg` сама и возвращает режим терминала.
+    func test_a_target_left_in_the_background_returns_by_itself() async {
+        let returner = FakeTerminalReturner()
+        let modes = FakeTerminalModes()
+        let (h, locator) = makeReturnHarness(returner: returner, modes: modes)
+        returner.onReturn = { locator.processes = self.tmuxPaneTree(foreground: 200) }
+
+        await liftPauseLeavingTargetInBackground(h, locator)
+
+        XCTAssertEqual(returner.calls.map(\.target), [200], "одна попытка на снятие паузы")
+        XCTAssertEqual(returner.calls.map(\.shell), [100])
+        XCTAssertEqual(modes.restored, 1, "после fg терминал обязан быть снова в режиме цели")
+
+        h.vm.handle(.tick)
+        XCTAssertNil(h.vm.terminalReturns[200], "цель снова впереди: подписи и кнопки нет")
+        XCTAssertEqual(returner.calls.count, 1)
+        h.vm.stop()
+    }
+
+    /// Две цели одного конвейера: терминал один и `fg` один, второй ушёл бы в цель как ввод.
+    func test_two_targets_on_one_terminal_get_one_fg() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+        func tree(foreground: Int32, stopped: Bool = false) -> [ProcessSnapshot] {
+            tmuxPaneTree(foreground: foreground, stopped: stopped) + [
+                ProcessSnapshot(pid: 210, parentPID: 100, executablePath: "/usr/bin/pico",
+                                processGroup: 200, terminalForegroundGroup: foreground, terminalDevice: 7,
+                                isStopped: stopped),
+            ]
+        }
+        locator.processes = tree(foreground: 200)
+        returner.onReturn = { locator.processes = tree(foreground: 200) }
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tree(foreground: 100, stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        locator.processes = tree(foreground: 100)
+        h.vm.handle(.tick)
+        await h.vm.awaitPendingTerminalReturns()
+
+        XCTAssertEqual(returner.calls.count, 1, "\(returner.calls)")
+        h.vm.stop()
+    }
+
+    /// То же на выходе: следующего такта нет, а обход один на всех.
+    func test_quitting_types_one_fg_for_two_targets_on_one_terminal() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+        func tree(foreground: Int32) -> [ProcessSnapshot] {
+            tmuxPaneTree(foreground: foreground) + [
+                ProcessSnapshot(pid: 210, parentPID: 100, executablePath: "/usr/bin/pico",
+                                processGroup: 200, terminalForegroundGroup: foreground, terminalDevice: 7),
+            ]
+        }
+        locator.processes = tree(foreground: 200)
+        returner.onReturn = { locator.processes = tree(foreground: 200) }
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tree(foreground: 100)
+
+        h.vm.stop()
+
+        XCTAssertEqual(returner.calls.count, 1, "\(returner.calls)")
+    }
+
+    /// Попытка стояла в очереди, а началась новая пауза: `fg` под ней вернул бы цели терминал
+    /// при неподтверждённом выходе.
+    func test_a_queued_return_is_dropped_when_a_new_pause_begins() async {
+        let returner = FakeTerminalReturner(result: .failure(.noWayToType))
+        let (h, locator) = makeReturnHarness(returner: returner)
+        await liftPauseLeavingTargetInBackground(h, locator)
+        XCTAssertEqual(returner.calls.count, 1, "автоматическая попытка не удалась")
+
+        // Нажатие ставит попытку в очередь, и смена выхода в том же проходе главного потока
+        // ставит цели на паузу раньше, чем попытка начнётся.
+        h.vm.returnToTerminal(pid: 200)
+        h.network.snapshotValue = NetworkSnapshot(
+            outgoing: OutgoingRoute(interface: "utun9", address: "10.9.9.9"), upInterfaces: ["utun9"]
+        )
+        h.vm.handle(.networkPath)
+        XCTAssertEqual(h.vm.phase.action, .pause)
+        await h.vm.awaitPendingTerminalReturns()
+
+        XCTAssertEqual(returner.calls.count, 1, "\(returner.calls)")
+        h.vm.stop()
+    }
+
+    /// Выход не висит на зависшем tmux: обещание вернуть цель не дороже закрытия приложения.
+    func test_a_hung_tmux_does_not_hold_the_exit() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+        returner.onReturn = { Thread.sleep(forTimeInterval: 20) }
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tmuxPaneTree(foreground: 100)
+
+        let started = Date()
+        h.vm.stop()
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    /// Закрытие могло сорваться, и приложение живёт дальше без тактов: кнопка, которую уже
+    /// некому погасить, не должна остаться рабочей.
+    func test_stopping_forgets_the_return_history() async {
+        let returner = FakeTerminalReturner(result: .failure(.noWayToType))
+        let (h, locator) = makeReturnHarness(returner: returner)
+
+        await liftPauseLeavingTargetInBackground(h, locator)
+        XCTAssertEqual(h.vm.terminalReturns[200], .offered)
+
+        h.vm.stop()
+
+        XCTAssertTrue(h.vm.terminalReturns.isEmpty)
+    }
+
+    /// На паузе цели возвращаться не должны, даже если терминал уже у шелла.
+    func test_nothing_returns_while_the_pause_lasts() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tmuxPaneTree(foreground: 100, stopped: true)
+        h.vm.handle(.tick)
+        await h.vm.awaitPendingTerminalReturns()
+
+        XCTAssertEqual(returner.calls.count, 0)
+        XCTAssertNil(h.vm.terminalReturns[200], "кнопки на паузе нет")
+    }
+
+    /// Автоматика не смогла — кнопка; кнопка не смогла — окно терминала и подсказка.
+    func test_a_failed_return_offers_the_button_and_then_the_hint() async {
+        let returner = FakeTerminalReturner(result: .failure(.noWayToType))
+        let terminals = SpyTerminalLocator()
+        let (h, locator) = makeReturnHarness(returner: returner, terminals: terminals)
+
+        await liftPauseLeavingTargetInBackground(h, locator)
+        XCTAssertEqual(h.vm.terminalReturns[200], .offered)
+        XCTAssertEqual(returner.calls.count, 1)
+        XCTAssertTrue(terminals.asked.isEmpty, "окно поднимает только нажатие")
+
+        h.vm.returnToTerminal(pid: 200)
+        await h.vm.awaitPendingTerminalReturns()
+
+        XCTAssertEqual(returner.calls.count, 2)
+        XCTAssertEqual(h.vm.terminalReturns[200], .failed)
+        XCTAssertEqual(terminals.asked, [200], "окно терминала открыто — подсказка говорит правду")
+
+        h.vm.returnToTerminal(pid: 200)
+        await h.vm.awaitPendingTerminalReturns()
+        XCTAssertEqual(returner.calls.count, 2, "кнопка живёт до первого нажатия")
+        h.vm.stop()
+    }
+
+    /// Пользователь запустил в шелле другую программу: `fg` достался бы ей.
+    func test_nothing_is_typed_into_another_program() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tmuxPaneTree(foreground: 300, stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        locator.processes = tmuxPaneTree(foreground: 300)
+        h.vm.handle(.tick)
+        await h.vm.awaitPendingTerminalReturns()
+
+        XCTAssertEqual(returner.calls.count, 0)
+        XCTAssertEqual(h.vm.terminalReturns[200], .offered)
+        h.vm.stop()
+    }
+
+    /// Голый терминал: цель так и осталась впереди, вводить нечего, хватило SIGCONT.
+    func test_a_target_that_kept_the_foreground_needs_no_return() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tmuxPaneTree(foreground: 200, stopped: true)
+        h.vm.handle(.geoSchedule)
+        await h.probe.waitUntilStarted(atLeast: 2)
+        await h.probe.resumeFirst(with: geoOutcome())
+        await h.vm.awaitPendingProbe()
+        locator.processes = tmuxPaneTree(foreground: 200)
+        h.vm.handle(.tick)
+        await h.vm.awaitPendingTerminalReturns()
+
+        XCTAssertEqual(returner.calls.count, 0)
+        XCTAssertNil(h.vm.terminalReturns[200])
+        h.vm.stop()
+    }
+
+    /// Выход из Weto посреди паузы: следующего такта не будет, поэтому `fg` и режим
+    /// терминала — здесь же и без ожидания окна разрешения Automation.
+    func test_quitting_returns_the_target_before_leaving() async {
+        let returner = FakeTerminalReturner()
+        let modes = FakeTerminalModes()
+        let (h, locator) = makeReturnHarness(returner: returner, modes: modes)
+        returner.onReturn = { locator.processes = self.tmuxPaneTree(foreground: 200) }
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tmuxPaneTree(foreground: 100)
+
+        h.vm.stop()
+
+        XCTAssertEqual(returner.calls.map(\.target), [200])
+        XCTAssertEqual(returner.calls.first?.usingAutomation, false)
+        XCTAssertEqual(modes.restored, 1)
     }
 }

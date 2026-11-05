@@ -111,6 +111,12 @@ public enum PausePlanner {
                          backgrounded: backgrounded, skipped: skipped, foregroundRoots: foregroundRoots)
     }
 
+    /// Держит ли процесс передний план своего терминала — тем же правилом, что план паузы.
+    public static func holdsForeground(_ target: ProcessSnapshot, among processes: [ProcessSnapshot]) -> Bool {
+        guard target.terminalForegroundGroup != 0 else { return false }
+        return holdsForeground(target, tree: ProcessTree(processes: processes))
+    }
+
     /// Цель в переднем плане своего терминала, если лидер передней группы tty — сама цель
     /// или её потомок. Сравнивать группы на равенство нельзя: группу, держащую терминал,
     /// цель могла отдать инструменту, запущенному в собственной группе (`sh -c` → потомок
@@ -124,15 +130,26 @@ public enum PausePlanner {
     /// своего лидера, так что этот случай — то же равенство групп сверху.
     /// Лидера может не быть в снимке (успел выйти) — тогда предков у него нет и передний
     /// план поддереву цели не принадлежит.
-    /// Держит ли процесс передний план своего терминала — тем же правилом, что план паузы.
-    public static func holdsForeground(_ target: ProcessSnapshot, among processes: [ProcessSnapshot]) -> Bool {
-        guard target.terminalForegroundGroup != 0 else { return false }
-        return holdsForeground(target, tree: ProcessTree(processes: processes))
-    }
-
     private static func holdsForeground(_ target: ProcessSnapshot, tree: ProcessTree) -> Bool {
         if target.processGroup == target.terminalForegroundGroup { return true }
         return tree.ancestors(of: target.terminalForegroundGroup).contains(target.pid)
+    }
+
+    /// Шелл, которому можно ввести `fg` за пользователя: ближайший предок цели, сам шелл
+    /// по имени, на её терминале, не из её задания и сейчас держащий этот терминал. Обёртка
+    /// `sh -c` идёт с целью одной группой и пропускается: задание ведёт шелл выше неё. Держит
+    /// терминал кто-то другой (пользователь запустил там `vim`) — `nil`: введённое досталось бы
+    /// чужой программе. Встроенный `read` самого шелла снаружи от приглашения не отличить.
+    public static func shellHoldingTerminal(of target: ProcessSnapshot, among processes: [ProcessSnapshot]) -> ProcessSnapshot? {
+        guard target.terminalDevice != 0 else { return nil }
+        var byPID: [Int32: ProcessSnapshot] = [:]
+        for process in processes { byPID[process.pid] = process }
+        for pid in ProcessTree(processes: processes).ancestors(of: target.pid) {
+            guard let candidate = byPID[pid], candidate.terminalDevice == target.terminalDevice else { continue }
+            guard isShell(candidate), candidate.processGroup != target.processGroup else { continue }
+            return candidate.processGroup == candidate.terminalForegroundGroup ? candidate : nil
+        }
+        return nil
     }
 
     /// Шеллы, которые ведут job control. Список имён — неприятная, но единственная

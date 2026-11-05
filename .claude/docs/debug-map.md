@@ -181,3 +181,18 @@ tmux continues the stopped pane shell at once, so the shell takes the terminal a
 again — check that the snapshot has `terminalDevice`/`tty_nr`, that the target was in
 `PausePlan.foregroundRoots`, and that the ledger let it go. Restoring is in-memory: a weto restart
 between pause and `fg` loses it. `bugs/tmux-takes-the-terminal-from-a-paused-target.md`.
+
+## If a target is drawn after a pause, but the keys go to the shell
+
+Цель осталась в фоне: сервер tmux или GNU screen (Linux) продолжил шелл посреди паузы, и шелл забрал
+терминал. Охрана вводит `fg` сама, поэтому смотри, что показывает попап:
+
+- кнопка «Вернуть в терминал» — автоматика не смогла. Терминал не у шелла этой цели
+  (`shellHoldingTerminal` / `shell_holding_terminal`), шелл незнакомый по имени, родитель шелла
+  не tmux и не screen, бинарник мультиплексора или каталог сокетов не прошли проверку, отказ в Automation;
+- «в фоне: введите fg» — кнопку не нажали за 5 минут;
+- ничего — weto перезапускался между паузой и возвратом (`savedModes` в памяти), либо цель ушла в фон
+  не с паузы. У терминальной версии от root ввода нет вовсе (`mayType` / `may_type`).
+
+`macos/Sources/WetoShared/GuardVM.swift`, `macos/Sources/WetoSystem/TerminalForegroundReturner.swift`,
+`linux/crates/weto-guard/src/controller.rs`, `linux/crates/weto-sys/src/terminal_return.rs`.

@@ -45,7 +45,7 @@
     "radiusTile": 10
   },
   "sizes": {
-    "popupWidth": 352,
+    "popupWidth": 480,
     "windowWidth": 500,
     "windowHeight": 640,
     "controlHeight": 32,

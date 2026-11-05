@@ -126,24 +126,40 @@ struct StatusPopupView: View {
                     // Пилюля приложения объединяет несколько корней в одну строку
                     // с pid: min(...); pausedProcesses хранит все корни `.rule`,
                     // поэтому совпадение есть, пока стоит хотя бы главный процесс.
-                    let paused = vm.pausedProcesses.first { $0.pid == target.pid }
-                    WetoProcessPill(
-                        icon: TargetIconStore.shared.icon(for: iconKind(for: target), size: 32),
-                        title: target.displayName,
-                        isCommandLine: target.kind != .appBundle,
-                        childCount: target.extraProcessCount
-                    ) {
-                        if let paused {
-                            WetoPauseBadge(
-                                deadline: vm.pauseDeadline,
-                                now: now,
-                                hint: paused.isBackgrounded
-                                    ? "Процесс вернулся в фон. Откройте терминал и введите fg"
-                                    : nil,
-                                onShowTerminal: paused.isBackgrounded
-                                    ? { vm.showTerminal(for: paused.pid) }
-                                    : nil
-                            )
+                    let paused = vm.pausedProcesses.contains { $0.pid == target.pid }
+                    let returning = vm.terminalReturns[target.pid]
+                    VStack(alignment: .leading, spacing: WetoTokens.space1) {
+                        HStack(spacing: WetoTokens.space2) {
+                            WetoProcessPill(
+                                icon: TargetIconStore.shared.icon(for: iconKind(for: target), size: 32),
+                                title: target.displayName,
+                                isCommandLine: target.kind != .appBundle,
+                                childCount: target.extraProcessCount
+                            ) {
+                                if paused {
+                                    WetoPauseBadge(deadline: vm.pauseDeadline, now: now)
+                                } else if let returning {
+                                    WetoBackgroundLabel(showsCommand: returning == .expired)
+                                }
+                            }
+
+                            // После пилюли, а не внутри: на паузе цели не возвращаются,
+                            // и появляется кнопка только когда автоматика не смогла.
+                            if returning == .offered, !paused {
+                                Button("Вернуть в терминал") { vm.returnToTerminal(pid: target.pid) }
+                                    .buttonStyle(WetoPillButtonStyle(.primary, matchesRow: true))
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        if returning == .failed {
+                            (Text(verbatim: "Не удалось вернуть автоматически. В терминале введите ")
+                                + Text(verbatim: "fg").monospaced())
+                                .font(WetoTokens.caption)
+                                .foregroundStyle(WetoTokens.dim.resolve(scheme))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.leading, WetoTokens.space2)
                         }
                     }
                 }

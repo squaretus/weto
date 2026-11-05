@@ -15,7 +15,8 @@ amendment (tolerance and a standing "Проверка" were both tried and then 
 ## Scope
 Both platforms behave the same way, and since the GTK screen was ported both also *show* it the
 same way: the five status titles come from `GuardPhase::title`, a standing target carries its pill
-with the countdown, and a target that lost its terminal carries the `fg` hint. What still differs
+with the countdown, and a target left in the background comes back by itself
+(`features/terminal-target-returns-after-pause.md`). What still differs
 on Linux is listed — with the reason for each — in `modules/linux-guard.md`; that list, not this
 document, is where deviations live.
 
@@ -26,7 +27,7 @@ Linux files: `weto-core/src/guard_machine.rs` and `pause_plan.rs` (the reducer a
 (the `.desktop` index, raising the terminal, the shared session bus, the clickable notification),
 `weto-config/src/stopped.rs` (the ledger), `weto-guard/src/controller.rs` and `enforcer.rs`
 (the behaviour), `weto-app/src/state.rs` (the journal writer), `weto-app/src/status_window.rs`
-(the badge, the hint and the "Показать терминал" button).
+(the badge).
 
 - `WetoCore`: `GuardMachine.swift` (the reducer — `GuardPhase`, `GuardInput`, `GuardEffect`),
   `PausePlan.swift` (`PausePlanner`), `GuardPolicy.swift` (`UnprovenReason`/`UnsafeEvidence`
@@ -54,8 +55,7 @@ Linux files: `weto-core/src/guard_machine.rs` and `pause_plan.rs` (the reducer a
   `SIGTTIN`).
 - Added: `StoppedLedger`/`stopped.json` — the record of "who did we SIGSTOP", read once on
   `GuardVM.start()` so a weto crash cannot leave a target frozen forever.
-- Added: `GuardNotifying.notifyBackgrounded` and the "Показать терминал" popup affordance
-  (`TerminalLocating`) — a paused terminal target that loses its foreground job otherwise just
+- Added: `GuardNotifying.notifyBackgrounded` — a paused terminal target that loses its foreground job otherwise just
   vanishes from its terminal with zero explanation.
 - Added: `CheckEvent`/`CheckLogStore` — a second, 50-entry journal for connectivity-check
   *attempts* (trigger + outcome), independent of the kill journal, which only ever hears about
@@ -127,19 +127,19 @@ episode outcome is not rewritten, `stop()`'s «продолжено при вы�
       (`resumeOrphans`), or, if `stopped.json` is corrupted, a `startupRecovery`/`ledgerUnreadable`
       entry appears in the check-journal.
 - [ ] Same, but with the target *backgrounded* (it answers the startup `SIGCONT` with a stop) →
-      the popup shows its badge with the `fg` hint and one
+      the popup shows its badge and one
       `startupRecovery`/`standingProcessesRemain` entry appears in the check-journal;
       the terminal does not keep printing `suspended (tty input)` forever.
 - [ ] Uninstall while a target is paused → it is resumed first; a target that answers `SIGCONT`
       with another stop is listed by name and pid, and «Отмена» leaves both weto and the ledger.
-- [ ] A paused terminal target loses its foreground job (backgrounded) → notification with
-      "Показать терминал" fires; the button activates the hosting terminal app.
+- [ ] A paused terminal target loses its foreground job (backgrounded) → notification fires;
+      tapping it opens the popup.
 - [ ] `linux/scripts/dev.sh cargo test -p weto-sys --test notifications --test terminal` — the
       notification wording and its action, and the choice of terminal, against a real session bus
       the test starts itself (`dbus-daemon`).
 - [ ] Linux: same scenarios end the same way, screen included — see `linux/docs/manual-check.md`
       §3 and §3а, and the pause section of `linux/docs/manual-ui-check.md` for the pill, the
-      countdown, the `fg` hint, the "Показать терминал" button and the notification click.
+      countdown and the notification click.
 
 ## Related modules
 - modules/weto-core.md

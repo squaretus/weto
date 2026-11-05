@@ -50,16 +50,18 @@ use weto_core::geo::{GeoOutcome, GeoProbeReport, GeoReading};
 use weto_core::guard_machine::{GuardAction, GuardEffect, GuardInput, GuardMachine, GuardPhase};
 use weto_core::network::{tunnel_status, NetworkSnapshot, OutgoingRoute};
 use weto_core::network::{VpnAppStatus, VpnTunnelStatus};
-use weto_core::pause_plan::{PausedProcess, RecoveredProcess};
+use weto_core::pause_plan::{self, PausedProcess, RecoveredProcess};
 use weto_core::policy::GuardSignals;
 use weto_core::policy::{decide, decide_local, GuardDecision, UnprovenReason, UnsafeEvidence};
 use weto_core::process::{MatchBasis, MatchedProcess, RunningTarget, TargetRule};
+use weto_core::terminal_return::{TerminalReturnState, TerminalReturnTracker};
 use weto_sys::background::{BackgroundDispatching, ThreadDispatcher};
 use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::process_signaler::SignalResult;
 use weto_sys::secret_store::SecretStoring;
 use weto_sys::target_resolver::{LaunchTargetResolver, TargetResolving};
+use weto_sys::terminal_return::{MultiplexerForegroundReturner, TerminalForegroundReturning};
 
 use crate::enforcer::{ProcessEnforcer, ResumeOutcome, Scan};
 use crate::rules::RuleCache;
@@ -97,6 +99,14 @@ pub const RELEASE_SIGNALLED_TEXT: &str =
 /// Обязательство исполнено и наблюдено: процесс идёт (или его больше нет),
 /// и запись ушла из учёта. Дословно как на macOS.
 pub const RELEASED_TEXT: &str = "продолжен: цель снята с охраны";
+
+/// Шеллу нужно мгновение на `fg`; режим терминала возвращаем сразу, не ожидая такта:
+/// иначе первые клавиши после возврата ушли бы в канонический режим.
+const FG_SETTLE: Duration = Duration::from_millis(200);
+
+/// Сколько выход ждёт ввода `fg`. Следующего такта не будет, и цель без него останется
+/// нарисованной, но без клавиатуры, — но держать закрытие приложения на зависшем tmux нельзя.
+const EXIT_RETURN_CEILING: Duration = Duration::from_secs(3);
 
 /// Откуда пришёл запрос пробы. Кнопка ведёт себя иначе, чем таймер, и это
 /// не оптимизация, а поведение продукта.
@@ -214,6 +224,8 @@ pub struct GuardSnapshot {
     pub running: Vec<RunningTarget>,
     /// Цели, стоящие прямо сейчас: пилюли с отсчётом рисует порт интерфейса.
     pub paused: Vec<PausedProcess>,
+    /// Цели, оставшиеся в фоне после снятия паузы, и что с ними сейчас: по pid.
+    pub terminal_returns: HashMap<i32, TerminalReturnState>,
     /// Когда истекает потолок паузы. `None` — цели не стоят.
     pub pause_deadline: Option<SystemTime>,
     /// Сигнал не дошёл до целей из-за нехватки прав: экран называет pid
@@ -292,6 +304,10 @@ struct Inner {
     last_reading: Option<GeoReading>,
     last_network: NetworkSnapshot,
     pause: PauseBook,
+    /// История возврата целей в терминал: попытка, кнопка, подсказка.
+    terminal_returns: TerminalReturnTracker,
+    /// Чьё нажатие не помогло: кто-то должен поднять окно терминала, и это не охрана.
+    failed_returns: Vec<i32>,
     /// Последний отказ ядра в сигнале целям — до прохода, который его снимет.
     permission_failure: Option<String>,
     snapshot: GuardSnapshot,
@@ -368,6 +384,13 @@ pub struct GuardController {
     /// Куда уходит проба, чтобы такт её не ждал. Граница, а не деталь: тесту
     /// нужен детерминированный порядок «проход прошёл — ответ пришёл».
     probes: Box<dyn BackgroundDispatching>,
+    /// Ввод `fg`: запуск tmux с потолком времени не имеет права идти ни в такте,
+    /// ни на главном потоке GTK, откуда приходит нажатие.
+    returns: Box<dyn BackgroundDispatching>,
+    returner: Box<dyn TerminalForegroundReturning>,
+    /// Ввод `fg` по одному: каждый смотрит, кто держит терминал, после предыдущего.
+    /// У двух корней цели терминал один, и второй `fg` ушёл бы в саму цель как ввод.
+    typing: Mutex<()>,
     inner: Mutex<Inner>,
     probe: ProbeGate,
     /// Ворота применения решения к процессам — и признак штатного выхода под
@@ -417,6 +440,9 @@ impl GuardController {
             reporter,
             checks,
             probes: Box::new(ThreadDispatcher::named("weto-probe")),
+            returns: Box::new(ThreadDispatcher::named("weto-return")),
+            returner: Box::new(MultiplexerForegroundReturner),
+            typing: Mutex::new(()),
             inner: Mutex::new(Inner {
                 machine: GuardMachine::default(),
                 verdict: None,
@@ -428,6 +454,8 @@ impl GuardController {
                 last_reading: None,
                 last_network: NetworkSnapshot::default(),
                 pause: PauseBook::default(),
+                terminal_returns: TerminalReturnTracker::default(),
+                failed_returns: Vec::new(),
                 permission_failure: None,
                 snapshot: GuardSnapshot::default(),
             }),
@@ -450,6 +478,21 @@ impl GuardController {
     /// То же самое для стенда, собравшего охрану раньше, чем он выбрал дорожку.
     pub fn set_probes(&mut self, probes: Box<dyn BackgroundDispatching>) {
         self.probes = probes;
+    }
+
+    /// Дорожка ввода `fg` — ради того же порядка, что и у пробы.
+    pub fn with_returns(mut self, returns: Box<dyn BackgroundDispatching>) -> GuardController {
+        self.returns = returns;
+        self
+    }
+
+    /// Граница ввода `fg`: настоящая запускала бы настоящий tmux.
+    pub fn with_terminal_returner(
+        mut self,
+        returner: Box<dyn TerminalForegroundReturning>,
+    ) -> GuardController {
+        self.returner = returner;
+        self
     }
 
     /// Окно коалесценции задаётся снаружи только ради тестов: им нужно
@@ -780,7 +823,7 @@ impl GuardController {
     /// `/proc` — не только лишние миллисекунды: оно описывает другой момент,
     /// и «приложение запущено» в записи журнала могло бы противоречить улике,
     /// по которой цели встали.
-    fn enforce(&self, settings: &Settings, scan: &Scan) -> GuardPhase {
+    fn enforce(self: &Arc<Self>, settings: &Settings, scan: &Scan) -> GuardPhase {
         // Ворота на всё применение: сигналы и учёт — один шаг относительно
         // штатного выхода. Такт, вошедший сюда раньше выхода, выход дожидается;
         // такт, подошедший после, разворачивается здесь — проба, начатая
@@ -840,6 +883,7 @@ impl GuardController {
         // Режим терминала — после учёта: возвращается он только цели, которую учёт
         // уже отпустил по наблюдению, и только по обходу этого же прохода.
         self.enforcer.restore_terminal_modes(Some(scan));
+        self.settle_terminal_returns(&phase, scan);
 
         // Разбор свежести жил ровно до применения: эпизод, ради которого его
         // считали, уже заведён, а следующему проходу он рассказал бы про чужой
@@ -853,12 +897,149 @@ impl GuardController {
         phase
     }
 
+    /// Такт возврата: кому положена автоматическая попытка, у кого вышло время.
+    ///
+    /// Под паузой ждать нечего: цели не возвращаются, и новая пауза обнуляет историю,
+    /// а после неё положена новая попытка.
+    fn settle_terminal_returns(self: &Arc<Self>, phase: &GuardPhase, scan: &Scan) {
+        let waiting: HashSet<i32> = if phase.action() == GuardAction::Run {
+            self.enforcer
+                .awaiting_foreground(Some(scan))
+                .into_iter()
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let moment = (self.now)();
+        let step = {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            let step = inner.terminal_returns.observe(&waiting, moment);
+            inner.failed_returns.extend(&step.failed);
+            step
+        };
+        for pid in step.attempts {
+            self.start_terminal_return(pid);
+        }
+    }
+
+    /// Кнопка «Вернуть в терминал». Живёт до первого нажатия.
+    pub fn return_to_terminal(self: &Arc<Self>, pid: i32) {
+        let pressed = {
+            let mut inner = self.inner.lock().expect("состояние охраны");
+            let pressed = inner.terminal_returns.press(pid);
+            inner.snapshot.terminal_returns = inner.terminal_returns.states();
+            pressed
+        };
+        if pressed {
+            self.start_terminal_return(pid);
+        }
+    }
+
+    /// Чьё нажатие на кнопку не помогло, по одному разу. Окно терминала поднимает
+    /// приложение: у охраны нет ни окон, ни шины, а у терминальной версии нет и кнопки.
+    pub fn take_failed_returns(&self) -> Vec<i32> {
+        std::mem::take(&mut self.inner.lock().expect("состояние охраны").failed_returns)
+    }
+
+    fn start_terminal_return(self: &Arc<Self>, pid: i32) {
+        let controller = Arc::clone(self);
+        self.returns.dispatch(Box::new(move || {
+            let sent = controller.type_fg(pid, false);
+            if sent {
+                controller.enforcer.restore_terminal_modes(None);
+            }
+            controller.finish_terminal_return(pid, sent);
+        }));
+    }
+
+    /// Ввести `fg` в шелл цели. Вводим, только если терминал прямо сейчас у него: иначе
+    /// введённое досталось бы чужой программе, и вместо этого — честный отказ, дальше кнопка.
+    ///
+    /// Пока стояла очередь, могла начаться новая пауза: тогда истории больше нет, а на паузе цели
+    /// не возвращаются. На выходе истории нет уже намеренно, и `leaving` это разрешает.
+    fn type_fg(&self, pid: i32, leaving: bool) -> bool {
+        let _one_at_a_time = self.typing.lock().expect("ввод fg");
+        let returning = self
+            .inner
+            .lock()
+            .expect("состояние охраны")
+            .terminal_returns
+            .state(pid)
+            == Some(TerminalReturnState::Returning);
+        if !leaving && !returning {
+            return false;
+        }
+        let processes = self.enforcer.processes();
+        let Some(target) = processes.iter().find(|process| process.pid == pid) else {
+            return false;
+        };
+        // Вернулся `fg` предыдущей цели того же конвейера: вводить незачем, и это успех.
+        if pause_plan::holds_foreground(target, &processes) {
+            return true;
+        }
+        let sent = pause_plan::shell_holding_terminal(target, &processes).is_some_and(|shell| {
+            self.returner
+                .return_to_foreground(target, shell, &processes)
+                .is_ok()
+        });
+        if sent {
+            std::thread::sleep(FG_SETTLE);
+        }
+        sent
+    }
+
+    fn finish_terminal_return(&self, pid: i32, sent: bool) {
+        let moment = (self.now)();
+        let mut inner = self.inner.lock().expect("состояние охраны");
+        inner.terminal_returns.finished(pid, sent, moment);
+        if inner.terminal_returns.state(pid) == Some(TerminalReturnState::Failed) {
+            inner.failed_returns.push(pid);
+        }
+        inner.snapshot.terminal_returns = inner.terminal_returns.states();
+    }
+
+    /// На выходе следующего такта не будет: то, что не вернём сейчас, останется призраком —
+    /// нарисованным, но без клавиатуры. Режим терминала — мимо учёта, записи в нём живут
+    /// до следующего запуска.
+    ///
+    /// Отдельным потоком с потолком времени: выход идёт с главного потока GTK.
+    fn return_targets_before_exit(self: &Arc<Self>) {
+        let waiting = self.enforcer.awaiting_foreground(None);
+        if waiting.is_empty() {
+            return;
+        }
+        let controller = Arc::clone(self);
+        let (done, finished) = std::sync::mpsc::channel();
+        let job = move || {
+            let mut sent = false;
+            for pid in waiting {
+                sent |= controller.type_fg(pid, true);
+            }
+            if sent {
+                controller.enforcer.restore_terminal_modes_on_exit();
+            }
+            let _ = done.send(());
+        };
+        if std::thread::Builder::new()
+            .name("weto-return".to_string())
+            .spawn(job)
+            .is_ok()
+        {
+            let _ = finished.recv_timeout(EXIT_RETURN_CEILING);
+        }
+    }
+
     /// Вход и немедленное применение — для того, кто приходит не тактом.
     ///
     /// Вход у такого прохода ровно один, и применение у него своё: локальное
     /// доказательство закрытого клиента обязано дойти до целей **до** сети,
     /// а не после пяти секунд таймаута ipinfo.
-    fn dispatch(&self, input: GuardInput, settings: &Settings, scan: &Scan) -> GuardPhase {
+    fn dispatch(
+        self: &Arc<Self>,
+        input: GuardInput,
+        settings: &Settings,
+        scan: &Scan,
+    ) -> GuardPhase {
         self.feed(input);
         self.enforce(settings, scan)
     }
@@ -884,7 +1065,7 @@ impl GuardController {
 
         // Пилюля с отсчётом описывает то, что стоит сейчас: цель, умершая под
         // паузой сама или снятая с охраны, оставалась бы в списке с живым
-        // отсчётом и кнопкой, которой нечего показывать.
+        // отсчётом.
         let standing: HashSet<i32> = outcome.matched.iter().map(|m| m.pid).collect();
 
         // Пилюли мало: цель, снятую с охраны, надо ещё и отпустить. Этим же проходом,
@@ -1044,8 +1225,7 @@ impl GuardController {
                 inner.pause.signalled_for_resume.remove(pid);
             }
             // Пилюля уходит с сигналом, а не с наблюдением: она про стоящую **цель**,
-            // а целью этот процесс уже не является — кнопке «Показать терминал» под ним
-            // нечего показывать, и отсчёт до потолка считается не про него.
+            // а целью этот процесс уже не является, и отсчёт до потолка считается не про него.
             let freed: HashSet<i32> = outcome.freed.iter().map(|entry| entry.pid).collect();
             inner
                 .pause
@@ -1482,7 +1662,7 @@ impl GuardController {
     /// закончиться раньше последнего SIGCONT, а начавшийся после — не начаться
     /// вовсе. Иначе SIGSTOP уходил бы вслед за выходом, и цель оставалась
     /// стоять до следующего запуска weto.
-    pub fn shutdown(&self) {
+    pub fn shutdown(self: &Arc<Self>) {
         let mut gate = self.enforcement.lock().expect("ворота применения");
         if *gate {
             return;
@@ -1508,6 +1688,13 @@ impl GuardController {
         inner.snapshot.phase = GuardPhase::Disabled;
         inner.snapshot.pause_deadline = None;
         inner.snapshot.paused = inner.pause.paused.clone();
+        inner.terminal_returns = TerminalReturnTracker::default();
+        inner.snapshot.terminal_returns.clear();
+        drop(inner);
+        // Признак выхода уже стоит, такты сюда не войдут: ворота отпускаем, чтобы
+        // на время ввода `fg` на них не висел никто.
+        drop(gate);
+        self.return_targets_before_exit();
     }
 
     /// Обход и продолжение всех записей учёта — общая дорога у штатного выхода
@@ -1596,6 +1783,7 @@ impl GuardController {
         inner.snapshot.phase = phase.clone();
         inner.snapshot.running = running;
         inner.snapshot.paused = inner.pause.paused.clone();
+        inner.snapshot.terminal_returns = inner.terminal_returns.states();
         inner.snapshot.pause_deadline = phase
             .paused_since()
             .map(|since| since + inner.machine.pause_ceiling());
@@ -1848,7 +2036,12 @@ impl GuardController {
     /// Дорожка освобождается вместе со сторожем: и ответом, и отказом, и паникой.
     /// Пока она занята, второй запрос не уходит — у подтверждающего сервиса лимит,
     /// а снимать летящую пробу нельзя.
-    fn probe_and_apply(&self, revision: u64, fingerprint: String, trigger: CheckTrigger) {
+    fn probe_and_apply(
+        self: &Arc<Self>,
+        revision: u64,
+        fingerprint: String,
+        trigger: CheckTrigger,
+    ) {
         let _in_flight = InFlight(&self.probe);
 
         let token = self.secrets.load().ok().flatten();
@@ -1885,7 +2078,7 @@ impl GuardController {
     /// отброшенных ответа остаются в журнале проверок: запрос состоялся,
     /// и молчать о нём нельзя.
     fn apply_probe(
-        &self,
+        self: &Arc<Self>,
         report: GeoProbeReport,
         expected_revision: u64,
         expected_fingerprint: String,

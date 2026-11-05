@@ -656,6 +656,16 @@ impl ProcessEnforcer {
     /// Обход — тот же, что у прохода: передний план и остановленность обязаны описывать
     /// тот же момент, что и сигналы с учётом.
     pub fn restore_terminal_modes(&self, scan: Option<&Scan>) {
+        self.restore_modes(scan, false);
+    }
+
+    /// То же на выходе из Weto: записи там остаются в учёте до следующего запуска,
+    /// а вернуть режим потом будет уже некому.
+    pub fn restore_terminal_modes_on_exit(&self) {
+        self.restore_modes(None, true);
+    }
+
+    fn restore_modes(&self, scan: Option<&Scan>, ignoring_ledger: bool) {
         if self
             .saved_modes
             .lock()
@@ -666,7 +676,11 @@ impl ProcessEnforcer {
         }
         let processes = self.observed_processes(scan);
         let by_pid: HashMap<i32, &ProcessSnapshot> = processes.iter().map(|p| (p.pid, p)).collect();
-        let held: HashSet<i32> = self.entries().iter().map(|entry| entry.pid).collect();
+        let held: HashSet<i32> = if ignoring_ledger {
+            HashSet::new()
+        } else {
+            self.entries().iter().map(|entry| entry.pid).collect()
+        };
 
         let mut saved = self.saved_modes.lock().expect("режимы терминала");
         saved.retain(|(pid, path), mode| {
@@ -686,6 +700,43 @@ impl ProcessEnforcer {
             }
             false
         });
+    }
+
+    /// Цели, державшие передний план при паузе и потерявшие его: живы, на том же терминале,
+    /// а терминал не у них. Режим у них ещё не возвращён — значит, и `fg` ещё не было.
+    /// Цель, сама оставшаяся впереди, сюда не попадает: у неё `restore_terminal_modes`
+    /// забрал запись на первом же проходе.
+    pub fn awaiting_foreground(&self, scan: Option<&Scan>) -> Vec<i32> {
+        if self
+            .saved_modes
+            .lock()
+            .expect("режимы терминала")
+            .is_empty()
+        {
+            return Vec::new();
+        }
+        let processes = self.observed_processes(scan);
+        let saved = self.saved_modes.lock().expect("режимы терминала");
+        saved
+            .iter()
+            .filter_map(|((pid, path), mode)| {
+                processes
+                    .iter()
+                    .find(|process| process.pid == *pid)
+                    .filter(|process| {
+                        process.executable_path == *path
+                            && process.terminal_device == mode.device
+                            && !pause_plan::holds_foreground(process, &processes)
+                    })
+                    .map(|_| *pid)
+            })
+            .collect()
+    }
+
+    /// Обход вне прохода: ввод `fg` живёт на своей дорожке и спрашивает, кто держит
+    /// терминал, в самый момент ввода.
+    pub fn processes(&self) -> Vec<ProcessSnapshot> {
+        self.registry.snapshot()
     }
 
     /// Наблюдать обязательство можно только по настоящему обходу. `scan()` при

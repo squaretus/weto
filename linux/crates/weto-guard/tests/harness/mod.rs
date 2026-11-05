@@ -35,6 +35,7 @@ use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
 use weto_sys::secret_store::{SecretError, SecretStoring};
 use weto_sys::target_resolver::{LocatedTarget, TargetResolving};
 use weto_sys::terminal_mode::{TerminalMode, TerminalModeError, TerminalModeKeeping};
+use weto_sys::terminal_return::{TerminalForegroundReturning, TerminalReturnError};
 
 // --- сеть -------------------------------------------------------------------
 
@@ -812,6 +813,10 @@ pub struct Harness {
     pub checks: RecordingChecks,
     pub resolver: FakeResolver,
     pub terminal_modes: RecordingTerminalModes,
+    /// Кому и через какой шелл ввели `fg`.
+    pub returner: RecordingReturner,
+    /// Ввод `fg`, ожидающий своего потока: как и у пробы, порядок задаёт тест.
+    pub returns: QueuedProbes,
     pub ledger_path: std::path::PathBuf,
     /// Каталог живёт ровно столько, сколько стенд: учёт остановленных пишется
     /// настоящим файлом, а не выдумкой.
@@ -973,6 +978,8 @@ fn build_over(
     let probes = QueuedProbes::default();
     let resolver = FakeResolver::default();
     let terminal_modes = RecordingTerminalModes::default();
+    let returner = RecordingReturner::default();
+    let returns = QueuedProbes::default();
 
     let controller = Arc::new(
         GuardController::new(
@@ -987,6 +994,8 @@ fn build_over(
         )
         .with_coalesce_window(window)
         .with_probes(Box::new(probes.clone()))
+        .with_returns(Box::new(returns.clone()))
+        .with_terminal_returner(Box::new(returner.clone()))
         .with_resolver(Box::new(resolver.clone())),
     );
 
@@ -1001,6 +1010,8 @@ fn build_over(
         checks,
         resolver,
         terminal_modes,
+        returner,
+        returns,
         ledger_path,
         _home: home,
     }
@@ -1076,6 +1087,58 @@ impl TerminalModeKeeping for RecordingTerminalModes {
 
     fn restore(&self, mode: &TerminalMode) -> Result<(), TerminalModeError> {
         self.0.lock().unwrap().1.push(mode.clone());
+        Ok(())
+    }
+}
+
+// --- ввод `fg` ---------------------------------------------------------------
+
+type ReturnHook = Box<dyn Fn() + Send + Sync>;
+
+#[derive(Default)]
+struct ReturnerInner {
+    /// Пары «цель, шелл» в порядке ввода.
+    calls: Vec<(i32, i32)>,
+    refuses: bool,
+    /// Что делает с миром введённый `fg`.
+    on_return: Option<ReturnHook>,
+}
+
+/// Ввод `fg` без tmux: кому ввели и через какой шелл. Настоящая граница запускала бы
+/// настоящий tmux по выдуманным номерам терминалов.
+#[derive(Clone, Default)]
+pub struct RecordingReturner(Arc<Mutex<ReturnerInner>>);
+
+impl RecordingReturner {
+    pub fn calls(&self) -> Vec<(i32, i32)> {
+        self.0.lock().unwrap().calls.clone()
+    }
+
+    /// Вводить нечем: не tmux или tmux не отвечает.
+    pub fn refuses(&self) {
+        self.0.lock().unwrap().refuses = true;
+    }
+
+    pub fn on_return(&self, hook: impl Fn() + Send + Sync + 'static) {
+        self.0.lock().unwrap().on_return = Some(Box::new(hook));
+    }
+}
+
+impl TerminalForegroundReturning for RecordingReturner {
+    fn return_to_foreground(
+        &self,
+        target: &ProcessSnapshot,
+        shell: &ProcessSnapshot,
+        _processes: &[ProcessSnapshot],
+    ) -> Result<(), TerminalReturnError> {
+        let inner = &mut *self.0.lock().unwrap();
+        inner.calls.push((target.pid, shell.pid));
+        if inner.refuses {
+            return Err(TerminalReturnError::NoWayToType);
+        }
+        if let Some(hook) = &inner.on_return {
+            hook();
+        }
         Ok(())
     }
 }

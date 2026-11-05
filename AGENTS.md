@@ -60,7 +60,7 @@ linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабо�
   а у `UpdateKitXPC` нет зависимостей вообще.
 - Мокаются только границы системы (`GeoProbing`, `ProcessSignaling`, `NetworkSnapshotReading`,
   `RouteProbing`, `TargetResolving`, `NetworkEventSourcing`, `TerminalLocating`,
-  `StoppedLedgerPersisting`, `PopupPresenting`; в пакете — `ReleaseFetching`, `UpdateInstalling`,
+  `StoppedLedgerPersisting`, `PopupPresenting`, `TerminalForegroundReturning`; в пакете — `ReleaseFetching`, `UpdateInstalling`,
   `UpdateStateStoring`, `UpdateClock`, `URLOpening`). Внутренние типы не подменяются.
 - Флаги стран лежат в бандле, а не тянутся из сети: канон — `shared/flags`,
   раскладка по платформам — `shared/tools/sync-flags.sh`, править копию нельзя.
@@ -192,7 +192,10 @@ linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабо�
   шелл посреди паузы видит остановку задания, забирает терминал и переключает его режим.
   `claude` сырой режим сама не восстанавливает — после `fg` рисуется, но глуха к клавишам.
   Поэтому охрана снимает режим терминала цели до `SIGSTOP` и возвращает его, когда цель
-  снова впереди (`PausePlan.foregroundRoots`, `TerminalModeKeeping`).
+  снова впереди (`PausePlan.foregroundRoots`, `TerminalModeKeeping`). GNU screen 4.09 на Linux
+  ведёт себя так же, системный screen на macOS — как голый терминал. SIGCONT при этом оставляет
+  цель в фоне, а снаружи сессии терминал не отдать, поэтому охрана вводит `fg` сама
+  (`TerminalForegroundReturning`), и только пока терминал у шелла этой цели; от root ввода нет.
   Разбор — `.claude/docs/bugs/tmux-takes-the-terminal-from-a-paused-target.md`.
 - Пул соединений между гео-пробами вреден: туннель с подменой адресов (`198.18.0.1`) молча
   бросает соединения при перезапуске, отпечаток выхода не меняется, и общая `URLSession`

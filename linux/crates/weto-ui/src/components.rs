@@ -24,7 +24,7 @@ pub const SPACE3: i32 = 9;
 pub const SPACE4: i32 = 12;
 pub const SPACE5: i32 = 18;
 
-pub const POPUP_WIDTH: i32 = 352;
+pub const POPUP_WIDTH: i32 = 480;
 pub const WINDOW_WIDTH: i32 = 500;
 pub const WINDOW_HEIGHT: i32 = 640;
 
@@ -188,10 +188,8 @@ pub fn primary_button(text: &str) -> Button {
     pill(text, "weto-primary")
 }
 
-/// Компактная первичная пилюля — «Показать терминал» у значка паузы.
-/// Единственный компактный контрол в проекте: рядом со значком уже стоят
-/// отсчёт и (i), и полноразмерная кнопка спорит с заголовком цели.
-/// Порт `WetoPillButtonStyle(.primary)` c `.controlSize(.small)`.
+/// Компактная первичная пилюля. Порт `WetoPillButtonStyle(.primary)`
+/// c `.controlSize(.small)`.
 pub fn compact_primary_button(text: &str) -> Button {
     let button = pill(text, "weto-primary");
     button.add_css_class("weto-compact");
@@ -533,22 +531,9 @@ pub fn pause_countdown_text(deadline: Option<SystemTime>, now: SystemTime) -> St
     weto_core::pause_ceiling::countdown_text(seconds)
 }
 
-/// Значок «на паузе»: капсула `amber` с отсчётом до потолка. `hint` — цель
-/// потеряла терминал (`fg`-подсказка); появляется как значок `(i)` с текстом
-/// во всплывающей подсказке. `terminal` — рядом встаёт кнопка «Показать
-/// терминал»; её дают только тогда, когда терминал и правда есть чем поднять,
-/// иначе кнопка обещала бы то, чего не будет. Порт `WetoPauseBadge`.
-///
-/// Кнопка возвращается отдельно, как у баннера: обработчик знает про состояние
-/// приложения, а компонент про него не знает ничего.
-pub fn pause_badge(
-    deadline: Option<SystemTime>,
-    now: SystemTime,
-    hint: Option<&str>,
-    terminal: bool,
-) -> (GtkBox, Option<Button>) {
-    let row = GtkBox::new(Orientation::Horizontal, SPACE2);
-
+/// Значок «на паузе»: капсула `amber` с отсчётом до потолка. Кнопок рядом нет:
+/// на паузе цели не возвращаются. Порт `WetoPauseBadge`.
+pub fn pause_badge(deadline: Option<SystemTime>, now: SystemTime) -> GtkBox {
     let capsule = GtkBox::new(Orientation::Horizontal, SPACE2);
     capsule.add_css_class("weto-pause-badge");
 
@@ -559,26 +544,59 @@ pub fn pause_badge(
     let countdown = Label::new(Some(&pause_countdown_text(deadline, now)));
     countdown.add_css_class("weto-pause-countdown");
     capsule.append(&countdown);
-    row.append(&capsule);
+    capsule
+}
 
-    // (i) и кнопка стоят рядом с капсулой, а не внутри неё: заливка `amber` —
-    // это фон отсчёта, и всё, что легло бы на неё, читалось бы частью отсчёта.
-    // Цвет (i) — `faint`, как у подсказок: смысл несёт текст, а не значок.
-    if let Some(hint) = hint {
-        let info = gtk4::Image::from_icon_name("dialog-information-symbolic");
-        info.set_pixel_size(12);
-        info.add_css_class("weto-hint");
-        info.set_tooltip_text(Some(hint));
-        row.append(&info);
+/// Подпись цели, оставшейся в фоне после снятия паузы: интерфейс её может быть нарисован,
+/// а клавиатура у шелла. `shows_command` — когда кнопки уже нет, и подсказать больше нечем.
+/// Порт `WetoBackgroundLabel`.
+pub fn background_label(shows_command: bool) -> GtkBox {
+    let label = Label::new(None);
+    label.add_css_class("weto-background-label");
+    if shows_command {
+        label.set_markup("в фоне: введите <tt>fg</tt>");
+    } else {
+        label.set_text("в фоне");
     }
+    let holder = GtkBox::new(Orientation::Horizontal, 0);
+    holder.append(&label);
+    holder
+}
 
-    let button = terminal.then(|| {
-        let button = compact_primary_button("Показать терминал");
-        row.append(&button);
-        button
-    });
+/// Кнопка рядом с пилюлей процесса — та же высота и тот же радиус, что у строки, иначе рядом
+/// стоят две разные по высоте формы. Высоту задаёт ряд (`pill_row`), поэтому не `Center`.
+/// Порт `WetoPillButtonStyle(.primary, matchesRow: true)`.
+pub fn return_button() -> Button {
+    let button = primary_button("Вернуть в терминал");
+    button.add_css_class("weto-row-button");
+    button.set_valign(Align::Fill);
+    button
+}
 
-    (row, button)
+/// Пилюля и действие после неё. Пилюля забирает остаток ширины: кнопка всегда стоит
+/// на своей ширине, и сокращаться в ряду может только имя цели.
+pub fn pill_row(pill: &GtkBox, action: Option<&Button>) -> GtkBox {
+    let row = GtkBox::new(Orientation::Horizontal, SPACE2);
+    pill.set_hexpand(true);
+    row.append(pill);
+    if let Some(action) = action {
+        row.append(action);
+    }
+    row
+}
+
+/// Под строкой цели, которую не вернула и кнопка: окно терминала к этому моменту поднято.
+pub fn return_failed_hint() -> Label {
+    let hint = Label::new(None);
+    hint.set_markup("Не удалось вернуть автоматически. В терминале введите <tt>fg</tt>");
+    hint.add_css_class("weto-explain-evidence");
+    // `Fill`, а не `Start`: переносимая подпись на `Start` просит себе узкую ширину
+    // и переносится, даже когда в строке хватает места.
+    hint.set_halign(Align::Fill);
+    hint.set_xalign(0.0);
+    hint.set_wrap(true);
+    hint.set_margin_start(SPACE2);
+    hint
 }
 
 /// Запись журнала без плашек, рамок и цвета — порт `JournalRow` с macOS:

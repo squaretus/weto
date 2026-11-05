@@ -28,15 +28,17 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `send(_:to:)` delivers `.kill`/`.stop`/`.resume` strictly in list order — pause's
   shell-then-target-then-descendants contract lives on this boundary, not in the caller
 - `macos/Sources/WetoSystem/TerminalLocator.swift` — `TerminalLocating`: finds the `.app` that
-  hosts a backgrounded terminal target's pid, to bring it back to the user's attention. Never
-  types `fg` for them — only Terminal.app/iTerm2 support that via AppleScript, and not every
-  emulator does
+  hosts a terminal target's pid and raises its window. Запасной путь: сюда приходят, когда нажатие
+  «Вернуть в терминал» не вернуло цель
+- `macos/Sources/WetoSystem/TerminalForegroundReturner.swift` — `TerminalForegroundReturning`: вводит
+  `fg` в шелл цели через tmux или AppleScript (Terminal.app, iTerm2). Терминальная версия создаёт его
+  с `allowsAutomation: false`
 - `macos/Sources/WetoSystem/TerminalModeKeeper.swift` — `TerminalModeKeeping`: captures a
   target's `termios` by device before the pause and writes it back after `fg`
 - `macos/Sources/WetoSystem/TargetResolver.swift`
 - `macos/Sources/WetoSystem/KeychainStore.swift` (also `SecretStoring`, `SecretStoreError`, `TokenBox`)
 - `macos/Sources/WetoSystem/FlagImageStore.swift`
-- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests,FileSecretStoreTests,ProcessSignalerTests,TerminalLocatorTests,HTTPFetcherPhasesTests,TerminalModeKeeperTests,ForegroundJobPlanTests}.swift`
+- Tests: `macos/Tests/WetoSystemTests/{GeoProbeTests,RouteProbeTests,NetworkSnapshotReaderTests,NetworkEventSourceTests,FlagImageStoreTests,ProcessTests,KeychainStoreTests,FileSecretStoreTests,ProcessSignalerTests,TerminalLocatorTests,TerminalForegroundReturnerTests,HTTPFetcherPhasesTests,TerminalModeKeeperTests,ForegroundJobPlanTests}.swift`
 
 ## Entry points
 - `NetworkSnapshotReading.snapshot() → NetworkSnapshot` — sync, no throws; kernel route probe plus
@@ -60,6 +62,10 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `.kill`/`.stop`/`.resume` (`SignalResult.isDelivered`, true for `nil` and `ESRCH` alike)
 - `TerminalLocating.activateTerminal(owning pid:in processes:) → Bool` — brings the hosting
   `.app` to the front; `TerminalLocator.hostApplicationPID(of:in:)` is the pure lookup half
+- `TerminalForegroundReturning.returnToForeground(target:shell:processes:usingAutomation:) →
+  Result<Void, TerminalReturnError>` — `shell` приходит от `PausePlanner.shellHoldingTerminal`;
+  `.success` значит «команда ушла», а не «цель вернулась». `usingAutomation: false` — на выходе
+  из Weto: ждать там окно разрешения нельзя
 - `TerminalModeKeeping.capture(device:) → Result<TerminalMode, TerminalModeError>`,
   `.restore(_:) → Result<Void, TerminalModeError>`; `TerminalMode` carries the device, the
   `/dev/ttysNNN` path (`devname`) and the raw `termios` bytes
@@ -91,6 +97,9 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `ProcessSignaler`, strictly in the order the caller lists them.
 - `TerminalLocator.activateTerminal` calls `NSRunningApplication.activate()` — brings a window
   to the front, the only UI-adjacent side effect below `WetoShared`.
+- `TerminalForegroundReturner` запускает `tmux` с потолком 2 с на команду или `/usr/bin/osascript`
+  с потолком 30 с: запас на окно разрешения Automation при первом запуске
+  (`NSAppleEventsUsageDescription` в `Weto-Info.plist`).
 - Network calls per `GeoProbe.probe()`: one ipinfo request, plus a confirmation request only when
   the address is new or the soft ceiling (60 s) has passed. When ipinfo refuses, one request to the
   geojs "who am I" endpoint instead — the address is what proves the verdict may be reused.
@@ -105,6 +114,18 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `tcgetattr` / `tcsetattr(TCSANOW)` on it — `TCSANOW`, so input typed after `fg` is not flushed.
 
 ## Invariants / assumptions
+- **Ввод `fg` не запускает чужое.** От root ввода нет (`mayType`): охрана стоит над всей машиной,
+  и запуск по подсказке чужих процессов отдал бы root локальному пользователю. `tmux` запускается,
+  только если это обычный файл, владелец root или мы, без записи для группы и остальных
+  (`isTrustedExecutable`): путь взят из таблицы процессов, а назвать процесс `tmux` может кто угодно.
+  Каталог `/private/tmp/tmux-<uid>` обязан быть нашим и закрытым для группы и остальных, проверяется
+  `lstat` (`isTrustedSocketDirectory`): `/tmp` общий, и сокет в чужом каталоге слушал бы его владелец.
+- **Панель tmux ищется перебором сокетов и по терминалу цели.** `TMUX` и `TMUX_PANE` из окружения шелла
+  macOS чужому процессу не отдаёт. Мёртвые сокеты отвечают ошибкой и пропускаются. `C-u` идёт отдельной
+  командой перед `fg Enter`, иначе набранное в строке шелла склеилось бы с `fg`. AppleScript набранное
+  не очищает. Сессии iTerm под `tmux -CC` идут путём tmux: родитель шелла там tmux.
+- **Пути ввода только два, screen среди них нет.** Системный screen 4.00.03 ведёт себя как голый
+  терминал, и ввод ему не нужен. Homebrew-screen не проверялся.
 - **«Is there a network at all» costs nothing.** `NetworkPathReporter` answers from a running
   `NWPathMonitor`, never with a probe request of its own. The popup shows that line only when
   something failed — it is the answer to "is my VPN to blame, or the service?".
@@ -270,4 +291,6 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
 - `decisions/geo-confirmation-services.md` — the request budget this module spends
 - `decisions/pause-instead-of-kill.md` — the signal-order contract `ProcessSignaling` enforces
 - `bugs/stale-pooled-connection-under-fake-ip-tunnel.md` — why the fetcher has no shared session
-- `bugs/tmux-takes-the-terminal-from-a-paused-target.md` — why `TerminalModeKeeping` exists
+- `bugs/tmux-takes-the-terminal-from-a-paused-target.md` — why `TerminalModeKeeping` and
+  `TerminalForegroundReturning` exist
+- `features/terminal-target-returns-after-pause.md` — весь путь возврата цели

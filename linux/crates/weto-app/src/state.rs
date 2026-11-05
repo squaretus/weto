@@ -145,16 +145,14 @@ impl AppState {
         self.controller.remaining_pause()
     }
 
-    /// Кто держит терминал стоящей цели и можно ли его поднять.
-    ///
-    /// Ответ спрашивается на живом снимке `/proc` и на живой шине, поэтому
-    /// интерфейс держит его в кэше: пока цель стоит, терминала она не меняет.
+    /// Кто держит терминал цели и можно ли его поднять. Ответ спрашивается
+    /// на живом снимке `/proc` и на живой шине.
     pub fn terminal_for(&self, pid: i32) -> Option<TerminalHost> {
         self.terminal.locate(pid, &self.registry.snapshot())
     }
 
-    /// Показать пользователю терминал стоящей цели: под паузой процесс
-    /// не отвечает, и найти его окно самому — задача не для человека.
+    /// Показать пользователю терминал цели, которую не удалось вернуть:
+    /// найти её окно самому — задача не для человека.
     /// Порт macOS `GuardVM.showTerminal(for:)`.
     pub fn show_terminal(&self, pid: i32) -> bool {
         match self.terminal_for(pid) {
@@ -275,11 +273,34 @@ impl AppState {
     /// содержимое лениво и защиты не было бы, пока пользователь не откроет меню.
     /// Здесь та же ловушка ждала бы с окном, которое может не открыться никогда.
     pub fn start_guard(self: &Arc<Self>) {
+        let state = self.clone();
         spawn_guard(
             self.controller.clone(),
             Box::new(NetlinkEventSource),
-            |_| {},
+            move |_| state.raise_terminals_of_failed_returns(),
         );
+    }
+
+    /// Кнопка «Вернуть в терминал». Запуск tmux идёт на дорожке охраны, а не здесь:
+    /// нажатие приходит из главного цикла GTK.
+    pub fn return_to_terminal(&self, pid: i32) {
+        self.controller.return_to_terminal(pid);
+    }
+
+    /// Нажатие не вернуло цель: подсказка отправляет в терминал — поднимаем его.
+    /// Своим потоком: ответ на вопрос «кто терминал» стоит обхода `/proc` и разговора с шиной,
+    /// а такт охраны ждать этого не должен.
+    fn raise_terminals_of_failed_returns(self: &Arc<Self>) {
+        let failed = self.controller.take_failed_returns();
+        if failed.is_empty() {
+            return;
+        }
+        let state = self.clone();
+        std::thread::spawn(move || {
+            for pid in failed {
+                state.show_terminal(pid);
+            }
+        });
     }
 }
 

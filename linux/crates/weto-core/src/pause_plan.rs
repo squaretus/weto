@@ -208,6 +208,31 @@ fn holds_foreground_in(target: &ProcessSnapshot, tree: &ProcessTree) -> bool {
         .contains(&target.pid)
 }
 
+/// Шелл, которому можно ввести `fg` за пользователя: ближайший предок цели, сам шелл по имени,
+/// на её терминале, не из её задания и сейчас держащий этот терминал. Обёртка `sh -c` идёт
+/// с целью одной группой и пропускается: задание ведёт шелл выше неё. Держит терминал кто-то
+/// другой (пользователь запустил там `vim`) — `None`: введённое досталось бы чужой программе.
+/// Встроенный `read` самого шелла снаружи от приглашения не отличить.
+pub fn shell_holding_terminal<'a>(
+    target: &ProcessSnapshot,
+    processes: &'a [ProcessSnapshot],
+) -> Option<&'a ProcessSnapshot> {
+    if target.terminal_device == 0 {
+        return None;
+    }
+    let by_pid: HashMap<i32, &ProcessSnapshot> = processes.iter().map(|p| (p.pid, p)).collect();
+    let candidate = ProcessTree::new(processes)
+        .ancestors(target.pid)
+        .into_iter()
+        .filter_map(|pid| by_pid.get(&pid).copied())
+        .find(|candidate| {
+            candidate.terminal_device == target.terminal_device
+                && is_shell(candidate)
+                && candidate.process_group != target.process_group
+        })?;
+    (candidate.process_group == candidate.terminal_foreground_group).then_some(candidate)
+}
+
 fn is_shell(process: &ProcessSnapshot) -> bool {
     let Some(name) = process.executable_path.rsplit('/').next() else {
         return false;
@@ -266,6 +291,85 @@ mod tests {
                 matched_by: *basis,
             })
             .collect()
+    }
+
+    /// Панель tmux: сервер, шелл, цель. `foreground` — у кого сейчас терминал.
+    fn tmux_pane(foreground: i32) -> Vec<ProcessSnapshot> {
+        let on_terminal = |process: ProcessSnapshot| ProcessSnapshot {
+            terminal_device: 7,
+            ..process
+        };
+        vec![
+            detached(90, 1, "/usr/bin/tmux"),
+            on_terminal(snapshot(100, 90, "/bin/zsh", 100, foreground)),
+            on_terminal(snapshot(
+                200,
+                100,
+                "/home/me/.local/bin/claude",
+                200,
+                foreground,
+            )),
+        ]
+    }
+
+    /// Терминал у шелла — он стоит на приглашении, и `fg` достанется именно ему.
+    #[test]
+    fn the_shell_holding_the_terminal_may_be_typed_into() {
+        let processes = tmux_pane(100);
+        assert_eq!(
+            shell_holding_terminal(&processes[2], &processes).map(|shell| shell.pid),
+            Some(100)
+        );
+    }
+
+    /// Пользователь запустил в этом шелле другую программу: терминал у неё,
+    /// и введённое досталось бы ей, а не шеллу.
+    #[test]
+    fn nothing_is_typed_while_another_program_holds_the_terminal() {
+        let processes = tmux_pane(300);
+        assert_eq!(shell_holding_terminal(&processes[2], &processes), None);
+    }
+
+    /// Шелл на другом терминале цели не ведёт: так выглядит шелл, запустивший tmux.
+    #[test]
+    fn a_shell_on_another_terminal_is_not_the_one() {
+        let mut processes = tmux_pane(100);
+        processes[1].terminal_device = 8;
+        assert_eq!(shell_holding_terminal(&processes[2], &processes), None);
+    }
+
+    /// Обёртка `sh -c` идёт с целью одной группой и частью задания остаётся: шелл, ведущий
+    /// задание, стоит выше неё.
+    #[test]
+    fn a_wrapper_in_the_targets_job_does_not_hide_the_shell() {
+        let tree = |foreground: i32| {
+            [
+                snapshot(100, 90, "/bin/zsh", 100, foreground),
+                snapshot(150, 100, "/bin/sh", 150, foreground),
+                snapshot(200, 150, "/usr/bin/node", 150, foreground),
+            ]
+            .map(|process| ProcessSnapshot {
+                terminal_device: 7,
+                ..process
+            })
+        };
+        let behind = tree(100);
+        assert_eq!(
+            shell_holding_terminal(&behind[2], &behind).map(|shell| shell.pid),
+            Some(100)
+        );
+
+        // Цель сама впереди: обёртка держит терминал вместе с ней, и `fg` ушёл бы в цель.
+        let ahead = tree(150);
+        assert_eq!(shell_holding_terminal(&ahead[2], &ahead), None);
+    }
+
+    /// Без терминала вводить некуда.
+    #[test]
+    fn a_target_without_a_terminal_has_no_shell_to_type_into() {
+        let processes = tmux_pane(100);
+        let daemon = detached(200, 100, "/usr/bin/node");
+        assert_eq!(shell_holding_terminal(&daemon, &processes), None);
     }
 
     /// Стоп — шелл, цель, потомки; продолжение — в обратном порядке. На голом терминале

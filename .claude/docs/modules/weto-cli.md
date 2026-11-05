@@ -155,6 +155,11 @@ directories `weto-cli`, asset prefix `weto-cli-`.
   not apply. `install` is idempotent: the installer calls it on every run.
 - **Under root no GUI-session APIs:** `NetworkEventSource(observesWorkspace: false)`; terminal
   polling already covers targets.
+- **От root автовозврата в терминал нет.** Охрана от root стоит над всей машиной, и ввод в чужие сессии
+  ей не нужен и опасен (`mayType` / `may_type`): цель, оставшаяся в фоне после паузы, ждёт ручного `fg`.
+  От пользователя `fg` вводится через tmux, на Linux ещё через GNU screen. AppleScript терминальная
+  версия не использует (`allowsAutomation: false`). Кнопки и подсказки у неё нет, и в `status.json`
+  состояние возврата не попадает.
 
 ## Failure hotspots
 - **Bare target names under root.** `sudo` brings root's `PATH`, without the user's `~/.local/bin`
@@ -193,3 +198,4 @@ directories `weto-cli`, asset prefix `weto-cli-`.
 - decisions/vpn-tunnel-in-terminal-version.md, decisions/whole-machine-guard-from-root.md
 - runbooks/install-weto-cli-on-a-server.md, runbooks/release.md
 - modules/weto-shared.md, modules/linux-guard.md, modules/weto-core.md
+- features/terminal-target-returns-after-pause.md

@@ -119,8 +119,10 @@ turns a decision into one of six phases and either keeps targets running, pauses
    (zsh's `notify` prints `suspended (tty input)` on every answer).
    `resolvePauseEpisode` refines the open episode with how it ended — «возобновлено» only for an
    observed resume, and per process: records of pids that stopped again or refused `SIGCONT` get
-   their own «не возобновлено: …» (`exceptions`), the rest share the episode outcome; the popup keeps its badge with the `fg`
-   hint instead of pretending the target came back. A `.terminate` effect
+   their own «не возобновлено: …» (`exceptions`), the rest share the episode outcome; the popup keeps its badge
+   instead of pretending the target came back. Цель, идущая, но оставшаяся в фоне, возвращается своим циклом:
+   `GuardVM.settleTerminalReturns` вводит `fg`, дальше кнопка и подсказка
+   (`features/terminal-target-returns-after-pause.md`). A `.terminate` effect
    instead kills whatever still matches the rules and resumes (never leaves stopped) anyone in the
    ledger that no longer does, so nothing is left frozen past the point where it stops being
    watched; reaching the pause ceiling with no answer resolves the same way, with
@@ -140,8 +142,8 @@ turns a decision into one of six phases and either keeps targets running, pauses
     ledger recorded — that file preserves the real stop order — and keeps every entry it did not
     resolve, leaving it to the tick loop above to observe and re-signal. Whatever survives that
     call is surfaced at once, off the same walk (`resumeOrphans` hands its scan back rather than
-    have the caller repeat it) — `GuardVM.surfaceRecovered` seeds the popup's standing list (badge,
-    `fg` hint, «Показать терминал») and writes one `CheckEvent(trigger: .startupRecovery,
+    have the caller repeat it) — `GuardVM.surfaceRecovered` seeds the popup's standing list (badge)
+    and writes one `CheckEvent(trigger: .startupRecovery,
     outcome: .standingProcessesRemain)`, one per recovery — because this launch has no pause
     episode and the kill-journal is silent about it by construction. A
     corrupted `stopped.json` is read as empty (never blocks startup) but writes one
@@ -155,6 +157,7 @@ Files: `macos/Sources/WetoSystem/NetworkEventSource.swift`, `macos/Sources/WetoS
 `macos/Sources/WetoShared/ProcessEnforcer.swift`, `macos/Sources/WetoCore/ProcessMatcher.swift`,
 `macos/Sources/WetoSystem/ProcessSignaler.swift`, `macos/Sources/WetoShared/StoppedLedger.swift`,
 `macos/Sources/WetoShared/GuardNotifying.swift`, `macos/Sources/WetoSystem/TerminalLocator.swift`,
+`macos/Sources/WetoSystem/TerminalForegroundReturner.swift`, `macos/Sources/WetoCore/TerminalReturnTracker.swift`,
 `macos/Sources/WetoShared/EventLogStore.swift`, `macos/Sources/WetoShared/CheckLogStore.swift`,
 `macos/Sources/WetoMenuBar/StatusPopupView.swift`.
 

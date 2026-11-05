@@ -209,6 +209,7 @@ final class GuardRunner {
             locator: ProcessRegistry(),
             signaler: ProcessSignaler(),
             ledger: StoppedLedger(storage: CLI.ledgerStorage(paths)),
+            terminalReturner: TerminalForegroundReturner(allowsAutomation: false),
             notifier: LogNotifier(log: log),
             // У системной охраны нет GUI-сессии: уведомления `NSWorkspace` ей
             // не положены, цели ловит опрос процессов.

@@ -14,8 +14,8 @@ application state — they take values and closures, never view models.
 - `macos/Sources/WetoDesign/Components/WetoBanner.swift`
 - `macos/Sources/WetoDesign/Components/WetoProcessPill.swift`
 - `macos/Sources/WetoDesign/Components/WetoPauseBadge.swift` — the amber countdown capsule for a
-  paused target, plus the (i) hint and "Показать терминал" button for one that lost its
-  foreground job. Takes `now` as a parameter rather than running its own timer, so every badge in
+  paused target and nothing else: на паузе цели не возвращаются. `WetoBackgroundLabel(showsCommand:)` в том
+  же файле — подпись «в фоне» и «в фоне: введите fg» у цели после паузы. Takes `now` as a parameter rather than running its own timer, so every badge in
   the popup and the explanation's third line tick from the exact same clock
   (`StatusPopupView`'s single `TimelineView`). `remainingText(seconds:)` is the one countdown
   format: above a minute «4:59», the last minute «43 с» (the ceiling is a 1–10 min setting, and
@@ -36,14 +36,15 @@ application state — they take values and closures, never view models.
 - `StatusTone.color → WetoColor` (`.ok`/`.degraded`/`.blocked`/`.off`)
 - `WetoPanel(width:content:)`, `WetoCard(_ caption:content:)`, `WetoRow(content:)`, `WetoDivider()`
 - `WetoSegmentedControl(selection:options:)` — generic over `Value: Hashable`
-- `WetoPillButtonStyle(_ kind: .primary/.ghost/.danger, expands:)` — reads `\.controlSize` and
+- `WetoPillButtonStyle(_ kind: .primary/.ghost/.danger, expands:, matchesRow:)` — `matchesRow`: кнопка
+  рядом с пилюлей процесса, высоту задаёт ряд, радиус `radiusCard`, паддинг `space4`. Reads `\.controlSize` and
   switches between `WetoTokens.controlHeight` (32, default) and `.controlHeightCompact` (24,
-  `.small`); the compact size is a dedicated token, not a scaled-down default, and its first (and
-  so far only) user is the pause badge's "Показать терминал" button, `WetoTileButtonStyle()`,
+  `.small`); the compact size is a dedicated token, not a scaled-down default; на экранах он сейчас не используется,
+  `WetoTileButtonStyle()`,
   `WetoIconButtonStyle()`, `WetoFieldStyle()`, `WetoMenuButton(_ title:items:)`
 - `StatusShield(tone:)`, `WetoBanner(tone:systemImage:text:trailing:)`,
   `WetoProcessPill(icon:title:isCommandLine:childCount:)`,
-  `WetoPauseBadge(deadline:now:hint:onShowTerminal:)`, `WetoPauseBadge.countdown(until:at:)`,
+  `WetoPauseBadge(deadline:now:)`, `WetoPauseBadge.countdown(until:at:)`,
   `WetoPauseBadge.remainingText(seconds:) → String`,
   `WetoDeleteRowAction(label:hint:action:)`
 - `MenuBarImageRenderer.image(flagImage:color:) → NSImage` — no country code: nothing draws it

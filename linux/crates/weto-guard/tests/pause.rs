@@ -21,6 +21,7 @@ use weto_core::diagnostics::StalenessCause;
 use weto_core::guard_machine::{GuardAction, GuardPhase};
 use weto_core::policy::{UnprovenReason, UnsafeEvidence};
 use weto_core::process::{MatchBasis, ProcessSnapshot};
+use weto_core::terminal_return::TerminalReturnState;
 use weto_sys::process_signaler::ProcessSignal::{Kill, Resume, Stop};
 use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
 
@@ -1555,5 +1556,266 @@ fn a_tick_after_shutdown_touches_nothing() {
     assert!(
         s.controller.is_shut_down(),
         "по этому признаку поток охраны и выходит из своего цикла"
+    );
+}
+
+// --- возврат цели в терминал ------------------------------------------------
+
+const PANE_TTY: i32 = (136 << 8) | 3;
+
+/// Панель tmux: сервер, шелл, цель с потомком на одном терминале, рядом VPN-клиент.
+fn tmux_pane() -> Vec<ProcessSnapshot> {
+    vec![
+        detached(90, 1, "/usr/bin/tmux"),
+        on_terminal(process(100, 90, "/usr/bin/zsh", 100, 200), PANE_TTY),
+        on_terminal(process(200, 100, CLAUDE, 200, 200), PANE_TTY),
+        on_terminal(process(201, 200, "/usr/bin/node", 200, 200), PANE_TTY),
+        detached(77, 1, "/usr/bin/happ"),
+    ]
+}
+
+/// Пауза, под которой сервер tmux продолжил шелл и тот забрал терминал `holder`.
+fn pause_under_tmux(s: &Stand, holder: i32) {
+    services_go_silent(s);
+    s.world.continues(100);
+    s.world.terminal_goes_to(holder);
+    s.tick();
+}
+
+/// Пауза под tmux и её снятие: цель идёт, но терминал не у неё.
+fn lift_pause_leaving_target_behind(s: &Stand, holder: i32) {
+    pause_under_tmux(s, holder);
+    s.geo.everything_answers_again();
+    s.probe_now();
+    s.tick();
+    assert!(ledger_pids(s).is_empty(), "пауза кончилась по наблюдению");
+    s.returns.settle();
+}
+
+fn tmux_stand() -> Stand {
+    let s = stand_with(World::of(tmux_pane()), &[]);
+    guarded(&s);
+    s
+}
+
+fn return_state(s: &Stand, pid: i32) -> Option<TerminalReturnState> {
+    s.controller.snapshot().terminal_returns.get(&pid).copied()
+}
+
+/// Живой случай: SIGCONT оставил `claude` в фоне, интерфейс нарисован, а клавиши идут
+/// шеллу. Охрана вводит `fg` сама и возвращает режим терминала.
+#[test]
+fn a_target_left_in_the_background_returns_by_itself() {
+    let s = tmux_stand();
+    let world = s.world.clone();
+    s.returner.on_return(move || world.terminal_goes_to(200));
+
+    lift_pause_leaving_target_behind(&s, 100);
+
+    assert_eq!(
+        s.returner.calls(),
+        vec![(200, 100)],
+        "одна попытка на снятие"
+    );
+    assert_eq!(
+        s.terminal_modes.restored(),
+        vec![PANE_TTY],
+        "после fg терминал обязан быть снова в режиме цели"
+    );
+
+    s.tick();
+    assert_eq!(
+        return_state(&s, 200),
+        None,
+        "цель снова впереди: подписи нет"
+    );
+    assert_eq!(s.returner.calls().len(), 1);
+}
+
+/// Попытка на снятие одна: пока команда ещё не подействовала, такт её не повторяет.
+#[test]
+fn the_passes_after_the_attempt_do_not_repeat_it() {
+    let s = tmux_stand();
+    lift_pause_leaving_target_behind(&s, 100);
+    s.tick();
+    s.returns.settle();
+
+    assert_eq!(s.returner.calls().len(), 1);
+    assert_eq!(return_state(&s, 200), Some(TerminalReturnState::Returning));
+}
+
+/// На паузе цели не возвращаются, даже если терминал уже у шелла, и кнопки нет.
+#[test]
+fn nothing_returns_while_the_pause_lasts() {
+    let s = tmux_stand();
+    pause_under_tmux(&s, 100);
+    s.returns.settle();
+
+    assert!(s.returner.calls().is_empty());
+    assert_eq!(return_state(&s, 200), None, "кнопки на паузе нет");
+}
+
+/// Автоматика не смогла — кнопка; кнопка не смогла — окно терминала и подсказка.
+#[test]
+fn a_failed_return_offers_the_button_and_then_the_hint() {
+    let s = tmux_stand();
+    s.returner.refuses();
+
+    lift_pause_leaving_target_behind(&s, 100);
+    assert_eq!(return_state(&s, 200), Some(TerminalReturnState::Offered));
+    assert_eq!(s.returner.calls().len(), 1);
+    assert!(
+        s.controller.take_failed_returns().is_empty(),
+        "окно поднимает только нажатие"
+    );
+
+    s.controller.return_to_terminal(200);
+    s.returns.settle();
+
+    assert_eq!(s.returner.calls().len(), 2);
+    assert_eq!(return_state(&s, 200), Some(TerminalReturnState::Failed));
+    assert_eq!(
+        s.controller.take_failed_returns(),
+        vec![200],
+        "подсказка отправляет в терминал — поднимаем его окно"
+    );
+    assert!(s.controller.take_failed_returns().is_empty(), "один раз");
+
+    s.controller.return_to_terminal(200);
+    s.returns.settle();
+    assert_eq!(
+        s.returner.calls().len(),
+        2,
+        "кнопка живёт до первого нажатия"
+    );
+}
+
+/// Команда прошла, а цель не вернулась: решает наблюдение, а не код выхода. Сперва кнопка,
+/// через пять минут от снятия паузы — только подсказка.
+#[test]
+fn a_command_that_changed_nothing_offers_the_button_for_five_minutes() {
+    let s = tmux_stand();
+    lift_pause_leaving_target_behind(&s, 100);
+    assert_eq!(return_state(&s, 200), Some(TerminalReturnState::Returning));
+
+    s.hands.advance(4);
+    s.tick();
+    assert_eq!(return_state(&s, 200), Some(TerminalReturnState::Offered));
+
+    s.hands.advance(300);
+    s.tick();
+    assert_eq!(return_state(&s, 200), Some(TerminalReturnState::Expired));
+
+    s.controller.return_to_terminal(200);
+    s.returns.settle();
+    assert_eq!(s.returner.calls().len(), 1, "нажимать уже нечего");
+}
+
+/// Пользователь запустил в шелле другую программу: `fg` достался бы ей.
+#[test]
+fn nothing_is_typed_into_another_program() {
+    let s = tmux_stand();
+
+    lift_pause_leaving_target_behind(&s, 300);
+
+    assert!(s.returner.calls().is_empty());
+    assert_eq!(return_state(&s, 200), Some(TerminalReturnState::Offered));
+}
+
+/// Голый терминал: цель так и осталась впереди, вводить нечего, хватило SIGCONT.
+#[test]
+fn a_target_that_kept_the_foreground_needs_no_return() {
+    let s = tmux_stand();
+    services_go_silent(&s);
+    s.geo.everything_answers_again();
+    s.probe_now();
+    s.tick();
+    s.returns.settle();
+
+    assert!(s.returner.calls().is_empty());
+    assert_eq!(return_state(&s, 200), None);
+    assert_eq!(s.terminal_modes.restored(), vec![PANE_TTY]);
+}
+
+/// Новая пауза обнуляет историю: после неё снова положена автоматическая попытка.
+#[test]
+fn a_new_pause_gives_a_new_attempt() {
+    let s = tmux_stand();
+    s.returner.refuses();
+    lift_pause_leaving_target_behind(&s, 100);
+    assert_eq!(return_state(&s, 200), Some(TerminalReturnState::Offered));
+
+    services_go_silent(&s);
+    assert_eq!(return_state(&s, 200), None, "на паузе кнопки нет");
+
+    s.geo.everything_answers_again();
+    s.probe_now();
+    s.tick();
+    s.returns.settle();
+    assert_eq!(s.returner.calls().len(), 2);
+}
+
+/// Попытка стояла в очереди, а началась новая пауза: `fg` под ней вернул бы цели терминал
+/// при неподтверждённом выходе.
+#[test]
+fn a_queued_return_is_dropped_when_a_new_pause_begins() {
+    let s = tmux_stand();
+    pause_under_tmux(&s, 100);
+    s.geo.everything_answers_again();
+    s.probe_now();
+    s.tick();
+
+    pause_under_tmux(&s, 100);
+    s.returns.settle();
+
+    assert!(s.returner.calls().is_empty(), "{:?}", s.returner.calls());
+}
+
+/// Два корня цели на одном терминале: `fg` один, иначе второй ушёл бы в цель как ввод.
+#[test]
+fn two_roots_on_one_terminal_get_one_fg() {
+    let mut world = tmux_pane();
+    world.push(on_terminal(process(210, 100, CLAUDE, 200, 200), PANE_TTY));
+    let s = stand_with(World::of(world), &[]);
+    guarded(&s);
+    let world = s.world.clone();
+    s.returner.on_return(move || world.terminal_goes_to(200));
+
+    lift_pause_leaving_target_behind(&s, 100);
+
+    assert_eq!(s.returner.calls().len(), 1, "{:?}", s.returner.calls());
+}
+
+/// Выход посреди паузы: следующего такта не будет, поэтому `fg` и режим терминала —
+/// здесь же, режим мимо учёта: записи в нём остаются до следующего запуска.
+#[test]
+fn quitting_returns_the_target_before_leaving() {
+    let s = tmux_stand();
+    let world = s.world.clone();
+    s.returner.on_return(move || world.terminal_goes_to(200));
+    pause_under_tmux(&s, 100);
+
+    s.controller.shutdown();
+
+    assert_eq!(s.returner.calls(), vec![(200, 100)]);
+    assert_eq!(s.terminal_modes.restored(), vec![PANE_TTY]);
+    assert!(s.controller.snapshot().terminal_returns.is_empty());
+}
+
+/// Выход не висит на зависшем tmux: обещание вернуть цель не дороже закрытия приложения.
+#[test]
+fn a_hung_tmux_does_not_hold_the_exit() {
+    let s = tmux_stand();
+    s.returner
+        .on_return(|| std::thread::sleep(Duration::from_secs(20)));
+    pause_under_tmux(&s, 100);
+
+    let started = std::time::Instant::now();
+    s.controller.shutdown();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
     );
 }
