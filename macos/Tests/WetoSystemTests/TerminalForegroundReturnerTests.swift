@@ -46,4 +46,35 @@ final class TerminalForegroundReturnerTests: XCTestCase {
             return XCTFail("вернуть нечем")
         }
     }
+
+    // MARK: - Чей бинарник запускаем
+
+    /// Путь к tmux взят из таблицы процессов, а назвать процесс `tmux` может кто угодно.
+    /// Запускаем только то, что принадлежит root или нам и не открыто на запись другим.
+    func test_only_a_binary_nobody_else_can_change_is_run() {
+        let me: uid_t = 501
+        XCTAssertTrue(TerminalForegroundReturner.isTrustedExecutable(owner: 0, mode: 0o755, euid: me))
+        XCTAssertTrue(TerminalForegroundReturner.isTrustedExecutable(owner: me, mode: 0o755, euid: me))
+        XCTAssertFalse(TerminalForegroundReturner.isTrustedExecutable(owner: 502, mode: 0o755, euid: me),
+                       "чужой бинарник с именем tmux")
+        XCTAssertFalse(TerminalForegroundReturner.isTrustedExecutable(owner: me, mode: 0o775, euid: me),
+                       "группа может подменить")
+        XCTAssertFalse(TerminalForegroundReturner.isTrustedExecutable(owner: 0, mode: 0o757, euid: me),
+                       "кто угодно может подменить")
+    }
+
+    /// `/tmp` общий: каталог `tmux-<uid>` мог заранее создать другой пользователь.
+    /// Требование то же, что у самого tmux.
+    func test_only_our_private_socket_directory_is_used() {
+        let me: uid_t = 501
+        XCTAssertTrue(TerminalForegroundReturner.isTrustedSocketDirectory(owner: me, mode: 0o700, euid: me))
+        XCTAssertFalse(TerminalForegroundReturner.isTrustedSocketDirectory(owner: 502, mode: 0o700, euid: me))
+        XCTAssertFalse(TerminalForegroundReturner.isTrustedSocketDirectory(owner: me, mode: 0o770, euid: me))
+    }
+
+    /// От root охрана стоит над всей машиной, и ввод в чужие сессии ей не нужен и опасен.
+    func test_root_types_into_nothing() {
+        XCTAssertFalse(TerminalForegroundReturner.mayType(euid: 0))
+        XCTAssertTrue(TerminalForegroundReturner.mayType(euid: 501))
+    }
 }

@@ -48,10 +48,13 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
         processes: [ProcessSnapshot],
         usingAutomation: Bool
     ) -> Result<Void, TerminalReturnError> {
-        guard let tty = TerminalModeKeeper.path(of: target.terminalDevice) else { return .failure(.noWayToType) }
+        guard Self.mayType(euid: geteuid()),
+              let tty = TerminalModeKeeper.path(of: target.terminalDevice)
+        else { return .failure(.noWayToType) }
 
         if let tmux = processes.first(where: { $0.pid == shell.parentPID }),
            tmux.executablePath.split(separator: "/").last == "tmux" {
+            guard Self.isTrustedExecutable(at: tmux.executablePath) else { return .failure(.noWayToType) }
             return typeThroughTmux(binary: tmux.executablePath, tty: tty)
         }
 
@@ -81,9 +84,39 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
     }
 
     private static func tmuxSockets() -> [String] {
-        let directory = "/private/tmp/tmux-\(geteuid())"
+        let euid = geteuid()
+        let directory = "/private/tmp/tmux-\(euid)"
+        var info = stat()
+        guard lstat(directory, &info) == 0,
+              info.st_mode & S_IFMT == S_IFDIR,
+              isTrustedSocketDirectory(owner: info.st_uid, mode: info.st_mode, euid: euid)
+        else { return [] }
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
         return names.sorted().map { "\(directory)/\($0)" }
+    }
+
+    /// Охрана от root стоит над всей машиной: процессы, которые она видит, принадлежат кому
+    /// угодно, и запускать что-либо по их подсказке значит отдать root локальному пользователю.
+    static func mayType(euid: uid_t) -> Bool {
+        euid != 0
+    }
+
+    /// Путь к tmux взят из таблицы процессов, а назвать свой процесс `tmux` может кто угодно.
+    /// Запускается только файл, который никто другой изменить не может.
+    static func isTrustedExecutable(owner: uid_t, mode: mode_t, euid: uid_t) -> Bool {
+        (owner == 0 || owner == euid) && mode & (S_IWGRP | S_IWOTH) == 0
+    }
+
+    private static func isTrustedExecutable(at path: String) -> Bool {
+        var info = stat()
+        guard stat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return false }
+        return isTrustedExecutable(owner: info.st_uid, mode: info.st_mode, euid: geteuid())
+    }
+
+    /// `/tmp` общий: каталог `tmux-<uid>` мог заранее создать другой пользователь, и сокет
+    /// в нём слушал бы он. Требование то же, что у самого tmux: наш и закрыт для остальных.
+    static func isTrustedSocketDirectory(owner: uid_t, mode: mode_t, euid: uid_t) -> Bool {
+        owner == euid && mode & (S_IRWXG | S_IRWXO) == 0
     }
 
     static func paneID(forTTY tty: String, in listing: String) -> String? {
