@@ -7,8 +7,8 @@
 //!
 //! Состав повторяет `StatusPopupView` построчно: шапка со щитом, заголовком
 //! и двумя иконками, три строки объяснения (там, где есть что объяснять),
-//! показания гео, строка отказа прав, баннер обновления и живые цели
-//! с бейджем паузы. Карточек и крупных кнопок в попапе нет — управление
+//! показания гео, строка отказа прав, баннер обновления и живые цели с бейджем
+//! паузы или кнопкой возврата в терминал. Карточек и крупных кнопок в попапе нет — управление
 //! живёт в окне настроек.
 
 use std::collections::HashMap;
@@ -18,7 +18,10 @@ use std::time::SystemTime;
 use gtk4::prelude::*;
 use gtk4::{Align, ApplicationWindow, Box as GtkBox, Label, Orientation};
 
+use weto_core::guard_machine::GuardPhase;
 use weto_core::presentation::{self, GuardStatusColor, StatusLine};
+use weto_core::terminal_return::TerminalReturnState;
+use weto_guard::controller::GuardSnapshot;
 use weto_ui::components as ui;
 use weto_ui::theme;
 use weto_update::policy::UpdateInfo;
@@ -115,10 +118,7 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
         let mut shown_banner: Option<BannerView> = None;
         let mut shown_lines: Vec<StatusLine> = Vec::new();
         let mut readout_values: Vec<Label> = Vec::new();
-        // Терминал стоящей цели спрашивается один раз на pid: ответ стоит
-        // обхода `/proc` и полусотни вопросов шине, а такт идёт дважды
-        // в секунду. Пока цель стоит, терминала она не меняет.
-        let mut terminals: HashMap<i32, bool> = HashMap::new();
+        let mut shown_targets: Option<TargetsView> = None;
         // Иконка из ярлыка читается один раз на цель: файл ярлыка за время
         // жизни окна не меняется, а такт идёт дважды в секунду.
         let mut icons: HashMap<String, Option<String>> = HashMap::new();
@@ -182,17 +182,23 @@ pub fn build(app: &gtk4::Application, state: Arc<AppState>) -> ApplicationWindow
                 None => permission_failure.set_visible(false),
             }
 
-            clear(&targets_slot);
-            if !state.settings.current().targets.is_empty() {
-                targets_slot.append(&ui::divider());
-                targets_slot.append(&targets_view(
-                    phase,
-                    &snapshot,
-                    now,
-                    &state,
-                    &mut terminals,
-                    &mut icons,
-                ));
+            // Строки целей пересобираются только на смену того, что они говорят, — как баннер:
+            // кнопка, пересозданная посреди нажатия, нажатия не получила бы.
+            let targets = (!state.settings.current().targets.is_empty())
+                .then(|| TargetsView::new(phase, &snapshot, now));
+            if targets != shown_targets {
+                clear(&targets_slot);
+                if let Some(view) = &targets {
+                    targets_slot.append(&ui::divider());
+                    targets_slot.append(&targets_view(
+                        view,
+                        snapshot.pause_deadline,
+                        now,
+                        &state,
+                        &mut icons,
+                    ));
+                }
+                shown_targets = targets;
             }
         }
     };
@@ -306,71 +312,127 @@ fn explanation_line(text: &str, css_class: &str) -> Label {
     label
 }
 
-/// Живые цели пилюлями, а когда их нет — строка с советом. Цвет и совет берём
-/// из фазы охраны, а не из самого факта «целей нет»: после срабатывания
-/// цели молчат именно потому, что VPN уже выключен. Стоящая цель получает
-/// бейдж паузы с отсчётом до потолка, а потерявшая терминал — ещё и (i)
-/// с подсказкой про `fg` и кнопку «Показать терминал».
-///
-/// Кнопку дают не всякому: эмулятор, не выходящий на сессионную шину
-/// (xterm, alacritty, kitty), поднять нечем, и обещать это кнопкой нельзя —
-/// остаётся одна подсказка. `terminals` помнит ответ по pid: он стоит обхода
-/// `/proc` и разговора с шиной, а такт идёт дважды в секунду.
-fn targets_view(
-    phase: &weto_core::guard_machine::GuardPhase,
-    snapshot: &weto_guard::controller::GuardSnapshot,
+/// Что говорит строка живой цели. `countdown` — цель стоит; `returning` — идёт, но осталась
+/// в фоне. На паузе кнопки нет: цели не возвращаются, и история возврата к этому моменту пуста.
+#[derive(Debug, Clone, PartialEq)]
+struct PillView {
+    pid: i32,
+    name: String,
+    entry: String,
+    extra: usize,
+    countdown: Option<String>,
+    returning: Option<TerminalReturnState>,
+}
+
+/// Что говорит блок целей сейчас: живые цели, а когда их нет — строка с советом. Цвет и совет
+/// берём из фазы охраны, а не из самого факта «целей нет»: после срабатывания цели молчат
+/// именно потому, что VPN уже выключен.
+#[derive(Debug, Clone, PartialEq)]
+struct TargetsView {
+    pills: Vec<PillView>,
+    notice: String,
+    notice_hint: Option<String>,
+    notice_tone: &'static str,
+}
+
+impl TargetsView {
+    fn new(phase: &GuardPhase, snapshot: &GuardSnapshot, now: SystemTime) -> TargetsView {
+        let notice = presentation::idle_targets(phase);
+        TargetsView {
+            pills: snapshot
+                .running
+                .iter()
+                .map(|target| {
+                    let paused = snapshot.paused.iter().any(|p| p.pid == target.pid);
+                    PillView {
+                        pid: target.pid,
+                        name: target.display_name.clone(),
+                        entry: target.entry.clone(),
+                        extra: target.extra_process_count(),
+                        countdown: paused
+                            .then(|| ui::pause_countdown_text(snapshot.pause_deadline, now)),
+                        returning: snapshot.terminal_returns.get(&target.pid).copied(),
+                    }
+                })
+                .collect(),
+            notice: notice.text,
+            notice_hint: notice.hint,
+            notice_tone: theme::shield_class(presentation::shield_color(phase)),
+        }
+    }
+}
+
+impl PillView {
+    fn offers_return(&self) -> bool {
+        self.countdown.is_none() && self.returning == Some(TerminalReturnState::Offered)
+    }
+}
+
+/// Строка цели: пилюля, кнопка после неё, подсказка под ней. После пилюли, а не внутри:
+/// на паузе цели не возвращаются, и появляется кнопка только когда автоматика не смогла.
+fn pill_row(
+    pill: &PillView,
+    deadline: Option<SystemTime>,
     now: SystemTime,
     state: &Arc<AppState>,
-    terminals: &mut HashMap<i32, bool>,
+    icons: &mut HashMap<String, Option<String>>,
+) -> GtkBox {
+    let accessory = if pill.countdown.is_some() {
+        Some(ui::pause_badge(deadline, now))
+    } else {
+        pill.returning
+            .map(|returning| ui::background_label(returning == TerminalReturnState::Expired))
+    };
+    let icon = icons
+        .entry(pill.entry.clone())
+        .or_insert_with(|| weto_sys::target_resolver::icon_for(&pill.entry));
+    let process = ui::process_pill(
+        &pill.name,
+        icon.as_deref(),
+        presentation::is_command_line_target(&pill.entry),
+        pill.extra,
+        accessory.as_ref(),
+    );
+
+    let button = pill.offers_return().then(|| {
+        let button = ui::return_button();
+        let state = state.clone();
+        let pid = pill.pid;
+        button.connect_clicked(move |_| state.return_to_terminal(pid));
+        button
+    });
+
+    let line = GtkBox::new(Orientation::Vertical, ui::SPACE1);
+    line.append(&ui::pill_row(&process, button.as_ref()));
+    if pill.returning == Some(TerminalReturnState::Failed) {
+        line.append(&ui::return_failed_hint());
+    }
+    line
+}
+
+/// Живые цели пилюлями, а когда их нет — строка с советом.
+fn targets_view(
+    view: &TargetsView,
+    deadline: Option<SystemTime>,
+    now: SystemTime,
+    state: &Arc<AppState>,
     icons: &mut HashMap<String, Option<String>>,
 ) -> GtkBox {
     let box_ = GtkBox::new(Orientation::Vertical, ui::SPACE2);
 
-    if !snapshot.running.is_empty() {
-        for target in &snapshot.running {
-            let paused = snapshot.paused.iter().find(|p| p.pid == target.pid);
-            let accessory = paused.map(|paused| {
-                let hint = paused
-                    .is_backgrounded
-                    .then(|| "Процесс вернулся в фон. Откройте терминал и введите fg".to_string());
-                let raisable = paused.is_backgrounded
-                    && *terminals.entry(paused.pid).or_insert_with(|| {
-                        state
-                            .terminal_for(paused.pid)
-                            .is_some_and(|host| host.can_activate())
-                    });
-                let (badge, button) =
-                    ui::pause_badge(snapshot.pause_deadline, now, hint.as_deref(), raisable);
-                if let Some(button) = button {
-                    let state = state.clone();
-                    let pid = paused.pid;
-                    button.connect_clicked(move |_| {
-                        state.show_terminal(pid);
-                    });
-                }
-                badge
-            });
-            let icon = icons
-                .entry(target.entry.clone())
-                .or_insert_with(|| weto_sys::target_resolver::icon_for(&target.entry));
-            box_.append(&ui::process_pill(
-                &target.display_name,
-                icon.as_deref(),
-                presentation::is_command_line_target(&target.entry),
-                target.extra_process_count(),
-                accessory.as_ref(),
-            ));
+    if !view.pills.is_empty() {
+        for pill in &view.pills {
+            box_.append(&pill_row(pill, deadline, now, state, icons));
         }
         return box_;
     }
 
     // Значок и текст — цветом щита, как `tone.color` на macOS: в «На страже»
     // это канонная «зелёная строка», под паузой — янтарная. Совет — `faint`.
-    let notice = presentation::idle_targets(phase);
-    let tone = theme::shield_class(presentation::shield_color(phase));
+    let tone = view.notice_tone;
 
     let row = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
-    let glyph = gtk4::Image::from_icon_name(if notice.hint.is_some() {
+    let glyph = gtk4::Image::from_icon_name(if view.notice_hint.is_some() {
         "object-select-symbolic"
     } else {
         "action-unavailable-symbolic"
@@ -380,13 +442,13 @@ fn targets_view(
     glyph.add_css_class(tone);
     row.append(&glyph);
 
-    let text = ui::caption(&notice.text);
+    let text = ui::caption(&view.notice);
     text.add_css_class("weto-status-tone");
     text.add_css_class(tone);
     row.append(&text);
 
-    if let Some(hint) = notice.hint {
-        let hint_label = ui::caption(&hint);
+    if let Some(hint) = &view.notice_hint {
+        let hint_label = ui::caption(hint);
         hint_label.add_css_class("weto-hint");
         row.append(&hint_label);
     }
@@ -414,4 +476,77 @@ fn local_time(at: std::time::SystemTime) -> String {
         .and_then(|time| time.format("%H:%M:%S"))
         .map(|text| text.to_string())
         .unwrap_or_else(|_| "—".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+    use weto_core::pause_plan::PausedProcess;
+    use weto_core::process::{RunningTarget, TargetKind};
+
+    fn snapshot() -> GuardSnapshot {
+        GuardSnapshot {
+            running: vec![RunningTarget {
+                entry: "claude".to_string(),
+                display_name: "claude".to_string(),
+                kind: TargetKind::Binary,
+                path: "/home/me/.local/bin/claude".to_string(),
+                pid: 200,
+                process_count: 1,
+            }],
+            ..GuardSnapshot::default()
+        }
+    }
+
+    fn pill(snapshot: &GuardSnapshot, now: SystemTime) -> PillView {
+        TargetsView::new(&GuardPhase::Disabled, snapshot, now).pills[0].clone()
+    }
+
+    /// Кнопка — только когда автоматика не смогла, и не под паузой.
+    #[test]
+    fn the_button_is_offered_only_after_the_automatic_attempt_failed() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        for (state, offered) in [
+            (TerminalReturnState::Returning, false),
+            (TerminalReturnState::Offered, true),
+            (TerminalReturnState::Failed, false),
+            (TerminalReturnState::Expired, false),
+        ] {
+            let mut running = snapshot();
+            running.terminal_returns.insert(200, state);
+            assert_eq!(pill(&running, now).offers_return(), offered, "{state:?}");
+        }
+
+        let mut paused = snapshot();
+        paused
+            .terminal_returns
+            .insert(200, TerminalReturnState::Offered);
+        paused.paused.push(PausedProcess {
+            pid: 200,
+            target_name: "claude".to_string(),
+            since: now,
+            is_backgrounded: true,
+        });
+        assert!(!pill(&paused, now).offers_return(), "на паузе кнопки нет");
+    }
+
+    /// Такт окна идёт дважды в секунду, а кнопка живёт до первого нажатия: строка
+    /// не пересобирается, пока сказать ей нечего нового, иначе нажатие терялось бы.
+    #[test]
+    fn the_row_with_the_button_does_not_change_between_ticks() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut running = snapshot();
+        running
+            .terminal_returns
+            .insert(200, TerminalReturnState::Offered);
+        assert_eq!(
+            TargetsView::new(&GuardPhase::Disabled, &running, now),
+            TargetsView::new(
+                &GuardPhase::Disabled,
+                &running,
+                now + Duration::from_millis(500)
+            )
+        );
+    }
 }
