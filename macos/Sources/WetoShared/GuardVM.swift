@@ -279,6 +279,9 @@ public final class GuardVM {
         let outcome = resumeFromLedger()
         resolvePauseEpisode("возобновлено при выходе из Weto", exceptions: shutdownExceptions(outcome))
         returnTargetsBeforeExit()
+        // Закрытие могло сорваться, а тактов больше нет: кнопку некому было бы погасить.
+        returnTracker = TerminalReturnTracker()
+        terminalReturns = [:]
         let stillStanding = Set(outcome.unresolved.map(\.pid))
         pausedProcesses.removeAll { !stillStanding.contains($0.pid) }
         // Фаза обязана уйти вместе с целями: «Пауза», оставленная после остановки,
@@ -402,6 +405,9 @@ public final class GuardVM {
         returnTasks.append(Task { [weak self] in
             await previous?.value
             guard let self else { return }
+            // Пока стояла очередь, могла начаться новая пауза или выход: тогда истории больше
+            // нет, а на паузе цели не возвращаются.
+            guard self.returnTracker.state(of: pid) == .returning else { return }
             let processes = self.locator.allProcesses(includeArguments: false)
             guard let target = processes.first(where: { $0.pid == pid }) else {
                 self.finishTerminalReturn(pid, succeeded: false)
@@ -441,22 +447,40 @@ public final class GuardVM {
 
     /// На выходе из Weto следующего такта не будет: то, что не вернём сейчас, останется
     /// призраком — нарисованным, но без клавиатуры. Только tmux: ждать окно разрешения
-    /// Automation посреди выхода нельзя.
+    /// Automation посреди выхода нельзя. Отдельным потоком с потолком времени: выход идёт
+    /// с главного потока, и держать его на зависшем tmux нельзя.
     private func returnTargetsBeforeExit() {
+        let waiting = enforcer.awaitingForeground()
+        guard !waiting.isEmpty else { return }
         let processes = locator.allProcesses(includeArguments: false)
-        var typed = false
-        var shells = Set<Int32>()
-        for target in enforcer.awaitingForeground() {
-            guard let shell = PausePlanner.shellHoldingTerminal(of: target, among: processes),
-                  shells.insert(shell.pid).inserted
-            else { continue }
-            if case .success = terminalReturner.returnToForeground(
-                target: target, shell: shell, processes: processes, usingAutomation: false
-            ) { typed = true }
+        let returner = terminalReturner
+        let finished = DispatchSemaphore(value: 0)
+        let typed = TypedFlag()
+        DispatchQueue.global(qos: .userInitiated).async {
+            var shells = Set<Int32>()
+            for target in waiting {
+                guard let shell = PausePlanner.shellHoldingTerminal(of: target, among: processes),
+                      shells.insert(shell.pid).inserted
+                else { continue }
+                if case .success = returner.returnToForeground(
+                    target: target, shell: shell, processes: processes, usingAutomation: false
+                ) { typed.set() }
+            }
+            finished.signal()
         }
-        guard typed else { return }
+        guard finished.wait(timeout: .now() + Self.exitReturnCeiling) == .success, typed.value else { return }
         Thread.sleep(forTimeInterval: 0.2)
         enforcer.restoreTerminalModes(ignoringLedger: true)
+    }
+
+    /// Сколько выход ждёт ввода `fg`.
+    private static let exitReturnCeiling: TimeInterval = 3
+
+    private final class TypedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isSet = false
+        var value: Bool { lock.lock(); defer { lock.unlock() }; return isSet }
+        func set() { lock.lock(); isSet = true; lock.unlock() }
     }
 
     /// Показать пользователю терминал стоящей цели: под паузой процесс не отвечает,

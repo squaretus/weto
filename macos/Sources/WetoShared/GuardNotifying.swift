@@ -39,7 +39,7 @@ public struct UserNotificationGuardNotifier: GuardNotifying {
 
         let content = UNMutableNotificationContent()
         content.title = "Weto: \(targetName) вернулся в фон"
-        content.body = "Процесс на паузе потерял терминал. Откройте терминал и введите fg."
+        content.body = "Процесс на паузе потерял терминал. Когда пауза снимется, Weto вернёт его сам или подскажет, что ввести."
         content.categoryIdentifier = Self.backgroundedCategory
         content.sound = .default
 

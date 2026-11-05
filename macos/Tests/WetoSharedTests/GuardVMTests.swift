@@ -3961,6 +3961,57 @@ extension GuardVMTests {
         XCTAssertEqual(returner.calls.count, 1, "\(returner.calls)")
     }
 
+    /// Попытка стояла в очереди, а началась новая пауза: `fg` под ней вернул бы цели терминал
+    /// при неподтверждённом выходе.
+    func test_a_queued_return_is_dropped_when_a_new_pause_begins() async {
+        let returner = FakeTerminalReturner(result: .failure(.noWayToType))
+        let (h, locator) = makeReturnHarness(returner: returner)
+        await liftPauseLeavingTargetInBackground(h, locator)
+        XCTAssertEqual(returner.calls.count, 1, "автоматическая попытка не удалась")
+
+        // Нажатие ставит попытку в очередь, и смена выхода в том же проходе главного потока
+        // ставит цели на паузу раньше, чем попытка начнётся.
+        h.vm.returnToTerminal(pid: 200)
+        h.network.snapshotValue = NetworkSnapshot(
+            outgoing: OutgoingRoute(interface: "utun9", address: "10.9.9.9"), upInterfaces: ["utun9"]
+        )
+        h.vm.handle(.networkPath)
+        XCTAssertEqual(h.vm.phase.action, .pause)
+        await h.vm.awaitPendingTerminalReturns()
+
+        XCTAssertEqual(returner.calls.count, 1, "\(returner.calls)")
+        h.vm.stop()
+    }
+
+    /// Выход не висит на зависшем tmux: обещание вернуть цель не дороже закрытия приложения.
+    func test_a_hung_tmux_does_not_hold_the_exit() async {
+        let returner = FakeTerminalReturner()
+        let (h, locator) = makeReturnHarness(returner: returner)
+        returner.onReturn = { Thread.sleep(forTimeInterval: 20) }
+
+        await pauseWithABadResult(h, after: 0)
+        locator.processes = tmuxPaneTree(foreground: 100)
+
+        let started = Date()
+        h.vm.stop()
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    /// Закрытие могло сорваться, и приложение живёт дальше без тактов: кнопка, которую уже
+    /// некому погасить, не должна остаться рабочей.
+    func test_stopping_forgets_the_return_history() async {
+        let returner = FakeTerminalReturner(result: .failure(.noWayToType))
+        let (h, locator) = makeReturnHarness(returner: returner)
+
+        await liftPauseLeavingTargetInBackground(h, locator)
+        XCTAssertEqual(h.vm.terminalReturns[200], .offered)
+
+        h.vm.stop()
+
+        XCTAssertTrue(h.vm.terminalReturns.isEmpty)
+    }
+
     /// На паузе цели возвращаться не должны, даже если терминал уже у шелла.
     func test_nothing_returns_while_the_pause_lasts() async {
         let returner = FakeTerminalReturner()

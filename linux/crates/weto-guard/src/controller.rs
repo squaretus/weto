@@ -944,7 +944,7 @@ impl GuardController {
     fn start_terminal_return(self: &Arc<Self>, pid: i32) {
         let controller = Arc::clone(self);
         self.returns.dispatch(Box::new(move || {
-            let sent = controller.type_fg(pid);
+            let sent = controller.type_fg(pid, false);
             if sent {
                 controller.enforcer.restore_terminal_modes(None);
             }
@@ -954,8 +954,21 @@ impl GuardController {
 
     /// Ввести `fg` в шелл цели. Вводим, только если терминал прямо сейчас у него: иначе
     /// введённое досталось бы чужой программе, и вместо этого — честный отказ, дальше кнопка.
-    fn type_fg(&self, pid: i32) -> bool {
+    ///
+    /// Пока стояла очередь, могла начаться новая пауза: тогда истории больше нет, а на паузе цели
+    /// не возвращаются. На выходе истории нет уже намеренно, и `leaving` это разрешает.
+    fn type_fg(&self, pid: i32, leaving: bool) -> bool {
         let _one_at_a_time = self.typing.lock().expect("ввод fg");
+        let returning = self
+            .inner
+            .lock()
+            .expect("состояние охраны")
+            .terminal_returns
+            .state(pid)
+            == Some(TerminalReturnState::Returning);
+        if !leaving && !returning {
+            return false;
+        }
         let processes = self.enforcer.processes();
         let Some(target) = processes.iter().find(|process| process.pid == pid) else {
             return false;
@@ -1000,7 +1013,7 @@ impl GuardController {
         let job = move || {
             let mut sent = false;
             for pid in waiting {
-                sent |= controller.type_fg(pid);
+                sent |= controller.type_fg(pid, true);
             }
             if sent {
                 controller.enforcer.restore_terminal_modes_on_exit();

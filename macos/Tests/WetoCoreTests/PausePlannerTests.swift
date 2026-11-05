@@ -261,6 +261,27 @@ final class PausePlannerTests: XCTestCase {
         XCTAssertNil(PausePlanner.shellHoldingTerminal(of: processes[2], among: processes))
     }
 
+    /// Обёртка `sh -c` идёт с целью одной группой и частью задания остаётся: шелл, ведущий
+    /// задание, стоит выше неё.
+    func test_a_wrapper_in_the_targets_job_does_not_hide_the_shell() {
+        func tree(foreground: Int32) -> [ProcessSnapshot] {
+            [
+                ProcessSnapshot(pid: 100, parentPID: 90, executablePath: "/bin/zsh",
+                                processGroup: 100, terminalForegroundGroup: foreground, terminalDevice: 7),
+                ProcessSnapshot(pid: 150, parentPID: 100, executablePath: "/bin/sh",
+                                processGroup: 150, terminalForegroundGroup: foreground, terminalDevice: 7),
+                ProcessSnapshot(pid: 200, parentPID: 150, executablePath: "/usr/bin/node",
+                                processGroup: 150, terminalForegroundGroup: foreground, terminalDevice: 7),
+            ]
+        }
+        let behind = tree(foreground: 100)
+        XCTAssertEqual(PausePlanner.shellHoldingTerminal(of: behind[2], among: behind)?.pid, 100)
+
+        // Цель сама впереди: обёртка держит терминал вместе с ней, и `fg` ушёл бы в цель как ввод.
+        let ahead = tree(foreground: 150)
+        XCTAssertNil(PausePlanner.shellHoldingTerminal(of: ahead[2], among: ahead))
+    }
+
     /// Без терминала вводить некуда.
     func test_a_target_without_a_terminal_has_no_shell_to_type_into() {
         let daemon = ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/node")

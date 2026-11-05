@@ -136,16 +136,17 @@ public enum PausePlanner {
     }
 
     /// Шелл, которому можно ввести `fg` за пользователя: ближайший предок цели, сам шелл
-    /// по имени, на её терминале и сейчас держащий этот терминал — то есть стоящий
-    /// на приглашении. Держит терминал кто-то другой (пользователь запустил там `vim`) — `nil`:
-    /// введённое досталось бы чужой программе.
+    /// по имени, на её терминале, не из её задания и сейчас держащий этот терминал. Обёртка
+    /// `sh -c` идёт с целью одной группой и пропускается: задание ведёт шелл выше неё. Держит
+    /// терминал кто-то другой (пользователь запустил там `vim`) — `nil`: введённое досталось бы
+    /// чужой программе. Встроенный `read` самого шелла снаружи от приглашения не отличить.
     public static func shellHoldingTerminal(of target: ProcessSnapshot, among processes: [ProcessSnapshot]) -> ProcessSnapshot? {
         guard target.terminalDevice != 0 else { return nil }
         var byPID: [Int32: ProcessSnapshot] = [:]
         for process in processes { byPID[process.pid] = process }
         for pid in ProcessTree(processes: processes).ancestors(of: target.pid) {
             guard let candidate = byPID[pid], candidate.terminalDevice == target.terminalDevice else { continue }
-            guard isShell(candidate) else { continue }
+            guard isShell(candidate), candidate.processGroup != target.processGroup else { continue }
             return candidate.processGroup == candidate.terminalForegroundGroup ? candidate : nil
         }
         return nil

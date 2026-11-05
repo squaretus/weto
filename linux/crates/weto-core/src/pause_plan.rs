@@ -209,9 +209,10 @@ fn holds_foreground_in(target: &ProcessSnapshot, tree: &ProcessTree) -> bool {
 }
 
 /// Шелл, которому можно ввести `fg` за пользователя: ближайший предок цели, сам шелл по имени,
-/// на её терминале и сейчас держащий этот терминал — то есть стоящий на приглашении. Держит
-/// терминал кто-то другой (пользователь запустил там `vim`) — `None`: введённое досталось бы
-/// чужой программе.
+/// на её терминале, не из её задания и сейчас держащий этот терминал. Обёртка `sh -c` идёт
+/// с целью одной группой и пропускается: задание ведёт шелл выше неё. Держит терминал кто-то
+/// другой (пользователь запустил там `vim`) — `None`: введённое досталось бы чужой программе.
+/// Встроенный `read` самого шелла снаружи от приглашения не отличить.
 pub fn shell_holding_terminal<'a>(
     target: &ProcessSnapshot,
     processes: &'a [ProcessSnapshot],
@@ -225,7 +226,9 @@ pub fn shell_holding_terminal<'a>(
         .into_iter()
         .filter_map(|pid| by_pid.get(&pid).copied())
         .find(|candidate| {
-            candidate.terminal_device == target.terminal_device && is_shell(candidate)
+            candidate.terminal_device == target.terminal_device
+                && is_shell(candidate)
+                && candidate.process_group != target.process_group
         })?;
     (candidate.process_group == candidate.terminal_foreground_group).then_some(candidate)
 }
@@ -333,6 +336,32 @@ mod tests {
         let mut processes = tmux_pane(100);
         processes[1].terminal_device = 8;
         assert_eq!(shell_holding_terminal(&processes[2], &processes), None);
+    }
+
+    /// Обёртка `sh -c` идёт с целью одной группой и частью задания остаётся: шелл, ведущий
+    /// задание, стоит выше неё.
+    #[test]
+    fn a_wrapper_in_the_targets_job_does_not_hide_the_shell() {
+        let tree = |foreground: i32| {
+            [
+                snapshot(100, 90, "/bin/zsh", 100, foreground),
+                snapshot(150, 100, "/bin/sh", 150, foreground),
+                snapshot(200, 150, "/usr/bin/node", 150, foreground),
+            ]
+            .map(|process| ProcessSnapshot {
+                terminal_device: 7,
+                ..process
+            })
+        };
+        let behind = tree(100);
+        assert_eq!(
+            shell_holding_terminal(&behind[2], &behind).map(|shell| shell.pid),
+            Some(100)
+        );
+
+        // Цель сама впереди: обёртка держит терминал вместе с ней, и `fg` ушёл бы в цель.
+        let ahead = tree(150);
+        assert_eq!(shell_holding_terminal(&ahead[2], &ahead), None);
     }
 
     /// Без терминала вводить некуда.

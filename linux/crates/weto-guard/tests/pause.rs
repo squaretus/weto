@@ -1677,7 +1677,7 @@ fn a_failed_return_offers_the_button_and_then_the_hint() {
     assert_eq!(
         s.controller.take_failed_returns(),
         vec![200],
-        "окно терминала открыто — подсказка говорит правду"
+        "подсказка отправляет в терминал — поднимаем его окно"
     );
     assert!(s.controller.take_failed_returns().is_empty(), "один раз");
 
@@ -1753,6 +1753,22 @@ fn a_new_pause_gives_a_new_attempt() {
     s.tick();
     s.returns.settle();
     assert_eq!(s.returner.calls().len(), 2);
+}
+
+/// Попытка стояла в очереди, а началась новая пауза: `fg` под ней вернул бы цели терминал
+/// при неподтверждённом выходе.
+#[test]
+fn a_queued_return_is_dropped_when_a_new_pause_begins() {
+    let s = tmux_stand();
+    pause_under_tmux(&s, 100);
+    s.geo.everything_answers_again();
+    s.probe_now();
+    s.tick();
+
+    pause_under_tmux(&s, 100);
+    s.returns.settle();
+
+    assert!(s.returner.calls().is_empty(), "{:?}", s.returner.calls());
 }
 
 /// Два корня цели на одном терминале: `fg` один, иначе второй ушёл бы в цель как ввод.

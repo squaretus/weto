@@ -588,9 +588,7 @@ pub fn pill_row(pill: &GtkBox, action: Option<&Button>) -> GtkBox {
 /// Под строкой цели, которую не вернула и кнопка: окно терминала к этому моменту поднято.
 pub fn return_failed_hint() -> Label {
     let hint = Label::new(None);
-    hint.set_markup(
-        "Не удалось вернуть автоматически. Окно терминала открыто, введите <tt>fg</tt>",
-    );
+    hint.set_markup("Не удалось вернуть автоматически. В терминале введите <tt>fg</tt>");
     hint.add_css_class("weto-explain-evidence");
     // `Fill`, а не `Start`: переносимая подпись на `Start` просит себе узкую ширину
     // и переносится, даже когда в строке хватает места.

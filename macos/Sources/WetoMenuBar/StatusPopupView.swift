@@ -154,7 +154,7 @@ struct StatusPopupView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                         if returning == .failed {
-                            (Text(verbatim: "Не удалось вернуть автоматически. Окно терминала открыто, введите ")
+                            (Text(verbatim: "Не удалось вернуть автоматически. В терминале введите ")
                                 + Text(verbatim: "fg").monospaced())
                                 .font(WetoTokens.caption)
                                 .foregroundStyle(WetoTokens.dim.resolve(scheme))

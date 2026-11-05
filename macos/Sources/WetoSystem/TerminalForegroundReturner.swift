@@ -52,8 +52,7 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
               let tty = TerminalModeKeeper.path(of: target.terminalDevice)
         else { return .failure(.noWayToType) }
 
-        if let tmux = processes.first(where: { $0.pid == shell.parentPID }),
-           tmux.executablePath.split(separator: "/").last == "tmux" {
+        if let tmux = Self.tmuxServer(above: shell, in: processes) {
             guard Self.isTrustedExecutable(at: tmux.executablePath) else { return .failure(.noWayToType) }
             return typeThroughTmux(binary: tmux.executablePath, tty: tty)
         }
@@ -68,12 +67,20 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
         return Self.run("/usr/bin/osascript", ["-e", script], timeout: 30).map { _ in }
     }
 
+    /// Сервер tmux над шеллом. Не обязательно родитель: шелл бывает вложенным,
+    /// `tmux → zsh → bash → цель`.
+    static func tmuxServer(above shell: ProcessSnapshot, in processes: [ProcessSnapshot]) -> ProcessSnapshot? {
+        ProcessTree(processes: processes).ancestors(of: shell.pid).lazy
+            .compactMap { pid in processes.first { $0.pid == pid } }
+            .first { $0.executablePath.split(separator: "/").last == "tmux" }
+    }
+
     /// Панель ищется перебором сокетов: окружение шелла (`TMUX`, `TMUX_PANE`) macOS чужому
     /// процессу не отдаёт. Мёртвые сокеты после упавших серверов отвечают ошибкой и пропускаются.
     private func typeThroughTmux(binary: String, tty: String) -> Result<Void, TerminalReturnError> {
         for socket in Self.tmuxSockets() {
             guard case .success(let listing) = Self.run(
-                binary, ["-S", socket, "list-panes", "-a", "-F", "#{pane_tty} #{pane_id}"], timeout: 2
+                binary, ["-S", socket, "list-panes", "-a", "-F", "#{pane_tty} #{pane_id} #{pane_synchronized}"], timeout: 2
             ), let pane = Self.paneID(forTTY: tty, in: listing) else { continue }
 
             // C-u отдельной командой: набранное в строке шелла иначе склеилось бы с `fg`.
@@ -119,10 +126,12 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
         owner == euid && mode & (S_IRWXG | S_IRWXO) == 0
     }
 
+    /// Панель с общим вводом (`synchronize-panes`) не подходит: `fg` ушёл бы во все панели окна.
     static func paneID(forTTY tty: String, in listing: String) -> String? {
         for line in listing.split(separator: "\n") {
             let fields = line.split(separator: " ")
-            if fields.count == 2, fields[0] == tty { return String(fields[1]) }
+            guard fields.count == 3, fields[0] == tty else { continue }
+            return fields[2] == "1" ? nil : String(fields[1])
         }
         return nil
     }

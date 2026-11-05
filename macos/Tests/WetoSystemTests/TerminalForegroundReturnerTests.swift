@@ -7,11 +7,33 @@ final class TerminalForegroundReturnerTests: XCTestCase {
     /// Панель ищется по терминалу цели, а не по догадке: панелей на сервере много.
     func test_the_pane_is_found_by_its_terminal() {
         let listing = """
-        /dev/ttys001 %0
-        /dev/ttys004 %3
+        /dev/ttys001 %0 0
+        /dev/ttys004 %3 0
         """
         XCTAssertEqual(TerminalForegroundReturner.paneID(forTTY: "/dev/ttys004", in: listing), "%3")
         XCTAssertNil(TerminalForegroundReturner.paneID(forTTY: "/dev/ttys009", in: listing))
+    }
+
+    /// С общим вводом панелей `fg` ушёл бы во все панели окна, а там чужие программы.
+    func test_a_pane_with_synchronized_input_is_not_typed_into() {
+        let listing = """
+        /dev/ttys001 %0 0
+        /dev/ttys004 %3 1
+        """
+        XCTAssertEqual(TerminalForegroundReturner.paneID(forTTY: "/dev/ttys001", in: listing), "%0")
+        XCTAssertNil(TerminalForegroundReturner.paneID(forTTY: "/dev/ttys004", in: listing))
+    }
+
+    /// Сервер tmux бывает и не родителем шелла: `tmux → zsh → bash → цель`.
+    func test_tmux_is_found_above_a_nested_shell_and_only_there() {
+        let processes = [
+            ProcessSnapshot(pid: 90, parentPID: 1, executablePath: "/opt/homebrew/bin/tmux"),
+            ProcessSnapshot(pid: 100, parentPID: 90, executablePath: "/bin/zsh"),
+            ProcessSnapshot(pid: 150, parentPID: 100, executablePath: "/bin/bash"),
+            ProcessSnapshot(pid: 300, parentPID: 1, executablePath: "/bin/zsh"),
+        ]
+        XCTAssertEqual(TerminalForegroundReturner.tmuxServer(above: processes[2], in: processes)?.pid, 90)
+        XCTAssertNil(TerminalForegroundReturner.tmuxServer(above: processes[3], in: processes))
     }
 
     /// Terminal.app и iTerm2 находят вкладку по точному tty: `fg` не должен уйти

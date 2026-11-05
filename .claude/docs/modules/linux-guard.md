@@ -151,7 +151,7 @@ same rule, KDE's Konsole, which registers `org.kde.konsole-<pid>` (the `-<pid>` 
 when the object path is derived — the KDE convention). What it cannot cover: xterm, alacritty,
 kitty, foot, xfce4-terminal, mate-terminal, terminator — they never appear on the session bus,
 so there is no one to ask. Окно такой цели не поднимется, а подсказка «Не удалось вернуть автоматически.
-Окно терминала открыто, введите fg» останется: текст один на всех и про неподнятое окно не знает.
+В терминале введите fg» останется: она окна не обещает.
 
 The answer costs a `/proc` pass plus one `ListNames` and a `GetConnectionUnixProcessID` per name,
 поэтому спрашивается только после неудачного нажатия и своим потоком: такт охраны его не ждёт.

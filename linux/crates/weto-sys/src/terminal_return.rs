@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::time::Duration;
 
-use weto_core::process::ProcessSnapshot;
+use weto_core::process::{ProcessSnapshot, ProcessTree};
 use weto_core::terminal::program_name;
 
 use crate::terminal_mode;
@@ -65,25 +65,45 @@ impl TerminalForegroundReturning for MultiplexerForegroundReturner {
         if !may_type(euid) {
             return Err(TerminalReturnError::NoWayToType);
         }
-        let host = processes
-            .iter()
-            .find(|process| process.pid == shell.parent_pid)
-            .filter(|process| {
-                std::fs::metadata(&process.executable_path)
-                    .is_ok_and(|meta| is_trusted_executable(meta.uid(), meta.mode(), euid))
-            })
-            .ok_or(TerminalReturnError::NoWayToType)?;
+        let (host, multiplexer) =
+            multiplexer_above(shell, processes).ok_or(TerminalReturnError::NoWayToType)?;
+        let trusted = std::fs::metadata(&host.executable_path)
+            .is_ok_and(|meta| is_trusted_executable(meta.uid(), meta.mode(), euid));
+        if !trusted {
+            return Err(TerminalReturnError::NoWayToType);
+        }
 
-        match program_name(&host.executable_path) {
-            "tmux" => {
+        match multiplexer {
+            Multiplexer::Tmux => {
                 let tty = terminal_mode::path_of(target.terminal_device)
                     .ok_or(TerminalReturnError::NoWayToType)?;
                 type_through_tmux(&host.executable_path, &tty.to_string_lossy(), euid)
             }
-            name if is_screen(name) => type_through_screen(&host.executable_path, shell.pid),
-            _ => Err(TerminalReturnError::NoWayToType),
+            Multiplexer::Screen => type_through_screen(&host.executable_path, shell.pid),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Multiplexer {
+    Tmux,
+    Screen,
+}
+
+/// Сервер над шеллом. Не обязательно родитель: шелл бывает вложенным, `tmux → zsh → bash → цель`.
+pub fn multiplexer_above<'a>(
+    shell: &ProcessSnapshot,
+    processes: &'a [ProcessSnapshot],
+) -> Option<(&'a ProcessSnapshot, Multiplexer)> {
+    ProcessTree::new(processes)
+        .ancestors(shell.pid)
+        .into_iter()
+        .filter_map(|pid| processes.iter().find(|process| process.pid == pid))
+        .find_map(|process| match program_name(&process.executable_path) {
+            "tmux" => Some((process, Multiplexer::Tmux)),
+            name if is_screen(name) => Some((process, Multiplexer::Screen)),
+            _ => None,
+        })
 }
 
 /// Охрана от root стоит над всей машиной: процессы, которые она видит, принадлежат кому угодно,
@@ -118,8 +138,9 @@ pub fn is_screen(program: &str) -> bool {
             .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
 }
 
-/// Сессия и окно screen из окружения шелла (`/proc/<pid>/environ`). Им можно верить: родитель
-/// шелла уже проверен, это сам сервер screen, и выставил их он.
+/// Сессия и окно screen из окружения шелла (`/proc/<pid>/environ`). Выставил их сам сервер при
+/// запуске шелла. Номер окна устаревает только после ручного `:number`; сверить его с терминалом
+/// screen не даёт, такую цену оставляем.
 pub fn screen_window(environ: &[u8]) -> Option<(&str, &str)> {
     let variable = |name: &[u8]| {
         environ
@@ -144,13 +165,18 @@ fn type_through_screen(binary: &str, shell: i32) -> Result<(), TerminalReturnErr
     .map(|_| ())
 }
 
-/// Строка `list-panes`: `#{pane_tty} #{pane_id}`. Панель ищется по терминалу цели, а не по
-/// догадке: панелей на сервере много.
+/// Строка `list-panes`: `#{pane_tty} #{pane_id} #{pane_synchronized}`. Панель ищется по терминалу
+/// цели, а не по догадке: панелей на сервере много. Панель с общим вводом (`synchronize-panes`)
+/// не подходит: `fg` ушёл бы во все панели окна.
 pub fn pane_id<'a>(tty: &str, listing: &'a str) -> Option<&'a str> {
-    listing.lines().find_map(|line| {
-        let (pane_tty, pane) = line.split_once(' ')?;
-        (pane_tty == tty && !pane.contains(' ')).then_some(pane)
-    })
+    let fields = listing.lines().find_map(|line| {
+        let mut fields = line.split(' ');
+        (fields.next() == Some(tty)).then(|| (fields.next(), fields.next(), fields.next()))
+    })?;
+    match fields {
+        (Some(pane), Some(synchronized), None) if synchronized != "1" => Some(pane),
+        _ => None,
+    }
 }
 
 /// Сокеты сервера tmux: панели ищутся перебором, потому что на машине их бывает несколько
@@ -183,7 +209,7 @@ fn type_through_tmux(binary: &str, tty: &str, euid: u32) -> Result<(), TerminalR
                 "list-panes",
                 "-a",
                 "-F",
-                "#{pane_tty} #{pane_id}",
+                "#{pane_tty} #{pane_id} #{pane_synchronized}",
             ],
             COMMAND_CEILING,
         ) else {
@@ -238,7 +264,9 @@ fn run(path: &str, arguments: &[&str], ceiling: Duration) -> Result<String, Term
             Err(TerminalReturnError::CommandFailed(-1))
         }
         Err(RecvTimeoutError::Timeout) => {
-            // SAFETY: pid нашего ещё не дождавшегося ребёнка: номер занят, пока его не прочитали.
+            // SAFETY: сигнал ничего не портит в памяти. Pid наш, но поток мог дождаться ребёнка
+            // ровно на границе потолка: тогда номер уже свободен, а занять его за этот миг
+            // другому процессу почти неоткуда.
             unsafe { libc::kill(pid, libc::SIGKILL) };
             Err(TerminalReturnError::TimedOut)
         }
@@ -257,13 +285,47 @@ mod tests {
     /// Панель ищется по терминалу цели, а не по догадке: панелей на сервере много.
     #[test]
     fn the_pane_is_found_by_its_terminal() {
-        let listing = "/dev/pts/1 %0\n/dev/pts/14 %3\n";
+        let listing = "/dev/pts/1 %0 0\n/dev/pts/14 %3 0\n";
         assert_eq!(pane_id("/dev/pts/14", listing), Some("%3"));
         assert_eq!(
             pane_id("/dev/pts/4", listing),
             None,
             "только точное совпадение"
         );
+    }
+
+    /// С общим вводом панелей `fg` ушёл бы во все панели окна, а там чужие программы.
+    #[test]
+    fn a_pane_with_synchronized_input_is_not_typed_into() {
+        let listing = "/dev/pts/1 %0 0\n/dev/pts/14 %3 1\n";
+        assert_eq!(pane_id("/dev/pts/1", listing), Some("%0"));
+        assert_eq!(pane_id("/dev/pts/14", listing), None);
+    }
+
+    /// Сервер бывает и не родителем шелла (`tmux → zsh → bash → цель`), а без него вводить нечем.
+    #[test]
+    fn the_multiplexer_is_found_above_a_nested_shell_and_only_there() {
+        let process = |pid, parent_pid, path: &str| ProcessSnapshot {
+            pid,
+            parent_pid,
+            executable_path: path.to_string(),
+            ..ProcessSnapshot::default()
+        };
+        let processes = [
+            process(90, 1, "/usr/bin/screen-4.9.1"),
+            process(100, 90, "/bin/zsh"),
+            process(150, 100, "/bin/bash"),
+            process(290, 1, "/usr/bin/tmux"),
+            process(300, 290, "/bin/zsh"),
+            process(390, 1, "/usr/bin/gnome-terminal-server"),
+            process(400, 390, "/bin/zsh"),
+        ];
+        let found = |shell: usize| {
+            multiplexer_above(&processes[shell], &processes).map(|(host, kind)| (host.pid, kind))
+        };
+        assert_eq!(found(2), Some((90, Multiplexer::Screen)));
+        assert_eq!(found(4), Some((290, Multiplexer::Tmux)));
+        assert_eq!(found(6), None);
     }
 
     /// Назвать процесс `tmux` может кто угодно: запускаем только то, что принадлежит root
@@ -366,39 +428,6 @@ mod tests {
         assert_eq!(screen_window(b"HOME=/h\0STY=1.a\0"), None, "нет окна");
         assert_eq!(screen_window(b"WINDOW=2\0"), None, "нет сессии");
         assert_eq!(screen_window(b"STY=\xff\0WINDOW=2\0"), None, "не текст");
-    }
-
-    /// Цель не под tmux: отказ сразу, без запуска чего-либо.
-    #[test]
-    fn without_tmux_the_return_is_refused() {
-        let shell = ProcessSnapshot {
-            pid: 100,
-            parent_pid: 90,
-            executable_path: "/bin/zsh".to_string(),
-            terminal_device: 34816,
-            ..ProcessSnapshot::default()
-        };
-        let host = ProcessSnapshot {
-            pid: 90,
-            parent_pid: 1,
-            executable_path: "/usr/bin/gnome-terminal-server".to_string(),
-            ..ProcessSnapshot::default()
-        };
-        let target = ProcessSnapshot {
-            pid: 200,
-            parent_pid: 100,
-            terminal_device: 0,
-            executable_path: "/usr/bin/node".to_string(),
-            ..ProcessSnapshot::default()
-        };
-        assert_eq!(
-            MultiplexerForegroundReturner.return_to_foreground(
-                &target,
-                &shell,
-                &[host, shell.clone()]
-            ),
-            Err(TerminalReturnError::NoWayToType)
-        );
     }
 
     #[test]

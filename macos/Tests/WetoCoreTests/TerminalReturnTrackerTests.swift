@@ -17,6 +17,22 @@ final class TerminalReturnTrackerTests: XCTestCase {
         XCTAssertEqual(tracker.observe(waiting: [200], at: at(1)).attempts, [])
     }
 
+    /// Пять минут считаются от снятия паузы: кнопка, показанная на третьей секунде, живёт
+    /// не дольше остальных.
+    func test_the_button_lives_five_minutes_from_the_lift_not_from_being_shown() {
+        var tracker = TerminalReturnTracker()
+        _ = tracker.observe(waiting: [200], at: at(0))
+        tracker.finished(200, succeeded: true, at: at(0))
+        _ = tracker.observe(waiting: [200], at: at(3))
+        XCTAssertEqual(tracker.state(of: 200), .offered)
+
+        _ = tracker.observe(waiting: [200], at: at(299))
+        XCTAssertEqual(tracker.state(of: 200), .offered)
+
+        _ = tracker.observe(waiting: [200], at: at(300))
+        XCTAssertEqual(tracker.state(of: 200), .expired)
+    }
+
     /// Команда ушла — это ещё не возврат. Решает наблюдение: цель снова впереди.
     func test_coming_back_to_the_foreground_ends_the_story() {
         var tracker = TerminalReturnTracker()

@@ -66,6 +66,25 @@ fn a_command_that_changed_nothing_offers_the_button_too() {
     assert_eq!(tracker.state(200), Some(TerminalReturnState::Offered));
 }
 
+/// Кнопка, показанная на третьей секунде, живёт не дольше остальных: отсчёт от снятия паузы.
+#[test]
+fn the_five_minutes_run_from_the_lift_not_from_being_shown() {
+    let mut tracker = TerminalReturnTracker::default();
+    tracker.observe(&waiting(&[200]), at(0));
+    tracker.finished(200, true, at(0));
+    tracker.observe(&waiting(&[200]), at(0) + VERIFY_WINDOW);
+    assert_eq!(tracker.state(200), Some(TerminalReturnState::Offered));
+
+    tracker.observe(
+        &waiting(&[200]),
+        at(0) + OFFER_WINDOW - Duration::from_secs(1),
+    );
+    assert_eq!(tracker.state(200), Some(TerminalReturnState::Offered));
+
+    tracker.observe(&waiting(&[200]), at(0) + OFFER_WINDOW);
+    assert_eq!(tracker.state(200), Some(TerminalReturnState::Expired));
+}
+
 /// Кнопка живёт максимум пять минут — от снятия паузы, а не от показа.
 #[test]
 fn the_button_goes_away_after_five_minutes() {

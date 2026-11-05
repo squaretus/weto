@@ -158,7 +158,7 @@ impl KillNotifying for DesktopNotifier {
     fn notify_backgrounded(&self, target_name: &str) {
         self.send(
             format!("Weto: {target_name} вернулся в фон"),
-            "Процесс на паузе потерял терминал. Откройте терминал и введите fg.".to_string(),
+            "Процесс на паузе потерял терминал. Когда пауза снимется, Weto вернёт его сам или подскажет, что ввести.".to_string(),
         );
     }
 }
