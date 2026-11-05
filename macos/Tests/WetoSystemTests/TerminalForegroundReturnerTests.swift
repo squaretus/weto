@@ -36,6 +36,20 @@ final class TerminalForegroundReturnerTests: XCTestCase {
         XCTAssertNil(TerminalForegroundReturner.tmuxServer(above: processes[3], in: processes))
     }
 
+    /// Под Terminal.app между шеллом и приложением стоит `login` от root: родителя его обход
+    /// не видит, и приложение терялось, а с ним и весь ввод `fg` в Terminal.app.
+    func test_the_terminal_app_is_found_above_a_login_owned_by_root() {
+        let processes = [
+            ProcessSnapshot(pid: 90, parentPID: 1, executablePath: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"),
+            ProcessSnapshot(pid: 95, parentPID: 0, executablePath: "/usr/bin/login"),
+            ProcessSnapshot(pid: 100, parentPID: 95, executablePath: "/bin/zsh"),
+            ProcessSnapshot(pid: 200, parentPID: 100, executablePath: "/usr/bin/node"),
+        ]
+        let host = TerminalLocator.hostApplicationPID(of: 200, in: processes, parentOf: { $0 == 95 ? 90 : nil })
+        XCTAssertEqual(host, 90)
+        XCTAssertNil(TerminalLocator.hostApplicationPID(of: 200, in: processes, parentOf: { _ in nil }))
+    }
+
     /// Terminal.app и iTerm2 находят вкладку по точному tty: `fg` не должен уйти
     /// в окно, которое просто оказалось впереди.
     func test_automation_scripts_address_the_exact_terminal() throws {
@@ -43,13 +57,13 @@ final class TerminalForegroundReturnerTests: XCTestCase {
             bundleID: "com.apple.Terminal", tty: "/dev/ttys009"
         ))
         XCTAssertTrue(terminal.contains("tty of t is \"/dev/ttys009\""), terminal)
-        XCTAssertTrue(terminal.contains("do script \"fg\" in t"), terminal)
+        XCTAssertTrue(terminal.contains("do script ((character id 21) & \"fg\") in t"), terminal)
 
         let iterm = try XCTUnwrap(TerminalForegroundReturner.automationScript(
             bundleID: "com.googlecode.iterm2", tty: "/dev/ttys010"
         ))
         XCTAssertTrue(iterm.contains("tty of s is \"/dev/ttys010\""), iterm)
-        XCTAssertTrue(iterm.contains("write text \"fg\""), iterm)
+        XCTAssertTrue(iterm.contains("write text ((character id 21) & \"fg\" & linefeed) newline NO"), iterm)
     }
 
     /// Остальные эмуляторы вводить за пользователя не умеют — честный отказ, дальше кнопка.
