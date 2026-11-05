@@ -136,6 +136,8 @@ Every invariant above lives in artifacts that XCTest never sees: shell installer
 cd macos && WETO_LIVE_TMUX=1 swift test --filter LiveTmuxReturnTests
 # с настоящей программой, никакого запроса она не отправляет: текст набирается без Enter
 cd macos && WETO_LIVE_TMUX=1 WETO_LIVE_TARGET=$HOME/.local/bin/claude swift test --filter LiveTmuxReturnTests
+# без tmux, в настоящем приложении; открывает своё окно (или terminal)
+cd macos && WETO_LIVE_APP=iterm swift test --filter LiveTerminalAppReturnTests
 
 # Linux, не от root: от root возврат отказывает, ничего не запуская
 WETO_LIVE_TMUX=1 WETO_LIVE_SCREEN=1 WETO_LIVE_SHELL=/usr/bin/zsh <бинарник теста live_return>

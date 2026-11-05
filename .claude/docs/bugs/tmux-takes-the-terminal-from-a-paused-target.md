@@ -67,11 +67,10 @@ longer pretends to.
 Снаружи сессии терминал не отдать: `tcsetpgrp` работает только изнутри неё, а `TIOCSTI` не от root
 запрещён. Остаётся ввод через того, кто терминал ведёт:
 
-- tmux, обе платформы: `send-keys C-u`, затем `fg Enter`;
+- tmux, обе платформы: `send-keys C-u fg Enter` одной командой;
 - GNU screen, только Linux: `screen -S $STY -p $WINDOW -X stuff`, значения из `/proc/<shell>/environ`;
-- AppleScript, только macOS: по точному tty `do script "fg" in t` в Terminal.app и `write text "fg"`
-  в iTerm2. Первое использование спрашивает разрешение Automation, набранный текст этот путь
-  не очищает. Сессии iTerm под `tmux -CC` идут путём tmux.
+- AppleScript, только macOS: по точному tty `do script` в Terminal.app и `write text` в iTerm2,
+  Control-U и `fg` одной записью. Первое использование спрашивает разрешение Automation. Сессии iTerm под `tmux -CC` идут путём tmux.
 
 Ввод опасен, поэтому ограничен:
 
@@ -87,10 +86,19 @@ longer pretends to.
 (не нажали). Новая пауза обнуляет историю, на самой паузе кнопки нет. На выходе из Weto цель
 возвращается тоже, без AppleScript; на Linux выход ждёт ввода не дольше 3 с.
 
+## Строка шелла не бывает пустой (v1.19.1)
+
+Цель с отслеживанием мыши (`claude`) не может выключить его, пока стоит или в фоне, и эмулятор шлёт отчёты в шелл без конца. `C-u` и `fg Enter` двумя командами оставляли зазор: новые отчёты вклинивались, склеивались с `fg` (`command not found: 117~fg`), Enter выполнял строку, а точки с запятой в отчётах делили её на команды. В iTerm2 и Terminal.app строка не очищалась вовсе, и Enter выполнил бы и то, что пользователь набрал сам. Теперь очистка и `fg` идут одной записью на всех путях. Поток отчётов есть в живых тестах.
+
+Там же нашлось: под Terminal.app путь AppleScript не работал вовсе. `login` принадлежит root, `proc_pidinfo` его родителя не отдаёт, и приложение не находилось. `TerminalLocator` спрашивает такого родителя у `sysctl`; общий обход это намеренно не меняет, иначе у цели Terminal.app потомками стали бы все шеллы её окон.
+
+Если автовозврат не удался, отчёты продолжают идти в шелл, и строку для ручного `fg` надо сперва стереть. Выключить отслеживание снаружи можно только записью в терминал, а вернёт ли его цель после `fg`, не проверялось.
+
 ## Regression checks
 
 - [ ] macOS: `WETO_LIVE_TMUX=1 swift test --filter LiveTmuxReturnTests`, с настоящей программой ещё
       `WETO_LIVE_TARGET=$HOME/.local/bin/claude`.
+- [ ] macOS, без tmux: `WETO_LIVE_APP=iterm swift test --filter LiveTerminalAppReturnTests`, то же с `terminal`.
 - [ ] Linux, не от root: `linux/crates/weto-guard/tests/live_return.rs` с
       `WETO_LIVE_TMUX=1 WETO_LIVE_SCREEN=1 WETO_LIVE_SHELL=...`.
 
