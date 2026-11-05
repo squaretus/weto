@@ -46,9 +46,6 @@ final class LiveTerminalAppReturnTests: XCTestCase {
 
     private func iTermWindow() -> Window {
         // Профиль по умолчанию может открывать `tmux -CC`, а здесь проверяется путь без tmux.
-        // Закрытое приложение своего словаря AppleScript не отдаёт.
-        sh("open -a /Applications/iTerm.app")
-        Thread.sleep(forTimeInterval: 2)
         let id = osa("""
         tell application "iTerm2"
             set w to (create window with default profile command "/bin/zsh -il")
@@ -111,6 +108,10 @@ final class LiveTerminalAppReturnTests: XCTestCase {
     func test_a_target_in_the_background_returns_through_a_line_full_of_mouse_reports() throws {
         let app = ProcessInfo.processInfo.environment["WETO_LIVE_APP"]
         try XCTSkipUnless(app == "iterm" || app == "terminal")
+        // Запускать приложение отсюда нельзя: оно унаследует окружение этого процесса вместе
+        // с `NO_COLOR`, и все его окна останутся такими до выхода из него.
+        try XCTSkipUnless(!sh("pgrep -x \(app == "iterm" ? "iTerm2" : "Terminal")").isEmpty,
+                          "Сначала откройте приложение сами")
 
         let raw = NSTemporaryDirectory() + "wetolive-\(UUID().uuidString.prefix(8))"
         sh("mkdir -p \(raw)")

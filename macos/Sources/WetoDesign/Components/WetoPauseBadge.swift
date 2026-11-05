@@ -63,7 +63,7 @@ public struct WetoBackgroundLabel: View {
     public var body: some View {
         Group {
             if showsCommand {
-                Text(verbatim: "в фоне: введите ") + Text(verbatim: "fg").monospaced()
+                Text("в фоне: введите \(Text(verbatim: "fg").monospaced())")
             } else {
                 Text(verbatim: "в фоне")
             }

@@ -122,8 +122,9 @@ only legitimate mocking points in the whole test suite; nothing inside `WetoCore
   `lstat` (`isTrustedSocketDirectory`): `/tmp` общий, и сокет в чужом каталоге слушал бы его владелец.
 - **Панель tmux ищется перебором сокетов и по терминалу цели.** `TMUX` и `TMUX_PANE` из окружения шелла
   macOS чужому процессу не отдаёт. Мёртвые сокеты отвечают ошибкой и пропускаются. Очистка строки и `fg`
-  идут одной записью (`C-u fg Enter`, в AppleScript `character id 21`): в зазор вклинились бы отчёты
-  мыши, и Enter выполнил бы строку. Сессии iTerm под `tmux -CC` идут путём tmux: родитель шелла там tmux.
+  идут одной записью сырыми байтами (`send-keys -H 15 66 67 0d`, в AppleScript `character id 21`):
+  в зазор вклинились бы отчёты мыши, а имя `C-u` при `extended-keys on` приходит шеллу как
+  `ESC[27;5;117~` и строку не стирает. Сессии iTerm под `tmux -CC` идут путём tmux: родитель шелла там tmux.
 - **Пути ввода только два, screen среди них нет.** Системный screen 4.00.03 ведёт себя как голый
   терминал, и ввод ему не нужен. Homebrew-screen не проверялся.
 - **«Is there a network at all» costs nothing.** `NetworkPathReporter` answers from a running

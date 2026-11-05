@@ -46,6 +46,7 @@ final class LiveTmuxReturnTests: XCTestCase {
         int main(int c, char **v) {
             FILE *o = fopen(v[1], "a"); setvbuf(o, NULL, _IONBF, 0);
             struct termios t; tcgetattr(0, &t); cfmakeraw(&t); tcsetattr(0, TCSANOW, &t);
+            printf("\\033[>4;2m"); fflush(stdout);
             for (;;) {
                 fd_set r; FD_ZERO(&r); FD_SET(0, &r);
                 struct timeval tv = {0, 200000};
@@ -63,6 +64,10 @@ final class LiveTmuxReturnTests: XCTestCase {
         let server = "wetolive\(getpid())"
         let tmux = "tmux -L \(server) -f /dev/null"
         sh("\(tmux) new-session -d -x 120 -y 30")
+        // Так настроен tmux у живых пользователей, и программа вроде `claude` включает расширенные
+        // клавиши, а из фона выключить их не может: `send-keys C-u` приходит в шелл как
+        // `ESC[27;5;117~`, и строку это не стирает.
+        sh("\(tmux) set -s extended-keys on; \(tmux) set -s extended-keys-format xterm")
         defer { sh("\(tmux) kill-server") }
         Thread.sleep(forTimeInterval: 1.5)
         let repository = URL(fileURLWithPath: #filePath)

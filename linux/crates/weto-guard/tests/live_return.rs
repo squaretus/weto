@@ -28,6 +28,7 @@ const RAW_PROBE: &str = r#"
 int main(int c, char **v) {
     FILE *o = fopen(v[1], "a"); setvbuf(o, NULL, _IONBF, 0);
     struct termios t; tcgetattr(0, &t); cfmakeraw(&t); tcsetattr(0, TCSANOW, &t);
+    printf("\033[>4;2m"); fflush(stdout);
     for (;;) {
         fd_set r; FD_ZERO(&r); FD_SET(0, &r);
         struct timeval tv = {0, 200000};
@@ -76,6 +77,12 @@ fn a_paused_target_under_tmux_comes_back_with_the_keyboard() {
     sh(&format!(
         "SHELL={} {tmux} new-session -d -x 120 -y 30",
         live_shell()
+    ));
+    // Так настроен tmux у живых пользователей, и программа вроде `claude` включает расширенные
+    // клавиши, а из фона выключить их не может: `send-keys C-u` приходит в шелл как
+    // `ESC[27;5;117~`, и строку это не стирает.
+    sh(&format!(
+        "{tmux} set -s extended-keys on; {tmux} set -s extended-keys-format xterm"
     ));
     wait(1_500);
     paused_target_comes_back(

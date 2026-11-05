@@ -84,9 +84,12 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
             ), let pane = Self.paneID(forTTY: tty, in: listing) else { continue }
 
             // Строка шелла редко пуста: цель включила отслеживание мыши и выключить его не может,
-            // и отчёты идут в шелл без конца. C-u стирает их, и всё одной командой: в зазор между
-            // двумя вклинились бы новые, склеились с `fg`, а Enter выполнил бы это как команды.
-            return Self.run(binary, ["-S", socket, "send-keys", "-t", pane, "C-u", "fg", "Enter"], timeout: 2).map { _ in }
+            // и отчёты идут в шелл без конца. Control-U стирает их, и всё одной командой: в зазор
+            // между двумя вклинились бы новые, а Enter выполнил бы строку как команды.
+            //
+            // Сырыми байтами (`-H`), не именами клавиш: цель включила и расширенные клавиши, и при
+            // `extended-keys on` `C-u` пришёл бы шеллу как `ESC[27;5;117~` и строку бы не стёр.
+            return Self.run(binary, ["-S", socket, "send-keys", "-t", pane, "-H"] + Self.promptClearingKeys, timeout: 2).map { _ in }
         }
         return .failure(.paneNotFound)
     }
@@ -126,6 +129,9 @@ public struct TerminalForegroundReturner: TerminalForegroundReturning {
     static func isTrustedSocketDirectory(owner: uid_t, mode: mode_t, euid: uid_t) -> Bool {
         owner == euid && mode & (S_IRWXG | S_IRWXO) == 0
     }
+
+    /// Control-U, `fg`, Enter в шестнадцатеричном виде для `send-keys -H`.
+    static let promptClearingKeys = ["15", "66", "67", "0d"]
 
     /// Панель с общим вводом (`synchronize-panes`) не подходит: `fg` ушёл бы во все панели окна.
     static func paneID(forTTY tty: String, in listing: String) -> String? {
