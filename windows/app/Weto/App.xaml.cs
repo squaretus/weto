@@ -27,6 +27,9 @@ public partial class App : Application
     /// <summary>Сколько деинсталлятор ждёт выхода работающего экземпляра.</summary>
     private static readonly TimeSpan QuitTimeout = TimeSpan.FromSeconds(20);
 
+    /// <summary>Как часто повторять просьбу выйти, пока мьютекс занят.</summary>
+    private static readonly TimeSpan QuitRetry = TimeSpan.FromMilliseconds(250);
+
     private Mutex? _instance;
     private WetoBridge? _bridge;
     private TrayIcon? _tray;
@@ -329,18 +332,34 @@ public partial class App : Application
     /// Попросить работающий экземпляр выйти штатно (стоящие цели продолжаются)
     /// и дождаться его мьютекса. Мьютекс остаётся у этого процесса до его
     /// конца: второй Weto не поднимется посреди удаления или установки.
+    ///
+    /// Просьба повторяется, пока мьютекс занят: экземпляр берёт мьютекс первым
+    /// делом, а событие выхода заводит только после подъёма моста. Деинсталлятор,
+    /// пришедший в этот промежуток, событие не находил, и одна просьба терялась —
+    /// работающий Weto не выходил, удаление отменялось.
     /// </summary>
     private bool QuitRunningInstance()
     {
-        if (EventWaitHandle.TryOpenExisting(QuitEvent, out var quit))
-        {
-            quit.Set();
-            quit.Dispose();
-        }
         _instance = new Mutex(false, InstanceMutex);
+        var deadline = DateTime.UtcNow + QuitTimeout;
         try
         {
-            return _instance.WaitOne(QuitTimeout);
+            while (true)
+            {
+                if (EventWaitHandle.TryOpenExisting(QuitEvent, out var quit))
+                {
+                    quit.Set();
+                    quit.Dispose();
+                }
+                if (_instance.WaitOne(QuitRetry))
+                {
+                    return true;
+                }
+                if (DateTime.UtcNow >= deadline)
+                {
+                    return false;
+                }
+            }
         }
         catch (AbandonedMutexException)
         {
