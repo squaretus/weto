@@ -27,6 +27,18 @@ public sealed class StatusWindow : Window
         Title = "Weto";
         _panel = Panel();
         _panel.Width = Number("PopupWidth");
+        // Сверху, а не на всю высоту: тогда фактическая высота панели — её
+        // естественная высота, и окно подгоняется под неё после раскладки.
+        // Заранее посчитанная через Measure высота выходила больше настоящей,
+        // и под содержимым оставалась пустая полоса.
+        _panel.VerticalAlignment = VerticalAlignment.Top;
+        _panel.SizeChanged += (_, _) =>
+        {
+            if (IsOpen)
+            {
+                Place();
+            }
+        };
         Content = _panel;
 
         if (AppWindow.Presenter is OverlappedPresenter presenter)
@@ -187,16 +199,29 @@ public sealed class StatusWindow : Window
         System.Text.Json.JsonSerializer.Serialize(left, BridgeJson.Default.StatusView)
         == System.Text.Json.JsonSerializer.Serialize(right, BridgeJson.Default.StatusView);
 
+    /// <summary>Первая прикидка до раскладки — дальше окно уточняет SizeChanged.</summary>
+    private double MeasuredHeight()
+    {
+        _panel.Measure(new Windows.Foundation.Size(_panel.Width, double.PositiveInfinity));
+        return _panel.DesiredSize.Height;
+    }
+
     /// <summary>
     /// Над треем: правый нижний угол рабочей области экрана с курсором, отступ space4.
     /// Высота — по содержимому: у окна WinUI нет «размера по содержимому».
     /// </summary>
     private void Place()
     {
-        var scale = (Content as FrameworkElement)?.XamlRoot?.RasterizationScale ?? 1.0;
-        _panel.Measure(new Windows.Foundation.Size(_panel.Width, double.PositiveInfinity));
+        var scale = _panel.XamlRoot?.RasterizationScale ?? 1.0;
+        var natural = _panel.ActualHeight > 0
+            ? _panel.ActualHeight
+            : MeasuredHeight();
         var width = (int)Math.Ceiling(_panel.Width * scale);
-        var height = (int)Math.Ceiling(_panel.DesiredSize.Height * scale);
+        var height = (int)Math.Ceiling(natural * scale);
+        if (AppWindow.ClientSize.Width == width && AppWindow.ClientSize.Height == height)
+        {
+            return;
+        }
         // Размер — клиентской области: рамка окна в него не входит, и при
         // MoveAndResize по внешнему размеру низ попапа обрезался.
         AppWindow.ResizeClient(new Windows.Graphics.SizeInt32(width, height));

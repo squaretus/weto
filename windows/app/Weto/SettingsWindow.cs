@@ -38,8 +38,29 @@ public sealed class SettingsWindow : Window
         Rebuild();
     }
 
+    /// <summary>
+    /// Заголовок окна в цветах темы: системный светлый заголовок над тёмными
+    /// карточками читался чужим. Кнопки окна остаются системными.
+    /// </summary>
+    private void PaintTitleBar()
+    {
+        var bar = AppWindow.TitleBar;
+        var shell = (Windows.UI.Color)Application.Current.Resources["WetoShellColor"];
+        var ink = (Windows.UI.Color)Application.Current.Resources["WetoInkColor"];
+        var faint = (Windows.UI.Color)Application.Current.Resources["WetoFaintColor"];
+        bar.BackgroundColor = shell;
+        bar.InactiveBackgroundColor = shell;
+        bar.ButtonBackgroundColor = shell;
+        bar.ButtonInactiveBackgroundColor = shell;
+        bar.ForegroundColor = ink;
+        bar.ButtonForegroundColor = ink;
+        bar.InactiveForegroundColor = faint;
+        bar.ButtonInactiveForegroundColor = faint;
+    }
+
     public void Rebuild()
     {
+        PaintTitleBar();
         var settings = App.Current.Bridge.Settings();
         var panel = Panel();
         _scroll.Background = Brush("Shell");
