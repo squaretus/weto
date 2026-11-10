@@ -2,6 +2,9 @@
 
 Один продукт в двух реализациях: macOS (Swift) и Linux (Rust). Кода они не делят —
 только данные: токены дизайна, исходники иконки и голден-фикстуры политики.
+Готовится Windows-версия: её охрана — пять Rust-крейтов Linux (`weto-core`, `weto-config`,
+`weto-sys`, `weto-guard`, `weto-update`), которые уже собираются и тестируются под Windows;
+кода самой Windows-версии в репозитории пока нет.
 
 ## Стек macOS
 - Swift 5.9 (tools-version 5.9), Swift Package Manager, target macOS 26.0+ (Apple Silicon).
@@ -35,6 +38,9 @@
   в поставке бинарник называется `weto` (cargo-имя `weto` занято приложением), собирается
   статически под musl. Сервис systemd `weto.service` (от root — системный). Цикл охраны
   и писатели журналов — `weto_guard::runtime`, общий для `weto-app` и `weto-cli`.
+- Пять общих крейтов собираются и под Windows: Linux-адаптеры и их зависимости
+  (`rustix`, `libc`, `zbus`) — под `cfg(target_os = "linux")`, трейты границ общие.
+  Что переносимо — [linux-guard](../docs/modules/linux-guard.md#shared-with-windows).
 
 ## Персистентность
 Доменной БД нет, правило UUID-PK неприменимо.
@@ -51,6 +57,10 @@
 | `weto` от root: токен, журналы, учёт, `status.json`, `run.lock` | `/Library/Application Support/weto/` | токен — `/etc/weto/token`, остальное — `/var/lib/weto/` |
 | `weto` от пользователя: настройки | `UserDefaults(suiteName: "com.weto.cli")` | `~/.config/weto-cli/config.toml` |
 | `weto` от пользователя: остальное | `~/Library/Application Support/weto-cli/` | токен — `~/.config/weto-cli/token`, остальное — `~/.local/state/weto-cli/` |
+
+Windows (`Paths::from_windows_env`, пути есть только в `weto-config`): настройки —
+`%APPDATA%\weto\config.toml`, журналы и учёт остановленных — `%LOCALAPPDATA%\weto\`,
+кэш — `%LOCALAPPDATA%\weto\cache\`.
 
 Хранилище терминальной версии отдельное целиком: окно не видит туннеля, а две установки
 не путают учёт остановленных. Выбирает его эффективный uid, а не `$HOME`: `sudo` обращается
@@ -134,6 +144,8 @@ linux/scripts/dev.sh bash -c 'Xvfb :99 -screen 0 1280x1024x24 & sleep 2
 linux/scripts/dev.sh cargo fmt --all --check                   # форматирование, его требует CI
 linux/scripts/dev.sh cargo clippy --workspace --all-targets -- -D warnings
 linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh      # инвариант границ ядра
+linux/scripts/dev.sh cargo check --target x86_64-pc-windows-gnu -p weto-core -p weto-config \
+                     -p weto-sys -p weto-guard -p weto-update          # общие крейты под Windows
 linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/, weto (musl) — cli/*.tar.gz
 bash shared/cli/tests/install-contract.sh            # контракт установщика терминальной версии
 linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабочим столом для проверки глазами

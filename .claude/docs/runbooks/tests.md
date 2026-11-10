@@ -119,6 +119,23 @@ the workspace (657 tests in total); `system.rs` covers root paths under a temp r
 the fake `ReleaseFetching` / `BinaryFiles`. The PR build (`scripts/build.sh 9.9.9`) also builds
 the static musl CLI and fails on a dynamic binary.
 
+### 4b. Shared Rust crates under Windows
+
+```bash
+linux/scripts/dev.sh cargo check --target x86_64-pc-windows-gnu \
+  -p weto-core -p weto-config -p weto-sys -p weto-guard -p weto-update
+```
+
+Fast local check in the dev container (mingw + target `x86_64-pc-windows-gnu`): it catches only a
+Linux dependency leaking into shared code, not the behaviour of paths, threads and network.
+`dev.sh` builds the image only when it is missing, so an image built before the mingw line must be
+rebuilt once: `docker build -t weto-rust-dev -f linux/scripts/Dockerfile.dev linux/scripts`.
+
+Behaviour is checked on a real Windows by CI: job `windows-shared` in `pr-checks.yml`, runners
+`windows-2025` (x86_64) and `windows-11-arm` (aarch64; Rust is installed with rustup if absent),
+`cargo clippy … --all-targets -- -D warnings` and `cargo test` for the same five crates, from
+`linux/`. Linux-only integration tests are compiled out there by `#![cfg(target_os = "linux")]`.
+
 ### 5. Why these cannot be unit tests
 
 <!-- generated, verify -->
