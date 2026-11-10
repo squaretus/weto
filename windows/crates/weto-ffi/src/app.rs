@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use weto_config::checks::CheckLog;
 use weto_config::journal::Journal;
 use weto_config::paths::Paths;
+use weto_core::guard_machine::GuardPhase;
 use weto_guard::controller::GuardController;
 use weto_guard::enforcer::ProcessEnforcer;
 use weto_guard::runtime::{spawn_guard, CheckWriter, JournalWriter};
@@ -42,6 +43,19 @@ use crate::update::{
 use crate::view::{
     journal_view, settings_view, status_view, JournalView, SettingsView, StatusView,
 };
+
+/// Охрана держит цели: пауза, запрет запуска или стоящие по учёту. Пока так,
+/// установщик обновления не запускается — его начало это штатный выход,
+/// а выход продолжает цели и снимает запрет на всё время установки.
+fn guard_holds_targets(controller: Arc<GuardController>) -> impl Fn() -> bool + Send + Sync {
+    move || {
+        let snapshot = controller.snapshot();
+        matches!(
+            snapshot.phase,
+            GuardPhase::Paused { .. } | GuardPhase::Danger(_)
+        ) || !snapshot.paused.is_empty()
+    }
+}
 
 pub struct WindowsApp {
     paths: Paths,
@@ -87,7 +101,11 @@ impl WindowsApp {
             Arc::new(ReleaseChecker::new(REPOSITORY, arch).with_asset_suffix(asset_suffix(arch)));
         let updates = Updates::new(
             paths.state_dir.clone(),
-            Arc::new(SetupInstaller::new(paths.cache_dir.join("updates"), arch)),
+            Arc::new(SetupInstaller::new(
+                paths.cache_dir.join("updates"),
+                arch,
+                Box::new(guard_holds_targets(controller.clone())),
+            )),
             checker.clone(),
             current_version(),
         );

@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,13 @@ pub fn asset_suffix(arch: &str) -> String {
 pub type Launch =
     Box<dyn Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()> + Send + Sync>;
 
+/// Можно ли сейчас выйти ради установки. `true` — нельзя: цели на паузе
+/// или запуск запрещён, и штатный выход отпустил бы их на всё время установки.
+pub type Hold = Box<dyn Fn() -> bool + Send + Sync>;
+
+/// Как часто переспрашивать охрану, пока установка ждёт конца паузы.
+pub const HOLD_POLL: Duration = Duration::from_secs(1);
+
 /// Установщик найденной версии: скачать `setup.exe` и запустить его тихо.
 ///
 /// «Установлено» здесь значит «установщик запущен»: заменить файлы
@@ -73,11 +81,18 @@ pub struct SetupInstaller {
     suffix: String,
     progress: Arc<AtomicU64>,
     launch: Launch,
+    hold: Hold,
+    hold_poll: Duration,
 }
 
 impl SetupInstaller {
-    pub fn new(cache_dir: PathBuf, arch: &str) -> SetupInstaller {
+    /// `hold` — охрана держит цели (пауза, запрет запуска): установщик тогда
+    /// скачивается, но запускается только после конца паузы. На Linux этого
+    /// не нужно — перезапуск подменяет образ процесса, и пауза его переживает;
+    /// здесь же установка начинается со штатного выхода, а он продолжает цели.
+    pub fn new(cache_dir: PathBuf, arch: &str, hold: Hold) -> SetupInstaller {
         SetupInstaller::with_launch(cache_dir, arch, Box::new(launch_silently))
+            .holding(hold, HOLD_POLL)
     }
 
     pub fn with_launch(cache_dir: PathBuf, arch: &str, launch: Launch) -> SetupInstaller {
@@ -86,7 +101,30 @@ impl SetupInstaller {
             suffix: asset_suffix(arch),
             progress: Arc::new(AtomicU64::new(0)),
             launch,
+            hold: Box::new(|| false),
+            hold_poll: HOLD_POLL,
         }
+    }
+
+    pub fn holding(mut self, hold: Hold, poll: Duration) -> SetupInstaller {
+        self.hold = hold;
+        self.hold_poll = poll;
+        self
+    }
+
+    /// Ждёт конца паузы. Окно в это время показывает фазу установки:
+    /// загрузка позади, а выход и замена файлов — ещё впереди.
+    fn wait_while_held(&self) {
+        while (self.hold)() {
+            std::thread::sleep(self.hold_poll);
+        }
+    }
+
+    /// Запуск скачанного установщика — после конца паузы.
+    fn launch_when_free(&self, setup: &std::path::Path) -> Result<(), String> {
+        self.wait_while_held();
+        (self.launch)(setup, &self.cache_dir.join("setup.log"))
+            .map_err(|e| format!("установщик не запустился: {e}"))
     }
 }
 
@@ -107,8 +145,7 @@ impl UpdateInstalling for SetupInstaller {
         }
         // Файл остаётся в кэше: установщик ещё работает с него, когда
         // приложения уже нет. Следующая загрузка перезапишет его.
-        (self.launch)(&setup, &self.cache_dir.join("setup.log"))
-            .map_err(|e| format!("установщик не запустился: {e}"))
+        self.launch_when_free(&setup)
     }
 
     fn progress(&self) -> f32 {
@@ -429,6 +466,49 @@ mod tests {
             assert!(error.starts_with("недоверенный источник"), "{url}: {error}");
         }
         assert!(launched.lock().unwrap().is_empty(), "запущено чужое");
+    }
+
+    /// Пока охрана держит цели, установщик не запускается: штатный выход
+    /// ради него продолжил бы цели при неподтверждённом выходе.
+    #[test]
+    fn the_setup_waits_for_the_pause_to_end() {
+        use std::sync::atomic::AtomicBool;
+
+        let paused = Arc::new(AtomicBool::new(true));
+        let held = paused.clone();
+        let launched = Arc::new(AtomicBool::new(false));
+        let seen = launched.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let installer = Arc::new(
+            SetupInstaller::with_launch(
+                dir.path().to_path_buf(),
+                "x86_64",
+                Box::new(move |_, _| {
+                    seen.store(true, Ordering::SeqCst);
+                    Ok(())
+                }),
+            )
+            .holding(
+                Box::new(move || held.load(Ordering::SeqCst)),
+                Duration::from_millis(5),
+            ),
+        );
+
+        let running = installer.clone();
+        let done =
+            std::thread::spawn(move || running.launch_when_free(std::path::Path::new("setup.exe")));
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            !launched.load(Ordering::SeqCst),
+            "установщик запущен посреди паузы"
+        );
+
+        paused.store(false, Ordering::SeqCst);
+        done.join().unwrap().unwrap();
+        assert!(
+            launched.load(Ordering::SeqCst),
+            "после паузы установщик не запущен"
+        );
     }
 
     #[test]
