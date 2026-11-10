@@ -9,6 +9,7 @@
 //! тесты на раннерах Windows.
 
 pub mod process_table;
+pub mod shortcut;
 pub mod target_resolver;
 
 #[cfg(windows)]
