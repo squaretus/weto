@@ -221,6 +221,11 @@ public sealed class SettingsWindow : Window
         FrameworkElement vpnRight;
         if (settings.VpnApp is { } vpn)
         {
+            // Описание переносится, а не обрезается: колонка текста — вся
+            // оставшаяся ширина, корзина — своя колонка справа.
+            var chosen = new Grid { ColumnSpacing = Number("Space3") };
+            chosen.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            chosen.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var text = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
             var name = Text(vpn.DisplayName, "Value");
             name.HorizontalAlignment = HorizontalAlignment.Right;
@@ -230,9 +235,10 @@ public sealed class SettingsWindow : Window
             description.TextAlignment = TextAlignment.Right;
             description.IsTextSelectionEnabled = true;
             text.Children.Add(description);
-            var chosen = new StackPanel { Orientation = Orientation.Horizontal, Spacing = Number("Space3") };
             chosen.Children.Add(text);
-            chosen.Children.Add(IconButton("\uE74D", "Снять выбор", () => Run("clearVpnApp")));
+            var clear = IconButton("\uE74D", "Снять выбор", () => Run("clearVpnApp"));
+            Grid.SetColumn(clear, 1);
+            chosen.Children.Add(clear);
             vpnRight = chosen;
         }
         else
@@ -269,7 +275,7 @@ public sealed class SettingsWindow : Window
         vpnRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         vpnRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         vpnRow.Children.Add(Text("VPN-приложение", "Label"));
-        vpnRight.HorizontalAlignment = settings.VpnApp is null ? HorizontalAlignment.Stretch : HorizontalAlignment.Right;
+        vpnRight.HorizontalAlignment = HorizontalAlignment.Stretch;
         Grid.SetColumn(vpnRight, 1);
         vpnRow.Children.Add(vpnRight);
         rows.Add(vpnRow);
@@ -587,7 +593,7 @@ public sealed class SettingsWindow : Window
         {
             return;
         }
-        _check.IsEnabled = !update.Footer.Busy;
+        SetEnabled(_check, !update.Footer.Busy);
         // Тумблер сверяется с настройкой каждый такт: галочка окна обновления
         // меняет то же значение. Сверка — не нажатие, команды она не шлёт.
         if (_autoInstall is { } auto && auto.IsOn != update.AutoInstall)
@@ -621,8 +627,8 @@ public sealed class SettingsWindow : Window
             }
         }
         var button = PillButton("Добавить", ButtonKind.Primary, Submit);
-        button.IsEnabled = !string.IsNullOrWhiteSpace(field.Text);
-        field.TextChanged += (_, _) => button.IsEnabled = !string.IsNullOrWhiteSpace(field.Text);
+        SetEnabled(button, !string.IsNullOrWhiteSpace(field.Text));
+        field.TextChanged += (_, _) => SetEnabled(button, !string.IsNullOrWhiteSpace(field.Text));
         field.KeyDown += (_, args) =>
         {
             if (args.Key == Windows.System.VirtualKey.Enter)

@@ -401,10 +401,11 @@ public static class Components
     }
 
     /// <summary>
-    /// Неактивная пилюля — та же заливка с непрозрачностью 0.4, как
-    /// <c>WetoPillButtonStyle</c> на macOS. Шаблон WinUI в состояниях
-    /// «наведение», «нажатие» и «неактивна» подменяет фон своими кистями —
-    /// в светлой теме неактивная кнопка выходила белой на белом.
+    /// Фон пилюли во всех состояниях — свой: шаблон WinUI в состояниях
+    /// «наведение», «нажатие» и «неактивна» подменяет его своими кистями,
+    /// и в светлой теме неактивная кнопка выходила белой на белом. Неактивная —
+    /// та же заливка с непрозрачностью 0.4 (<see cref="SetEnabled"/>), как
+    /// <c>WetoPillButtonStyle</c> на macOS.
     /// </summary>
     private static void KeepFill(Button button, Brush background, Brush foreground, Brush? border)
     {
@@ -415,9 +416,17 @@ public static class Components
             button.Resources["ButtonForeground" + state] = foreground;
             button.Resources["ButtonBorderBrush" + state] = edge;
         }
-        void Apply() => button.Opacity = button.IsEnabled ? 1 : 0.4;
-        button.IsEnabledChanged += (_, _) => Apply();
-        Apply();
+    }
+
+    /// <summary>
+    /// Включить или выключить пилюлю вместе с её видом: неактивная — непрозрачность
+    /// 0.4. Явно, а не по IsEnabledChanged: событие до вставки кнопки в дерево
+    /// не приходило, и неактивная «Добавить» выглядела активной.
+    /// </summary>
+    public static void SetEnabled(Button button, bool enabled)
+    {
+        button.IsEnabled = enabled;
+        button.Opacity = enabled ? 1 : 0.4;
     }
 
     /// <summary>Заливка деструктивной кнопки — red 16 %.</summary>
