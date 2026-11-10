@@ -191,7 +191,16 @@ public sealed class SettingsWindow : Window
 
     private Border MaintenanceCard(SettingsView settings)
     {
-        var autostart = new ToggleSwitch { IsOn = settings.Autostart, OnContent = null, OffContent = null };
+        // MinWidth шаблона (154) держит место под подписи «Вкл/Выкл», которых нет:
+        // без сброса тумблер стоял посередине строки, а не у правого края.
+        var autostart = new ToggleSwitch
+        {
+            IsOn = settings.Autostart,
+            OnContent = null,
+            OffContent = null,
+            MinWidth = 0,
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
         autostart.Toggled += (_, _) =>
             Run("setAutostart", new Dictionary<string, object?> { ["enabled"] = autostart.IsOn });
         return Card("Обслуживание",

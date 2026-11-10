@@ -140,7 +140,15 @@ public sealed class UpdateWindow : Window
         var skip = PillButton(labels.Skip, ButtonKind.Muted, () => Answer("skipUpdate"));
         row.Children.Add(skip);
 
-        var remind = PillButton(labels.RemindLater + "  ", ButtonKind.Muted, () => { });
+        // Кнопка с меню: как приглушённая, плюс стрелка (канон, «Кнопки»).
+        var remind = PillButton(labels.RemindLater, ButtonKind.Muted, () => { });
+        var caption = (TextBlock)remind.Content;
+        remind.Content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = Number("Space2"),
+            Children = { caption, Glyph("\uE70D", 10, Brush("Ink")) },
+        };
         var menu = new MenuFlyout();
         foreach (var option in labels.Remind)
         {
