@@ -16,7 +16,7 @@ use gtk4::{ApplicationWindow, Box as GtkBox, Orientation, ScrolledWindow, Stack}
 
 use weto_config::settings::{GeoListKind, Theme};
 use weto_core::pause_ceiling::PauseCeiling;
-use weto_core::presentation::target_description;
+use weto_core::presentation::{self, target_description};
 use weto_sys::autostart::Autostart;
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 use weto_sys::target_resolver::{
@@ -148,11 +148,7 @@ fn targets_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // под карточкой не читалась как относящаяся к полю. Про бандлы здесь
     // не сказано ни слова — на Linux нет каталога, которым можно накрыть
     // процессы разом, и вид цели `appBundle` не переносится.
-    ui::entry_hint(
-        &entry,
-        "Имя команды (nano) или путь (/usr/bin/curl). \
-         Дочерние процессы завершаются вместе с родителем.",
-    );
+    ui::entry_hint(&entry, presentation::TARGET_ENTRY_HINT);
     let add = ui::primary_button("Добавить");
     let pick = ui::muted_button("Выбрать…");
     add_row.append(&entry);
@@ -541,12 +537,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     // поля, видный только у пустого поля, его бы не показал.
     let token_label = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
     token_label.append(&ui::label("Токен ipinfo"));
-    token_label.append(&ui::hint(
-        "Ключ ipinfo.io — единственного сервиса, который называет адрес выхода. \
-         Без ключа проверять нечем: цели встают на паузу и по таймауту завершаются. \
-         Ключ бесплатный: ipinfo.io → Sign Up → Dashboard → API Token. \
-         Хранится отдельно от настроек и в выгрузку журнала не попадает.",
-    ));
+    token_label.append(&ui::hint(presentation::TOKEN_HINT));
     token_label.set_margin_end(ui::SPACE5 - ui::SPACE3);
     label_column.add_widget(&token_label);
     token_row.append(&token_label);
@@ -569,7 +560,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
             .flatten()
             .unwrap_or_default(),
     ));
-    token_entry.set_text(&token_field_text(&stored.borrow(), false));
+    token_entry.set_text(&presentation::token_field_text(&stored.borrow(), false));
 
     // Подмена текста при входе в поле и уходе из него — не ввод. `set_text`
     // у поля GTK — это стирание и вставка, и `changed` приходит дважды:
@@ -586,7 +577,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
             }
             // Маска и показ токена при входе в поле — не ввод: сохранять
             // нечего. Решает чистый помощник, здесь только запись.
-            let Some(value) = token_to_save(&entry.text(), &stored.borrow()) else {
+            let Some(value) = presentation::token_to_save(&entry.text(), &stored.borrow()) else {
                 return;
             };
             // Токен считается сохранённым только после успешной записи:
@@ -614,7 +605,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
         let show = move |controller: &gtk4::EventControllerFocus| {
             if let Some(entry) = controller.widget().and_downcast::<gtk4::Entry>() {
                 replacing.set(true);
-                entry.set_text(&token_field_text(&stored.borrow(), focused));
+                entry.set_text(&presentation::token_field_text(&stored.borrow(), focused));
                 replacing.set(false);
             }
         };
@@ -632,12 +623,7 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     let timeout_row = ui::row(false);
     let timeout_label = GtkBox::new(Orientation::Horizontal, ui::SPACE2);
     timeout_label.append(&ui::label("Таймаут"));
-    timeout_label.append(&ui::hint(
-        "Сколько цели стоят на паузе, если сервисы не подтвердили безопасный выход. \
-         Подтверждение пришло — цели продолжают работу, не пришло за это время — \
-         завершаются. Отсчёт идёт от начала паузы, новое значение действует сразу, \
-         в том числе на текущую паузу.",
-    ));
+    timeout_label.append(&ui::hint(presentation::TIMEOUT_HINT));
     timeout_label.set_margin_end(ui::SPACE5 - ui::SPACE3);
     label_column.add_widget(&timeout_label);
     timeout_row.append(&timeout_label);
@@ -667,48 +653,6 @@ fn network_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox {
     card
 }
 
-/// Что стоит в поле токена. В фокусе — сам токен: его правят, и правка
-/// маски сохраняла бы точки. Вне фокуса — маска: хвост токена, а не сам
-/// токен, — подтвердить «тот ли ключ» так можно, а подсмотреть через плечо
-/// нет. Порт `onChange(of: isTokenFocused)` из `NetworkSettingsCard`.
-fn token_field_text(stored: &str, focused: bool) -> String {
-    if focused {
-        stored.to_string()
-    } else {
-        mask(stored)
-    }
-}
-
-/// Что сохранить из поля токена, если сохранять есть что.
-///
-/// Точка маски в настоящем токене не встречается, поэтому текст с ней — маска
-/// или её обломок, а не ввод: так маска не уходит в файл ни целой,
-/// ни правленой. Совпавший с записанным текст — показ токена при входе
-/// в поле, а не правка.
-fn token_to_save(text: &str, stored: &str) -> Option<String> {
-    if text.contains(MASK_DOT) {
-        return None;
-    }
-    let value = text.trim();
-    (value != stored).then(|| value.to_string())
-}
-
-/// Знак маски токена.
-const MASK_DOT: char = '•';
-
-fn mask(token: &str) -> String {
-    let length = token.chars().count();
-    if length == 0 {
-        return String::new();
-    }
-    let dots = |count: usize| MASK_DOT.to_string().repeat(count);
-    if length <= 4 {
-        return dots(length);
-    }
-    let tail: String = token.chars().skip(length - 4).collect();
-    format!("{}{tail}", dots(length - 4))
-}
-
 // --- Списки геоправил -----------------------------------------------------
 
 /// Один builder на обе карточки: чёрный и белый списки отличаются только
@@ -724,11 +668,7 @@ fn geo_list_card(state: Arc<AppState>, kind: GeoListKind, title: &str) -> GtkBox
     let add_row = ui::row(true);
     let entry = ui::entry("Код страны (RU), IP или CIDR");
     // Плейсхолдер исчезает при первом символе, поэтому формат повторён значком.
-    ui::entry_hint(
-        &entry,
-        "Код страны из двух букв (RU), IP-адрес (203.0.113.7) \
-         или диапазон CIDR (203.0.113.0/24).",
-    );
+    ui::entry_hint(&entry, presentation::GEO_ENTRY_HINT);
     let add = ui::primary_button("Добавить");
     add_row.append(&entry);
     add_row.append(&add);
@@ -1187,13 +1127,8 @@ thread_local! {
 /// автозапуск по умолчанию выключен, и без него Weto не вернётся никогда.
 /// Дословно как на macOS (`MaintenanceCard.confirmClose`).
 pub fn close_confirmation() -> gtk4::AlertDialog {
-    confirmation(
-        "Закрыть Weto?",
-        "Приложение завершится и перестанет охранять цели. Настройки, журнал \
-         и автозапуск сохранятся: если автозапуск включён, Weto вернётся \
-         при следующем входе в систему.",
-        "Закрыть",
-    )
+    let text = presentation::close_confirmation();
+    confirmation(&text.title, &text.message, &text.confirm)
 }
 
 /// Спрашивает «Закрыть Weto?» и выходит по согласию. Окна может не быть
@@ -1671,75 +1606,5 @@ fn set_vpn_app_named(state: &Arc<AppState>, text: &str, display_name: Option<Str
 /// Считается вручную из unix-времени: тянуть chrono ради одной строки незачем,
 /// а часового пояса у имени файла и не должно быть — UTC однозначен.
 fn stamp_now() -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-
-    let days = seconds / 86_400;
-    let minute_of_day = (seconds % 86_400) / 60;
-    let (year, month, day) = civil_from_days(days as i64);
-    format!(
-        "{year:04}-{month:02}-{day:02}-{:02}{:02}",
-        minute_of_day / 60,
-        minute_of_day % 60
-    )
-}
-
-/// Григорианская дата из числа дней с эпохи — алгоритм Хиннанта.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-#[cfg(test)]
-mod token_field_tests {
-    use super::{token_field_text, token_to_save};
-
-    /// В фокусе поле показывает сам токен — его правят, — а вне фокуса маску:
-    /// подтвердить «тот ли ключ» по хвосту можно, подсмотреть через плечо — нет.
-    /// Как `onChange(of: isTokenFocused)` в `NetworkSettingsCard` на macOS.
-    #[test]
-    fn the_field_shows_the_token_only_while_focused() {
-        assert_eq!(token_field_text("abcd1234efgh", true), "abcd1234efgh");
-        assert_eq!(token_field_text("abcd1234efgh", false), "••••••••efgh");
-        assert_eq!(token_field_text("abc", false), "•••");
-        assert_eq!(token_field_text("", false), "");
-        assert_eq!(token_field_text("", true), "");
-    }
-
-    /// Маска — не ввод: ни она сама, ни правленая маска не сохраняются. Раньше
-    /// маска стояла в поле и в фокусе, и дописанный к ней символ уходил в файл
-    /// токеном из точек — ipinfo отвечал отказом, а цели вставали на паузу.
-    #[test]
-    fn the_mask_is_never_saved() {
-        let stored = "abcd1234efgh";
-        assert_eq!(token_to_save("••••••••efgh", stored), None);
-        assert_eq!(token_to_save("••••••••efghX", stored), None);
-        assert_eq!(token_to_save("••••••••efg", stored), None);
-    }
-
-    /// Сохраняется только настоящая правка: показ токена при входе в поле
-    /// записью не является, а пробелы по краям — частая добыча копирования.
-    #[test]
-    fn only_a_real_edit_is_saved() {
-        let stored = "abcd1234efgh";
-        assert_eq!(token_to_save(stored, stored), None);
-        assert_eq!(
-            token_to_save(" newtoken42 ", stored),
-            Some("newtoken42".to_string())
-        );
-        // Стёртое поле — тоже правка: пользователь убирает ключ.
-        assert_eq!(token_to_save("", stored), Some(String::new()));
-        // Пустое поле при пустом токене — нечего сохранять.
-        assert_eq!(token_to_save("", ""), None);
-    }
+    weto_config::export::JournalExport::stamp(std::time::SystemTime::now())
 }

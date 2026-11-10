@@ -204,8 +204,10 @@ pub fn idle_targets(phase: &GuardPhase) -> IdleTargetsNotice {
 /// метки нет только у бандла `.app`. Здесь аналог бандла — ярлык `.desktop`:
 /// правило у всех целей бинарник или скрипт, и по нему приложение от команды
 /// не отличить, а по тому, что выбрал пользователь, — можно.
+/// На Windows аналог ярлыка — `.lnk` из меню «Пуск» (без учёта регистра:
+/// Проводник пишет и `.LNK`).
 pub fn is_command_line_target(entry: &str) -> bool {
-    !entry.ends_with(".desktop")
+    !(entry.ends_with(".desktop") || entry.to_ascii_lowercase().ends_with(".lnk"))
 }
 
 /// Строка показаний: ключ слева, значение справа.
@@ -419,6 +421,91 @@ pub fn backgrounded_notification(target_name: &str) -> NotificationText {
         title: format!("Weto: {target_name} вернулся в фон"),
         body: "Процесс на паузе потерял терминал. Когда пауза снимется, Weto вернёт его сам или подскажет, что ввести.".to_string(),
     }
+}
+
+/// Подтверждение «Закрыть Weto?» — одно на два входа: кнопку «Закрыть
+/// приложение» в «Обслуживании» и пункт «Выход» в трее. Дословно как на macOS
+/// (`MaintenanceCard.confirmClose`).
+pub fn close_confirmation() -> DialogText {
+    DialogText {
+        title: "Закрыть Weto?".to_string(),
+        message: "Приложение завершится и перестанет охранять цели. Настройки, журнал \
+                  и автозапуск сохранятся: если автозапуск включён, Weto вернётся \
+                  при следующем входе в систему."
+            .to_string(),
+        confirm: "Закрыть".to_string(),
+        cancel: "Отмена".to_string(),
+    }
+}
+
+/// Пояснение к формату ввода цели. Примеры — свои у системы: на Windows нет
+/// ни `nano`, ни `/usr/bin`.
+pub const TARGET_ENTRY_HINT: &str = if cfg!(windows) {
+    "Имя команды (claude) или путь (C:\\Program Files\\Git\\bin\\git.exe). \
+     Дочерние процессы завершаются вместе с родителем."
+} else {
+    "Имя команды (nano) или путь (/usr/bin/curl). \
+     Дочерние процессы завершаются вместе с родителем."
+};
+
+/// Пояснение к формату записи чёрного и белого списков.
+pub const GEO_ENTRY_HINT: &str = "Код страны из двух букв (RU), IP-адрес (203.0.113.7) \
+     или диапазон CIDR (203.0.113.0/24).";
+
+/// Пояснение к токену ipinfo.
+pub const TOKEN_HINT: &str =
+    "Ключ ipinfo.io — единственного сервиса, который называет адрес выхода. \
+     Без ключа проверять нечем: цели встают на паузу и по таймауту завершаются. \
+     Ключ бесплатный: ipinfo.io → Sign Up → Dashboard → API Token. \
+     Хранится отдельно от настроек и в выгрузку журнала не попадает.";
+
+/// Пояснение к таймауту паузы.
+pub const TIMEOUT_HINT: &str =
+    "Сколько цели стоят на паузе, если сервисы не подтвердили безопасный выход. \
+     Подтверждение пришло — цели продолжают работу, не пришло за это время — \
+     завершаются. Отсчёт идёт от начала паузы, новое значение действует сразу, \
+     в том числе на текущую паузу.";
+
+/// Знак маски токена.
+pub const MASK_DOT: char = '•';
+
+/// Что стоит в поле токена. В фокусе — сам токен: его правят, и правка
+/// маски сохраняла бы точки. Вне фокуса — маска: хвост токена, а не сам
+/// токен, — подтвердить «тот ли ключ» так можно, а подсмотреть через плечо
+/// нет. Порт `onChange(of: isTokenFocused)` из `NetworkSettingsCard`.
+pub fn token_field_text(stored: &str, focused: bool) -> String {
+    if focused {
+        stored.to_string()
+    } else {
+        mask(stored)
+    }
+}
+
+/// Что сохранить из поля токена, если сохранять есть что.
+///
+/// Точка маски в настоящем токене не встречается, поэтому текст с ней — маска
+/// или её обломок, а не ввод: так маска не уходит в хранилище ни целой,
+/// ни правленой. Совпавший с записанным текст — показ токена при входе
+/// в поле, а не правка.
+pub fn token_to_save(text: &str, stored: &str) -> Option<String> {
+    if text.contains(MASK_DOT) {
+        return None;
+    }
+    let value = text.trim();
+    (value != stored).then(|| value.to_string())
+}
+
+fn mask(token: &str) -> String {
+    let length = token.chars().count();
+    if length == 0 {
+        return String::new();
+    }
+    let dots = |count: usize| MASK_DOT.to_string().repeat(count);
+    if length <= 4 {
+        return dots(length);
+    }
+    let tail: String = token.chars().skip(length - 4).collect();
+    format!("{}{tail}", dots(length - 4))
 }
 
 #[cfg(test)]
@@ -923,5 +1010,68 @@ mod tests {
     fn a_target_without_a_shortcut_is_named_by_what_was_typed() {
         assert_eq!(target_fallback_name("claude"), "claude");
         assert_eq!(target_fallback_name("/usr/local/bin/qwen"), "qwen");
+    }
+}
+
+#[cfg(test)]
+mod token_field_tests {
+    use super::{token_field_text, token_to_save};
+
+    /// В фокусе поле показывает сам токен — его правят, — а вне фокуса маску:
+    /// подтвердить «тот ли ключ» по хвосту можно, подсмотреть через плечо — нет.
+    /// Как `onChange(of: isTokenFocused)` в `NetworkSettingsCard` на macOS.
+    #[test]
+    fn the_field_shows_the_token_only_while_focused() {
+        assert_eq!(token_field_text("abcd1234efgh", true), "abcd1234efgh");
+        assert_eq!(token_field_text("abcd1234efgh", false), "••••••••efgh");
+        assert_eq!(token_field_text("abc", false), "•••");
+        assert_eq!(token_field_text("", false), "");
+        assert_eq!(token_field_text("", true), "");
+    }
+
+    /// Маска — не ввод: ни она сама, ни правленая маска не сохраняются. Раньше
+    /// маска стояла в поле и в фокусе, и дописанный к ней символ уходил в файл
+    /// токеном из точек — ipinfo отвечал отказом, а цели вставали на паузу.
+    #[test]
+    fn the_mask_is_never_saved() {
+        let stored = "abcd1234efgh";
+        assert_eq!(token_to_save("••••••••efgh", stored), None);
+        assert_eq!(token_to_save("••••••••efghX", stored), None);
+        assert_eq!(token_to_save("••••••••efg", stored), None);
+    }
+
+    /// Сохраняется только настоящая правка: показ токена при входе в поле
+    /// записью не является, а пробелы по краям — частая добыча копирования.
+    #[test]
+    fn only_a_real_edit_is_saved() {
+        let stored = "abcd1234efgh";
+        assert_eq!(token_to_save(stored, stored), None);
+        assert_eq!(
+            token_to_save(" newtoken42 ", stored),
+            Some("newtoken42".to_string())
+        );
+        // Стёртое поле — тоже правка: пользователь убирает ключ.
+        assert_eq!(token_to_save("", stored), Some(String::new()));
+        // Пустое поле при пустом токене — нечего сохранять.
+        assert_eq!(token_to_save("", ""), None);
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::is_command_line_target;
+
+    /// Ярлык — приложение, как `.desktop` на Linux; команда и путь — терминал.
+    #[test]
+    fn a_shortcut_is_an_app_and_a_path_is_a_command() {
+        assert!(!is_command_line_target(
+            r"C:\Users\u\Start Menu\Programs\Happ.lnk"
+        ));
+        assert!(!is_command_line_target(r"C:\Users\u\Desktop\Happ.LNK"));
+        assert!(!is_command_line_target(
+            "/usr/share/applications/firefox.desktop"
+        ));
+        assert!(is_command_line_target(r"C:\tools\claude.exe"));
+        assert!(is_command_line_target("claude"));
     }
 }

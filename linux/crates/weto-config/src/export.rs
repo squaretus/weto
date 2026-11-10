@@ -107,9 +107,34 @@ impl JournalExport {
         serde_json::to_string_pretty(self)
     }
 
+    /// Метка времени для имени файла: UTC с точностью до минуты, `2026-11-10-1432`.
+    pub fn stamp(at: SystemTime) -> String {
+        let iso = weto_core::timestamp::to_iso8601(at);
+        // `2026-11-10T14:32:05Z` → `2026-11-10-1432`
+        format!("{}-{}{}", &iso[..10], &iso[11..13], &iso[14..16])
+    }
+
     /// Имя файла по умолчанию: с точностью до минуты и без пробелов, чтобы его
     /// можно было приложить куда угодно, не переименовывая.
     pub fn file_name(stamp: &str) -> String {
         format!("weto-journal-{stamp}.json")
+    }
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::JournalExport;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    /// Имя выгрузки одно на платформы: окно Linux и мост Windows берут его здесь.
+    #[test]
+    fn the_file_name_carries_the_minute_in_utc() {
+        // 2026-11-10 14:32:05 UTC
+        let at = UNIX_EPOCH + Duration::from_secs(1_794_321_125);
+        assert_eq!(JournalExport::stamp(at), "2026-11-10-1432");
+        assert_eq!(
+            JournalExport::file_name(&JournalExport::stamp(at)),
+            "weto-journal-2026-11-10-1432.json"
+        );
     }
 }
