@@ -218,11 +218,12 @@ fn the_update_window_matches_the_macos_dialog() {
     );
     assert!(updates.auto_install(), "галочка и тумблер разошлись");
 
+    // Ждём сам отказ, а не заголовок: «Обновление Weto» стоит и над загрузкой,
+    // и такт окна, пришедшийся на миг до отказа, кончал ожидание раньше него.
     wait_for(Duration::from_secs(5), || {
-        title(root).text() == "Обновление Weto"
+        find_button(root, "Открыть страницу релиза").is_visible()
     });
-    let release = find_button(root, "Открыть страницу релиза");
-    assert!(release.is_visible(), "после отказа нет ручного пути");
+    assert_eq!(title(root).text(), "Обновление Weto");
     assert!(!find_button(root, "Обновить").is_visible());
     assert!(!auto.is_visible());
     let detail = descendants::<Label>(root)

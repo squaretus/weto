@@ -187,6 +187,8 @@ jobs:
         run: bash windows/scripts/build.sh "$VERSION" "$ARCH"
 
       - name: Installer contract
+        # Зависание (окно, которого никто не закроет) не держит раннер шесть часов.
+        timeout-minutes: 15
         shell: powershell
         env:
           ARCH: ${{ matrix.arch }}
