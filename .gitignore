@@ -23,3 +23,8 @@ DerivedData/
 docs/superpowers/
 docs/mockups/
 docs/reviews/
+
+# Windows: сборка C# и иконки, которые собирает weto-icons
+windows/app/**/bin/
+windows/app/**/obj/
+windows/app/Weto/Assets/*.ico
