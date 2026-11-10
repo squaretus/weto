@@ -1,4 +1,4 @@
-# Контракт установщика Windows на раннере: то, что пользователь получит
+﻿# Контракт установщика Windows на раннере: то, что пользователь получит
 # от setup.exe и что останется после удаления.
 #   powershell -File installer-contract.ps1 -Setup out\release_build\weto-9.9.9-x86_64-windows-setup.exe
 #
