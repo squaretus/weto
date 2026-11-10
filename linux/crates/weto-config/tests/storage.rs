@@ -693,6 +693,37 @@ fn paths_follow_xdg_layout_under_a_given_home() {
     );
 }
 
+/// Windows: настройки — в перемещаемом профиле (`%APPDATA%`), журналы, учёт
+/// и кэш — в локальном (`%LOCALAPPDATA%`): они машинные и в профиль, едущий
+/// на другую машину, попадать не должны. Приложение ставится туда же,
+/// в `Programs\weto`, без прав администратора.
+#[test]
+fn windows_paths_split_roaming_settings_from_local_state() {
+    let roaming = std::path::Path::new("/профиль/Roaming");
+    let local = std::path::Path::new("/профиль/Local");
+    let paths = Paths::windows_under(roaming, local);
+
+    assert_eq!(
+        paths.settings_file(),
+        roaming.join("weto").join("config.toml")
+    );
+    assert_eq!(
+        paths.journal_file(),
+        local.join("weto").join("journal.json")
+    );
+    assert_eq!(paths.checks_file(), local.join("weto").join("checks.json"));
+    assert_eq!(
+        paths.stopped_file(),
+        local.join("weto").join("stopped.json")
+    );
+    assert_eq!(paths.cache_dir, local.join("weto").join("cache"));
+    assert_eq!(paths.data_dir, local.join("Programs").join("weto"));
+    assert_eq!(
+        paths.launcher,
+        local.join("Programs").join("weto").join("Weto.exe")
+    );
+}
+
 /// Системное хранилище терминальной версии — фиксированные пути, не `$HOME`.
 #[test]
 fn system_paths_live_in_etc_and_var_lib() {

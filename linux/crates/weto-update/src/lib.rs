@@ -12,13 +12,20 @@
 //! подтверждает целостность бандла, но не происхождение. Заводить подпись
 //! на одной платформе значило бы развести продукт по уровню защиты
 //! без причины, лежащей в самой платформе.
+//!
+//! Раскладка установки (`layout`: версионные каталоги и симлинк `current`),
+//! распаковка архива и откат — Linux-половина. Проверка релиза, политика
+//! показа, планировщик и список доверенных хостов — общие с Windows, где
+//! обновление ставит установщик Inno Setup.
 
 pub mod checker;
 pub mod dialog;
 pub mod installer;
+#[cfg(target_os = "linux")]
 pub mod layout;
 pub mod policy;
 pub mod progress;
+#[cfg(target_os = "linux")]
 pub mod rollback;
 pub mod scheduler;
 pub mod store;

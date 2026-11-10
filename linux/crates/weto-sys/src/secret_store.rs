@@ -8,9 +8,13 @@
 //! появится вместе с UI: проверить его можно только в живой сессии рабочего
 //! стола, а выдавать непроверенную интеграцию за работающую нельзя.
 
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +35,7 @@ pub trait SecretStoring: Send + Sync {
     fn delete(&self) -> Result<(), SecretError>;
 }
 
+#[cfg(target_os = "linux")]
 pub struct FileSecretStore {
     path: PathBuf,
     /// Сужать ли каталог до `0700`. Свой каталог пользователя сужается;
@@ -39,6 +44,7 @@ pub struct FileSecretStore {
     harden_directory: bool,
 }
 
+#[cfg(target_os = "linux")]
 impl FileSecretStore {
     pub fn new(path: PathBuf) -> FileSecretStore {
         FileSecretStore {
@@ -57,6 +63,7 @@ impl FileSecretStore {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl SecretStoring for FileSecretStore {
     fn load(&self) -> Result<Option<String>, SecretError> {
         match fs::read_to_string(&self.path) {
@@ -101,6 +108,7 @@ impl SecretStoring for FileSecretStore {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn harden(directory: &Path) -> Result<(), SecretError> {
     fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
         .map_err(|e| SecretError::Write(e.to_string()))

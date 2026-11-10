@@ -10,11 +10,16 @@ license.workspace = true
 [dependencies]
 weto-core = { path = "../weto-core" }
 weto-config = { path = "../weto-config" }
-rustix = { workspace = true, features = ["process"] }
 if-addrs = { workspace = true }
-libc = { workspace = true }
 ureq = { workspace = true }
 thiserror = { workspace = true }
+
+# Адаптеры к Linux. Трейты границы, гео-проба, фоновая дорожка и проба
+# маршрута — общие с Windows (`windows/crates/weto-sys-windows` реализует
+# те же трейты), и Linux-зависимости в их сборку не попадают.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+libc = { workspace = true }
 # Шина сессии: уведомления с действием и подъём терминала через
 # org.freedesktop.Application. Тот же zbus, что уже стоит под треем (ksni),
 # и та же его половина — tokio: async-io вторым реактором здесь ни к чему.

@@ -9,7 +9,9 @@
 //! реализации. Шелл, узнавший о стопе цели раньше времени, забирает терминал
 //! себе, и цель встаёт по `SIGTTIN` после каждого `SIGCONT`.
 
+#[cfg(target_os = "linux")]
 use rustix::io::Errno;
+#[cfg(target_os = "linux")]
 use rustix::process::{kill_process, Pid, Signal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub enum ProcessSignal {
     Resume,
 }
 
+#[cfg(target_os = "linux")]
 impl ProcessSignal {
     fn number(self) -> Signal {
         match self {
@@ -37,16 +40,25 @@ impl ProcessSignal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignalResult {
     pub pid: i32,
-    /// errno неудавшегося `kill(2)`; `None` — сигнал ушёл.
+    /// Код ошибки ОС у неудавшегося сигнала (errno `kill(2)` на Linux,
+    /// `GetLastError` на Windows); `None` — сигнал ушёл.
     pub error_code: Option<i32>,
 }
 
 impl SignalResult {
     /// Процесс, исчезнувший до сигнала, — не отказ: цель достигнута.
     pub fn is_delivered(&self) -> bool {
-        matches!(self.error_code, None | Some(libc::ESRCH))
+        self.error_code.is_none() || self.error_code == Some(PROCESS_GONE)
     }
 }
+
+/// Код ошибки ОС «такого процесса нет»: `ESRCH` у `kill(2)` на Linux,
+/// `ERROR_INVALID_PARAMETER` у `OpenProcess` на Windows. Остальные коды —
+/// настоящий отказ, и учёт обязан знать, кому сигнал не ушёл.
+#[cfg(target_os = "linux")]
+pub const PROCESS_GONE: i32 = libc::ESRCH;
+#[cfg(windows)]
+pub const PROCESS_GONE: i32 = 87;
 
 /// Граница, за которой начинается чужая жизнь.
 ///
@@ -57,12 +69,15 @@ pub trait ProcessSignaling: Send + Sync {
     fn send(&self, signal: ProcessSignal, pids: &[i32]) -> Vec<SignalResult>;
 }
 
+#[cfg(target_os = "linux")]
 type KernelSend = Box<dyn Fn(i32, ProcessSignal) -> Option<i32> + Send + Sync>;
 
+#[cfg(target_os = "linux")]
 pub struct ProcessSignaler {
     send_to_kernel: KernelSend,
 }
 
+#[cfg(target_os = "linux")]
 impl ProcessSignaler {
     pub fn new() -> ProcessSignaler {
         ProcessSignaler {
@@ -82,12 +97,14 @@ impl ProcessSignaler {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Default for ProcessSignaler {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ProcessSignaling for ProcessSignaler {
     fn send(&self, signal: ProcessSignal, pids: &[i32]) -> Vec<SignalResult> {
         pids.iter()
@@ -102,6 +119,7 @@ impl ProcessSignaling for ProcessSignaler {
 /// `kill(0, …)` в ядре означает «всей своей группе процессов», а `kill(-1, …)` —
 /// «всем, кому можем». Ни то, ни другое сюда прийти не должно, и молча
 /// расширять сигнал на соседей граница не станет: такой pid — ошибка вызова.
+#[cfg(target_os = "linux")]
 fn send_to_kernel(pid: i32, signal: ProcessSignal) -> Option<i32> {
     // Проверка раньше `Pid::from_raw`, а не вместо неё: на отрицательном
     // значении тот падает по внутреннему `assert`, и «ошибка вызова» стала бы
@@ -117,7 +135,7 @@ fn send_to_kernel(pid: i32, signal: ProcessSignal) -> Option<i32> {
         .map(|errno| errno.raw_os_error())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};

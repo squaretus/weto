@@ -3,6 +3,11 @@
 //! Каждый прячется за трейтом: только на этой границе тесты и подменяют
 //! что-либо. Внутренние типы не подменяются никогда — правило унаследовано
 //! от `WetoSystem` на macOS, где оно уже доказало свою пользу.
+//!
+//! Трейты границ, гео-проба, фоновая дорожка и проба маршрута общие с Windows:
+//! `windows/crates/weto-sys-windows` реализует те же трейты своими адаптерами.
+//! Linux-реализации стоят под `cfg(target_os = "linux")`, и их зависимости
+//! (`rustix`, `libc`, `zbus`) в сборку под Windows не попадают.
 
 pub mod autostart;
 pub mod background;
@@ -14,6 +19,7 @@ pub mod notifications;
 pub mod process_registry;
 pub mod process_signaler;
 pub mod secret_store;
+#[cfg(target_os = "linux")]
 pub mod session_bus;
 pub mod target_resolver;
 pub mod terminal;

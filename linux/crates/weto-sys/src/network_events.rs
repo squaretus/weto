@@ -9,7 +9,10 @@
 //! `NetworkSnapshotReading`. Так граница остаётся тонкой, а разбор структур
 //! ядра не расползается по адаптерам.
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Receiver;
+#[cfg(target_os = "linux")]
+use std::sync::mpsc::{self, Sender};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 pub trait NetworkEventSourcing: Send + Sync {
@@ -21,14 +24,21 @@ pub trait NetworkEventSourcing: Send + Sync {
 /// смена адресов и смена маршрутов обеих версий IP. Правила (`ip rule`)
 /// отдельной группы не имеют, но их правка всегда сопровождается изменением
 /// маршрутов, так что окно не остаётся.
+#[cfg(target_os = "linux")]
 const RTMGRP_LINK: u32 = 0x1;
+#[cfg(target_os = "linux")]
 const RTMGRP_IPV4_IFADDR: u32 = 0x10;
+#[cfg(target_os = "linux")]
 const RTMGRP_IPV4_ROUTE: u32 = 0x40;
+#[cfg(target_os = "linux")]
 const RTMGRP_IPV6_IFADDR: u32 = 0x100;
+#[cfg(target_os = "linux")]
 const RTMGRP_IPV6_ROUTE: u32 = 0x400;
 
+#[cfg(target_os = "linux")]
 pub struct NetlinkEventSource;
 
+#[cfg(target_os = "linux")]
 impl NetworkEventSourcing for NetlinkEventSource {
     fn subscribe(&self) -> Receiver<()> {
         let (sender, receiver) = mpsc::channel();
@@ -43,6 +53,7 @@ impl NetworkEventSourcing for NetlinkEventSource {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn listen(sender: &Sender<()>) {
     let Some(socket) = NetlinkSocket::open() else {
         // Без сокета остаётся только штатный тик охраны: он реже, но безопасен.
@@ -64,10 +75,12 @@ fn listen(sender: &Sender<()>) {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct NetlinkSocket {
     fd: i32,
 }
 
+#[cfg(target_os = "linux")]
 impl NetlinkSocket {
     fn open() -> Option<NetlinkSocket> {
         // SAFETY: обычная последовательность socket + bind. Все структуры
@@ -122,6 +135,7 @@ impl NetlinkSocket {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for NetlinkSocket {
     fn drop(&mut self) {
         // SAFETY: дескриптор наш и закрывается ровно один раз.

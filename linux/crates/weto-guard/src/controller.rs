@@ -60,8 +60,14 @@ use weto_sys::geo_probe::GeoProbing;
 use weto_sys::network_snapshot::NetworkSnapshotReading;
 use weto_sys::process_signaler::SignalResult;
 use weto_sys::secret_store::SecretStoring;
-use weto_sys::target_resolver::{LaunchTargetResolver, TargetResolving};
-use weto_sys::terminal_return::{MultiplexerForegroundReturner, TerminalForegroundReturning};
+#[cfg(target_os = "linux")]
+use weto_sys::target_resolver::LaunchTargetResolver;
+use weto_sys::target_resolver::TargetResolving;
+#[cfg(target_os = "linux")]
+use weto_sys::terminal_return::MultiplexerForegroundReturner;
+#[cfg(not(target_os = "linux"))]
+use weto_sys::terminal_return::NoForegroundReturn;
+use weto_sys::terminal_return::TerminalForegroundReturning;
 
 use crate::enforcer::{ProcessEnforcer, ResumeOutcome, Scan};
 use crate::rules::RuleCache;
@@ -420,7 +426,21 @@ pub struct GuardController {
     now: Clock,
 }
 
+/// Ввод `fg` бывает только там, где есть job control. На Windows цель
+/// от паузы в фон не уходит, и вводить его некуда.
+#[cfg(target_os = "linux")]
+fn default_returner() -> Box<dyn TerminalForegroundReturning> {
+    Box::new(MultiplexerForegroundReturner)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn default_returner() -> Box<dyn TerminalForegroundReturning> {
+    Box::new(NoForegroundReturn)
+}
+
 impl GuardController {
+    /// Охрана с разрешением целей Linux (`.desktop`, шебанг, `PATH`).
+    #[cfg(target_os = "linux")]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network: Box<dyn NetworkSnapshotReading>,
@@ -430,6 +450,33 @@ impl GuardController {
         enforcer: ProcessEnforcer,
         reporter: Box<dyn KillReporting>,
         checks: Box<dyn CheckReporting>,
+    ) -> GuardController {
+        GuardController::with_target_resolution(
+            network,
+            geo,
+            secrets,
+            settings,
+            enforcer,
+            reporter,
+            checks,
+            Box::new(LaunchTargetResolver),
+        )
+    }
+
+    /// Охрана с разрешением целей, которое даёт платформа. Умолчания у него
+    /// нет намеренно: охрана без настоящего разрешения не узнала бы ни одной
+    /// цели, а выглядела бы работающей. Windows передаёт своё
+    /// (`weto-sys-windows`: `PATH` + `PATHEXT`, ярлыки, npm-шимы).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_target_resolution(
+        network: Box<dyn NetworkSnapshotReading>,
+        geo: Box<dyn GeoProbing>,
+        secrets: Box<dyn SecretStoring>,
+        settings: Box<dyn SettingsProviding>,
+        enforcer: ProcessEnforcer,
+        reporter: Box<dyn KillReporting>,
+        checks: Box<dyn CheckReporting>,
+        resolver: Box<dyn TargetResolving>,
     ) -> GuardController {
         GuardController {
             network,
@@ -441,7 +488,7 @@ impl GuardController {
             checks,
             probes: Box::new(ThreadDispatcher::named("weto-probe")),
             returns: Box::new(ThreadDispatcher::named("weto-return")),
-            returner: Box::new(MultiplexerForegroundReturner),
+            returner: default_returner(),
             typing: Mutex::new(()),
             inner: Mutex::new(Inner {
                 machine: GuardMachine::default(),
@@ -461,7 +508,7 @@ impl GuardController {
             }),
             probe: ProbeGate::default(),
             enforcement: Mutex::new(false),
-            rules: RuleCache::new(Box::new(LaunchTargetResolver)),
+            rules: RuleCache::new(resolver),
             coalesce_window: COALESCE_WINDOW,
             now: Box::new(SystemTime::now),
         }

@@ -24,17 +24,23 @@ use weto_core::episode::EpisodeLedger;
 use weto_core::guard_machine::{GuardAction, GuardPhase};
 use weto_core::pause_plan::RecoveredProcess;
 use weto_core::process::{MatchBasis, MatchedProcess};
+#[cfg(target_os = "linux")]
 use weto_sys::geo_probe::{GeoEndpoints, HttpGeoProbe, RouteNetworkPath};
 use weto_sys::network_events::NetworkEventSourcing;
+#[cfg(target_os = "linux")]
 use weto_sys::network_snapshot::KernelNetworkReader;
 use weto_sys::notifications::KillNotifying;
+#[cfg(target_os = "linux")]
 use weto_sys::process_registry::ProcRegistry;
+#[cfg(target_os = "linux")]
 use weto_sys::process_signaler::ProcessSignaler;
+#[cfg(target_os = "linux")]
 use weto_sys::secret_store::FileSecretStore;
 
-use crate::controller::{
-    CheckReporting, GuardController, KillReporting, OutcomeException, SettingsProviding,
-};
+#[cfg(target_os = "linux")]
+use crate::controller::SettingsProviding;
+use crate::controller::{CheckReporting, GuardController, KillReporting, OutcomeException};
+#[cfg(target_os = "linux")]
 use crate::enforcer::ProcessEnforcer;
 
 /// Пока небезопасно — 250 мс: терминальные цели больше ничем не поймать.
@@ -475,6 +481,9 @@ fn new_id() -> String {
 /// Охрана на настоящих границах: ядро, `/proc`, сигналы, гео-сервисы, токен
 /// и учёт остановленных по путям установки. Разное у двух оболочек — откуда
 /// настройки и куда уходят журналы — приходит параметрами.
+/// Охрана на адаптерах Linux. На Windows свою собирает `weto-ffi` — из тех же
+/// частей, но с адаптерами `weto-sys-windows`.
+#[cfg(target_os = "linux")]
 pub fn system_controller(
     paths: &Paths,
     settings: Box<dyn SettingsProviding>,
@@ -561,6 +570,7 @@ pub fn spawn_guard(
 
 /// Версия ядра для выгрузки. Из `/proc/version` — в контейнере и на живой машине
 /// это единственный источник, не требующий ни утилит, ни зависимостей.
+#[cfg(target_os = "linux")]
 pub fn os_version() -> String {
     std::fs::read_to_string("/proc/version")
         .map(|text| text.trim().to_string())

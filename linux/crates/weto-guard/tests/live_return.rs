@@ -1,3 +1,6 @@
+// Настоящие tmux и GNU screen: на Windows job control нет вовсе.
+#![cfg(target_os = "linux")]
+
 //! Живая проверка на настоящих tmux и GNU screen: настоящие обход, сигналы, режим терминала
 //! и ввод `fg`. Порт `macos/Tests/WetoSharedTests/LiveTmuxReturnTests.swift`.
 //!

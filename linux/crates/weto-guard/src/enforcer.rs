@@ -21,7 +21,11 @@ use weto_core::process::{
 };
 use weto_sys::process_registry::ProcessRegistryReading;
 use weto_sys::process_signaler::{ProcessSignal, ProcessSignaling, SignalResult};
-use weto_sys::terminal_mode::{TerminalMode, TerminalModeKeeper, TerminalModeKeeping};
+#[cfg(not(target_os = "linux"))]
+use weto_sys::terminal_mode::NoTerminalModes;
+#[cfg(target_os = "linux")]
+use weto_sys::terminal_mode::TerminalModeKeeper;
+use weto_sys::terminal_mode::{TerminalMode, TerminalModeKeeping};
 
 /// Один обход процессов вместе с правилами, по которым его разбирают.
 pub struct Scan {
@@ -102,6 +106,18 @@ impl ReleaseOutcome {
     }
 }
 
+/// Режим терминала есть только там, где есть job control: на Windows
+/// консоль не отдаёт фоновому процессу ни `SIGTTIN`, ни своего режима.
+#[cfg(target_os = "linux")]
+fn default_terminal_modes() -> Box<dyn TerminalModeKeeping> {
+    Box::new(TerminalModeKeeper::new())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn default_terminal_modes() -> Box<dyn TerminalModeKeeping> {
+    Box::new(NoTerminalModes)
+}
+
 pub struct ProcessEnforcer {
     registry: Box<dyn ProcessRegistryReading>,
     signaler: Box<dyn ProcessSignaling>,
@@ -129,7 +145,7 @@ impl ProcessEnforcer {
             ledger_was_corrupted: ledger.started_from_corrupted_file(),
             ledger: Mutex::new(ledger),
             ledger_path,
-            terminal_modes: Box::new(TerminalModeKeeper::new()),
+            terminal_modes: default_terminal_modes(),
             saved_modes: Mutex::new(HashMap::new()),
         }
     }

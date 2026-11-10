@@ -7,9 +7,10 @@
 
 use weto_core::network::OutgoingRoute;
 use weto_sys::network_snapshot::{
-    InterfaceListing, KernelInterfaces, KernelNetworkReader, KernelRouteProbe,
-    NetworkSnapshotReading, RouteProbing,
+    InterfaceListing, KernelNetworkReader, NetworkSnapshotReading, RouteProbing,
 };
+#[cfg(target_os = "linux")]
+use weto_sys::network_snapshot::{KernelInterfaces, KernelRouteProbe};
 
 struct FixedRoute(Option<OutgoingRoute>);
 
@@ -47,6 +48,7 @@ fn the_snapshot_carries_the_up_interfaces_outside_the_fingerprint() {
 
 /// На живом ядре петля поднята всегда, и имя в списке ровно одно, сколько бы
 /// адресов у интерфейса ни было.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_kernel_lists_the_loopback_once() {
     let names = KernelInterfaces.up_interfaces();
@@ -61,6 +63,7 @@ fn the_kernel_lists_the_loopback_once() {
 /// Выключенный интерфейс в список не попадает. Поднимать и ронять настоящие
 /// интерфейсы тест без `CAP_NET_ADMIN` не может, поэтому сверяется с тем,
 /// что ядро само называет выключенным в sysfs.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_interface_that_is_down_is_not_listed() {
     let names = KernelInterfaces.up_interfaces();
@@ -87,8 +90,11 @@ fn the_snapshot_carries_whatever_the_probe_answered() {
         interface: "wg0".to_string(),
         address: "10.7.0.2".to_string(),
     };
-    let snapshot =
-        KernelNetworkReader::with_probe(Box::new(FixedRoute(Some(route.clone())))).snapshot();
+    let snapshot = KernelNetworkReader::with_sources(
+        Box::new(FixedRoute(Some(route.clone()))),
+        Box::new(FixedInterfaces(vec![])),
+    )
+    .snapshot();
 
     assert_eq!(snapshot.outgoing, Some(route));
     assert_eq!(snapshot.verdict_fingerprint(), "out=wg0/10.7.0.2");
@@ -96,7 +102,11 @@ fn the_snapshot_carries_whatever_the_probe_answered() {
 
 #[test]
 fn without_a_route_the_snapshot_is_empty() {
-    let snapshot = KernelNetworkReader::with_probe(Box::new(FixedRoute(None))).snapshot();
+    let snapshot = KernelNetworkReader::with_sources(
+        Box::new(FixedRoute(None)),
+        Box::new(FixedInterfaces(vec![])),
+    )
+    .snapshot();
 
     assert!(snapshot.outgoing.is_none());
     assert_eq!(snapshot.verdict_fingerprint(), "out=-");
@@ -104,6 +114,7 @@ fn without_a_route_the_snapshot_is_empty() {
 
 /// Проба обязана называть тот же интерфейс, что и само ядро. Подделать это
 /// нечем, поэтому тест идёт к настоящей таблице маршрутов.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_kernel_probe_agrees_with_the_kernel() {
     // Адрес фиксированный: у пробы по умолчанию адрес гео-сервиса, а в контейнере

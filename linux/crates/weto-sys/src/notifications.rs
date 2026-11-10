@@ -15,18 +15,26 @@
 //! сообщением. Шины нет вовсе — уведомлений в системе нет как явления,
 //! и молчать правильнее, чем падать.
 
+#[cfg(target_os = "linux")]
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 
+#[cfg(target_os = "linux")]
 use zbus::blocking::Connection;
 
+#[cfg(target_os = "linux")]
 use crate::session_bus;
 
+#[cfg(target_os = "linux")]
 const SERVICE: &str = "org.freedesktop.Notifications";
+#[cfg(target_os = "linux")]
 const PATH: &str = "/org/freedesktop/Notifications";
 
 /// Сколько своих уведомлений помним, чтобы узнать своё нажатие. Больше
 /// незачем: сигнал приходит про то, что видно на экране сейчас.
+#[cfg(target_os = "linux")]
 const REMEMBERED: usize = 16;
 
 pub trait KillNotifying: Send + Sync {
@@ -44,6 +52,7 @@ pub trait KillNotifying: Send + Sync {
 /// там обработчик ставит приложение один раз на старте, здесь — тоже.
 pub type OpenHandler = Arc<dyn Fn() + Send + Sync>;
 
+#[cfg(target_os = "linux")]
 pub struct DesktopNotifier {
     bus: Option<Connection>,
     /// Сервер умеет действия, и нам есть что по ним делать.
@@ -53,6 +62,7 @@ pub struct DesktopNotifier {
     ours: Arc<Mutex<VecDeque<u32>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl DesktopNotifier {
     pub fn new() -> DesktopNotifier {
         DesktopNotifier::build(None)
@@ -134,12 +144,14 @@ impl DesktopNotifier {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Default for DesktopNotifier {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_os = "linux")]
 impl KillNotifying for DesktopNotifier {
     /// Дословно как на macOS (`UserNotificationGuardNotifier.notifyTerminated`
     /// с текстом из `GuardVM.terminateTargets`): заголовок общий, а цели,
@@ -163,6 +175,7 @@ impl KillNotifying for DesktopNotifier {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn supports_actions(bus: &Connection) -> bool {
     bus.call_method(Some(SERVICE), PATH, Some(SERVICE), "GetCapabilities", &())
         .and_then(|reply| reply.body().deserialize::<Vec<String>>())
@@ -174,6 +187,7 @@ fn supports_actions(bus: &Connection) -> bool {
 ///
 /// Отдельный поток на всю жизнь процесса: подписка блокирующая, а окно
 /// пользователь открывает нажатием в любой момент.
+#[cfg(target_os = "linux")]
 fn listen(bus: Connection, ours: Arc<Mutex<VecDeque<u32>>>, handler: OpenHandler) {
     std::thread::Builder::new()
         .name("weto-notifications".to_string())

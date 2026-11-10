@@ -265,7 +265,7 @@ pub fn locate_with_launch_paths(
             launch_paths
                 .iter()
                 .map(String::as_str)
-                .filter(|path| path.starts_with('/') && *path != entry),
+                .filter(|path| Path::new(path).is_absolute() && *path != entry),
         )
         .find_map(|candidate| resolver.locate(candidate))
 }
