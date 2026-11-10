@@ -310,7 +310,11 @@ jobs:
             ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/targets-status
           } finally {
             Stop-Process -Id $ping.Id, $notepad.Id -Force -ErrorAction SilentlyContinue
-            Remove-Item -Recurse -Force $config, (Join-Path $env:LOCALAPPDATA 'weto') -ErrorAction SilentlyContinue
+            # Профиль обязан уйти целиком: оставшиеся настройки с целями меняли бы
+            # поведение Weto в контракте установщика. Молчать об отказе нельзя.
+            foreach ($dir in $config, (Join-Path $env:LOCALAPPDATA 'weto')) {
+              if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+            }
           }
 
       # Установщик целиком: тихая установка, установка поверх работающего

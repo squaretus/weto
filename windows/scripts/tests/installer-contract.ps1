@@ -34,9 +34,31 @@ function Install {
 
 # Зависший шаг объясняет себя: список процессов Weto и установщика и снимки
 # их окон (диалог со стоящими, сообщение Inno) — в screens/stuck-*.png.
+function Describe-Profile {
+    foreach ($dir in $settingsDir, $stateDir) {
+        if (Test-Path $dir) {
+            Write-Output "в профиле: $dir"
+            Get-ChildItem -Recurse $dir | Select-Object -ExpandProperty FullName | Write-Output
+        } else {
+            Write-Output "в профиле нет: $dir"
+        }
+    }
+}
+
 function Describe-Stuck {
+    Describe-Profile
     $suspects = Get-Process | Where-Object { $_.Name -match '^(Weto|unins\d+|_iu\d+|.*setup.*|is-.*)$' }
     $suspects | Format-Table Id, Name, Path -AutoSize | Out-String | Write-Output
+    # Откликается ли работающий Weto на просьбу выйти — тот же путь, что у деинсталлятора.
+    $exe = Join-Path $app 'Weto.exe'
+    if (Test-Path $exe) {
+        $started = Get-Date
+        $quit = Start-Process -FilePath $exe -ArgumentList '--quit' -PassThru
+        $done = $quit.WaitForExit(30000)
+        $code = if ($done) { $quit.ExitCode } else { 'не завершился' }
+        Write-Output "Weto.exe --quit: код $code за $([int]((Get-Date) - $started).TotalSeconds) с"
+        Get-Process -Name Weto -ErrorAction SilentlyContinue | Format-Table Id, Path -AutoSize | Out-String | Write-Output
+    }
     if ($suspects) {
         New-Item -ItemType Directory -Force screens | Out-Null
         & (Join-Path $PSScriptRoot 'screenshot.ps1') -Attach ([uint32[]]$suspects.Id) -Out screens/stuck
@@ -60,6 +82,7 @@ function Weto-Process {
 }
 
 # --- 1. Установка -----------------------------------------------------------
+Describe-Profile
 Install
 foreach ($file in 'Weto.exe', 'weto_ffi.dll', 'unins000.exe', 'Assets\Weto.ico', 'Assets\tray-guarded.ico') {
     if (-not (Test-Path (Join-Path $app $file))) { Fail "нет $file в $app" }

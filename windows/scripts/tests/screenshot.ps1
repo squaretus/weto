@@ -87,6 +87,9 @@ if ($process.HasExited) {
 }
 $count = [WindowShot]::Capture([uint32]$process.Id, $Out)
 Stop-Process -Id $process.Id -Force
+# Ждём конца процесса: следующий шаг удаляет профиль, а открытые файлы
+# только что убитого Weto удаление срывали.
+Wait-Process -Id $process.Id -Timeout 30 -ErrorAction SilentlyContinue
 if ($count -eq 0) {
     Write-Error "у Weto нет видимых окон для снимка"
 }
