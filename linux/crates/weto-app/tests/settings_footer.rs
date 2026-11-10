@@ -15,7 +15,7 @@ use gtk4::{Application, Button, Widget};
 
 use weto_app::settings_window;
 use weto_app::state::AppState;
-use weto_app::update::{self, Updates};
+use weto_app::update;
 use weto_config::paths::Paths;
 use weto_update::checker::CheckError;
 use weto_update::policy::UpdateInfo;
@@ -62,7 +62,7 @@ fn the_update_tile_follows_the_check_like_macos() {
 
     let (open, gate) = mpsc::channel();
     let calls = Arc::new(AtomicUsize::new(0));
-    let updates = Updates::new(
+    let updates = update::linux_updates(
         &state.paths,
         Arc::new(GatedReleases {
             gate: Mutex::new(gate),

@@ -297,3 +297,14 @@ mod tests {
         assert_eq!(DOWNLOAD_READ_TIMEOUT, Duration::from_secs(60));
     }
 }
+
+#[cfg(target_os = "linux")]
+impl crate::updates::UpdateInstalling for Installer {
+    fn install(&self, version: &Version, url: &str) -> Result<(), String> {
+        Installer::install(self, version, url).map_err(|error| error.to_string())
+    }
+
+    fn progress(&self) -> f32 {
+        Installer::progress(self)
+    }
+}
