@@ -143,12 +143,67 @@ jobs:
             linux/target/release_build/*.tar.zst
             linux/target/release_build/cli/*.tar.gz
 
+  # Windows: мост и приложение под архитектуру раннера, установщик Inno Setup
+  # (`weto-<версия>-<arch>-windows-setup.exe` — его ищет автообновление)
+  # и контракт установщика: установка, поверх работающего, удаление.
+  windows:
+    name: Build installer (${{ matrix.arch }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if ! command -v cargo >/dev/null; then
+            curl -sSf -o "$RUNNER_TEMP/rustup-init.exe" "https://win.rustup.rs/$ARCH"
+            "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal
+            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          fi
+          cargo --version
+
+      - name: Test
+        working-directory: windows/crates
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Build
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.version.outputs.VERSION }}
+        run: bash windows/scripts/build.sh "$VERSION" "$ARCH"
+
+      - name: Installer contract
+        shell: powershell
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.version.outputs.VERSION }}
+        run: ./windows/scripts/tests/installer-contract.ps1 -Setup "windows/app/out/release_build/weto-$env:VERSION-$env:ARCH-windows-setup.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: windows/app/out/release_build/*-windows-setup.exe
+
   publish:
     name: Publish release
-    # Публикация только когда собрались обе платформы: половинчатый релиз
-    # означал бы, что автообновление на второй платформе видит релиз
+    # Публикация только когда собрались все платформы: половинчатый релиз
+    # означал бы, что автообновление на отставшей платформе видит релиз
     # без своего артефакта.
-    needs: [version, macos, linux]
+    needs: [version, macos, linux, windows]
     runs-on: ubuntu-24.04
     steps:
       # Нужен только установщик терминальной версии: он публикуется ассетом
@@ -169,14 +224,15 @@ jobs:
       - name: Collect assets and checksums
         run: |
           mkdir release
-          find artifacts -type f \( -name '*.pkg' -o -name '*.tar.zst' -o -name '*.tar.gz' \) \
+          find artifacts -type f \( -name '*.pkg' -o -name '*.tar.zst' -o -name '*.tar.gz' \
+            -o -name '*-windows-setup.exe' \) \
             -exec cp {} release/ \;
           cp shared/cli/install.sh release/install.sh
           cd release
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
 
-      # Релиз в этот же репозиторий — источник автообновления обеих платформ.
+      # Релиз в этот же репозиторий — источник автообновления всех платформ.
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
