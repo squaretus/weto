@@ -42,6 +42,10 @@ public partial class App : Application
     private static readonly bool Sample =
         Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-status-sample");
 
+    /// <summary>Показывать образец находки обновления (баннер и окно) — для скриншота в CI.</summary>
+    private static readonly bool UpdateSample =
+        Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-update-sample");
+
     public App()
     {
         InitializeComponent();
@@ -98,9 +102,14 @@ public partial class App : Application
             {
                 ShowStatus();
             }
-            if (argument == "--show-settings")
+            if (argument is "--show-settings" or "--show-settings-end")
             {
                 ShowSettings();
+            }
+            if (argument == "--show-update-sample")
+            {
+                ShowStatus();
+                ShowUpdate();
             }
         }
     }
@@ -120,7 +129,7 @@ public partial class App : Application
         }
         _status?.Show(status);
 
-        var update = _bridge.Update();
+        var update = CurrentUpdate();
         if (update.Installed)
         {
             // Установщик запущен и ждёт мьютекса: выход штатный, стоящие цели
@@ -191,9 +200,11 @@ public partial class App : Application
             _update = new UpdateWindow();
             _update.Closed += (_, _) => _update = null;
         }
-        _update.Show(Bridge.Update());
+        _update.Show(CurrentUpdate());
         _update?.Activate();
     }
+
+    private UpdateView CurrentUpdate() => UpdateSample ? Bridge.UpdateSample() : Bridge.Update();
 
     /// <summary>
     /// Кнопка «Удалить приложение…»: подтверждение текстами моста, затем

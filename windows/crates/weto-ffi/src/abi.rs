@@ -96,6 +96,7 @@ pub unsafe extern "C" fn weto_view(weto: *const Weto, kind: *const c_char) -> *m
             "settings" => serde_json::to_string(&weto.app.settings()),
             "journal" => serde_json::to_string(&weto.app.journal()),
             "update" => serde_json::to_string(&weto.app.update()),
+            "update-sample" => serde_json::to_string(&crate::update::sample_update()),
             "uninstall-confirmation" => serde_json::to_string(&crate::uninstall::confirmation()),
             "status-sample" => {
                 serde_json::to_string(&crate::view::sample_status(std::time::SystemTime::now()))

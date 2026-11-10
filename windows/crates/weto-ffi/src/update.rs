@@ -265,22 +265,68 @@ pub fn update_view(updates: &Updates, window_requested: bool) -> UpdateView {
             .to_string(),
         },
         installed: updates.progress() == Progress::Installed,
-        labels: UpdateLabels {
-            window_title: strings.progress_title(),
-            details: "Подробнее".to_string(),
-            skip: strings.skip().to_string(),
-            remind_later: strings.remind_later().to_string(),
-            install: strings.install().to_string(),
-            open_release_page: strings.open_release_page().to_string(),
-            auto_install: strings.auto_install_toggle().to_string(),
-            remind: RemindInterval::ALL
-                .iter()
-                .map(|interval| RemindOption {
-                    interval: Remind::from(*interval),
-                    title: strings.remind_title(*interval).to_string(),
-                })
-                .collect(),
+        labels: labels(&strings),
+    }
+}
+
+/// Образец «найдена 9.9.10» — для скриншотов окна обновления и баннера в CI,
+/// где настоящей находки нет. Тексты и правила те же, что у живого вида.
+pub fn sample_update() -> UpdateView {
+    use weto_update::policy::UpdateInfo;
+
+    let strings = UpdateStrings::new(APP_NAME);
+    let info = UpdateInfo {
+        current_version: "9.9.9".to_string(),
+        latest_version: "9.9.10".to_string(),
+        release_url: "https://github.com/squaretus/weto/releases/tag/v9.9.10".to_string(),
+        download_url: String::new(),
+        is_newer: true,
+    };
+    let progress = UpdateProgress::idle();
+    let model = UpdateDialogModel::make(Some(&info), &progress, &strings);
+    UpdateView {
+        banner: Some(banner(&strings, &progress, &info.latest_version)),
+        dialog: Some(UpdateDialogView {
+            title: model.title,
+            detail: model.detail,
+            fraction: model.fraction,
+            shows_progress: model.shows_progress,
+            shows_choice_buttons: model.shows_choice_buttons,
+            shows_release_page_button: model.shows_release_page_button,
+            release_page: release_page(Some(&info), RELEASES_URL),
+        }),
+        window_requested: false,
+        auto_install: false,
+        footer: FooterView {
+            offers: true,
+            hint: footer_hint(
+                &weto_update::scheduler::CheckState::Available(info.clone()),
+                false,
+            ),
+            busy: false,
+            label: "Показать обновление".to_string(),
         },
+        installed: false,
+        labels: labels(&strings),
+    }
+}
+
+fn labels(strings: &UpdateStrings) -> UpdateLabels {
+    UpdateLabels {
+        window_title: strings.progress_title(),
+        details: "Подробнее".to_string(),
+        skip: strings.skip().to_string(),
+        remind_later: strings.remind_later().to_string(),
+        install: strings.install().to_string(),
+        open_release_page: strings.open_release_page().to_string(),
+        auto_install: strings.auto_install_toggle().to_string(),
+        remind: RemindInterval::ALL
+            .iter()
+            .map(|interval| RemindOption {
+                interval: Remind::from(*interval),
+                title: strings.remind_title(*interval).to_string(),
+            })
+            .collect(),
     }
 }
 

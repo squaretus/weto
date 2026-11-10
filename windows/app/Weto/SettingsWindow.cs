@@ -39,6 +39,12 @@ public sealed class SettingsWindow : Window
             (int)(Number("WindowHeight") * scale)));
         AppWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Weto.ico"));
         Rebuild();
+        // Для скриншота в CI: низ вкладки — «Обслуживание» и подвал.
+        if (Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-settings-end"))
+        {
+            _scroll.Loaded += (_, _) => DispatcherQueue.TryEnqueue(() =>
+                _scroll.ChangeView(null, _scroll.ScrollableHeight, null, disableAnimation: true));
+        }
     }
 
     /// <summary>

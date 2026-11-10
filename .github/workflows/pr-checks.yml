@@ -266,6 +266,8 @@ jobs:
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/status
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status-sample -Out screens/paused
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/settings
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings-end -Out screens/settings-end
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-update-sample -Out screens/update
 
       # Установщик целиком: тихая установка, установка поверх работающего
       # (так выглядит обновление) и удаление со всеми следами.

@@ -59,6 +59,11 @@ public sealed unsafe class WetoBridge : IDisposable
         View("update", BridgeJson.Default.UpdateView)
         ?? throw new InvalidOperationException("Мост не отдал экран обновления");
 
+    /// <summary>Образец «найдена новая версия» — для скриншотов окна обновления в CI.</summary>
+    public UpdateView UpdateSample() =>
+        View("update-sample", BridgeJson.Default.UpdateView)
+        ?? throw new InvalidOperationException("Мост не отдал образец обновления");
+
     public DialogView UninstallConfirmation() =>
         View("uninstall-confirmation", BridgeJson.Default.DialogView)
         ?? throw new InvalidOperationException("Мост не отдал текст подтверждения");
