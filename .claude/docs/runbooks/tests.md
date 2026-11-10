@@ -143,8 +143,9 @@ linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo test'      # чис�
 linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings'
 ```
 
-Свой Cargo workspace (`weto-sys-windows`, `weto-ffi`) с path-зависимостями на `linux/crates/*`.
-В контейнере идут только чистые модули — `process_table`, `target_resolver`, `view`, `command`:
+Свой Cargo workspace (`weto-sys-windows`, `weto-ffi`, `weto-icons`) с path-зависимостями
+на `linux/crates/*`. В контейнере идут только чистые модули — `process_table`, `target_resolver`,
+`view`, `command`, `update`, `uninstall`:
 всё, что зовёт Windows API, стоит под `cfg(windows)`, поэтому `cargo test` на Linux его не видит,
 а clippy под `x86_64-pc-windows-gnu` его компилирует и проверяет, но не запускает. Тот же образ
 с mingw, что и для 4b.
@@ -159,6 +160,42 @@ linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo clippy --target x86_
 CI: job `windows` в `pr-checks.yml`, раннеры `windows-2025` и `windows-11-arm`, из `windows/crates`:
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace --no-fail-fast`. Что проверяет каждый тест — `modules/windows.md`.
+
+### 4d. Windows app and installer (`windows/app`, `windows/installer`)
+
+Собирается только на Windows: `bash windows/scripts/build.sh 9.9.9 <x86_64|aarch64>` в Git Bash
+(Rust, .NET SDK из `windows/app/global.json`, Inno Setup 6 по пути `ISCC` или умолчанию
+`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`). Живой Windows-машины у проекта нет, поэтому
+глаза заменяет CI: job `windows-app` в `pr-checks.yml` (`windows-2025`, `windows-11-arm`):
+
+1. **Build** — `windows/scripts/build.sh 9.9.9 "$ARCH"`: мост, иконки, `dotnet publish`, `setup.exe`.
+2. **Screenshots** — `windows/scripts/tests/screenshot.ps1 -Exe … -Flag <флаг> -Out screens/<имя>`
+   с флагами `--show-status`, `--show-status-sample` (образец паузы из `view::sample_status`),
+   `--show-settings`, `--show-settings-end` (низ окна настроек), `--show-update-sample`
+   (баннер и окно по `update::sample_update`); файл на окно, артефакт `windows-screens-<arch>`
+   (выгружается и при падении).
+3. **Installer contract** — `windows/scripts/tests/installer-contract.ps1 -Setup …`, `timeout-minutes: 15`:
+   тихая установка (файлы, ярлык в «Пуске», Weto запущен), установка поверх работающего
+   (новый pid — так выглядит обновление), тихое удаление (нет каталога программы, ярлыка,
+   `%APPDATA%\weto`, `%LOCALAPPDATA%\weto`, значения `Run`, записи `com.weto.ipinfo`).
+   Тот же контракт идёт в job `windows` у `release.yml`.
+
+Генераторы: job `generators` проверяет, что `gen-tokens --out-xaml-dir windows/app/Weto/Themes`
+ничего не меняет — правка `Tokens.*.xaml` руками валит CI.
+
+Ловушки, каждая уже стоила прогона:
+- **`.ps1` — UTF-8 с BOM.** Windows PowerShell 5.1 читает файл без BOM в ANSI-кодировке, и байт
+  `0x82` из буквы «т» становится кавычкой — скрипт ломается на разборе.
+- **`Start-Process -Wait` в PS 5.1 ждёт всё дерево процессов**, а установщик в конце запускает
+  Weto, который не выходит, — контракт висел до таймаута раннера. Ждать `-PassThru` + `WaitForExit()`.
+  Деинсталлятор перезапускает себя из временного каталога и выходит сразу: конец удаления —
+  исчезнувший каталог программы, а не код возврата.
+- **Скриншоты — `PrintWindow` по окнам процесса, не снимок экрана:** на `windows-11-arm` экран
+  закрыт OOBE (экран первичной настройки), и снимок показывал только его.
+- **Скриншоты — в Windows PowerShell 5.1, не pwsh:** `Add-Type` на `System.Drawing` в pwsh 7
+  вытесняет стандартные ссылки.
+- **В Git Bash ключи ISCC `/D…` требуют `MSYS_NO_PATHCONV=1`**, иначе MSYS переписывает их в пути.
+- Зависание установщика (окно, которого никто не закроет) без `timeout-minutes` держало бы раннер шесть часов.
 
 ### 5. Why these cannot be unit tests
 

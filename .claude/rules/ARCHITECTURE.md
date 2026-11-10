@@ -1,10 +1,9 @@
 # Архитектура weto
 
-Один продукт в двух реализациях: macOS (Swift) и Linux (Rust). Кода они не делят —
-только данные: токены дизайна, исходники иконки и голден-фикстуры политики.
-Готовится Windows-версия: её охрана — пять Rust-крейтов Linux (`weto-core`, `weto-config`,
-`weto-sys`, `weto-guard`, `weto-update`), которые уже собираются и тестируются под Windows;
-адаптеры к Windows API и мост к интерфейсу на C# — в `windows/crates`, самого приложения пока нет.
+Один продукт в трёх реализациях: macOS (Swift), Linux (Rust) и Windows (C# поверх Rust).
+macOS и Linux кода не делят — только данные: токены дизайна, исходники иконки и голден-фикстуры
+политики. Охрана Windows — пять Rust-крейтов Linux (`weto-core`, `weto-config`, `weto-sys`,
+`weto-guard`, `weto-update`) плюс адаптеры к Windows API и мост в `windows/crates`.
 
 ## Стек macOS
 - Swift 5.9 (tools-version 5.9), Swift Package Manager, target macOS 26.0+ (Apple Silicon).
@@ -41,6 +40,14 @@
 - Пять общих крейтов собираются и под Windows: Linux-адаптеры и их зависимости
   (`rustix`, `libc`, `zbus`) — под `cfg(target_os = "linux")`, трейты границ общие.
   Что переносимо — [linux-guard](../docs/modules/linux-guard.md#shared-with-windows).
+
+## Стек Windows
+- C# WinUI 3: .NET 10, Windows App SDK 2.6.5, неупакованное self-contained приложение, x64 и ARM64.
+  Трей — `Shell_NotifyIcon`, уведомления — `AppNotificationManager`.
+- Логика и состояние — `weto_ffi.dll` (Rust) в том же процессе, C ABI на JSON; C# только рисует.
+- Установка и обновление — установщик Inno Setup 6 без прав администратора
+  (`%LOCALAPPDATA%\Programs\weto`); приложение скачивает новый `setup.exe` из GitHub Releases
+  и запускает его тихо. Собирается только на Windows (CI-раннеры), живой машины у проекта нет.
 
 ## Персистентность
 Доменной БД нет, правило UUID-PK неприменимо.
@@ -151,6 +158,8 @@ linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo clippy --target x86_
 linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/, weto (musl) — cli/*.tar.gz
 bash shared/cli/tests/install-contract.sh            # контракт установщика терминальной версии
 linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабочим столом для проверки глазами
+
+bash windows/scripts/build.sh 0.1.0 x86_64           # только на Windows (Git Bash): setup.exe → windows/app/out/release_build/
 ```
 Дисплей тестам поднимаем свой: `xvfb-run` в контейнере умеет повиснуть — стартует Xvfb
 и не запускает команду вовсе.
@@ -167,7 +176,11 @@ linux/            приложение под Linux (Cargo workspace)
 │                 weto-tray, weto-update, weto-app, weto-cli, wetod
 ├── scripts/      dev.sh (контейнер), build.sh, install.sh, desktop-machine.sh, tests/
 └── docs/         ручные проверки и сценарий живого рабочего стола
-windows/crates/   Windows (свой Cargo workspace): weto-sys-windows, weto-ffi; охрана — path на linux/crates
+windows/          приложение под Windows
+├── app/          Weto — C# WinUI 3; Themes/Tokens.*.xaml генерируются
+├── crates/       свой Cargo workspace: weto-sys-windows, weto-ffi, weto-icons; охрана — path на linux/crates
+├── installer/    weto.iss — Inno Setup
+└── scripts/      build.sh, tests/ (скриншоты, контракт установщика)
 shared/           то, что обязано совпадать: исходники иконки, токены дизайна,
                   голден-фикстуры политики, генератор токенов, установщик `weto` (cli/)
 docs/             канон дизайн-системы — общий, по платформам не делится
@@ -210,8 +223,9 @@ docs/             канон дизайн-системы — общий, по п
   `run`, `status.json`, сервис systemd/launchd, охрана всей машины от root, самообновление;
   VPN можно задать туннелем. Установка одной командой (`shared/cli/install.sh`) —
   [runbooks/install-weto-cli-on-a-server](../docs/runbooks/install-weto-cli-on-a-server.md).
-- **Windows** ([docs](../docs/modules/windows.md)) — `windows/crates`: адаптеры к Windows API
-  за трейтами `weto-sys` (`weto-sys-windows`) и C ABI на JSON для приложения на C# (`weto-ffi`).
+- **Windows** ([docs](../docs/modules/windows.md)) — адаптеры к Windows API за трейтами `weto-sys`
+  (`weto-sys-windows`), мост C ABI на JSON (`weto-ffi`), приложение C# WinUI 3 (`windows/app`),
+  установщик и удаление (`windows/installer`), самообновление через `weto_update::updates`.
 
 Потоки данных — [overview](../docs/overview.md). Процедуры — [runbooks](../docs/runbooks/).
 

@@ -62,13 +62,14 @@ The five shared crates build for Windows; everything that talks to Linux is unde
 - **Portable:** every boundary trait, `geo_probe`, `background`, `KernelRouteProbe`,
   `KernelNetworkReader::with_sources`, `target_resolver` (Linux semantics, but it compiles;
   `locate_with_launch_paths` checks `Path::is_absolute`, not a leading `/`), `NoTerminalModes`,
-  `NoForegroundReturn`; in `weto-update` — checker, policy, scheduler, `ALLOWED_HOSTS` /
-  `is_trusted_url`; in `weto-config` — `Paths::from_windows_env`.
+  `NoForegroundReturn`; in `weto-update` — checker (`with_asset_suffix` for the Windows
+  `-<arch>-windows-setup.exe`), policy, scheduler, `updates` (`Updates`, `Progress`,
+  `UpdateInstalling`, footer hints), `installer::download`, `ALLOWED_HOSTS` / `is_trusted_url`; in `weto-config` — `Paths::from_windows_env`.
 - **Linux only:** `ProcRegistry`, `ProcessSignaler`, `FileSecretStore`, `NetlinkEventSource`,
   `DesktopNotifier`, `session_bus`, `DesktopTerminalActivator`, `TerminalModeKeeper`,
   `MultiplexerForegroundReturner`, `KernelInterfaces`, `KernelNetworkReader::new`/`with_probe`;
   `GuardController::new`, `runtime::system_controller`, `os_version`; `weto-update`'s `layout`,
-  `rollback` and `Installer` (tar.zst + `current` symlink). Linux-only integration tests carry
+  `rollback` and `Installer` (tar.zst + `current` symlink) with its `UpdateInstalling` impl. Linux-only integration tests carry
   `#![cfg(target_os = "linux")]`.
 - **No default target resolver off Linux, on purpose:** a guard without real resolution would
   match no target and still look working, so the caller must pass one to
@@ -447,6 +448,14 @@ fixtures. A silent outcome hides both the window and the banner; auto-install ru
 a dialog; the restart is an `exec` over itself, by which point the launch symlink already
 points at the new version.
 
+- **The mechanism is shared with Windows.** `Updates`, `Progress` and the footer hints
+  (`footer_hint`, `footer_shows_update`) live in `weto_update::updates`, behind the trait
+  `UpdateInstalling` (`install(version, url)`, `progress()`); moved there from `weto-app`
+  without behaviour changes. Linux plugs in `Installer`, Windows — `SetupInstaller`
+  (`modules/windows.md`, "Self-update"). `weto-app/src/update.rs` keeps only the GTK glue:
+  thread-local registration, `linux_updates`, `guard_the_launch` (rollback marker), `restart`,
+  `present_requested`, repository constants and `current_version` (`WETO_VERSION`).
+
 - **Rollback is built in:** a start attempt is marked before any window is created and
   cleared after five seconds of life. Two failures in a row mean the version does not
   start, and the app returns to the previous one by itself. macOS needs no such safety net —
@@ -545,7 +554,7 @@ and that `Arc::strong_count` of the state returns to its baseline after closing.
 |---|---|
 | `weto-ui` | design system on plain GTK4; two generated stylesheets, one per theme |
 | `weto-tray` | StatusNotifierItem icon rendered from the shared `.icon` bundle |
-| `weto-update` | release check, show policy, install into `$HOME`, rollback (install layout and rollback are Linux only) |
+| `weto-update` | release check, show policy, app-side `Updates` behind `UpdateInstalling` (shared with Windows), install into `$HOME`, rollback (install layout, rollback and `Installer` are Linux only) |
 | `weto-app` | `weto` binary: status window, settings, update banner and window |
 | `weto-cli` | `weto-cli` cargo binary, shipped as `weto`: the terminal version, no GTK/D-Bus, static musl — `modules/weto-cli.md` |
 

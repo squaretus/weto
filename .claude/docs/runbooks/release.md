@@ -1,8 +1,8 @@
 # Release
 
-Cutting a weto version: a macOS PKG, two Linux app tarballs, three terminal-version archives,
-`SHA256SUMS` and `install.sh`, published as one GitHub Release that feeds auto-update of the
-apps and of the terminal version on both platforms.
+Cutting a weto version: a macOS PKG, two Linux app tarballs, two Windows installers, three
+terminal-version archives, `SHA256SUMS` and `install.sh`, published as one GitHub Release that
+feeds auto-update of the apps on all three platforms and of the terminal version.
 
 ## Steps
 
@@ -40,13 +40,17 @@ apps and of the terminal version on both platforms.
      `release_build/cli/*.tar.gz`;
    - `linux` jobs (x86_64, aarch64): lint, tests, `scripts/build.sh "$VERSION"` (app `.tar.zst` +
      static CLI `.tar.gz`), install contract, `shared/cli/tests/install-contract.sh`;
-   - `publish`: sparse checkout of `shared/cli/install.sh`, copies every `*.pkg`, `*.tar.zst`,
-     `*.tar.gz` **flat** into `release/`, adds `install.sh`, writes `SHA256SUMS` over all of them
-     (`sha256sum -- *`), and publishes `release/*` via `softprops/action-gh-release@v2`
+   - `windows` jobs (`windows-2025` x86_64, `windows-11-arm` aarch64): `cargo test` in
+     `windows/crates`, `windows/scripts/build.sh "$VERSION" "$ARCH"`, installer contract
+     (`installer-contract.ps1`, 15 min cap); uploads `release_build/*-windows-setup.exe`;
+   - `publish` (`needs: [version, macos, linux, windows]`): sparse checkout of
+     `shared/cli/install.sh`, copies every `*.pkg`, `*.tar.zst`, `*.tar.gz`, `*-windows-setup.exe` **flat** into
+     `release/`, adds `install.sh`, writes `SHA256SUMS` over all of them (`sha256sum -- *`), and publishes `release/*` via `softprops/action-gh-release@v2`
      (`generate_release_notes: true`, name `weto <VERSION>`).
 
 6. **Verify.** `GET /repos/squaretus/weto/releases/latest` returns the new `tag_name` and the
    assets: `Weto-<v>.pkg`, `weto-<v>-{x86_64,aarch64}-linux.tar.zst`,
+   `weto-<v>-{x86_64,aarch64}-windows-setup.exe`,
    `weto-cli-<v>-linux-{x86_64,aarch64}.tar.gz`, `weto-cli-<v>-macos-arm64.tar.gz`,
    `SHA256SUMS`, `install.sh`. Then on a server:
    `curl -fsSL https://github.com/squaretus/weto/releases/latest/download/install.sh | sudo bash`
@@ -115,7 +119,7 @@ second job overwrite the first and ship one archive instead of two.
 Locally the same script does it: `linux/scripts/build.sh <X.Y.Z>`, which names the archive
 from `uname -m`.
 
-**Publication waits for all three jobs.** A half release would mean auto-update on the
+**Publication waits for every platform job** (macOS, Linux, Windows). A half release would mean auto-update on the
 other platform sees a release with no asset for it — and by contract such a release is not
 a find at all, so the app would go quiet instead of updating.
 
@@ -125,6 +129,25 @@ builder. Nothing hardcodes an architecture on either side; check both if either 
 
 **Not verified on real arm64 hardware.** The artifact builds and its install contract
 passes, but nobody has watched the tray or the windows on an arm64 desktop.
+
+## Windows artifacts
+
+Built natively on `windows-2025` and `windows-11-arm`, no cross-compilation: `windows/scripts/build.sh
+<X.Y.Z> <arch>` (Git Bash) produces `windows/app/out/release_build/weto-<X.Y.Z>-<arch>-windows-setup.exe`,
+uploaded as artifact `windows-<arch>`. The version reaches the app only through `WETO_VERSION`
+at the bridge build (and `-p:Version` for the .exe); nothing tracked is edited.
+
+- **The name is a contract** of `weto.iss` (`OutputBaseFilename`), `build.sh`, `release.yml` and
+  `weto-ffi/src/update.rs` (`asset_suffix`, `-<std::env::consts::ARCH>-windows-setup.exe`) — change
+  one, change all four. It ends in neither `.pkg` nor `-linux.tar.zst`, so other updaters ignore it.
+- **The installer is the update.** The app downloads it, runs it with `/VERYSILENT
+  /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS` and quits; the installer waits for the
+  instance mutex and starts the new version. The `AppId` in `weto.iss` must never change, or an
+  update installs a second copy next to the first.
+- No signature: neither `setup.exe` nor `Weto.exe` is signed. Download protection is the same
+  https + GitHub host list as on Linux.
+- **Not verified on a real Windows desktop.** CI screenshots (`windows-screens-*` on PRs) and the
+  installer contract are the only evidence; see `runbooks/tests.md`, 4d.
 
 ## Terminal version assets
 
