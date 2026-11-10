@@ -17,6 +17,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use weto_config::settings::{Settings, Target};
+use weto_core::path_text::is_absolute;
 use weto_core::process::{TargetKind, TargetRule};
 use weto_sys::target_resolver::{locate_with_launch_paths, TargetResolving};
 
@@ -211,7 +212,7 @@ impl RuleCache {
             TargetKind::Binary => &mut rule.other_kind_paths,
         };
         scripts.retain(|path| {
-            !path.starts_with('/') || self.resolver.kind_of(path) != Some(TargetKind::Binary)
+            !is_absolute(path) || self.resolver.kind_of(path) != Some(TargetKind::Binary)
         });
     }
 }

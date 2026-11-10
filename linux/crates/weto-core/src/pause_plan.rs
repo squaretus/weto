@@ -234,10 +234,7 @@ pub fn shell_holding_terminal<'a>(
 }
 
 fn is_shell(process: &ProcessSnapshot) -> bool {
-    let Some(name) = process.executable_path.rsplit('/').next() else {
-        return false;
-    };
-    SHELL_NAMES.contains(&name)
+    SHELL_NAMES.contains(&crate::path_text::file_name(&process.executable_path))
 }
 
 #[cfg(test)]

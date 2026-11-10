@@ -329,8 +329,7 @@ pub fn target_description(entry: &str, kind: TargetKind, found: Option<&str>) ->
 /// каталога (`~/.local/share/claude/versions/2.1.241`) последний сегмент —
 /// номер версии, и цель подписывалась бы им.
 pub fn target_fallback_name(entry: &str) -> String {
-    let entry = entry.trim_end_matches('/');
-    entry.rsplit('/').next().unwrap_or(entry).to_string()
+    crate::path_text::file_name(entry).to_string()
 }
 
 #[cfg(test)]

@@ -1623,12 +1623,7 @@ impl GuardController {
                     // не находится — тогда именем служит сам бинарник, и это честнее
                     // пустой строки.
                     target_name: names.get(&entry.pid).cloned().unwrap_or_else(|| {
-                        entry
-                            .executable_path
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or_default()
-                            .to_string()
+                        weto_core::path_text::file_name(&entry.executable_path).to_string()
                     }),
                     target_entry: entry
                         .target_entry
