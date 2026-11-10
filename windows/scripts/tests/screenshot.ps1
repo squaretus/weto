@@ -4,12 +4,15 @@
 # чужое (на windows-11-arm поверх рабочего стола висит экран первичной
 # настройки Windows, и снимок экрана показывал только его).
 #   pwsh -File screenshot.ps1 -Exe out\x86_64\Weto.exe -Flag --show-status -Out screens\status
+# С -Attach снимает уже запущенные процессы (диагностика зависшего шага):
+#   screenshot.ps1 -Attach 1234,5678 -Out screens\stuck
 # Файлы: <Out>-1.png, <Out>-2.png … — по окну на файл.
 param(
-    [Parameter(Mandatory)] [string] $Exe,
-    [Parameter(Mandatory)] [string] $Flag,
+    [string] $Exe,
+    [string] $Flag,
     [Parameter(Mandatory)] [string] $Out,
-    [int] $Wait = 15
+    [int] $Wait = 15,
+    [uint32[]] $Attach
 )
 $ErrorActionPreference = 'Stop'
 
@@ -67,6 +70,15 @@ public static class WindowShot
     }
 }
 '@
+
+if ($Attach) {
+    $count = 0
+    foreach ($id in $Attach) {
+        $count += [WindowShot]::Capture($id, "$Out-$id")
+    }
+    Write-Output "снято окон: $count → $Out-*.png"
+    return
+}
 
 $process = Start-Process -FilePath $Exe -ArgumentList $Flag -PassThru
 Start-Sleep -Seconds $Wait

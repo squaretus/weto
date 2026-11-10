@@ -32,10 +32,24 @@ function Install {
     if ($run.ExitCode -ne 0) { Fail "установщик вернул $($run.ExitCode)" }
 }
 
+# Зависший шаг объясняет себя: список процессов Weto и установщика и снимки
+# их окон (диалог со стоящими, сообщение Inno) — в screens/stuck-*.png.
+function Describe-Stuck {
+    $suspects = Get-Process | Where-Object { $_.Name -match '^(Weto|unins\d+|_iu\d+|.*setup.*|is-.*)$' }
+    $suspects | Format-Table Id, Name, Path -AutoSize | Out-String | Write-Output
+    if ($suspects) {
+        New-Item -ItemType Directory -Force screens | Out-Null
+        & (Join-Path $PSScriptRoot 'screenshot.ps1') -Attach ([uint32[]]$suspects.Id) -Out screens/stuck
+    }
+}
+
 function Wait-Until([scriptblock] $done, [string] $what, [int] $seconds = 60) {
     $deadline = (Get-Date).AddSeconds($seconds)
     while (-not (& $done)) {
-        if ((Get-Date) -gt $deadline) { Fail "не дождались: $what" }
+        if ((Get-Date) -gt $deadline) {
+            Describe-Stuck
+            Fail "не дождались: $what"
+        }
         Start-Sleep -Milliseconds 500
     }
 }
