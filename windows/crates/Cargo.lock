@@ -1050,6 +1050,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "weto-ffi"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "weto-config",
+ "weto-core",
+ "weto-guard",
+ "weto-sys",
+ "weto-sys-windows",
+]
+
+[[package]]
+name = "weto-guard"
+version = "0.0.0"
+dependencies = [
+ "weto-config",
+ "weto-core",
+ "weto-sys",
+]
+
+[[package]]
 name = "weto-sys"
 version = "0.0.0"
 dependencies = [
