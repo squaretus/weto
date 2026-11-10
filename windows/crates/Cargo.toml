@@ -6,7 +6,7 @@
 # CI и документы Linux, поэтому крейты подключаются path-зависимостями.
 [workspace]
 resolver = "2"
-members = ["weto-sys-windows", "weto-ffi"]
+members = ["weto-sys-windows", "weto-ffi", "weto-icons"]
 
 [workspace.package]
 edition = "2021"
