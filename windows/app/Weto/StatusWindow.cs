@@ -18,6 +18,7 @@ namespace Weto;
 public sealed class StatusWindow : Window
 {
     private readonly StackPanel _panel;
+    private readonly Grid _root;
     private StatusView? _shown;
 
     public bool IsOpen { get; private set; }
@@ -29,17 +30,16 @@ public sealed class StatusWindow : Window
         _panel.Width = Number("PopupWidth");
         // Сверху, а не на всю высоту: тогда фактическая высота панели — её
         // естественная высота, и окно подгоняется под неё после раскладки.
-        // Заранее посчитанная через Measure высота выходила больше настоящей,
-        // и под содержимым оставалась пустая полоса.
         _panel.VerticalAlignment = VerticalAlignment.Top;
-        _panel.SizeChanged += (_, _) =>
-        {
-            if (IsOpen)
-            {
-                Place();
-            }
-        };
-        Content = _panel;
+        // Корень — вся клиентская область. Он нужен, чтобы видеть, сколько места
+        // дала система на самом деле: у окна без заголовка ResizeClient считает
+        // внешний размер так, будто заголовок есть, и под панелью оставалась
+        // полоса его высоты.
+        _root = new Grid { Background = Brush("Shell") };
+        _root.Children.Add(_panel);
+        _panel.SizeChanged += (_, _) => FitIfOpen();
+        _root.SizeChanged += (_, _) => FitIfOpen();
+        Content = _root;
 
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
@@ -108,6 +108,7 @@ public sealed class StatusWindow : Window
     public void Rebuild()
     {
         _panel.Background = Brush("Shell");
+        _root.Background = Brush("Shell");
         if (_shown is not null)
         {
             Build(_shown);
@@ -199,6 +200,14 @@ public sealed class StatusWindow : Window
         System.Text.Json.JsonSerializer.Serialize(left, BridgeJson.Default.StatusView)
         == System.Text.Json.JsonSerializer.Serialize(right, BridgeJson.Default.StatusView);
 
+    private void FitIfOpen()
+    {
+        if (IsOpen)
+        {
+            Place();
+        }
+    }
+
     /// <summary>Первая прикидка до раскладки — дальше окно уточняет SizeChanged.</summary>
     private double MeasuredHeight()
     {
@@ -213,23 +222,35 @@ public sealed class StatusWindow : Window
     private void Place()
     {
         var scale = _panel.XamlRoot?.RasterizationScale ?? 1.0;
-        var natural = _panel.ActualHeight > 0
-            ? _panel.ActualHeight
-            : MeasuredHeight();
-        var width = (int)Math.Ceiling(_panel.Width * scale);
-        var height = (int)Math.Ceiling(natural * scale);
-        if (AppWindow.ClientSize.Width == width && AppWindow.ClientSize.Height == height)
+        var natural = _panel.ActualHeight > 0 ? _panel.ActualHeight : MeasuredHeight();
+        if (_root.ActualHeight > 0)
         {
-            return;
+            // Подгонка по факту: внешний размер меняется ровно на разницу между
+            // тем, что дала система, и тем, что нужно панели. Сходится за шаг,
+            // а повторный SizeChanged с нулевой разницей ничего не делает.
+            var extraWidth = (int)Math.Round((_root.ActualWidth - _panel.Width) * scale);
+            var extraHeight = (int)Math.Round((_root.ActualHeight - natural) * scale);
+            if (extraWidth != 0 || extraHeight != 0)
+            {
+                var size = AppWindow.Size;
+                AppWindow.Resize(new Windows.Graphics.SizeInt32(size.Width - extraWidth, size.Height - extraHeight));
+            }
         }
-        // Размер — клиентской области: рамка окна в него не входит, и при
-        // MoveAndResize по внешнему размеру низ попапа обрезался.
-        AppWindow.ResizeClient(new Windows.Graphics.SizeInt32(width, height));
+        else
+        {
+            AppWindow.ResizeClient(new Windows.Graphics.SizeInt32(
+                (int)Math.Ceiling(_panel.Width * scale),
+                (int)Math.Ceiling(natural * scale)));
+        }
         var outer = AppWindow.Size;
         var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
         var margin = (int)(Number("Space4") * scale);
-        AppWindow.Move(new Windows.Graphics.PointInt32(
+        var position = new Windows.Graphics.PointInt32(
             area.X + area.Width - outer.Width - margin,
-            area.Y + area.Height - outer.Height - margin));
+            area.Y + area.Height - outer.Height - margin);
+        if (AppWindow.Position.X != position.X || AppWindow.Position.Y != position.Y)
+        {
+            AppWindow.Move(position);
+        }
     }
 }
