@@ -276,7 +276,13 @@ fn is_interpreter(process: &ProcessSnapshot, arguments: &[String]) -> bool {
         // `node.exe` на Windows — тот же node.
         let name = crate::path_text::program_stem(path);
         let bare = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-');
-        INTERPRETER_NAMES.contains(&bare) || crate::pause_plan::SHELL_NAMES.contains(&bare)
+        // Регистр на Windows не значим и в имени программы: `NODE.EXE` — тот же node.
+        let known = |names: &[&str]| {
+            names
+                .iter()
+                .any(|known| *known == bare || (cfg!(windows) && known.eq_ignore_ascii_case(bare)))
+        };
+        known(INTERPRETER_NAMES) || known(crate::pause_plan::SHELL_NAMES)
     };
     is_known(&process.executable_path) || arguments.first().is_some_and(|zero| is_known(zero))
 }

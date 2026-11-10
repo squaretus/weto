@@ -28,6 +28,7 @@ public sealed class SettingsWindow : Window
     private readonly Dictionary<string, string> _errors = new();
     private readonly Dictionary<string, TextBlock> _counts = new(StringComparer.OrdinalIgnoreCase);
     private string? _tokenError;
+    private TextBlock? _tokenErrorText;
     private string? _maintenanceError;
     private ToggleSwitch? _autoInstall;
     private bool _syncing;
@@ -38,7 +39,9 @@ public sealed class SettingsWindow : Window
     {
         Title = "Weto — настройки";
         Content = _scroll;
-        var scale = 1.0;
+        // Токены — в эффективных пикселях, а Resize ждёт физических: на масштабе
+        // 150 % окно выходило в полтора раза меньше задуманного.
+        var scale = GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0;
         AppWindow.Resize(new Windows.Graphics.SizeInt32(
             (int)(Number("WindowWidth") * scale),
             (int)(Number("WindowHeight") * scale)));
@@ -285,10 +288,11 @@ public sealed class SettingsWindow : Window
         }
 
         rows.Add(FieldRow(LabelWithHint("Токен ipinfo", settings.Hints.Token), TokenField(settings)));
-        if (_tokenError is { } tokenError)
-        {
-            rows.Add(WithoutDivider(Text(tokenError, "Caption", "Red", wrap: true)));
-        }
+        // Строка отказа есть всегда и меняется на месте: пересборка карточки
+        // посреди ввода отняла бы у поля фокус, и отказ не был виден до неё.
+        _tokenErrorText = WithoutDivider(Text(_tokenError ?? "", "Caption", "Red", wrap: true));
+        ShowTokenError();
+        rows.Add(_tokenErrorText);
 
         var choices = new List<(ulong, string)>();
         foreach (var choice in settings.PauseCeilings)
@@ -310,7 +314,6 @@ public sealed class SettingsWindow : Window
     private TextBox TokenField(SettingsView settings)
     {
         var field = Field("Ключ ipinfo.io");
-        var stored = "";
         var replacing = false;
         void Show(string text)
         {
@@ -319,35 +322,30 @@ public sealed class SettingsWindow : Window
             replacing = false;
         }
         Show(settings.TokenMask);
-        field.GotFocus += (_, _) =>
-        {
-            stored = App.Current.Bridge.Token();
-            Show(stored);
-        };
+        field.GotFocus += (_, _) => Show(App.Current.Bridge.Token());
         field.LostFocus += (_, _) => Show(App.Current.Bridge.Settings().TokenMask);
         field.TextChanged += (_, _) =>
         {
-            if (replacing || field.Text.Contains('\u2022'))
+            if (replacing)
             {
                 return;
             }
-            var value = field.Text.Trim();
-            if (value == stored)
-            {
-                return;
-            }
-            var result = App.Current.Bridge.Command("setToken", new Dictionary<string, object?> { ["token"] = value });
-            if (result.Ok)
-            {
-                stored = value;
-                _tokenError = null;
-            }
-            else
-            {
-                _tokenError = result.Error;
-            }
+            // Текст поля как есть: что из него сохранять — маска, показ
+            // записанного или правка, — решает мост (presentation::token_to_save).
+            var result = App.Current.Bridge.Command("setToken", new Dictionary<string, object?> { ["token"] = field.Text });
+            _tokenError = result.Ok ? null : result.Error;
+            ShowTokenError();
         };
         return field;
+    }
+
+    private void ShowTokenError()
+    {
+        if (_tokenErrorText is { } text)
+        {
+            text.Text = _tokenError ?? "";
+            text.Visibility = _tokenError is null ? Visibility.Collapsed : Visibility.Visible;
+        }
     }
 
     // --- Списки геоправил ------------------------------------------------------
@@ -402,7 +400,9 @@ public sealed class SettingsWindow : Window
         var autostart = Toggle(settings.Autostart);
         autostart.Toggled += (_, _) =>
             Run("setAutostart", new Dictionary<string, object?> { ["enabled"] = autostart.IsOn }, "autostart");
-        _autoInstall = Toggle(App.Current.Bridge.Update().AutoInstall);
+        // Значение — из последнего такта, а не новым запросом экрана обновления:
+        // тот забирает просьбу открыть окно обновления, и окно бы не открылось.
+        _autoInstall = Toggle(App.Current.LastUpdate?.AutoInstall ?? false);
         var autoInstall = _autoInstall;
         autoInstall.Toggled += (_, _) =>
         {
@@ -663,4 +663,7 @@ public sealed class SettingsWindow : Window
 
     private static T WithoutDividerIf<T>(bool condition, T row)
         where T : FrameworkElement => condition ? WithoutDivider(row) : row;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(nint window);
 }

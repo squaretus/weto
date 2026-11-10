@@ -44,16 +44,20 @@ use crate::view::{
     journal_view, settings_view, status_view, IconRef, JournalView, SettingsView, StatusView,
 };
 
-/// Охрана держит цели: пауза, запрет запуска или стоящие по учёту. Пока так,
-/// установщик обновления не запускается — его начало это штатный выход,
-/// а выход продолжает цели и снимает запрет на всё время установки.
+/// Охрана держит цели: пауза или запрет запуска. Пока так, установщик
+/// обновления не запускается — его начало это штатный выход, а выход
+/// продолжает цели и снимает запрет на всё время установки.
+///
+/// Только по фазе, а не по стоящим в снимке: вне паузы там остаются лишь
+/// записи, которые досылки SIGCONT поднять не смогли (`resumeRetryLimit`),
+/// и выход продолжает их так же, как любой другой. Держать установку ради
+/// них значило бы ждать вечно — без потолка и без отмены.
 fn guard_holds_targets(controller: Arc<GuardController>) -> impl Fn() -> bool + Send + Sync {
     move || {
-        let snapshot = controller.snapshot();
         matches!(
-            snapshot.phase,
+            controller.snapshot().phase,
             GuardPhase::Paused { .. } | GuardPhase::Danger(_)
-        ) || !snapshot.paused.is_empty()
+        )
     }
 }
 
@@ -215,11 +219,16 @@ impl WindowsApp {
                 self.controller.probe_now();
             }
             Command::SetToken { token } => {
-                let token = token.trim();
-                if token.is_empty() {
-                    self.secrets.delete().map_err(|e| e.to_string())?;
-                } else {
-                    self.secrets.save(token).map_err(|e| e.to_string())?;
+                // Текст поля как есть: маска, её обломок и показ записанного
+                // токена при входе в поле — не ввод. Решает общий помощник,
+                // тот же, что у окна Linux.
+                let stored = self.token();
+                if let Some(token) = weto_core::presentation::token_to_save(&token, &stored) {
+                    if token.is_empty() {
+                        self.secrets.delete().map_err(|e| e.to_string())?;
+                    } else {
+                        self.secrets.save(&token).map_err(|e| e.to_string())?;
+                    }
                 }
             }
             Command::ClearToken => self.secrets.delete().map_err(|e| e.to_string())?,

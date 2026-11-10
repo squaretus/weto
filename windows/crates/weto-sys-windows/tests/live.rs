@@ -276,3 +276,87 @@ fn a_start_menu_shortcut_resolves_to_its_program() {
     assert_eq!(setting.display_name, "My ping");
     assert_eq!(setting.entry, entry);
 }
+
+/// npm-цель целиком: настоящий шим `cmd-shim`, настоящий node, разрешение
+/// записи в правило и совпадение с живым процессом. Шим передаёт node путь
+/// `"%dp0%\node_modules\…"`, а `%~dp0` уже кончается разделителем — в командной
+/// строке node оказывается `npm\\node_modules\…`, и правило с обычной записью
+/// пути не совпадало: цель `claude` из npm не охранялась, а юнит-тесты разбора
+/// шима этого не видели.
+#[test]
+fn an_npm_shim_target_matches_its_running_node_script() {
+    let base = std::env::temp_dir().join(format!("weto-npm-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+    // Длинное имя каталога: у раннера TEMP — короткое (`RUNNER~1`), а npm
+    // ставит шимы по длинному пути, и правило хранит длинный.
+    let npm = std::fs::canonicalize(&base).unwrap();
+    let npm = std::path::PathBuf::from(without_verbatim_prefix(&npm.to_string_lossy())).join("npm");
+    let script = npm.join(r"node_modules\@weto\tool\cli.js");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "setInterval(() => {}, 1000);\n").unwrap();
+    let shim = npm.join("tool.cmd");
+    std::fs::write(
+        &shim,
+        "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\n\
+         IF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\n\
+         endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@weto\\tool\\cli.js\" %*\r\n",
+    )
+    .unwrap();
+
+    let entry = shim.to_string_lossy().into_owned();
+    let located = WindowsTargetResolver
+        .locate(&entry)
+        .expect("шим не разрешился");
+    assert_eq!(located.kind, TargetKind::Script);
+    assert!(
+        same_path(&located.path, &script.to_string_lossy()),
+        "шим привёл к {}",
+        located.path
+    );
+
+    let mut shell = Command::new("cmd")
+        .args(["/c", &entry])
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("cmd не запустился");
+    let registry = NtProcessRegistry::default();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut matched = Vec::new();
+    let mut seen = String::new();
+    while Instant::now() < deadline && matched.is_empty() {
+        let snapshot = registry.snapshot();
+        let rule =
+            weto_core::process::TargetRule::new(&entry, "tool", located.kind, &located.path, &[]);
+        matched = weto_core::process::matches(&snapshot, &[rule])
+            .into_iter()
+            .filter(|process| {
+                snapshot.iter().any(|p| {
+                    p.pid == process.pid
+                        && weto_core::path_text::program_stem(&p.executable_path)
+                            .eq_ignore_ascii_case("node")
+                })
+            })
+            .collect();
+        seen = snapshot
+            .iter()
+            .filter(|p| {
+                weto_core::path_text::program_stem(&p.executable_path).eq_ignore_ascii_case("node")
+            })
+            .map(|p| format!("{:?}", p.arguments))
+            .collect::<Vec<_>>()
+            .join("; ");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &shell.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = shell.wait();
+
+    assert!(
+        !matched.is_empty(),
+        "node под шимом не совпал с правилом {}; процессы node: {seen}",
+        located.path
+    );
+}

@@ -44,12 +44,64 @@ pub fn is_absolute(path: &str) -> bool {
 /// Один ли это файл по записи пути. На Windows регистр не различается:
 /// файловая система его не различает, а путь процесса приходит в том регистре,
 /// каким его открыли (`c:\tools\Claude.EXE`). На Linux различается.
+///
+/// На Windows сравнивается и запись пути, а не только буквы: npm-шим `claude.cmd`
+/// передаёт node путь скрипта как `%~dp0\node_modules\…`, а `%~dp0` уже кончается
+/// разделителем, и node получает `npm\\node_modules\…`; шим PowerShell пишет
+/// `npm/node_modules/…`. Правило же хранит путь в обычной записи, и цель,
+/// поставленная npm, с ним не совпадала. Поэтому `/` и `\` равны, повторы
+/// разделителей и сегменты `.` не значат ничего, `..` снимает предыдущий сегмент.
 pub fn same_path(left: &str, right: &str) -> bool {
     if cfg!(windows) {
-        left.eq_ignore_ascii_case(right)
+        same_windows_path(left, right)
     } else {
         left == right
     }
+}
+
+fn same_windows_path(left: &str, right: &str) -> bool {
+    if left.eq_ignore_ascii_case(right) {
+        return true;
+    }
+    // Почти все сравнения — с чужими процессами: несовпавшее имя файла отсеивает
+    // их без разбора пути целиком.
+    if !same_letters(file_name(left), file_name(right)) {
+        return false;
+    }
+    let (left_unc, left) = windows_segments(left);
+    let (right_unc, right) = windows_segments(right);
+    left_unc == right_unc
+        && left.len() == right.len()
+        && left.iter().zip(&right).all(|(a, b)| same_letters(a, b))
+}
+
+/// Без учёта регистра и за пределами ASCII: `C:\Проекты` и `c:\проекты` — один каталог.
+fn same_letters(left: &str, right: &str) -> bool {
+    left.chars()
+        .flat_map(char::to_lowercase)
+        .eq(right.chars().flat_map(char::to_lowercase))
+}
+
+/// Сегменты пути без пустых и `.`, с разобранными `..`; признак UNC (`\\сервер\…`)
+/// отдельно — он, в отличие от повтора разделителей, значим. `..` в корне не уводит
+/// выше корня, как и у самой системы.
+fn windows_segments(path: &str) -> (bool, Vec<&str>) {
+    let unc = path.starts_with(r"\\") || path.starts_with("//");
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                // Диск (`C:`) остаётся: выше корня подняться нельзя.
+                if segments.len() > 1 || segments.first().is_some_and(|first| !first.ends_with(':'))
+                {
+                    segments.pop();
+                }
+            }
+            _ => segments.push(segment),
+        }
+    }
+    (unc, segments)
 }
 
 #[cfg(test)]
@@ -72,6 +124,49 @@ mod tests {
         assert_eq!(program_stem("/usr/bin/python3.12"), "python3.12");
         assert_eq!(program_stem(".exe"), "");
         assert_eq!(program_stem("я.exe"), "я");
+    }
+
+    #[test]
+    fn a_windows_path_is_the_same_in_any_spelling() {
+        let rule = r"C:\Users\me\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js";
+        // claude.cmd: %~dp0 уже кончается разделителем.
+        assert!(same_windows_path(
+            rule,
+            r"C:\Users\me\AppData\Roaming\npm\\node_modules\@anthropic-ai\claude-code\cli.js"
+        ));
+        // claude.ps1 пишет прямые косые.
+        assert!(same_windows_path(
+            rule,
+            "C:/Users/me/AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/cli.js"
+        ));
+        // Старый шим уходит в каталог выше и обратно.
+        assert!(same_windows_path(
+            rule,
+            r"C:\Users\me\AppData\Roaming\npm\.\lib\..\node_modules\@anthropic-ai\claude-code\cli.js"
+        ));
+        assert!(same_windows_path(
+            r"c:\tools\Claude.EXE",
+            r"C:\Tools\claude.exe"
+        ));
+        assert!(same_windows_path(
+            r"C:\Проекты\Цель.exe",
+            r"c:\проекты\цель.EXE"
+        ));
+    }
+
+    #[test]
+    fn a_different_windows_path_stays_different() {
+        assert!(!same_windows_path(r"C:\tools\cli.js", r"C:\other\cli.js"));
+        assert!(!same_windows_path(r"C:\tools\cli.js", r"D:\tools\cli.js"));
+        assert!(!same_windows_path(r"C:\tools\cli.js", r"C:\tools\cli.json"));
+        assert!(!same_windows_path(r"C:\a\b\cli.js", r"C:\a\cli.js"));
+        // UNC — не то же, что путь от корня текущего диска.
+        assert!(!same_windows_path(
+            r"\\server\share\cli.js",
+            r"\server\share\cli.js"
+        ));
+        // Выше корня диска не подняться: `C:\..\x` — это `C:\x`, а не `x`.
+        assert!(same_windows_path(r"C:\..\tools\cli.js", r"C:\tools\cli.js"));
     }
 
     #[test]
