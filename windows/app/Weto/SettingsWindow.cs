@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Weto.Bridge;
+using Weto.Ui;
 using static Weto.Ui.Components;
 
 namespace Weto;
@@ -599,7 +600,6 @@ public sealed class SettingsWindow : Window
     /// </summary>
     private static Button AddButton(TextBox field, Action<string> add)
     {
-        Button? button = null;
         void Submit()
         {
             if (!string.IsNullOrWhiteSpace(field.Text))
@@ -607,7 +607,7 @@ public sealed class SettingsWindow : Window
                 add(field.Text.Trim());
             }
         }
-        button = PillButton("Добавить", ButtonKind.Primary, Submit);
+        var button = PillButton("Добавить", ButtonKind.Primary, Submit);
         button.IsEnabled = !string.IsNullOrWhiteSpace(field.Text);
         field.TextChanged += (_, _) => button.IsEnabled = !string.IsNullOrWhiteSpace(field.Text);
         field.KeyDown += (_, args) =>

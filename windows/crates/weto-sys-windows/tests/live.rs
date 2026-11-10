@@ -246,7 +246,9 @@ fn a_bare_system_command_is_found_by_path_and_pathext() {
 fn a_start_menu_shortcut_resolves_to_its_program() {
     let dir = std::env::temp_dir().join(format!("weto-shortcut-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let link = dir.join("Мой ping.lnk");
+    // Имя латиницей: WScript.Shell передаёт путь через кодовую страницу ANSI,
+    // и кириллица становится «???». Unicode-путь проверяет юнит-тест разбора.
+    let link = dir.join("My ping.lnk");
     let target = r"C:\Windows\System32\PING.EXE";
     let script = format!(
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath = '{}'; $s.Save()",
@@ -271,6 +273,6 @@ fn a_start_menu_shortcut_resolves_to_its_program() {
     assert_eq!(located.kind, TargetKind::Binary);
 
     let setting = weto_sys_windows::target_resolver::settings_target_now(&entry, None);
-    assert_eq!(setting.display_name, "Мой ping");
+    assert_eq!(setting.display_name, "My ping");
     assert_eq!(setting.entry, entry);
 }
