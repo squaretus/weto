@@ -332,6 +332,60 @@ pub fn target_fallback_name(entry: &str) -> String {
     crate::path_text::file_name(entry).to_string()
 }
 
+/// Диалог: заголовок, текст и подписи кнопок. Тексты диалогов удаления общие
+/// для платформ (macOS `MaintenanceCard`), поэтому живут здесь.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogText {
+    pub title: String,
+    pub message: String,
+    pub confirm: String,
+    pub cancel: String,
+}
+
+/// Подтверждение удаления.
+pub fn uninstall_confirmation() -> DialogText {
+    DialogText {
+        title: "Удалить Weto?".to_string(),
+        message: "Будут удалены приложение, автозапуск, настройки, журнал и токен ipinfo. \
+                  Действие необратимо."
+            .to_string(),
+        confirm: "Удалить".to_string(),
+        cancel: "Отмена".to_string(),
+    }
+}
+
+/// Кто остался стоять после выхода охраны, когда удаление уже решено: имена
+/// и pid (имя — из пути учёта: цель, снятую с охраны, по имени не найти).
+/// Второй исход — выход, а не «ничего не делать»: охрана к этому моменту
+/// остановлена необратимо, тумблера у неё нет.
+///
+/// Совет, как вернуть программы без Weto, зависит от системы: на Linux и macOS —
+/// `fg` в их терминале, на Windows job control нет, и приостановленный процесс
+/// возобновляет Монитор ресурсов. Остальное дословно общее.
+pub fn standing_after_uninstall(standing: &[(String, i32)]) -> DialogText {
+    let list = standing
+        .iter()
+        .map(|(path, pid)| format!("{} (pid {pid})", crate::path_text::file_name(path)))
+        .collect::<Vec<String>>()
+        .join(", ");
+    let advice = if cfg!(windows) {
+        "только через «Возобновить процесс» в Мониторе ресурсов"
+    } else {
+        "только командой fg в их терминале"
+    };
+    DialogText {
+        title: "Эти программы Weto поставил на паузу, и они ещё не продолжились:".to_string(),
+        message: format!(
+            "{list}\n\nОхрана уже остановлена и обратно не включится: Weto придётся \
+             запустить заново.\n\nЕсли удалить Weto сейчас, вернуть эти программы \
+             будет некому — {advice}. Если не удалять, \
+             их разберёт следующий запуск: учёт остановленных цел."
+        ),
+        confirm: "Удалить всё равно".to_string(),
+        cancel: "Не удалять и закрыть Weto".to_string(),
+    }
+}
+
 /// Текст уведомления: заголовок и тело.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationText {
@@ -370,6 +424,27 @@ pub fn backgrounded_notification(target_name: &str) -> NotificationText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Текст на Linux — дословно прежний, macOS-овский; имя — последний сегмент
+    /// пути любой из двух форм.
+    #[test]
+    fn the_standing_dialog_names_programs_and_keeps_the_shared_wording() {
+        let dialog = standing_after_uninstall(&[
+            ("/home/me/.local/bin/claude".to_string(), 4200),
+            (r"C:\tools\codex.exe".to_string(), 4300),
+        ]);
+
+        assert!(dialog
+            .message
+            .starts_with("claude (pid 4200), codex.exe (pid 4300)\n\n"));
+        assert_eq!(dialog.confirm, "Удалить всё равно");
+        assert_eq!(dialog.cancel, "Не удалять и закрыть Weto");
+        if !cfg!(windows) {
+            assert!(dialog
+                .message
+                .contains("только командой fg в их терминале. Если не удалять"));
+        }
+    }
 
     /// Путь Windows — тоже путь: подсказка «укажите полный путь» к нему
     /// не относится.

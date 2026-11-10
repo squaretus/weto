@@ -996,64 +996,59 @@ fn maintenance_card(window: &ApplicationWindow, state: Arc<AppState>) -> GtkBox 
         uninstall.connect_clicked(move |button| {
             let error = error.clone();
             let state = state.clone();
-            confirm(
-                button,
-                "Удалить Weto?",
-                "Будут удалены приложение, автозапуск, настройки, журнал и токен ipinfo. \
-                 Действие необратимо.",
-                "Удалить",
-                {
-                    let anchor = button.clone();
-                    move || {
-                        // Единственное место, где выход зовут руками: порядок
-                        // важен. Стоящие цели продолжаются раньше удаления —
-                        // вместе с учётом исчезает и последний, кто помнит, кому
-                        // должен SIGCONT, а воронка отработала бы уже после него.
-                        // Повтор безвреден: вызов идемпотентен, и второй раз
-                        // на выходе не находит в учёте ничего.
-                        state.shutdown();
+            let text = weto_core::presentation::uninstall_confirmation();
+            confirm(button, &text.title, &text.message, &text.confirm, {
+                let anchor = button.clone();
+                move || {
+                    // Единственное место, где выход зовут руками: порядок
+                    // важен. Стоящие цели продолжаются раньше удаления —
+                    // вместе с учётом исчезает и последний, кто помнит, кому
+                    // должен SIGCONT, а воронка отработала бы уже после него.
+                    // Повтор безвреден: вызов идемпотентен, и второй раз
+                    // на выходе не находит в учёте ничего.
+                    state.shutdown();
 
-                        // И только здесь обязательство исполняет наблюдение,
-                        // а не отправка: всюду ещё запись, которую выход
-                        // не разрешил, достаётся следующему запуску, а после
-                        // удаления его не будет вовсе. Не поднявшихся удаление
-                        // называет пользователю, а не сносит поверх них молча:
-                        // вернуть их будет уже некому.
-                        let anchor = anchor.clone();
+                    // И только здесь обязательство исполняет наблюдение,
+                    // а не отправка: всюду ещё запись, которую выход
+                    // не разрешил, достаётся следующему запуску, а после
+                    // удаления его не будет вовсе. Не поднявшихся удаление
+                    // называет пользователю, а не сносит поверх них молча:
+                    // вернуть их будет уже некому.
+                    let anchor = anchor.clone();
+                    let error = error.clone();
+                    confirm_resumed(state.clone(), move |standing| {
+                        if standing.is_empty() {
+                            remove_weto(&error);
+                            return;
+                        }
+
                         let error = error.clone();
-                        confirm_resumed(state.clone(), move |standing| {
-                            if standing.is_empty() {
-                                remove_weto(&error);
-                                return;
-                            }
-
-                            let error = error.clone();
-                            ask_two_ways(
-                                &anchor,
-                                "Эти программы Weto поставил на паузу, и они ещё не продолжились:",
-                                &standing_detail(&standing),
-                                "Удалить всё равно",
-                                "Не удалять и закрыть Weto",
-                                move || remove_weto(&error),
-                                || {
-                                    // Второй исход — выход, а не «ничего
-                                    // не делать». Охрана к этому моменту
-                                    // остановлена необратимо: ворота применения
-                                    // закрыты, фаза сброшена, а тумблера охраны
-                                    // в продукте нет. Прежняя «Отмена»
-                                    // оставляла в трее weto, который ничего
-                                    // не охраняет и молчит об этом, —
-                                    // на Linux ещё и надолго, потому что
-                                    // приложение держит себя само.
-                                    if let Some(app) = gtk4::gio::Application::default() {
-                                        app.quit();
-                                    }
-                                },
-                            );
-                        });
-                    }
-                },
-            );
+                        let text = standing_dialog(&standing);
+                        ask_two_ways(
+                            &anchor,
+                            &text.title,
+                            &text.message,
+                            &text.confirm,
+                            &text.cancel,
+                            move || remove_weto(&error),
+                            || {
+                                // Второй исход — выход, а не «ничего
+                                // не делать». Охрана к этому моменту
+                                // остановлена необратимо: ворота применения
+                                // закрыты, фаза сброшена, а тумблера охраны
+                                // в продукте нет. Прежняя «Отмена»
+                                // оставляла в трее weto, который ничего
+                                // не охраняет и молчит об этом, —
+                                // на Linux ещё и надолго, потому что
+                                // приложение держит себя само.
+                                if let Some(app) = gtk4::gio::Application::default() {
+                                    app.quit();
+                                }
+                            },
+                        );
+                    });
+                }
+            });
         });
     }
 
@@ -1090,40 +1085,17 @@ fn confirm_resumed(
     });
 }
 
-/// Пояснение к диалогу об оставшихся стоять. Дословно совпадает с macOS
-/// (`MaintenanceCard.askToUninstallAnyway`) — тексты и набор кнопок у диалогов
-/// общие для платформ.
-///
-/// Про остановленную охрану сказано прямо, и это не вежливость: к этому моменту
-/// выход уже случился, обратно охрана не включится, а тумблера у неё нет. Молчи
-/// диалог об этом, «не удалять» означало бы weto в трее, который ничего
-/// не сторожит, — и пользователь узнал бы об этом только по погибшей цели.
-fn standing_detail(standing: &[weto_config::stopped::StoppedProcess]) -> String {
-    format!(
-        "{}\n\nОхрана уже остановлена и обратно не включится: Weto придётся \
-         запустить заново.\n\nЕсли удалить Weto сейчас, вернуть эти программы \
-         будет некому — только командой fg в их терминале. Если не удалять, \
-         их разберёт следующий запуск: учёт остановленных цел.",
-        standing_list(standing)
-    )
-}
-
-/// Имена и pid тех, кто остался стоять, — одной строкой на диалог. Имя берётся
-/// из пути учёта: цель, снятая с охраны между делом, по имени не находится,
-/// а бинарник честнее пустой строки.
-fn standing_list(standing: &[weto_config::stopped::StoppedProcess]) -> String {
-    standing
+/// Диалог об оставшихся стоять — тексты общие для платформ
+/// (`weto_core::presentation::standing_after_uninstall`, дословно как macOS
+/// `MaintenanceCard.askToUninstallAnyway`).
+fn standing_dialog(
+    standing: &[weto_config::stopped::StoppedProcess],
+) -> weto_core::presentation::DialogText {
+    let entries: Vec<(String, i32)> = standing
         .iter()
-        .map(|entry| {
-            let name = entry
-                .executable_path
-                .rsplit('/')
-                .next()
-                .unwrap_or(&entry.executable_path);
-            format!("{name} (pid {})", entry.pid)
-        })
-        .collect::<Vec<String>>()
-        .join(", ")
+        .map(|entry| (entry.executable_path.clone(), entry.pid))
+        .collect();
+    weto_core::presentation::standing_after_uninstall(&entries)
 }
 
 /// Собственно снос: тот же `uninstall.sh`, что и из терминала. Приложение
