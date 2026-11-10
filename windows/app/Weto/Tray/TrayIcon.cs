@@ -22,7 +22,7 @@ public sealed partial class TrayIcon : IDisposable
     private const uint NifMessage = 0x1, NifIcon = 0x2, NifTip = 0x4, NifShowTip = 0x80;
     private const uint NotifyIconVersion4 = 4;
 
-    private const int MenuSettings = 1, MenuQuit = 2;
+    private const int MenuProbe = 3, MenuSettings = 1, MenuQuit = 2;
 
     private static readonly nint HwndMessage = -3;
 
@@ -35,6 +35,8 @@ public sealed partial class TrayIcon : IDisposable
 
     /// <summary>Левый щелчок: показать попап статуса.</summary>
     public event Action? Clicked;
+    public event Action? ProbeRequested;
+
     public event Action? SettingsRequested;
     public event Action? QuitRequested;
 
@@ -120,6 +122,9 @@ public sealed partial class TrayIcon : IDisposable
         {
             switch ((int)(wParam & 0xFFFF))
             {
+                case MenuProbe:
+                    ProbeRequested?.Invoke();
+                    break;
                 case MenuSettings:
                     SettingsRequested?.Invoke();
                     break;
@@ -135,9 +140,12 @@ public sealed partial class TrayIcon : IDisposable
     private void ShowMenu()
     {
         var menu = CreatePopupMenu();
+        // Пункты — как в трее Linux; «Выход» спрашивает то же «Закрыть Weto?»,
+        // что кнопка «Закрыть приложение».
+        AppendMenuW(menu, 0, MenuProbe, "Проверить сейчас");
         AppendMenuW(menu, 0, MenuSettings, "Настройки");
         AppendMenuW(menu, 0x800, 0, null); // MF_SEPARATOR
-        AppendMenuW(menu, 0, MenuQuit, "Закрыть Weto");
+        AppendMenuW(menu, 0, MenuQuit, "Выход");
         GetCursorPos(out var point);
         // Без SetForegroundWindow меню не закрывается щелчком мимо него.
         SetForegroundWindow(_window);

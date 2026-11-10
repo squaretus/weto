@@ -42,6 +42,10 @@ public partial class App : Application
     private static readonly bool Sample =
         Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-status-sample");
 
+    /// <summary>Светлая тема без записи в настройки — для скриншотов в CI.</summary>
+    private static readonly bool LightSample =
+        Array.Exists(Environment.GetCommandLineArgs(), a => a == "--light-theme");
+
     /// <summary>Показывать образец находки обновления (баннер и окно) — для скриншота в CI.</summary>
     private static readonly bool UpdateSample =
         Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-update-sample");
@@ -94,8 +98,9 @@ public partial class App : Application
 
         _tray = new TrayIcon(TrayIconPath(Tone.Disabled), "Weto");
         _tray.Clicked += () => Dispatch(() => ToggleStatus());
+        _tray.ProbeRequested += () => Dispatch(() => _bridge?.Command("probeNow"));
         _tray.SettingsRequested += () => Dispatch(ShowSettings);
-        _tray.QuitRequested += () => Dispatch(Quit);
+        _tray.QuitRequested += () => Dispatch(AskToClose);
 
         var queue = DispatcherQueue.GetForCurrentThread();
         _timer = queue.CreateTimer();
@@ -152,9 +157,10 @@ public partial class App : Application
         }
         _status?.ShowUpdate(update);
         _settings?.ShowUpdate(update);
+        _settings?.Tick();
         _update?.Show(update);
 
-        var theme = _bridge.Settings().Theme;
+        var theme = LightSample ? "light" : _bridge.Settings().Theme;
         if (theme != _theme)
         {
             ApplyTheme(theme);
@@ -199,6 +205,30 @@ public partial class App : Application
             _settings.Closed += (_, _) => _settings = null;
         }
         _settings.Activate();
+    }
+
+    private bool _askingToClose;
+
+    /// <summary>
+    /// «Закрыть Weto?» — один вопрос на два входа: кнопку «Закрыть приложение»
+    /// и пункт «Выход» в трее. Второй вход, пока вопрос открыт, второго окна
+    /// не открывает. Тексты — общие с macOS и Linux.
+    /// </summary>
+    public void AskToClose()
+    {
+        if (_askingToClose || _bridge is null)
+        {
+            return;
+        }
+        _askingToClose = true;
+        DialogWindow.Ask(_bridge.CloseConfirmation(), destructive: false, confirmed =>
+        {
+            _askingToClose = false;
+            if (confirmed)
+            {
+                Quit();
+            }
+        });
     }
 
     /// <summary>Окно обновления: одно на процесс; закрывается само, когда находки нет.</summary>

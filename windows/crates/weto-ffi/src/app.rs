@@ -173,18 +173,19 @@ impl WindowsApp {
     }
 
     pub fn settings(&self) -> SettingsView {
-        let token_set = self
-            .secrets
-            .load()
-            .ok()
-            .flatten()
-            .is_some_and(|token| !token.is_empty());
         settings_view(
             &self.settings.current(),
-            token_set,
+            &self.controller.snapshot().running,
+            &self.token(),
             self.autostart.command().is_some(),
             &|entry| WindowsTargetResolver.locate(entry).map(|found| found.path),
         )
+    }
+
+    /// Сам токен — только для поля в фокусе (вид «token»); вне фокуса окно
+    /// показывает маску из вида настроек.
+    pub fn token(&self) -> String {
+        self.secrets.load().ok().flatten().unwrap_or_default()
     }
 
     pub fn journal(&self) -> JournalView {

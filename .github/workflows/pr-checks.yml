@@ -268,6 +268,38 @@ jobs:
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/settings
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings-end -Out screens/settings-end
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-update-sample -Out screens/update
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag "--show-status-sample --light-theme" -Out screens/light-paused
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag "--show-settings --light-theme" -Out screens/light-settings
+
+      # Окно настроек с целями: строки целей с числом процессов и выбранное
+      # VPN-приложение — пустые состояния этого не показывают. Цель — ping,
+      # её процесс запущен; состояние профиля вычищается после снимков,
+      # чтобы контракт установщика начинал с чистого.
+      - name: Screenshots with targets
+        shell: powershell
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $config = Join-Path $env:APPDATA 'weto'
+          New-Item -ItemType Directory -Force $config | Out-Null
+          @(
+            'blocked_countries = ["RU"]'
+            'targets = [{ entry = "ping", display_name = "ping", kind = "binary", path = ''C:\Windows\System32\PING.EXE'', launch_paths = ["ping"] }]'
+            '[vpn_app]'
+            'entry = ''C:\Windows\System32\notepad.exe'''
+            'display_name = "notepad"'
+            'kind = "binary"'
+            'path = ''C:\Windows\System32\notepad.exe'''
+          ) | Set-Content -Encoding utf8 (Join-Path $config 'config.toml')
+          $ping = Start-Process -FilePath ping -ArgumentList '-n', '120', '127.0.0.1' -PassThru -WindowStyle Hidden
+          $exe = "windows/app/out/$env:ARCH/Weto.exe"
+          try {
+            ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/targets-settings
+            ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/targets-status
+          } finally {
+            Stop-Process -Id $ping.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force $config, (Join-Path $env:LOCALAPPDATA 'weto') -ErrorAction SilentlyContinue
+          }
 
       # Установщик целиком: тихая установка, установка поверх работающего
       # (так выглядит обновление) и удаление со всеми следами.

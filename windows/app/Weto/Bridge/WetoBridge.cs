@@ -64,6 +64,13 @@ public sealed unsafe class WetoBridge : IDisposable
         View("update-sample", BridgeJson.Default.UpdateView)
         ?? throw new InvalidOperationException("Мост не отдал образец обновления");
 
+    /// <summary>Сам токен — только для поля токена в фокусе.</summary>
+    public string Token() => View("token", BridgeJson.Default.String) ?? "";
+
+    public DialogView CloseConfirmation() =>
+        View("close-confirmation", BridgeJson.Default.DialogView)
+        ?? throw new InvalidOperationException("Мост не отдал текст подтверждения");
+
     public DialogView UninstallConfirmation() =>
         View("uninstall-confirmation", BridgeJson.Default.DialogView)
         ?? throw new InvalidOperationException("Мост не отдал текст подтверждения");

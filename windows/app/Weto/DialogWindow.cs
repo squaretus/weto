@@ -27,6 +27,10 @@ public sealed class DialogWindow : Window
         window.Activate();
     }
 
+    /// <summary>Сообщить с одной кнопкой — отказ, о котором надо сказать («Журнал не выгрузился»).</summary>
+    public static void Tell(string title, string message, string button) =>
+        Ask(new DialogView(title, message, button, ""), destructive: false, _ => { });
+
     private DialogWindow(DialogView text, bool destructive, Action<bool> answer)
     {
         _answer = answer;
@@ -46,15 +50,21 @@ public sealed class DialogWindow : Window
         _panel.Children.Add(Text(text.Title, "Status", wrap: true));
         _panel.Children.Add(Text(text.Message, "Value", "Dim", wrap: true));
 
+        // Без «отмены» кнопка одна: сообщение, а не вопрос.
         var buttons = new Grid { ColumnSpacing = Number("Space2") };
         buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        var cancel = PillButton(text.Cancel, ButtonKind.Muted, () => Finish(false));
-        cancel.HorizontalAlignment = HorizontalAlignment.Stretch;
-        buttons.Children.Add(cancel);
+        var column = 0;
+        if (text.Cancel.Length > 0)
+        {
+            buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var cancel = PillButton(text.Cancel, ButtonKind.Muted, () => Finish(false));
+            cancel.HorizontalAlignment = HorizontalAlignment.Stretch;
+            buttons.Children.Add(cancel);
+            column = 1;
+        }
         var confirm = PillButton(text.Confirm, destructive ? ButtonKind.Destructive : ButtonKind.Primary, () => Finish(true));
         confirm.HorizontalAlignment = HorizontalAlignment.Stretch;
-        Grid.SetColumn(confirm, 1);
+        Grid.SetColumn(confirm, column);
         buttons.Children.Add(confirm);
         _panel.Children.Add(buttons);
 

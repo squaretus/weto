@@ -17,7 +17,8 @@ path-зависимости на `linux/crates/*`). Всё состояние ж
 | `weto-sys-windows` | `process_table.rs` | чистый разбор буфера `NtQuerySystemInformation`: свои `#[repr(C)]` по раскладке phnt; `trusted_parents`, `is_suspended`, `is_alive` |
 | `weto-sys-windows` | `process_registry.rs` | `NtProcessRegistry` (`ProcessRegistryReading`): один снимок на проход, путь и командная строка с кэшем по `(pid, CreateTime)` |
 | `weto-sys-windows` | `process_signaler.rs` | `WindowsProcessSignaler`: Stop → `NtSuspendProcess`, Resume → `NtResumeProcess`, Kill → `TerminateProcess`, строго в порядке списка |
-| `weto-sys-windows` | `target_resolver.rs` | чистый `WindowsTargetResolver`: канонизация пути, `PATH` + `PATHEXT`, npm-шим `.cmd` → скрипт, вид по заголовку `MZ`; `settings_target_now` |
+| `weto-sys-windows` | `target_resolver.rs` | чистый `WindowsTargetResolver`: канонизация пути, `PATH` + `PATHEXT`, ярлык `.lnk` → программа, npm-шим `.cmd` → скрипт, вид по заголовку `MZ`; `settings_target_now` |
+| `weto-sys-windows` | `shortcut.rs` | разбор `.lnk` (MS-SHLLINK): блок переменных окружения, `LocalBasePath`, `RELATIVE_PATH` |
 | `weto-sys-windows` | `interfaces.rs`, `network_events.rs` | `AdapterInterfaces` (`GetAdaptersAddresses`, имя = `FriendlyName`); `IpHelperEventSource` (`Notify*Change*` → канал) |
 | `weto-sys-windows` | `secret_store.rs`, `autostart.rs` | `CredentialStore` (target `com.weto.ipinfo`); `RunKeyAutostart` (значение `Weto` в `HKCU\…\Run`) |
 | `weto-sys-windows` | `power.rs`, `clock.rs`, `ntdll.rs` | `keep_full_speed`; `local_hms`, `utc_offset(at)` (смещение пояса на сам момент — для дат журнала), `os_version`; `Nt*`/`Rtl*` через `windows_link::link!` |
@@ -85,7 +86,8 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   `GetExitCodeProcess` и для вышедшего отдаёт `PROCESS_GONE` (87). Pid `0` отвергается.
 - **Разрешение цели.** Абсолютный путь канонизируется (префикс `\\?\` срезается). Голое имя —
   по `PATH` с `PATHEXT`. npm-шим `.cmd` разбирается до скрипта (`Script`, совпадение по argv node);
-  прочие `.bat`/`.cmd` не совпадут ни с чем — известная цена.
+  прочие `.bat`/`.cmd` — скрипт, процесс которого `cmd /c "путь"`. Ярлык `.lnk` разбирается
+  до программы (`shortcut.rs`, без COM) при каждом разрешении, как `.desktop` на Linux.
 - **Имена интерфейсов — `FriendlyName`** и у `if-addrs`, и у `AdapterInterfaces`.
 - **События сети живут до конца процесса:** контекст обратного вызова IP Helper отдан ядру навсегда.
 - **Автозапуск — одно значение `Weto` в `Run`**, путь — `Paths::launcher`
@@ -124,6 +126,25 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   корня и панели; панель — `VerticalAlignment.Top`.
 - Иконки и мост в репозиторий не кладутся: `Assets/*.ico` делает `weto-icons`, `weto_ffi.dll`
   берётся из `windows/crates/target/<triple>/<profile>/`.
+
+### The UI is a port, not a redesign
+Окна повторяют Linux (а через него macOS) поэлементно и дословно; тексты пояснений,
+подтверждения закрытия и маска токена — из `weto_core::presentation`, а не копиями.
+Таблица — весь список отличий от Linux; отличие не из неё — дефект.
+
+| Linux | Windows | Почему |
+|---|---|---|
+| попап — обычное окно «Weto» | безрамочное окно над треем, прячется при потере фокуса | Windows отдаёт координаты трея и разрешает самопозиционирование |
+| «Выбрать…» — `Gtk.FileDialog` в каталоге приложений XDG; цель — ярлык `.desktop` | `IFileOpenDialog` в меню «Пуск» пользователя; цель — ярлык `.lnk` (`shortcut.rs`), диалог с `FOS_NODEREFERENCELINKS` | пикер Windows App SDK разыменовывает ярлык и отдал бы `.exe` |
+| значок плашки — `Icon=` ярлыка | значок ярлыка от оболочки (`StorageFile.GetThumbnailAsync`) | своё понятие приложения |
+| второй диалог «Нужен файл программы» для Steam и flatpak | нет | игры Steam в «Пуске» — `.url`, а не `.lnk`; фильтр диалога их не предлагает |
+| «Вернуть в терминал», «в фоне», `fg` через tmux/screen | нет | job control в консоли Windows нет; приостановленная цель из фона не уходит |
+| пример в пояснении цели — `nano`, `/usr/bin/curl` | `claude`, `C:\Program Files\Git\bin\git.exe` | `TARGET_ENTRY_HINT` под `cfg!(windows)` |
+| значки темы иконок | Segoe Fluent Icons | системный набор |
+| «Запускать при входе в систему» — XDG autostart | ключ `HKCU\…\Run` | тот же текст, своя механика |
+
+Скрипты `.bat`/`.cmd` охраняются по процессу `cmd /c "путь"` (`process::command_processor_script`);
+набранный в открытом `cmd` скрипт исполняет сам шелл, отдельного процесса у него нет.
 
 ## Self-update
 Механизм общий с Linux — `weto_update::updates::Updates` (проверка по расписанию, отсрочки,
@@ -188,7 +209,7 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - Раскладка `SystemProcessInformation` — своя копия phnt; ошибка смещения ломает родителя и «стоит»,
   а не сборку. Ловит только `tests/live.rs`.
 - Новые коды отказа `OpenProcess` для вышедших процессов — учёт досылал бы Resume мёртвому.
-- `.bat`/`.cmd`, не npm-шим, молча не охраняются.
+- `.bat`, набранный в уже открытом `cmd`, процесса не имеет и не охраняется (охраняются запущенные им программы).
 - Окно размером «с заголовком» у окна без заголовка — лечится только `FitToPanel`, не `ResizeClient`.
 - Restart Manager (`CloseApplications`) приложение в трее закрыть не умеет: установка поверх
   работающего без `--quit` в `PrepareToInstall` возвращала код 5. Не вышел за 20 с —

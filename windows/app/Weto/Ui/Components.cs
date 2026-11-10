@@ -123,12 +123,15 @@ public static class Components
     /// Ширина колонки подписей у строк с полем и сегментами: поля и сегменты
     /// одной карточки начинаются с одной вертикали (канон, «Окно»). В WinUI нет
     /// общей колонки на несколько сеток, поэтому ширина — по самой длинной
-    /// подписи вкладки («Потолок паузы»).
+    /// подписи вкладки («Токен ipinfo» со значком пояснения).
     /// </summary>
     public const double LabelColumn = 120;
 
     /// <summary>Строка с полем или сегментами: подпись, зазор space5, контрол во всю остальную ширину.</summary>
-    public static Grid FieldRow(string label, FrameworkElement control)
+    public static Grid FieldRow(string label, FrameworkElement control) => FieldRow(Text(label, "Label"), control);
+
+    /// <summary>То же с подписью-элементом: название и значок пояснения после него.</summary>
+    public static Grid FieldRow(FrameworkElement label, FrameworkElement control)
     {
         var grid = new Grid
         {
@@ -137,7 +140,7 @@ public static class Components
         };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LabelColumn) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.Children.Add(Text(label, "Label"));
+        grid.Children.Add(label);
         control.HorizontalAlignment = HorizontalAlignment.Stretch;
         Grid.SetColumn(control, 1);
         grid.Children.Add(control);
@@ -264,6 +267,87 @@ public static class Components
                 (int)Math.Ceiling(panel.Width * scale),
                 (int)Math.Ceiling(natural * scale)));
         }
+    }
+
+    /// <summary>
+    /// Значок пояснения «?» (канон, «Окно»): 12 pt faint без фона; по нажатию
+    /// сразу — не по наведению — окно цвета card с границей line, текст 13 pt ink,
+    /// паддинг space4, ширина ~40 знаков. Наведение — dim, открытое пояснение — violet.
+    /// </summary>
+    public static Button Hint(string text)
+    {
+        var glyph = Glyph("\uE9CE", 12, Brush("Faint"));
+        var button = new Button
+        {
+            Content = glyph,
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(2),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, "Пояснение");
+        var flyout = new Flyout
+        {
+            Content = new TextBlock
+            {
+                Text = text,
+                Style = TextStyle("Value"),
+                Foreground = Brush("Ink"),
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 300,
+            },
+        };
+        var presenter = new Style(typeof(FlyoutPresenter));
+        presenter.Setters.Add(new Setter(Control.BackgroundProperty, Brush("Card")));
+        presenter.Setters.Add(new Setter(Control.BorderBrushProperty, Brush("Line")));
+        presenter.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
+        presenter.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(Number("Space4"))));
+        presenter.Setters.Add(new Setter(Control.CornerRadiusProperty, Radius("RadiusTile")));
+        flyout.FlyoutPresenterStyle = presenter;
+        flyout.Opened += (_, _) => glyph.Foreground = Brush("Violet");
+        flyout.Closed += (_, _) => glyph.Foreground = Brush("Faint");
+        button.PointerEntered += (_, _) =>
+        {
+            if (!flyout.IsOpen)
+            {
+                glyph.Foreground = Brush("Dim");
+            }
+        };
+        button.PointerExited += (_, _) =>
+        {
+            if (!flyout.IsOpen)
+            {
+                glyph.Foreground = Brush("Faint");
+            }
+        };
+        button.Flyout = flyout;
+        return button;
+    }
+
+    /// <summary>
+    /// Поле с пояснением формата в конце (канон, «Окно»): значок виден, только
+    /// пока поле пустое — кто начал набирать, пояснение уже прочитал.
+    /// </summary>
+    public static Grid HintedField(TextBox field, string hint)
+    {
+        var grid = new Grid();
+        grid.Children.Add(field);
+        var button = Hint(hint);
+        button.HorizontalAlignment = HorizontalAlignment.Right;
+        button.Margin = new Thickness(0, 0, Number("Space2"), 0);
+        grid.Children.Add(button);
+        void Apply() => button.Visibility = string.IsNullOrEmpty(field.Text) ? Visibility.Visible : Visibility.Collapsed;
+        field.TextChanged += (_, _) => Apply();
+        Apply();
+        return grid;
+    }
+
+    /// <summary>Число в строке (процессы цели): данные, цифры табличные, справа.</summary>
+    public static TextBlock DataValue(string text)
+    {
+        var value = Text(text, "Data", "Dim");
+        value.HorizontalAlignment = HorizontalAlignment.Right;
+        return value;
     }
 
     /// <summary>Иконочная кнопка без фона: шестерёнка, обновить, удалить строку.</summary>
@@ -417,14 +501,20 @@ public static class Components
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
+        // Значок приложения — у цели, добавленной ярлыком (`.lnk`), как Icon=
+        // ярлыка `.desktop` на Linux; у команды — значок терминала.
         var icon = new Border
         {
             Width = 32,
             Height = 32,
             CornerRadius = new CornerRadius(8),
             Background = Brush("Card"),
-            Child = Glyph("", 16, Brush("Dim")), // CommandPrompt
+            Child = Glyph("\uE756", 16, Brush("Dim")), // CommandPrompt
         };
+        if (!pill.CommandLine)
+        {
+            AppIcons.Load(pill.Entry, image => icon.Child = image);
+        }
         grid.Children.Add(icon);
 
         var name = new StackPanel { Orientation = Orientation.Horizontal, Spacing = Number("Space2") };

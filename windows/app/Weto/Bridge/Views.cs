@@ -53,13 +53,18 @@ public sealed record SettingsView(
     IReadOnlyList<Choice> PauseCeilings,
     string Theme,
     bool TokenSet,
-    bool Autostart);
+    string TokenMask,
+    bool Autostart,
+    Hints Hints);
 
-public sealed record TargetRow(string Entry, string DisplayName, string Description, bool CommandLine);
+/// <summary>Пояснения к полям — тексты ядра, общие с Linux.</summary>
+public sealed record Hints(string Target, string Geo, string Token, string Timeout);
+
+public sealed record TargetRow(string Entry, string DisplayName, string Description, bool CommandLine, int Running);
 
 public sealed record Choice(ulong Seconds, string Title);
 
-public sealed record JournalView(IReadOnlyList<JournalRow> Rows, string? LimitCaption);
+public sealed record JournalView(IReadOnlyList<JournalRow> Rows, string? LimitCaption, string ExportFileName);
 
 public sealed record JournalRow(string Title, string Summary, string? Resolution, string Diagnostics);
 
