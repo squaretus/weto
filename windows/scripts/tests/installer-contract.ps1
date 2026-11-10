@@ -23,8 +23,12 @@ function Fail([string] $what) {
     Write-Error "контракт установщика: $what"
 }
 
+# Ждём сам установщик, а не Start-Process -Wait: тот ждёт и всех потомков,
+# а установщик в конце запускает Weto, который не выходит, — контракт висел
+# до таймаута раннера.
 function Install {
-    $run = Start-Process -FilePath $Setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS' -Wait -PassThru
+    $run = Start-Process -FilePath $Setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS' -PassThru
+    if (-not $run.WaitForExit(180000)) { Fail 'установщик не закончил за 3 минуты' }
     if ($run.ExitCode -ne 0) { Fail "установщик вернул $($run.ExitCode)" }
 }
 
