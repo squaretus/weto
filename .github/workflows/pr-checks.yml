@@ -126,6 +126,51 @@ jobs:
       - name: CLI installer contract
         run: bash ../shared/cli/tests/install-contract.sh
 
+  # Охрана Windows-версии — те же Rust-крейты, что у Linux (`weto-core`,
+  # `weto-config`, `weto-sys`, `weto-guard`, `weto-update`), и их тесты обязаны
+  # идти на настоящей Windows: `cargo check` под mingw в контейнере ловит только
+  # протёкшую Linux-зависимость, а не поведение путей, потоков и сети.
+  windows-shared:
+    name: Shared Rust on Windows (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: linux
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # На образе arm64 Rust может не стоять: ставится тем же rustup,
+      # что и везде, без сторонних action.
+      - name: Rust toolchain
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if ! command -v cargo >/dev/null; then
+            curl -sSf -o "$RUNNER_TEMP/rustup-init.exe" "https://win.rustup.rs/$ARCH"
+            "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal
+            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          fi
+          rustup component add clippy
+          cargo --version
+
+      - name: Lint
+        run: >
+          cargo clippy -p weto-core -p weto-config -p weto-sys -p weto-guard -p weto-update
+          --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test -p weto-core -p weto-config -p weto-sys -p weto-guard -p weto-update
+
   generators:
     name: Generators are idempotent
     runs-on: macos-26

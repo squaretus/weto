@@ -19,7 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # Терминальная версия собирается статически под musl (build.sh):
         # musl-gcc собирает C-части ring и zstd.
         musl-tools \
+        # Общие крейты собираются и под Windows: `cargo check` для
+        # x86_64-pc-windows-gnu ловит Linux-зависимость, протёкшую в общий
+        # код, до прогона на раннере Windows. mingw собирает C-части ring.
+        gcc-mingw-w64-x86-64 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup component add clippy rustfmt \
-    && rustup target add "$(uname -m)-unknown-linux-musl"
+    && rustup target add "$(uname -m)-unknown-linux-musl" x86_64-pc-windows-gnu
