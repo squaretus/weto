@@ -96,8 +96,9 @@ var
   KeepClosed: Boolean;
   UninstallStarted: Boolean;
 
-{ Путь фиксирован (DisableDirPage), поэтому годится и там, где {app}
-  ещё не известен. }
+{ Путь фиксирован (DisableDirPage), поэтому годится и там, где каталог
+  установки ещё не известен. Фигурных скобок в комментариях Pascal не пишем:
+  первая закрывающая кончает комментарий. }
 function InstalledWeto(): String;
 begin
   Result := ExpandConstant('{localappdata}\Programs\weto\Weto.exe');
