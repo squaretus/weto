@@ -10,7 +10,8 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
-use weto_core::pause_ceiling::countdown_until;
+use weto_config::settings::{Settings, Target, Theme};
+use weto_core::pause_ceiling::{countdown_until, PauseCeiling};
 use weto_core::presentation::{self, GuardStatusColor};
 use weto_guard::controller::GuardSnapshot;
 
@@ -157,6 +158,79 @@ pub fn status_view(
     }
 }
 
+/// Модель окна настроек: то, что окно показывает, без единого решения.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsView {
+    pub targets: Vec<TargetRow>,
+    pub vpn_app: Option<TargetRow>,
+    pub blocked: Vec<String>,
+    pub allowed: Vec<String>,
+    pub pause_ceiling: u64,
+    pub pause_ceilings: Vec<Choice>,
+    pub theme: String,
+    pub token_set: bool,
+    pub autostart: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetRow {
+    pub entry: String,
+    pub display_name: String,
+    /// «бинарник: C:\…» / «скрипт: …» / «не найдено …» — текстом ядра.
+    pub description: String,
+    pub command_line: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Choice {
+    pub seconds: u64,
+    pub title: String,
+}
+
+/// Окно настроек. `locate` отвечает, что запустится по записи сейчас
+/// (на Windows — `WindowsTargetResolver`), параметром — ради тестов.
+pub fn settings_view(
+    settings: &Settings,
+    token_set: bool,
+    autostart: bool,
+    locate: &dyn Fn(&str) -> Option<String>,
+) -> SettingsView {
+    let row = |target: &Target| TargetRow {
+        entry: target.entry.clone(),
+        display_name: target.display_name.clone(),
+        description: presentation::target_description(
+            &target.entry,
+            target.kind,
+            locate(&target.entry).as_deref(),
+        ),
+        command_line: presentation::is_command_line_target(&target.entry),
+    };
+    SettingsView {
+        targets: settings.targets.iter().map(row).collect(),
+        vpn_app: settings.vpn_app.as_ref().map(row),
+        blocked: settings.blocked_entries(),
+        allowed: settings.allowed_entries(),
+        pause_ceiling: settings.pause_ceiling().seconds(),
+        pause_ceilings: PauseCeiling::ALL
+            .iter()
+            .map(|ceiling| Choice {
+                seconds: ceiling.seconds(),
+                title: ceiling.title(),
+            })
+            .collect(),
+        theme: match settings.theme {
+            Theme::Dark => "dark",
+            Theme::Light => "light",
+        }
+        .to_string(),
+        token_set,
+        autostart,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +301,38 @@ mod tests {
 
         assert_eq!(view.targets, None);
         assert!(view.probing);
+    }
+
+    #[test]
+    fn the_settings_window_describes_targets_with_the_shared_text() {
+        let mut settings = Settings::default();
+        settings.targets.push(Target {
+            entry: "claude".to_string(),
+            display_name: "claude".to_string(),
+            kind: TargetKind::Script,
+            path: String::new(),
+            launch_paths: vec![],
+        });
+        settings.targets.push(Target {
+            entry: r"C:\gone\tool.exe".to_string(),
+            display_name: "tool".to_string(),
+            kind: TargetKind::Binary,
+            path: String::new(),
+            launch_paths: vec![],
+        });
+        let locate = |entry: &str| (entry == "claude").then(|| r"C:\npm\cli.js".to_string());
+
+        let view = settings_view(&settings, true, false, &locate);
+
+        assert_eq!(view.targets[0].description, r"скрипт: C:\npm\cli.js");
+        assert_eq!(
+            view.targets[1].description,
+            "не найдено: по этому пути нет исполняемого файла"
+        );
+        assert_eq!(view.pause_ceilings.len(), 4);
+        assert_eq!(view.pause_ceiling, 60);
+        assert_eq!(view.theme, "dark");
+        assert!(view.token_set && !view.autostart);
     }
 
     /// Ключи — то, что читает C#: переименование поля в Rust ломало бы экран молча.

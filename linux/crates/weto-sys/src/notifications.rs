@@ -158,20 +158,14 @@ impl KillNotifying for DesktopNotifier {
     /// причина и число — в тексте. Число — процессы, а не цели: «claude ×34»
     /// это тридцать четыре завершённых процесса.
     fn notify(&self, target_names: &[String], reason: &str, killed_count: usize) {
-        self.send(
-            "Weto: процессы завершены".to_string(),
-            format!(
-                "{}: {reason}. Завершено процессов: {killed_count}.",
-                target_names.join(", ")
-            ),
-        );
+        let text =
+            weto_core::presentation::terminated_notification(target_names, reason, killed_count);
+        self.send(text.title, text.body);
     }
 
     fn notify_backgrounded(&self, target_name: &str) {
-        self.send(
-            format!("Weto: {target_name} вернулся в фон"),
-            "Процесс на паузе потерял терминал. Когда пауза снимется, Weto вернёт его сам или подскажет, что ввести.".to_string(),
-        );
+        let text = weto_core::presentation::backgrounded_notification(target_name);
+        self.send(text.title, text.body);
     }
 }
 

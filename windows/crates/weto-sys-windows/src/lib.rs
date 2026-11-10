@@ -14,6 +14,8 @@ pub mod target_resolver;
 #[cfg(windows)]
 pub mod autostart;
 #[cfg(windows)]
+pub mod clock;
+#[cfg(windows)]
 pub mod interfaces;
 #[cfg(windows)]
 pub mod network_events;

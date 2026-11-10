@@ -10,6 +10,19 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 windows_link::link!("ntdll.dll" "system" fn NtSuspendProcess(process: HANDLE) -> NTSTATUS);
 windows_link::link!("ntdll.dll" "system" fn NtResumeProcess(process: HANDLE) -> NTSTATUS);
 windows_link::link!("ntdll.dll" "system" fn RtlNtStatusToDosError(status: NTSTATUS) -> u32);
+windows_link::link!("ntdll.dll" "system" fn RtlGetVersion(info: *mut OsVersionInfo) -> NTSTATUS);
+
+/// `RTL_OSVERSIONINFOW`. `GetVersionEx` врёт приложениям без манифеста
+/// совместимости (называет Windows 8), `RtlGetVersion` — нет.
+#[repr(C)]
+pub struct OsVersionInfo {
+    pub size: u32,
+    pub major: u32,
+    pub minor: u32,
+    pub build: u32,
+    pub platform: u32,
+    pub service_pack: [u16; 128],
+}
 
 /// `STATUS_INFO_LENGTH_MISMATCH`: буфер мал, повторить с бо́льшим.
 pub const STATUS_INFO_LENGTH_MISMATCH: NTSTATUS = 0xC000_0004_u32 as NTSTATUS;
