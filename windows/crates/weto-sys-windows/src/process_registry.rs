@@ -61,6 +61,7 @@ impl ProcessRegistryReading for NtProcessRegistry {
 
         let snapshot: Vec<ProcessSnapshot> = raw
             .iter()
+            .filter(|process| process.is_alive())
             .filter_map(|process| {
                 let key = (process.pid, process.create_time);
                 let identity = match identities.get(&key) {
