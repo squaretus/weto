@@ -27,6 +27,10 @@ public partial class App : Application
     private Tone? _shownTone;
     private string? _theme;
 
+    /// <summary>Показывать образец «цели на паузе» вместо живого статуса — для скриншота в CI.</summary>
+    private static readonly bool Sample =
+        Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-status-sample");
+
     public App()
     {
         InitializeComponent();
@@ -65,7 +69,7 @@ public partial class App : Application
         // Флаг для проверки в CI: открыть экраны сразу, чтобы снять их скриншотом.
         foreach (var argument in Environment.GetCommandLineArgs())
         {
-            if (argument == "--show-status")
+            if (argument is "--show-status" or "--show-status-sample")
             {
                 ShowStatus();
             }
@@ -83,7 +87,7 @@ public partial class App : Application
         {
             return;
         }
-        var status = _bridge.Status();
+        var status = Sample ? _bridge.StatusSample() : _bridge.Status();
         if (status.Tone != _shownTone)
         {
             _tray.Update(TrayIconPath(status.Tone), $"Weto — {status.Title}");
@@ -114,7 +118,7 @@ public partial class App : Application
     public void ShowStatus()
     {
         _status ??= new StatusWindow();
-        _status.Present(Bridge.Status());
+        _status.Present(Sample ? Bridge.StatusSample() : Bridge.Status());
     }
 
     private void ToggleStatus()

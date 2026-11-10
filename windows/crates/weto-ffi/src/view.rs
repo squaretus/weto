@@ -159,6 +159,53 @@ pub fn status_view(
     }
 }
 
+/// Образец экрана «цели на паузе» — только для скриншотов в CI: живой Windows
+/// у проекта нет, а на раннере нет ни VPN, ни целей, и пилюли, значок паузы
+/// и объяснение иначе не увидеть. Тексты — настоящие, из `presentation`.
+pub fn sample_status(now: SystemTime) -> StatusView {
+    use weto_core::guard_machine::GuardPhase;
+    use weto_core::pause_plan::PausedProcess;
+    use weto_core::policy::UnprovenReason;
+    use weto_core::process::{RunningTarget, TargetKind};
+
+    let since = now - std::time::Duration::from_secs(17);
+    let target = |pid: i32, name: &str, path: &str, count: usize| RunningTarget {
+        entry: name.to_string(),
+        display_name: name.to_string(),
+        kind: TargetKind::Binary,
+        path: path.to_string(),
+        pid,
+        process_count: count,
+    };
+    let snapshot = GuardSnapshot {
+        phase: GuardPhase::Paused {
+            since,
+            reason: UnprovenReason::GeoUnavailable("таймаут запроса".to_string()),
+        },
+        running: vec![
+            target(4200, "claude", r"C:\Users\u\.local\bin\claude.exe", 3),
+            target(
+                4300,
+                "codex",
+                r"C:\Users\u\AppData\Roaming\npm\codex.cmd",
+                1,
+            ),
+        ],
+        paused: [4200, 4300]
+            .into_iter()
+            .map(|pid| PausedProcess {
+                pid,
+                target_name: String::new(),
+                since,
+                is_backgrounded: false,
+            })
+            .collect(),
+        pause_deadline: Some(since + std::time::Duration::from_secs(60)),
+        ..GuardSnapshot::default()
+    };
+    status_view(&snapshot, true, false, now, &|_| "—".to_string())
+}
+
 /// Модель окна настроек: то, что окно показывает, без единого решения.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,6 +422,17 @@ mod tests {
         assert_eq!(view.pause_ceiling, 60);
         assert_eq!(view.theme, "dark");
         assert!(view.token_set && !view.autostart);
+    }
+
+    #[test]
+    fn the_sample_shows_standing_targets_with_a_countdown() {
+        let view = sample_status(at(10_000));
+
+        assert_eq!(view.tone, Tone::Pending);
+        assert!(view.explanation.is_some());
+        let pills = view.targets.unwrap().pills;
+        assert_eq!(pills.len(), 2);
+        assert_eq!(pills[0].countdown.as_deref(), Some("43 с"));
     }
 
     #[test]

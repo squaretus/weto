@@ -46,6 +46,11 @@ public sealed unsafe class WetoBridge : IDisposable
         View("settings", BridgeJson.Default.SettingsView)
         ?? throw new InvalidOperationException("Мост не отдал экран настроек");
 
+    /// <summary>Образец экрана «цели на паузе» — для скриншотов в CI.</summary>
+    public StatusView StatusSample() =>
+        View("status-sample", BridgeJson.Default.StatusView)
+        ?? throw new InvalidOperationException("Мост не отдал образец");
+
     public JournalView Journal() =>
         View("journal", BridgeJson.Default.JournalView)
         ?? throw new InvalidOperationException("Мост не отдал журнал");

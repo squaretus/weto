@@ -55,7 +55,7 @@ public sealed class StatusWindow : Window
 
     /// <summary>Не прятать при потере фокуса — для скриншота в CI.</summary>
     public static bool KeepOpen { get; set; } =
-        Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-status");
+        Array.Exists(Environment.GetCommandLineArgs(), a => a is "--show-status" or "--show-status-sample");
 
     public void Present(StatusView status)
     {

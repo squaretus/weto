@@ -262,6 +262,7 @@ jobs:
           New-Item -ItemType Directory -Force screens | Out-Null
           $exe = "windows/app/out/$env:ARCH/Weto.exe"
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/status
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status-sample -Out screens/paused
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/settings
 
       - uses: actions/upload-artifact@v4
