@@ -280,24 +280,36 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         run: |
+          # VPN-приложение — powershell, в котором идёт этот шаг: запущено, и охрана
+          # не завершает цели по доказательству, а ставит их на паузу до ответа.
+          # Вторая цель — ярлык Блокнота: на плашке значок приложения из ярлыка.
           $config = Join-Path $env:APPDATA 'weto'
           New-Item -ItemType Directory -Force $config | Out-Null
+          $link = Join-Path $env:RUNNER_TEMP 'Notepad.lnk'
+          $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
+          $shortcut.TargetPath = 'C:\Windows\System32\notepad.exe'
+          $shortcut.Save()
+          $powershell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
           @(
             'blocked_countries = ["RU"]'
-            'targets = [{ entry = "ping", display_name = "ping", kind = "binary", path = ''C:\Windows\System32\PING.EXE'', launch_paths = ["ping"] }]'
+            'targets = ['
+            '  { entry = "ping", display_name = "ping", kind = "binary", path = ''C:\Windows\System32\PING.EXE'', launch_paths = ["ping"] },'
+            "  { entry = '$link', display_name = 'Notepad', kind = 'binary', path = 'C:\Windows\System32\notepad.exe', launch_paths = ['$link'] },"
+            ']'
             '[vpn_app]'
-            'entry = ''C:\Windows\System32\notepad.exe'''
-            'display_name = "notepad"'
+            "entry = '$powershell'"
+            'display_name = "powershell"'
             'kind = "binary"'
-            'path = ''C:\Windows\System32\notepad.exe'''
+            "path = '$powershell'"
           ) | Set-Content -Encoding utf8 (Join-Path $config 'config.toml')
           $ping = Start-Process -FilePath ping -ArgumentList '-n', '120', '127.0.0.1' -PassThru -WindowStyle Hidden
+          $notepad = Start-Process -FilePath notepad -PassThru -WindowStyle Minimized
           $exe = "windows/app/out/$env:ARCH/Weto.exe"
           try {
             ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/targets-settings
             ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/targets-status
           } finally {
-            Stop-Process -Id $ping.Id -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $ping.Id, $notepad.Id -Force -ErrorAction SilentlyContinue
             Remove-Item -Recurse -Force $config, (Join-Path $env:LOCALAPPDATA 'weto') -ErrorAction SilentlyContinue
           }
 

@@ -227,6 +227,7 @@ public static class Components
             VerticalAlignment = VerticalAlignment.Center,
         };
         ToolTipService.SetToolTip(button, tooltip);
+        KeepFill(button, Brush("Violet"), new SolidColorBrush(Microsoft.UI.Colors.White), null);
         button.Click += (_, _) => onClick();
         return button;
     }
@@ -394,8 +395,29 @@ public static class Components
             Padding = new Thickness(15, 0, 15, 0),
             VerticalAlignment = VerticalAlignment.Center,
         };
+        KeepFill(button, background, foreground, border);
         button.Click += (_, _) => onClick();
         return button;
+    }
+
+    /// <summary>
+    /// Неактивная пилюля — та же заливка с непрозрачностью 0.4, как
+    /// <c>WetoPillButtonStyle</c> на macOS. Шаблон WinUI в состояниях
+    /// «наведение», «нажатие» и «неактивна» подменяет фон своими кистями —
+    /// в светлой теме неактивная кнопка выходила белой на белом.
+    /// </summary>
+    private static void KeepFill(Button button, Brush background, Brush foreground, Brush? border)
+    {
+        var edge = border ?? new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        foreach (var state in new[] { "PointerOver", "Pressed", "Disabled" })
+        {
+            button.Resources["ButtonBackground" + state] = background;
+            button.Resources["ButtonForeground" + state] = foreground;
+            button.Resources["ButtonBorderBrush" + state] = edge;
+        }
+        void Apply() => button.Opacity = button.IsEnabled ? 1 : 0.4;
+        button.IsEnabledChanged += (_, _) => Apply();
+        Apply();
     }
 
     /// <summary>Заливка деструктивной кнопки — red 16 %.</summary>

@@ -237,10 +237,13 @@ public sealed class SettingsWindow : Window
         }
         else
         {
-            var unchosen = new StackPanel { Orientation = Orientation.Horizontal, Spacing = Number("Space3") };
+            // Подпись строки не обрезается: сжимается поле.
+            var unchosen = new Grid { ColumnSpacing = Number("Space3") };
+            unchosen.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            unchosen.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            unchosen.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             unchosen.Children.Add(Text("не выбрано", "Value", "Faint"));
             var field = Field("Команда или путь");
-            field.Width = 160;
             void Set()
             {
                 if (!string.IsNullOrWhiteSpace(field.Text))
@@ -255,11 +258,21 @@ public sealed class SettingsWindow : Window
                     Set();
                 }
             };
+            Grid.SetColumn(field, 1);
             unchosen.Children.Add(field);
-            unchosen.Children.Add(PillButton("Выбрать", ButtonKind.Primary, Set));
+            var set = PillButton("Выбрать", ButtonKind.Primary, Set);
+            Grid.SetColumn(set, 2);
+            unchosen.Children.Add(set);
             vpnRight = unchosen;
         }
-        rows.Add(Row(Text("VPN-приложение", "Label"), vpnRight));
+        var vpnRow = new Grid { ColumnSpacing = Number("Space3"), Padding = new Thickness(0, Number("Space2"), 0, Number("Space2")) };
+        vpnRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        vpnRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        vpnRow.Children.Add(Text("VPN-приложение", "Label"));
+        vpnRight.HorizontalAlignment = settings.VpnApp is null ? HorizontalAlignment.Stretch : HorizontalAlignment.Right;
+        Grid.SetColumn(vpnRight, 1);
+        vpnRow.Children.Add(vpnRight);
+        rows.Add(vpnRow);
         if (ErrorRow("vpn") is { } vpnError)
         {
             rows.Add(vpnError);
