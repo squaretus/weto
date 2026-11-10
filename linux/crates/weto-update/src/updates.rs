@@ -276,13 +276,18 @@ impl Updates {
 
             // Доля обновляется отдельным потоком: установщик считает её сам,
             // а спрашивать его из главного цикла значило бы держать блокировку.
+            //
+            // Проверка и запись — под одной блокировкой: итог (`Installed`,
+            // `Failed`), записанный между ними, иначе затирался бы долей,
+            // и окно навсегда оставалось бы «Установка…».
             let watcher = std::thread::spawn(move || loop {
-                let current = watched.progress();
-                if !matches!(current, Progress::Running(_)) {
-                    return;
+                {
+                    let mut progress = watched.progress.lock().expect("обновление");
+                    if !matches!(*progress, Progress::Running(_)) {
+                        return;
+                    }
+                    *progress = Progress::Running(watched.installer.progress());
                 }
-                *watched.progress.lock().expect("обновление") =
-                    Progress::Running(watched.installer.progress());
                 std::thread::sleep(Duration::from_millis(200));
             });
 

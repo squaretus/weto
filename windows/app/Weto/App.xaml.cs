@@ -53,6 +53,9 @@ public partial class App : Application
 
     public static new App Current => (App)Application.Current;
 
+    /// <summary>Идёт штатный выход: мост освобождается, окна к нему больше не обращаются.</summary>
+    public bool Quitting { get; private set; }
+
     public WetoBridge Bridge => _bridge ?? throw new InvalidOperationException("Мост не поднят");
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -341,6 +344,13 @@ public partial class App : Application
     /// <summary>Штатный выход: стоящие цели продолжаются, охрана останавливается.</summary>
     public void Quit()
     {
+        // Выход ровно один: его могут попросить и трей, и установщик (событие
+        // выхода), и такт по запущенному обновлению. Второй ReleaseMutex бросил бы.
+        if (Quitting)
+        {
+            return;
+        }
+        Quitting = true;
         _timer?.Stop();
         _quitRequest?.Dispose();
         _tray?.Dispose();

@@ -40,7 +40,8 @@ public sealed class UpdateWindow : Window
 
         Closed += (_, _) =>
         {
-            if (!_closingByModel)
+            // Закрытие выходом приложения — не «отложить»: мост уже освобождён.
+            if (!_closingByModel && !App.Current.Quitting)
             {
                 App.Current.Bridge.Command("dismissUpdate");
             }

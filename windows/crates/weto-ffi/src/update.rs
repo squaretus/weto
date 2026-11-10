@@ -57,7 +57,9 @@ pub fn asset_suffix(arch: &str) -> String {
 }
 
 /// Запуск скачанного установщика — граница системы, подменяется в тестах.
-pub type Launch = Box<dyn Fn(&std::path::Path) -> std::io::Result<()> + Send + Sync>;
+/// Аргументы — сам установщик и файл его журнала.
+pub type Launch =
+    Box<dyn Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()> + Send + Sync>;
 
 /// Установщик найденной версии: скачать `setup.exe` и запустить его тихо.
 ///
@@ -105,7 +107,8 @@ impl UpdateInstalling for SetupInstaller {
         }
         // Файл остаётся в кэше: установщик ещё работает с него, когда
         // приложения уже нет. Следующая загрузка перезапишет его.
-        (self.launch)(&setup).map_err(|e| format!("установщик не запустился: {e}"))
+        (self.launch)(&setup, &self.cache_dir.join("setup.log"))
+            .map_err(|e| format!("установщик не запустился: {e}"))
     }
 
     fn progress(&self) -> f32 {
@@ -113,9 +116,12 @@ impl UpdateInstalling for SetupInstaller {
     }
 }
 
-fn launch_silently(setup: &std::path::Path) -> std::io::Result<()> {
+/// Журнал установщика (`/LOG=`) — в кэше рядом с ним: приложения в момент
+/// установки уже нет, и разобрать неудачу потом больше нечем.
+fn launch_silently(setup: &std::path::Path, log: &std::path::Path) -> std::io::Result<()> {
     let mut command = std::process::Command::new(setup);
     command.args(SILENT_ARGUMENTS);
+    command.arg(format!("/LOG={}", log.display()));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -405,7 +411,7 @@ mod tests {
         let installer = SetupInstaller::with_launch(
             dir.path().to_path_buf(),
             "x86_64",
-            Box::new(move |path| {
+            Box::new(move |path, _log| {
                 seen.lock().unwrap().push(path.to_path_buf());
                 Ok(())
             }),

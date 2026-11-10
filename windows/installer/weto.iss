@@ -87,6 +87,30 @@ const
   InstanceMutex = 'Local\com.weto.app';
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
 
+var
+  { Установка дошла до конца: файлы новой версии на месте. }
+  Installed: Boolean;
+  { Удаление закрыло работающий Weto и ещё не начало сносить файлы. }
+  WetoClosed: Boolean;
+  { Пользователь сам выбрал «Не удалять и закрыть Weto». }
+  KeepClosed: Boolean;
+  UninstallStarted: Boolean;
+
+{ Путь фиксирован (DisableDirPage), поэтому годится и там, где {app}
+  ещё не известен. }
+function InstalledWeto(): String;
+begin
+  Result := ExpandConstant('{localappdata}\Programs\weto\Weto.exe');
+end;
+
+procedure LaunchWeto();
+var
+  Code: Integer;
+begin
+  if FileExists(InstalledWeto()) then
+    Exec(InstalledWeto(), '', '', SW_SHOWNORMAL, ewNoWait, Code);
+end;
+
 { Перед заменой файлов работающий Weto просится выйти штатно — стоящие
   цели продолжаются, а не гибнут вместе с принудительно закрытым процессом.
   Restart Manager (CloseApplications) приложение в трее закрыть не умеет:
@@ -95,24 +119,71 @@ const
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
-  Exe: String;
 begin
   Result := '';
-  Exe := ExpandConstant('{app}\Weto.exe');
-  if CheckForMutexes(InstanceMutex) and FileExists(Exe) then
-    if not Exec(Exe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+  if CheckForMutexes(InstanceMutex) and FileExists(InstalledWeto()) then
+    if not Exec(InstalledWeto(), '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
       Result := 'Weto не закрылся. Закройте его из меню в трее и запустите установку снова.';
 end;
 
-{ Проверка перед сносом: Weto.exe --uninstall. Код 0 — удалять; иначе
-  (стоящие остались и пользователь выбрал «Не удалять», Weto не вышел,
-  мост не ответил) — удаление отменяется. Ничего ещё не удалено. }
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    Installed := True;
+end;
+
+{ Тихое обновление, не дошедшее до конца (Weto не закрылся, нет места,
+  вмешался антивирус), не оставляет машину без охраны: прежний Weto уже
+  вышел, и поднять его, кроме установщика, некому. }
+procedure DeinitializeSetup();
+begin
+  if WizardSilent and not Installed then
+    LaunchWeto();
+end;
+
+{ Проверка перед сносом: Weto.exe --uninstall. Коды: 0 — удалять; 1 —
+  стоящие остались и выбрано «Не удалять и закрыть Weto»; 2 — Weto не
+  закрылся; 3 — проверка не удалась. Ничего ещё не удалено. Вопросы —
+  SuppressibleMsgBox: молчат только при /SUPPRESSMSGBOXES (скрипты), а
+  удаление кнопкой из приложения (/SILENT) их показывает. }
 function InitializeUninstall(): Boolean;
 var
   Code: Integer;
 begin
-  Result := Exec(ExpandConstant('{app}\Weto.exe'), '--uninstall', '', SW_SHOWNORMAL,
-    ewWaitUntilTerminated, Code) and (Code = 0);
+  if not FileExists(InstalledWeto())
+    or not Exec(InstalledWeto(), '--uninstall', '', SW_SHOWNORMAL, ewWaitUntilTerminated, Code) then
+  begin
+    { Сломанная установка удаляется, а не застревает навсегда. }
+    Result := SuppressibleMsgBox('Weto не запускается, и проверить, не осталось ли программ на паузе, нечем. Удалить всё равно?',
+      mbConfirmation, MB_YESNO, IDYES) = IDYES;
+    exit;
+  end;
+  case Code of
+    0:
+      begin
+        WetoClosed := True;
+        Result := True;
+      end;
+    1:
+      begin
+        KeepClosed := True;
+        Result := False;
+      end;
+    2:
+      begin
+        SuppressibleMsgBox('Weto не закрылся. Закройте его из меню в трее и запустите удаление снова.',
+          mbError, MB_OK, IDOK);
+        Result := False;
+      end;
+  else
+    begin
+      Result := SuppressibleMsgBox('Weto не смог проверить, не осталось ли программ на паузе. Удалить всё равно?',
+        mbConfirmation, MB_YESNO, IDYES) = IDYES;
+      { Отказались — Weto, закрытый проверкой, поднимается снова. }
+      if not Result then
+        LaunchWeto();
+    end;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -123,8 +194,8 @@ begin
     то, что лежит вне каталогов данных и знает только сам Weto. }
   if CurUninstallStep = usUninstall then
   begin
-    Exec(ExpandConstant('{app}\Weto.exe'), '--uninstall-cleanup', '', SW_HIDE,
-      ewWaitUntilTerminated, Code);
+    UninstallStarted := True;
+    Exec(InstalledWeto(), '--uninstall-cleanup', '', SW_HIDE, ewWaitUntilTerminated, Code);
     { Страховка, если Weto.exe не отработал: автозапуск без программы
       открывал бы ошибку при каждом входе. }
     RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'Weto');
@@ -136,4 +207,13 @@ begin
     DelTree(ExpandConstant('{userappdata}\weto'), True, True, True);
     DelTree(ExpandConstant('{localappdata}\weto'), True, True, True);
   end;
+end;
+
+{ Удаление отменено после проверки (например, «Нет» на вопрос самого
+  деинсталлятора): Weto к этому моменту закрыт, и без него машина осталась
+  бы без охраны. Выбор «Не удалять и закрыть Weto» уважается. }
+procedure DeinitializeUninstall();
+begin
+  if WetoClosed and not KeepClosed and not UninstallStarted then
+    LaunchWeto();
 end;
