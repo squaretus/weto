@@ -93,6 +93,16 @@ pub struct Pill {
     pub countdown: Option<String>,
     /// Цель задана командой, а не программой с ярлыком: глиф терминала.
     pub command_line: bool,
+    /// Значок приложения у цели-ярлыка: файл и индекс (`shortcut::icon`).
+    /// Заполняет приложение, у вида о файлах знаний нет.
+    pub icon: Option<IconRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IconRef {
+    pub path: String,
+    pub index: i32,
 }
 
 /// Экран статуса на момент `now`. `has_targets` — есть ли цели в настройках;
@@ -135,6 +145,7 @@ pub fn status_view(
                         .any(|paused| paused.pid == target.pid)
                         .then(|| countdown_until(snapshot.pause_deadline, now)),
                     command_line: presentation::is_command_line_target(&target.entry),
+                    icon: None,
                 })
                 .collect(),
             notice: notice.text,

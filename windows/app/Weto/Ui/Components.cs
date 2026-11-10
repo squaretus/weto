@@ -542,9 +542,9 @@ public static class Components
             Background = Brush("Card"),
             Child = Glyph("\uE756", 16, Brush("Dim")), // CommandPrompt
         };
-        if (!pill.CommandLine)
+        if (pill.Icon is { } source)
         {
-            AppIcons.Load(pill.Entry, image => icon.Child = image);
+            AppIcons.Load(source, image => icon.Child = image);
         }
         grid.Children.Add(icon);
 

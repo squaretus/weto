@@ -42,7 +42,11 @@ public sealed record Pill(
     string Entry,
     int Extra,
     string? Countdown,
-    bool CommandLine);
+    bool CommandLine,
+    IconRef? Icon);
+
+/// <summary>Значок приложения у цели-ярлыка: файл и индекс значка в нём.</summary>
+public sealed record IconRef(string Path, int Index);
 
 public sealed record SettingsView(
     IReadOnlyList<TargetRow> Targets,

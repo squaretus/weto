@@ -41,7 +41,7 @@ use crate::update::{
     asset_suffix, current_version, update_view, SetupInstaller, UpdateView, REPOSITORY,
 };
 use crate::view::{
-    journal_view, settings_view, status_view, JournalView, SettingsView, StatusView,
+    journal_view, settings_view, status_view, IconRef, JournalView, SettingsView, StatusView,
 };
 
 /// Охрана держит цели: пауза, запрет запуска или стоящие по учёту. Пока так,
@@ -163,13 +163,21 @@ impl WindowsApp {
     }
 
     pub fn status(&self) -> StatusView {
-        status_view(
+        let mut view = status_view(
             &self.controller.snapshot(),
             !self.settings.current().targets.is_empty(),
             self.controller.is_probing(),
             SystemTime::now(),
             &clock::local_hms,
-        )
+        );
+        // Значок приложения — только у цели-ярлыка, как Icon= у .desktop.
+        if let Some(targets) = view.targets.as_mut() {
+            for pill in targets.pills.iter_mut().filter(|pill| !pill.command_line) {
+                pill.icon = weto_sys_windows::shortcut::icon(std::path::Path::new(&pill.entry))
+                    .map(|(path, index)| IconRef { path, index });
+            }
+        }
+        view
     }
 
     pub fn settings(&self) -> SettingsView {

@@ -26,6 +26,7 @@ const HAS_LINK_TARGET_ID_LIST: u32 = 0x1;
 const HAS_LINK_INFO: u32 = 0x2;
 const HAS_NAME: u32 = 0x4;
 const HAS_RELATIVE_PATH: u32 = 0x8;
+const HAS_ICON_LOCATION: u32 = 0x40;
 const IS_UNICODE: u32 = 0x80;
 const HAS_EXP_STRING: u32 = 0x200;
 
@@ -41,6 +42,10 @@ pub struct Shortcut {
     pub local_path: Option<String>,
     /// `RELATIVE_PATH` — от каталога ярлыка.
     pub relative_path: Option<String>,
+    /// `ICON_LOCATION` как записан (бывает с переменными) и индекс значка
+    /// в файле из заголовка.
+    pub icon_location: Option<String>,
+    pub icon_index: i32,
 }
 
 impl Shortcut {
@@ -69,13 +74,17 @@ pub fn parse(bytes: &[u8]) -> Option<Shortcut> {
     }
     let flags = u32_at(bytes, 0x14)?;
     let unicode = flags & IS_UNICODE != 0;
+    let icon_index = u32_at(bytes, 0x38)? as i32;
     let mut offset = HEADER_SIZE;
 
     if flags & HAS_LINK_TARGET_ID_LIST != 0 {
         offset += 2 + u16_at(bytes, offset)? as usize;
     }
 
-    let mut shortcut = Shortcut::default();
+    let mut shortcut = Shortcut {
+        icon_index,
+        ..Shortcut::default()
+    };
     if flags & HAS_LINK_INFO != 0 {
         let info = bytes.get(offset..)?;
         let size = u32_at(info, 0)? as usize;
@@ -84,22 +93,19 @@ pub fn parse(bytes: &[u8]) -> Option<Shortcut> {
     }
 
     // Строки идут в порядке NAME, RELATIVE_PATH, WORKING_DIR, ARGUMENTS,
-    // ICON_LOCATION; нужен только относительный путь, остальные пропускаются.
-    for (flag, keep) in [
-        (HAS_NAME, false),
-        (HAS_RELATIVE_PATH, true),
-        (0x10, false),
-        (0x20, false),
-        (0x40, false),
-    ] {
+    // ICON_LOCATION; нужны относительный путь и значок.
+    for flag in [HAS_NAME, HAS_RELATIVE_PATH, 0x10, 0x20, HAS_ICON_LOCATION] {
         if flags & flag == 0 {
             continue;
         }
         let count = u16_at(bytes, offset)? as usize;
         let length = if unicode { count * 2 } else { count };
         let text = bytes.get(offset + 2..offset + 2 + length)?;
-        if keep {
-            shortcut.relative_path = Some(if unicode { utf16(text) } else { ansi(text) });
+        let text = || Some(if unicode { utf16(text) } else { ansi(text) });
+        match flag {
+            HAS_RELATIVE_PATH => shortcut.relative_path = text(),
+            HAS_ICON_LOCATION => shortcut.icon_location = text().filter(|path| !path.is_empty()),
+            _ => {}
         }
         offset += 2 + length;
     }
@@ -182,6 +188,19 @@ pub fn resolve(path: &Path) -> Option<String> {
     })
 }
 
+/// Значок ярлыка без стрелки: файл и индекс из `ICON_LOCATION`, а если его
+/// нет — программа ярлыка, значок 0. Оболочка на сам `.lnk` накладывает
+/// стрелку, а плашке нужен значок приложения, как `Icon=` у `.desktop`.
+pub fn icon(path: &Path) -> Option<(String, i32)> {
+    let bytes = std::fs::read(path).ok()?;
+    let shortcut = parse(&bytes)?;
+    let expand = |text: &str| expand_variables(text, &|name| std::env::var(name).ok());
+    if let Some(location) = shortcut.icon_location.as_deref().and_then(expand) {
+        return Some((location, shortcut.icon_index));
+    }
+    Some((shortcut.target(path.parent()?, &expand)?, 0))
+}
+
 /// Запись настроек — ярлык (`.lnk` в любом регистре).
 pub fn is_shortcut(entry: &str) -> bool {
     entry.to_ascii_lowercase().ends_with(".lnk")
@@ -240,6 +259,7 @@ mod tests {
         unicode_info: bool,
         relative_path: Option<String>,
         environment: Option<String>,
+        icon: Option<(String, i32)>,
         id_list: bool,
     }
 
@@ -250,6 +270,7 @@ mod tests {
                 unicode_info: true,
                 relative_path: None,
                 environment: None,
+                icon: None,
                 id_list: true,
             }
         }
@@ -268,9 +289,15 @@ mod tests {
             if self.environment.is_some() {
                 flags |= HAS_EXP_STRING;
             }
+            if self.icon.is_some() {
+                flags |= HAS_ICON_LOCATION;
+            }
             let mut bytes = vec![0u8; HEADER_SIZE];
             bytes[0..4].copy_from_slice(&(HEADER_SIZE as u32).to_le_bytes());
             bytes[0x14..0x18].copy_from_slice(&flags.to_le_bytes());
+            if let Some((_, index)) = &self.icon {
+                bytes[0x38..0x3C].copy_from_slice(&index.to_le_bytes());
+            }
 
             if self.id_list {
                 // Список идентификаторов — произвольные байты, разбор их пропускает.
@@ -282,6 +309,13 @@ mod tests {
             }
             if let Some(relative) = &self.relative_path {
                 let units: Vec<u16> = relative.encode_utf16().collect();
+                bytes.extend_from_slice(&(units.len() as u16).to_le_bytes());
+                for unit in units {
+                    bytes.extend_from_slice(&unit.to_le_bytes());
+                }
+            }
+            if let Some((location, _)) = &self.icon {
+                let units: Vec<u16> = location.encode_utf16().collect();
                 bytes.extend_from_slice(&(units.len() as u16).to_le_bytes());
                 for unit in units {
                     bytes.extend_from_slice(&unit.to_le_bytes());
@@ -400,6 +434,23 @@ mod tests {
                 .as_deref(),
             Some(r"C:\Users\u\AppData\Local\Programs\weto\Weto.exe")
         );
+    }
+
+    /// Значок — из `ICON_LOCATION` с индексом заголовка, а не из самого ярлыка.
+    #[test]
+    fn the_icon_location_and_index_are_read() {
+        let mut builder = Builder::new();
+        builder.local_path = Some(r"C:\App\Update.exe".into());
+        builder.icon = Some((r"%LOCALAPPDATA%\App\app.ico".into(), 3));
+
+        let shortcut = parse(&builder.build()).unwrap();
+
+        assert_eq!(
+            shortcut.icon_location.as_deref(),
+            Some(r"%LOCALAPPDATA%\App\app.ico")
+        );
+        assert_eq!(shortcut.icon_index, 3);
+        assert_eq!(shortcut.local_path.as_deref(), Some(r"C:\App\Update.exe"));
     }
 
     #[test]

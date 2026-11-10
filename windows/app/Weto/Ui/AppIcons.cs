@@ -2,15 +2,17 @@
 //
 // Значок есть только у цели, добавленной ярлыком из меню «Пуск» (.lnk): по одной
 // команде или пути, как и на Linux, приложение от инструмента не отличить.
-// Картинку отдаёт оболочка (SHGetFileInfo) — тот же значок, что в меню «Пуск»,
-// без стрелки ярлыка (её добавил бы только SHGFI_LINKOVERLAY). Синхронно:
-// StorageFile.GetThumbnailAsync на раннере молча не отдавал ничего. Кэш по
-// записи: попап перерисовывается раз в секунду, а ярлык за это время не меняется.
+// Файл и индекс значка называет мост (shortcut::icon): IconLocation ярлыка, а без
+// него — программа ярлыка. Сам .lnk не годится: оболочка накладывает на его
+// значок стрелку. Значок достаёт ExtractIconExW, синхронно: StorageFile.
+// GetThumbnailAsync на раннере молча не отдавал ничего. Кэш по файлу и индексу:
+// попап перерисовывается раз в секунду, а значок за это время не меняется.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Weto.Bridge;
 
 namespace Weto.Ui;
 
@@ -19,13 +21,14 @@ public static class AppIcons
     /// <summary>Готовые картинки; null — у ярлыка значка нет, спрашивать снова незачем.</summary>
     private static readonly Dictionary<string, (int Size, byte[] Pixels)?> Cache = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Значок записи в <paramref name="apply"/>; нет значка — <paramref name="apply"/> не зовётся.</summary>
-    public static void Load(string entry, Action<Image> apply)
+    /// <summary>Значок в <paramref name="apply"/>; нет значка — <paramref name="apply"/> не зовётся.</summary>
+    public static void Load(IconRef source, Action<Image> apply)
     {
-        if (!Cache.TryGetValue(entry, out var pixels))
+        var key = $"{source.Path}|{source.Index}";
+        if (!Cache.TryGetValue(key, out var pixels))
         {
-            pixels = Read(entry);
-            Cache[entry] = pixels;
+            pixels = Read(source);
+            Cache[key] = pixels;
         }
         if (pixels is not { } icon)
         {
@@ -41,17 +44,29 @@ public static class AppIcons
     }
 
     /// <summary>Пиксели BGRA (с предумножением альфы, как ждёт WriteableBitmap).</summary>
-    private static (int Size, byte[] Pixels)? Read(string path)
+    private static (int Size, byte[] Pixels)? Read(IconRef source)
     {
-        var info = new SHFILEINFOW();
-        if (SHGetFileInfoW(path, 0, ref info, (uint)Marshal.SizeOf<SHFILEINFOW>(), SHGFI_ICON | SHGFI_LARGEICON) == 0
-            || info.hIcon == 0)
+        nint icon = 0;
+        if (ExtractIconExW(source.Path, source.Index, out var large, 0, 1) > 0)
+        {
+            icon = large;
+        }
+        if (icon == 0)
+        {
+            // Значка с этим индексом нет — значок файла от оболочки.
+            var info = new SHFILEINFOW();
+            if (SHGetFileInfoW(source.Path, 0, ref info, (uint)Marshal.SizeOf<SHFILEINFOW>(), SHGFI_ICON | SHGFI_LARGEICON) != 0)
+            {
+                icon = info.hIcon;
+            }
+        }
+        if (icon == 0)
         {
             return null;
         }
         try
         {
-            if (!GetIconInfo(info.hIcon, out var iconInfo))
+            if (!GetIconInfo(icon, out var iconInfo))
             {
                 return null;
             }
@@ -67,7 +82,7 @@ public static class AppIcons
         }
         finally
         {
-            DestroyIcon(info.hIcon);
+            DestroyIcon(icon);
         }
     }
 
@@ -162,6 +177,9 @@ public static class AppIcons
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern nint SHGetFileInfoW(string path, uint attributes, ref SHFILEINFOW info, uint size, uint flags);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint ExtractIconExW(string file, int index, out nint large, nint small, uint count);
 
     [DllImport("user32.dll")]
     private static extern bool GetIconInfo(nint icon, out ICONINFO info);

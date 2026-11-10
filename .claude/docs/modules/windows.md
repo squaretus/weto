@@ -136,7 +136,7 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 |---|---|---|
 | попап — обычное окно «Weto» | безрамочное окно над треем, прячется при потере фокуса | Windows отдаёт координаты трея и разрешает самопозиционирование |
 | «Выбрать…» — `Gtk.FileDialog` в каталоге приложений XDG; цель — ярлык `.desktop` | `IFileOpenDialog` в меню «Пуск» пользователя; цель — ярлык `.lnk` (`shortcut.rs`), диалог с `FOS_NODEREFERENCELINKS` | пикер Windows App SDK разыменовывает ярлык и отдал бы `.exe` |
-| значок плашки — `Icon=` ярлыка | значок ярлыка от оболочки (`StorageFile.GetThumbnailAsync`) | своё понятие приложения |
+| значок плашки — `Icon=` ярлыка | `IconLocation` ярлыка с индексом, без него — программа ярлыка (`shortcut::icon`, `ExtractIconExW`) | на сам `.lnk` оболочка накладывает стрелку |
 | второй диалог «Нужен файл программы» для Steam и flatpak | нет | игры Steam в «Пуске» — `.url`, а не `.lnk`; фильтр диалога их не предлагает |
 | «Вернуть в терминал», «в фоне», `fg` через tmux/screen | нет | job control в консоли Windows нет; приостановленная цель из фона не уходит |
 | пример в пояснении цели — `nano`, `/usr/bin/curl` | `claude`, `C:\Program Files\Git\bin\git.exe` | `TARGET_ENTRY_HINT` под `cfg!(windows)` |
