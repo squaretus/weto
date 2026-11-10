@@ -9,6 +9,7 @@
 //! Linux-реализации стоят под `cfg(target_os = "linux")`, и их зависимости
 //! (`rustix`, `libc`, `zbus`) в сборку под Windows не попадают.
 
+#[cfg(target_os = "linux")]
 pub mod autostart;
 pub mod background;
 pub mod desktop_entries;

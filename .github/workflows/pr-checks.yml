@@ -169,7 +169,10 @@ jobs:
           --all-targets -- -D warnings
 
       - name: Unit tests
-        run: cargo test -p weto-core -p weto-config -p weto-sys -p weto-guard -p weto-update
+        # --no-fail-fast: падение одного тестового бинарника не прячет остальные.
+        run: >
+          cargo test --no-fail-fast
+          -p weto-core -p weto-config -p weto-sys -p weto-guard -p weto-update
 
   generators:
     name: Generators are idempotent
