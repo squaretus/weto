@@ -254,8 +254,10 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: bash windows/scripts/build.sh 9.9.9 "$ARCH"
 
+      # Windows PowerShell 5.1, а не pwsh: снимок окна собирается Add-Type
+      # на System.Drawing, а в pwsh 7 явные сборки вытесняют стандартные ссылки.
       - name: Screenshots
-        shell: pwsh
+        shell: powershell
         env:
           ARCH: ${{ matrix.arch }}
         run: |
