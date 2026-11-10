@@ -18,6 +18,7 @@ weto-core = { path = "../../linux/crates/weto-core" }
 weto-config = { path = "../../linux/crates/weto-config" }
 weto-sys = { path = "../../linux/crates/weto-sys" }
 weto-guard = { path = "../../linux/crates/weto-guard" }
+weto-update = { path = "../../linux/crates/weto-update" }
 weto-sys-windows = { path = "weto-sys-windows" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

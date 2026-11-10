@@ -16,6 +16,7 @@ weto-core = { workspace = true }
 weto-config = { workspace = true }
 weto-sys = { workspace = true }
 weto-guard = { workspace = true }
+weto-update = { workspace = true }
 weto-sys-windows = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

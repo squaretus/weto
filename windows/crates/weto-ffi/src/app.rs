@@ -31,7 +31,14 @@ use weto_sys_windows::process_signaler::WindowsProcessSignaler;
 use weto_sys_windows::secret_store::{CredentialStore, IPINFO_TARGET};
 use weto_sys_windows::target_resolver::{settings_target_now, WindowsTargetResolver};
 
+use weto_update::checker::ReleaseChecker;
+use weto_update::scheduler::{ReleaseLooking, UpdateScheduler};
+use weto_update::updates::Updates;
+
 use crate::command::{apply_to_settings, Command};
+use crate::update::{
+    asset_suffix, current_version, update_view, SetupInstaller, UpdateView, REPOSITORY,
+};
 use crate::view::{
     journal_view, settings_view, status_view, JournalView, SettingsView, StatusView,
 };
@@ -44,6 +51,8 @@ pub struct WindowsApp {
     checks: Arc<Mutex<CheckLog>>,
     secrets: CredentialStore,
     autostart: RunKeyAutostart,
+    updates: Arc<Updates>,
+    checker: Arc<dyn ReleaseLooking>,
 }
 
 impl WindowsApp {
@@ -73,6 +82,16 @@ impl WindowsApp {
             Box::new(WindowsTargetResolver),
         ));
 
+        let arch = std::env::consts::ARCH;
+        let checker: Arc<dyn ReleaseLooking> =
+            Arc::new(ReleaseChecker::new(REPOSITORY, arch).with_asset_suffix(asset_suffix(arch)));
+        let updates = Updates::new(
+            paths.state_dir.clone(),
+            Arc::new(SetupInstaller::new(paths.cache_dir.join("updates"), arch)),
+            checker.clone(),
+            current_version(),
+        );
+
         WindowsApp {
             paths,
             settings,
@@ -81,6 +100,8 @@ impl WindowsApp {
             checks,
             secrets: CredentialStore::new(IPINFO_TARGET),
             autostart: RunKeyAutostart::new(VALUE_NAME),
+            updates,
+            checker,
         }
     }
 
@@ -96,6 +117,31 @@ impl WindowsApp {
             Box::new(IpHelperEventSource),
             |_| {},
         );
+
+        // Проверка обновлений по расписанию: находки применяет свой поток —
+        // `Updates` потокобезопасен, а интерфейс читает итог опросом вида.
+        let findings = UpdateScheduler::new(
+            current_version(),
+            self.checker.clone(),
+            self.updates.deferrals(),
+        )
+        .start();
+        let updates = self.updates.clone();
+        std::thread::Builder::new()
+            .name("weto-updates".into())
+            .spawn(move || {
+                for examination in findings {
+                    updates.apply(examination);
+                }
+            })
+            .expect("поток обновлений не поднялся");
+    }
+
+    /// Обновление: баннер, окно, плитка подвала. Просьба открыть окно
+    /// забирается этим чтением — опрашивает вид один интерфейс.
+    pub fn update(&self) -> UpdateView {
+        let requested = self.updates.take_window_request().is_some();
+        update_view(&self.updates, requested)
     }
 
     pub fn status(&self) -> StatusView {
@@ -176,6 +222,26 @@ impl WindowsApp {
                     .map(|process| json!({"pid": process.pid, "path": process.executable_path}))
                     .collect::<Vec<_>>()));
             }
+            Command::CheckUpdates => {
+                if self.updates.found().is_some() {
+                    return Ok(Value::Bool(true));
+                }
+                self.updates.check_now();
+                return Ok(Value::Bool(false));
+            }
+            Command::InstallUpdate => {
+                if let Some(info) = self.updates.pending() {
+                    self.updates.install(&info);
+                }
+            }
+            Command::SkipUpdate => {
+                if let Some(info) = self.updates.pending() {
+                    self.updates.skip(&info.latest_version);
+                }
+            }
+            Command::RemindLater { interval } => self.updates.remind_later(interval.into()),
+            Command::DismissUpdate => self.updates.dismiss(),
+            Command::SetAutoInstall { enabled } => self.updates.set_auto_install(enabled),
             // Правки настроек исполнены выше.
             _ => {}
         }
