@@ -121,15 +121,15 @@ public sealed class SettingsWindow : Window
                 Run("setToken", new Dictionary<string, object?> { ["token"] = token.Text });
             }
         };
-        rows.Add(Row(Text("Токен ipinfo", "Label"), token));
+        rows.Add(FieldRow("Токен ipinfo", token));
 
         var choices = new List<(ulong, string)>();
         foreach (var choice in settings.PauseCeilings)
         {
             choices.Add((choice.Seconds, choice.Title));
         }
-        rows.Add(Row(
-            Text("Потолок паузы", "Label"),
+        rows.Add(FieldRow(
+            "Потолок паузы",
             Segments(choices, settings.PauseCeiling, seconds =>
                 Run("setPauseCeiling", new Dictionary<string, object?> { ["seconds"] = seconds }))));
         return Card("Сеть и гео", rows);
@@ -153,8 +153,8 @@ public sealed class SettingsWindow : Window
 
     private Border AppearanceCard(SettingsView settings) => Card("Внешний вид",
     [
-        Row(
-            Text("Тема", "Label"),
+        FieldRow(
+            "Тема",
             Segments([("dark", "Тёмная"), ("light", "Светлая")], settings.Theme, theme =>
                 Run("setTheme", new Dictionary<string, object?> { ["theme"] = theme }))),
     ]);

@@ -197,12 +197,14 @@ public sealed class StatusWindow : Window
         _panel.Measure(new Windows.Foundation.Size(_panel.Width, double.PositiveInfinity));
         var width = (int)Math.Ceiling(_panel.Width * scale);
         var height = (int)Math.Ceiling(_panel.DesiredSize.Height * scale);
+        // Размер — клиентской области: рамка окна в него не входит, и при
+        // MoveAndResize по внешнему размеру низ попапа обрезался.
+        AppWindow.ResizeClient(new Windows.Graphics.SizeInt32(width, height));
+        var outer = AppWindow.Size;
         var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
         var margin = (int)(Number("Space4") * scale);
-        AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
-            area.X + area.Width - width - margin,
-            area.Y + area.Height - height - margin,
-            width,
-            height));
+        AppWindow.Move(new Windows.Graphics.PointInt32(
+            area.X + area.Width - outer.Width - margin,
+            area.Y + area.Height - outer.Height - margin));
     }
 }

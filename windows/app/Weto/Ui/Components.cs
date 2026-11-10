@@ -119,6 +119,31 @@ public static class Components
         return grid;
     }
 
+    /// <summary>
+    /// Ширина колонки подписей у строк с полем и сегментами: поля и сегменты
+    /// одной карточки начинаются с одной вертикали (канон, «Окно»). В WinUI нет
+    /// общей колонки на несколько сеток, поэтому ширина — по самой длинной
+    /// подписи вкладки («Потолок паузы»).
+    /// </summary>
+    public const double LabelColumn = 120;
+
+    /// <summary>Строка с полем или сегментами: подпись, зазор space5, контрол во всю остальную ширину.</summary>
+    public static Grid FieldRow(string label, FrameworkElement control)
+    {
+        var grid = new Grid
+        {
+            Padding = new Thickness(0, Number("Space2"), 0, Number("Space2")),
+            ColumnSpacing = Number("Space5"),
+        };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LabelColumn) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.Children.Add(Text(label, "Label"));
+        control.HorizontalAlignment = HorizontalAlignment.Stretch;
+        Grid.SetColumn(control, 1);
+        grid.Children.Add(control);
+        return grid;
+    }
+
     /// <summary>Название с подписью под ним (путь цели).</summary>
     public static StackPanel Titled(string title, string? caption) => new()
     {
