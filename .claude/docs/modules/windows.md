@@ -133,9 +133,10 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   `weto_update::installer::download` в кэш, запуск `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART
   /CLOSEAPPLICATIONS` (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`). Файл остаётся в кэше.
 - **«Installed» = установщик запущен**, не «файлы заменены». `UpdateView.installed` → такт
-  приложения делает штатный `Quit()` (стоящие продолжаются); установщик в `InitializeSetup`
-  ждёт мьютекс до 30 с (дальше страхует `CloseApplications`), ставит поверх и поднимает новую
-  версию (`[Run]` с `Check: WizardSilent`). Отката, как на Linux, нет.
+  приложения делает штатный `Quit()` (стоящие продолжаются); установщик в `PrepareToInstall`
+  зовёт старый `Weto.exe --quit` (событие `Local\com.weto.app.quit`, ждёт мьютекс до 20 с),
+  ставит поверх и поднимает новую версию (`[Run]` с `Check: WizardSilent`). Отката, как
+  на Linux, нет.
 - Версия — `WETO_VERSION` при сборке моста (`build.sh`); без неё `0.0.0`.
 
 ## Install and uninstall
@@ -179,9 +180,9 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - Новые коды отказа `OpenProcess` для вышедших процессов — учёт досылал бы Resume мёртвому.
 - `.bat`/`.cmd`, не npm-шим, молча не охраняются.
 - Окно размером «с заголовком» у окна без заголовка — лечится только `FitToPanel`, не `ResizeClient`.
-- Обновление, не дождавшееся выхода приложения за 30 с: дальше `CloseApplications` (Restart
-  Manager) может закрыть его без штатного выхода — тогда стоящие цели продолжит только
-  следующий запуск по учёту.
+- Restart Manager (`CloseApplications`) приложение в трее закрыть не умеет: установка поверх
+  работающего без `--quit` в `PrepareToInstall` возвращала код 5. Не вышел за 20 с —
+  установщик останавливается с просьбой закрыть Weto из трея, а не убивает его.
 
 ## Testing
 - Чистая часть (`process_table`, `target_resolver`, `view`, `command`, `update`, `uninstall`) идёт

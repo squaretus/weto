@@ -69,6 +69,12 @@ public partial class App : Application
             UninstallCleanup();
             return;
         }
+        if (Array.Exists(arguments, a => a == "--quit"))
+        {
+            // Установщик поверх работающего: попросить выйти штатно и дождаться.
+            Environment.Exit(QuitRunningInstance() ? 0 : 2);
+            return;
+        }
 
         _instance = new Mutex(initiallyOwned: true, InstanceMutex, out var created);
         if (!created)
@@ -269,25 +275,7 @@ public partial class App : Application
     /// </summary>
     private void Uninstall()
     {
-        if (EventWaitHandle.TryOpenExisting(QuitEvent, out var quit))
-        {
-            quit.Set();
-            quit.Dispose();
-        }
-        // Мьютекс держится до конца процесса: второй Weto не поднимется
-        // посреди проверки и вопроса.
-        _instance = new Mutex(false, InstanceMutex);
-        bool acquired;
-        try
-        {
-            acquired = _instance.WaitOne(QuitTimeout);
-        }
-        catch (AbandonedMutexException)
-        {
-            // Экземпляр упал, не отпустив мьютекс: учёт разберёт мост ниже.
-            acquired = true;
-        }
-        if (!acquired)
+        if (!QuitRunningInstance())
         {
             Environment.Exit(2);
         }
@@ -302,6 +290,30 @@ public partial class App : Application
         }
         // Второй исход — «Не удалять и закрыть Weto»: Weto к этому моменту уже закрыт.
         DialogWindow.Ask(check.Dialog, destructive: true, confirmed => Environment.Exit(confirmed ? 0 : 1));
+    }
+
+    /// <summary>
+    /// Попросить работающий экземпляр выйти штатно (стоящие цели продолжаются)
+    /// и дождаться его мьютекса. Мьютекс остаётся у этого процесса до его
+    /// конца: второй Weto не поднимется посреди удаления или установки.
+    /// </summary>
+    private bool QuitRunningInstance()
+    {
+        if (EventWaitHandle.TryOpenExisting(QuitEvent, out var quit))
+        {
+            quit.Set();
+            quit.Dispose();
+        }
+        _instance = new Mutex(false, InstanceMutex);
+        try
+        {
+            return _instance.WaitOne(QuitTimeout);
+        }
+        catch (AbandonedMutexException)
+        {
+            // Экземпляр упал, не отпустив мьютекс: учёт разберёт следующий запуск.
+            return true;
+        }
     }
 
     /// <summary>

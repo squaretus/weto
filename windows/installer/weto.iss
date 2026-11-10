@@ -3,8 +3,8 @@
 ; Ставится пользователю, без прав администратора: %LOCALAPPDATA%\Programs\weto
 ; (Paths::windows_under), ярлык в меню «Пуск». Тот же установщик — обновление:
 ; приложение запускает его тихо (/VERYSILENT … /CLOSEAPPLICATIONS) и выходит
-; штатно, установщик дожидается освобождения мьютекса экземпляра, ставит новую
-; версию поверх и поднимает её.
+; штатно; установщик просит выйти и работающий экземпляр (Weto.exe --quit),
+; ставит новую версию поверх и поднимает её.
 ;
 ; Удаление — то же обязательство, что на macOS и Linux: до сноса чего-либо
 ; Weto.exe --uninstall просит работающий экземпляр выйти, досылает SIGCONT
@@ -87,19 +87,21 @@ const
   InstanceMutex = 'Local\com.weto.app';
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
 
-{ Обновление: приложение выходит само, увидев запущенный установщик.
-  Ждём его мьютекса до 30 с, а дальше страхует CloseApplications. }
-function InitializeSetup(): Boolean;
+{ Перед заменой файлов работающий Weto просится выйти штатно — стоящие
+  цели продолжаются, а не гибнут вместе с принудительно закрытым процессом.
+  Restart Manager (CloseApplications) приложение в трее закрыть не умеет:
+  установка поверх работающего возвращала код 5. Обновление из самого
+  приложения сюда приходит, когда Weto уже вышел, и --quit ничего не ждёт. }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  Waited: Integer;
+  Code: Integer;
+  Exe: String;
 begin
-  Waited := 0;
-  while CheckForMutexes(InstanceMutex) and (Waited < 60) do
-  begin
-    Sleep(500);
-    Waited := Waited + 1;
-  end;
-  Result := True;
+  Result := '';
+  Exe := ExpandConstant('{app}\Weto.exe');
+  if CheckForMutexes(InstanceMutex) and FileExists(Exe) then
+    if not Exec(Exe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+      Result := 'Weto не закрылся. Закройте его из меню в трее и запустите установку снова.';
 end;
 
 { Проверка перед сносом: Weto.exe --uninstall. Код 0 — удалять; иначе
