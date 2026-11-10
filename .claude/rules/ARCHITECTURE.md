@@ -4,7 +4,7 @@
 только данные: токены дизайна, исходники иконки и голден-фикстуры политики.
 Готовится Windows-версия: её охрана — пять Rust-крейтов Linux (`weto-core`, `weto-config`,
 `weto-sys`, `weto-guard`, `weto-update`), которые уже собираются и тестируются под Windows;
-кода самой Windows-версии в репозитории пока нет.
+адаптеры к Windows API и мост к интерфейсу на C# — в `windows/crates`, самого приложения пока нет.
 
 ## Стек macOS
 - Swift 5.9 (tools-version 5.9), Swift Package Manager, target macOS 26.0+ (Apple Silicon).
@@ -146,6 +146,8 @@ linux/scripts/dev.sh cargo clippy --workspace --all-targets -- -D warnings
 linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh      # инвариант границ ядра
 linux/scripts/dev.sh cargo check --target x86_64-pc-windows-gnu -p weto-core -p weto-config \
                      -p weto-sys -p weto-guard -p weto-update          # общие крейты под Windows
+linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo test'      # Windows: чистая часть (живые тесты — только CI)
+linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings'
 linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/, weto (musl) — cli/*.tar.gz
 bash shared/cli/tests/install-contract.sh            # контракт установщика терминальной версии
 linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабочим столом для проверки глазами
@@ -165,6 +167,7 @@ linux/            приложение под Linux (Cargo workspace)
 │                 weto-tray, weto-update, weto-app, weto-cli, wetod
 ├── scripts/      dev.sh (контейнер), build.sh, install.sh, desktop-machine.sh, tests/
 └── docs/         ручные проверки и сценарий живого рабочего стола
+windows/crates/   Windows (свой Cargo workspace): weto-sys-windows, weto-ffi; охрана — path на linux/crates
 shared/           то, что обязано совпадать: исходники иконки, токены дизайна,
                   голден-фикстуры политики, генератор токенов, установщик `weto` (cli/)
 docs/             канон дизайн-системы — общий, по платформам не делится
@@ -207,6 +210,8 @@ docs/             канон дизайн-системы — общий, по п
   `run`, `status.json`, сервис systemd/launchd, охрана всей машины от root, самообновление;
   VPN можно задать туннелем. Установка одной командой (`shared/cli/install.sh`) —
   [runbooks/install-weto-cli-on-a-server](../docs/runbooks/install-weto-cli-on-a-server.md).
+- **Windows** ([docs](../docs/modules/windows.md)) — `windows/crates`: адаптеры к Windows API
+  за трейтами `weto-sys` (`weto-sys-windows`) и C ABI на JSON для приложения на C# (`weto-ffi`).
 
 Потоки данных — [overview](../docs/overview.md). Процедуры — [runbooks](../docs/runbooks/).
 

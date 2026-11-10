@@ -136,6 +136,30 @@ Behaviour is checked on a real Windows by CI: job `windows-shared` in `pr-checks
 `cargo clippy … --all-targets -- -D warnings` and `cargo test` for the same five crates, from
 `linux/`. Linux-only integration tests are compiled out there by `#![cfg(target_os = "linux")]`.
 
+### 4c. Windows workspace (`windows/crates`)
+
+```bash
+linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo test'      # чистая часть
+linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings'
+```
+
+Свой Cargo workspace (`weto-sys-windows`, `weto-ffi`) с path-зависимостями на `linux/crates/*`.
+В контейнере идут только чистые модули — `process_table`, `target_resolver`, `view`, `command`:
+всё, что зовёт Windows API, стоит под `cfg(windows)`, поэтому `cargo test` на Linux его не видит,
+а clippy под `x86_64-pc-windows-gnu` его компилирует и проверяет, но не запускает. Тот же образ
+с mingw, что и для 4b.
+
+Живые тесты — `weto-sys-windows/tests/live.rs` и `weto-ffi/tests/abi.rs` (`cfg(windows)`) —
+идут только на раннерах: настоящие процессы приостанавливаются, продолжаются и завершаются
+(наблюдение — по состояниям потоков), проба маршрута сверяется с `Find-NetRoute`, токен и ключ
+`Run` пишутся в Диспетчер учётных данных и реестр раннера; `abi.rs` проводит весь мост через ABI
+с `APPDATA`/`LOCALAPPDATA` во временном каталоге. На машине разработчика под Windows они тоже
+пройдут, но тронут его реестр и учётные данные (значение `Weto` в `Run`, `com.weto.ipinfo`).
+
+CI: job `windows` в `pr-checks.yml`, раннеры `windows-2025` и `windows-11-arm`, из `windows/crates`:
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace --no-fail-fast`. Что проверяет каждый тест — `modules/windows.md`.
+
 ### 5. Why these cannot be unit tests
 
 <!-- generated, verify -->
