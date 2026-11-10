@@ -19,7 +19,9 @@ public sealed class StatusWindow : Window
 {
     private readonly StackPanel _panel;
     private readonly Grid _root;
+    private readonly StackPanel _bannerSlot = new() { Visibility = Visibility.Collapsed };
     private StatusView? _shown;
+    private BannerView? _shownBanner;
 
     public bool IsOpen { get; private set; }
 
@@ -109,10 +111,33 @@ public sealed class StatusWindow : Window
     {
         _panel.Background = Brush("Shell");
         _root.Background = Brush("Shell");
+        _shownBanner = null;
+        _bannerSlot.Children.Clear();
+        _bannerSlot.Visibility = Visibility.Collapsed;
         if (_shown is not null)
         {
             Build(_shown);
         }
+    }
+
+    /// <summary>
+    /// Баннер обновления — пересобирается только на смену того, что он говорит:
+    /// кнопка, пересозданная посреди нажатия, нажатия не получила бы.
+    /// </summary>
+    public void ShowUpdate(UpdateView update)
+    {
+        if (update.Banner == _shownBanner && _bannerSlot.Children.Count == (update.Banner is null ? 0 : 1))
+        {
+            return;
+        }
+        _shownBanner = update.Banner;
+        _bannerSlot.Children.Clear();
+        if (update.Banner is { } banner)
+        {
+            _bannerSlot.Children.Add(Banner(banner, update.Labels.Details, () => App.Current.ShowUpdate()));
+        }
+        // Пустой слот свёрнут: иначе StackPanel добавил бы ему интервал.
+        _bannerSlot.Visibility = update.Banner is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void Build(StatusView status)
@@ -164,6 +189,10 @@ public sealed class StatusWindow : Window
             _panel.Children.Add(Text(failure, "Caption", "Red", wrap: true));
         }
 
+        // Баннер — после показаний, перед целями, как в попапе macOS; слот
+        // живёт дольше пересборок экрана статуса.
+        _panel.Children.Add(_bannerSlot);
+
         if (status.Targets is { } targets)
         {
             _panel.Children.Add(Divider());
@@ -208,40 +237,14 @@ public sealed class StatusWindow : Window
         }
     }
 
-    /// <summary>Первая прикидка до раскладки — дальше окно уточняет SizeChanged.</summary>
-    private double MeasuredHeight()
-    {
-        _panel.Measure(new Windows.Foundation.Size(_panel.Width, double.PositiveInfinity));
-        return _panel.DesiredSize.Height;
-    }
-
     /// <summary>
     /// Над треем: правый нижний угол рабочей области экрана с курсором, отступ space4.
-    /// Высота — по содержимому: у окна WinUI нет «размера по содержимому».
+    /// Высота — по содержимому (<see cref="FitToPanel"/>).
     /// </summary>
     private void Place()
     {
+        FitToPanel(AppWindow, _root, _panel);
         var scale = _panel.XamlRoot?.RasterizationScale ?? 1.0;
-        var natural = _panel.ActualHeight > 0 ? _panel.ActualHeight : MeasuredHeight();
-        if (_root.ActualHeight > 0)
-        {
-            // Подгонка по факту: внешний размер меняется ровно на разницу между
-            // тем, что дала система, и тем, что нужно панели. Сходится за шаг,
-            // а повторный SizeChanged с нулевой разницей ничего не делает.
-            var extraWidth = (int)Math.Round((_root.ActualWidth - _panel.Width) * scale);
-            var extraHeight = (int)Math.Round((_root.ActualHeight - natural) * scale);
-            if (extraWidth != 0 || extraHeight != 0)
-            {
-                var size = AppWindow.Size;
-                AppWindow.Resize(new Windows.Graphics.SizeInt32(size.Width - extraWidth, size.Height - extraHeight));
-            }
-        }
-        else
-        {
-            AppWindow.ResizeClient(new Windows.Graphics.SizeInt32(
-                (int)Math.Ceiling(_panel.Width * scale),
-                (int)Math.Ceiling(natural * scale)));
-        }
         var outer = AppWindow.Size;
         var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
         var margin = (int)(Number("Space4") * scale);

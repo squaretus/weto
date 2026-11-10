@@ -63,6 +63,48 @@ public sealed record JournalView(IReadOnlyList<JournalRow> Rows, string? LimitCa
 
 public sealed record JournalRow(string Title, string Summary, string? Resolution, string Diagnostics);
 
+/// <summary>Обновление: баннер, окно, плитка подвала (weto-ffi/src/update.rs).</summary>
+public sealed record UpdateView(
+    BannerView? Banner,
+    UpdateDialogView? Dialog,
+    bool WindowRequested,
+    bool AutoInstall,
+    FooterView Footer,
+    bool Installed,
+    UpdateLabels Labels);
+
+public sealed record BannerView(string Text, bool Warning, bool InFlight);
+
+public sealed record UpdateDialogView(
+    string Title,
+    string Detail,
+    double? Fraction,
+    bool ShowsProgress,
+    bool ShowsChoiceButtons,
+    bool ShowsReleasePageButton,
+    string? ReleasePage);
+
+public sealed record FooterView(bool Offers, string Hint, bool Busy, string Label);
+
+public sealed record UpdateLabels(
+    string WindowTitle,
+    string Details,
+    string Skip,
+    string RemindLater,
+    string Install,
+    string OpenReleasePage,
+    string AutoInstall,
+    IReadOnlyList<RemindOption> Remind);
+
+/// <summary>Пункт «Напомнить позже»: имя интервала для команды и подпись.</summary>
+public sealed record RemindOption(string Interval, string Title);
+
+/// <summary>Текст диалога: тексты общие с macOS и Linux (weto_core::presentation).</summary>
+public sealed record DialogView(string Title, string Message, string Confirm, string Cancel);
+
+/// <summary>Итог проверки перед сносом: <c>Dialog</c> — null, когда стоящих нет.</summary>
+public sealed record UninstallCheck(int Standing, DialogView? Dialog);
+
 /// <summary>Ответ на команду: исполнена или отказ с текстом для пользователя.</summary>
 public sealed record CommandResult(bool Ok, JsonElement? Value, string? Error);
 
@@ -77,6 +119,9 @@ public sealed record Notification(string Title, string Body);
 [JsonSerializable(typeof(StatusView))]
 [JsonSerializable(typeof(SettingsView))]
 [JsonSerializable(typeof(JournalView))]
+[JsonSerializable(typeof(UpdateView))]
+[JsonSerializable(typeof(DialogView))]
+[JsonSerializable(typeof(UninstallCheck))]
 [JsonSerializable(typeof(CommandResult))]
 [JsonSerializable(typeof(Notification))]
 [JsonSerializable(typeof(Dictionary<string, object?>))]

@@ -176,6 +176,96 @@ public static class Components
         VerticalAlignment = VerticalAlignment.Center,
     };
 
+    /// <summary>
+    /// Баннер попапа (канон, «Баннер»): фон card, рамка line, радиус radiusTile,
+    /// паддинг space3 × space2; тон — только у иконки (violet — новость, amber —
+    /// предупреждение), текст caption цветом dim; справа одно действие primary
+    /// или индикатор, пока идёт работа.
+    /// </summary>
+    public static Border Banner(BannerView view, string action, Action onAction)
+    {
+        var grid = new Grid { ColumnSpacing = Number("Space2") };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.Children.Add(Glyph(view.Warning ? "\uE7BA" : "\uE896", 14, Brush(view.Warning ? "Amber" : "Violet")));
+        var text = Text(view.Text, "Caption", "Dim", wrap: true);
+        text.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(text, 1);
+        grid.Children.Add(text);
+        FrameworkElement right = view.InFlight
+            ? new ProgressRing { Width = 16, Height = 16, IsActive = true }
+            : PillButton(action, ButtonKind.Primary, onAction);
+        Grid.SetColumn(right, 2);
+        grid.Children.Add(right);
+        return new Border
+        {
+            Background = Brush("Card"),
+            BorderBrush = Brush("Line"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = Radius("RadiusTile"),
+            Padding = new Thickness(Number("Space3"), Number("Space2"), Number("Space3"), Number("Space2")),
+            Child = grid,
+        };
+    }
+
+    /// <summary>Плитка-иконка (канон, «Кнопки»): violet, белая иконка, 30×30, радиус radiusTile.</summary>
+    public static Button TileButton(string glyph, string tooltip, Action onClick)
+    {
+        var button = new Button
+        {
+            Content = Glyph(glyph, 14, new SolidColorBrush(Microsoft.UI.Colors.White)),
+            Background = Brush("Violet"),
+            BorderThickness = new Thickness(0),
+            CornerRadius = Radius("RadiusTile"),
+            Width = 30,
+            Height = 30,
+            Padding = new Thickness(0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        ToolTipService.SetToolTip(button, tooltip);
+        button.Click += (_, _) => onClick();
+        return button;
+    }
+
+    /// <summary>
+    /// Подогнать окно под естественный размер панели. У WinUI нет «размера
+    /// по содержимому», а ResizeClient у окна без заголовка считает внешний
+    /// размер так, будто заголовок есть, — поэтому подгонка по факту: внешний
+    /// размер правится на разницу между корнем (вся клиентская область) и
+    /// панелью. Сходится за шаг; до первой раскладки — прикидка через Measure.
+    /// </summary>
+    public static void FitToPanel(Microsoft.UI.Windowing.AppWindow window, FrameworkElement root, FrameworkElement panel)
+    {
+        var scale = panel.XamlRoot?.RasterizationScale ?? 1.0;
+        double natural;
+        if (panel.ActualHeight > 0)
+        {
+            natural = panel.ActualHeight;
+        }
+        else
+        {
+            panel.Measure(new Windows.Foundation.Size(panel.Width, double.PositiveInfinity));
+            natural = panel.DesiredSize.Height;
+        }
+        if (root.ActualHeight > 0)
+        {
+            var extraWidth = (int)Math.Round((root.ActualWidth - panel.Width) * scale);
+            var extraHeight = (int)Math.Round((root.ActualHeight - natural) * scale);
+            if (extraWidth != 0 || extraHeight != 0)
+            {
+                var size = window.Size;
+                window.Resize(new Windows.Graphics.SizeInt32(size.Width - extraWidth, size.Height - extraHeight));
+            }
+        }
+        else
+        {
+            window.ResizeClient(new Windows.Graphics.SizeInt32(
+                (int)Math.Ceiling(panel.Width * scale),
+                (int)Math.Ceiling(natural * scale)));
+        }
+    }
+
     /// <summary>Иконочная кнопка без фона: шестерёнка, обновить, удалить строку.</summary>
     public static Button IconButton(string glyph, string tooltip, Action onClick)
     {

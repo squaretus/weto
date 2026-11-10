@@ -38,6 +38,14 @@ internal static unsafe partial class Native
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
     internal static partial void weto_stop(nint weto);
 
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    internal static partial nint weto_uninstall_check();
+
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    internal static partial nint weto_uninstall_cleanup();
+
     /// <summary>Забрать строку моста и освободить её. Нулевой указатель — null.</summary>
     internal static string? Take(nint text)
     {

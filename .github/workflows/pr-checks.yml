@@ -217,7 +217,7 @@ jobs:
         run: cargo test --workspace --no-fail-fast
 
   # Приложение Windows (C#, WinUI 3) целиком: мост, иконки, publish под
-  # архитектуру раннера. Живой Windows-машины у проекта нет, поэтому
+  # архитектуру раннера, установщик Inno Setup. Живой Windows-машины у проекта нет, поэтому
   # попап и окно настроек снимаются скриншотами — артефакт windows-screens-*.
   windows-app:
     name: Windows app (${{ matrix.arch }})
@@ -266,6 +266,14 @@ jobs:
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/status
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status-sample -Out screens/paused
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/settings
+
+      # Установщик целиком: тихая установка, установка поверх работающего
+      # (так выглядит обновление) и удаление со всеми следами.
+      - name: Installer contract
+        shell: powershell
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: ./windows/scripts/tests/installer-contract.ps1 -Setup "windows/app/out/release_build/weto-9.9.9-$env:ARCH-windows-setup.exe"
 
       - uses: actions/upload-artifact@v4
         if: always()

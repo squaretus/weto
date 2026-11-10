@@ -55,6 +55,34 @@ public sealed unsafe class WetoBridge : IDisposable
         View("journal", BridgeJson.Default.JournalView)
         ?? throw new InvalidOperationException("Мост не отдал журнал");
 
+    public UpdateView Update() =>
+        View("update", BridgeJson.Default.UpdateView)
+        ?? throw new InvalidOperationException("Мост не отдал экран обновления");
+
+    public DialogView UninstallConfirmation() =>
+        View("uninstall-confirmation", BridgeJson.Default.DialogView)
+        ?? throw new InvalidOperationException("Мост не отдал текст подтверждения");
+
+    /// <summary>
+    /// Проверка перед сносом (<c>Weto.exe --uninstall</c>): без запуска охраны.
+    /// <c>null</c> — сбой, удалять нельзя.
+    /// </summary>
+    public static UninstallCheck? UninstallCheck()
+    {
+        var text = Native.Take(Native.weto_uninstall_check());
+        return text is null ? null : JsonSerializer.Deserialize(text, BridgeJson.Default.UninstallCheck);
+    }
+
+    /// <summary>Снос токена и автозапуска (<c>Weto.exe --uninstall-cleanup</c>).</summary>
+    public static CommandResult UninstallCleanup()
+    {
+        var text = Native.Take(Native.weto_uninstall_cleanup());
+        return text is null
+            ? new CommandResult(false, null, "Мост не ответил")
+            : JsonSerializer.Deserialize(text, BridgeJson.Default.CommandResult)
+              ?? new CommandResult(false, null, "Ответ моста не разобран");
+    }
+
     /// <summary>
     /// Команда моста: имя и поля, как их ждёт weto-ffi/src/command.rs
     /// (<c>{"command":"addTarget","entry":"claude"}</c>).

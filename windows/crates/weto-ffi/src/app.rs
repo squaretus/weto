@@ -279,4 +279,31 @@ impl WindowsApp {
     pub fn shutdown(&self) {
         self.controller.shutdown();
     }
+
+    /// Проверка перед сносом — без запуска охраны: SIGCONT по учёту и круги
+    /// наблюдения (`uninstall::confirm_resumed`). Работающий экземпляр
+    /// к этому моменту уже вышел.
+    pub fn uninstall_check(&self) -> crate::uninstall::UninstallCheck {
+        self.controller.shutdown();
+        let standing = crate::uninstall::confirm_resumed(
+            || self.controller.confirm_resumed(),
+            std::thread::sleep,
+        );
+        crate::uninstall::check_view(&standing)
+    }
+
+    /// Снос того, что лежит вне каталогов данных: токен в Диспетчере учётных
+    /// данных и автозапуск в `HKCU\…\Run`. Каталоги сносит деинсталлятор —
+    /// учёт остановленных последним.
+    pub fn uninstall_cleanup(&self) -> Result<(), String> {
+        let token = self
+            .secrets
+            .delete()
+            .map_err(|e| format!("токен не удалён: {e}"));
+        let autostart = self
+            .autostart
+            .disable()
+            .map_err(|e| format!("автозапуск не снят: {e}"));
+        token.and(autostart)
+    }
 }

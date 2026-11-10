@@ -96,6 +96,7 @@ pub unsafe extern "C" fn weto_view(weto: *const Weto, kind: *const c_char) -> *m
             "settings" => serde_json::to_string(&weto.app.settings()),
             "journal" => serde_json::to_string(&weto.app.journal()),
             "update" => serde_json::to_string(&weto.app.update()),
+            "uninstall-confirmation" => serde_json::to_string(&crate::uninstall::confirmation()),
             "status-sample" => {
                 serde_json::to_string(&crate::view::sample_status(std::time::SystemTime::now()))
             }
@@ -158,6 +159,44 @@ pub unsafe extern "C" fn weto_stop(weto: *mut Weto) {
         let weto = Box::from_raw(weto);
         weto.app.shutdown();
     }));
+}
+
+/// Уведомлять при удалении некого: окна нет, охрана не запускалась.
+struct Silent;
+
+impl KillNotifying for Silent {
+    fn notify(&self, _: &[String], _: &str, _: usize) {}
+    fn notify_backgrounded(&self, _: &str) {}
+}
+
+/// Проверка перед сносом (`Weto.exe --uninstall`): охрана не запускается,
+/// стоящие по учёту продолжаются, оставшиеся называются. Ответ —
+/// `{"standing":N,"dialog":{title,message,confirm,cancel}|null}`; нулевой
+/// указатель — сбой, и деинсталлятор удаление отменит.
+#[no_mangle]
+pub extern "C" fn weto_uninstall_check() -> *mut c_char {
+    catch_unwind(|| {
+        let app = WindowsApp::new(Paths::from_windows_env(), Box::new(Silent));
+        serde_json::to_string(&app.uninstall_check())
+            .ok()
+            .map_or(std::ptr::null_mut(), owned)
+    })
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Снос токена и автозапуска (`Weto.exe --uninstall-cleanup`). Ответ —
+/// `{"ok":true}` или `{"ok":false,"error":…}`.
+#[no_mangle]
+pub extern "C" fn weto_uninstall_cleanup() -> *mut c_char {
+    let answer = catch_unwind(|| {
+        let app = WindowsApp::new(Paths::from_windows_env(), Box::new(Silent));
+        match app.uninstall_cleanup() {
+            Ok(()) => json!({"ok": true}),
+            Err(error) => json!({"ok": false, "error": error}),
+        }
+    })
+    .unwrap_or_else(|_| json!({"ok": false, "error": "сбой внутри Weto"}));
+    owned(answer.to_string())
 }
 
 unsafe fn text(pointer: *const c_char) -> Option<String> {

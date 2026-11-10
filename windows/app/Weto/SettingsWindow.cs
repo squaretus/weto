@@ -25,6 +25,9 @@ public sealed class SettingsWindow : Window
     private readonly ScrollViewer _scroll = new();
     private Tab _tab = Tab.Settings;
     private string? _error;
+    private string? _maintenanceError;
+    private Button? _check;
+    private FooterView? _footer;
 
     public SettingsWindow()
     {
@@ -188,8 +191,32 @@ public sealed class SettingsWindow : Window
         return Card("Обслуживание",
         [
             Row(Text("Запускать при входе в Windows", "Label"), autostart),
-            WithoutDivider(Row(PillButton("Закрыть приложение", ButtonKind.Muted, () => App.Current.Quit()))),
+            WithoutDivider(MaintenanceButtons()),
+            _maintenanceError is null
+                ? WithoutDivider(new StackPanel())
+                : (UIElement)WithoutDivider(Text(_maintenanceError, "Caption", "Red", wrap: true)),
         ]);
+    }
+
+    /// <summary>«Закрыть приложение» и «Удалить приложение…» делят ширину поровну.</summary>
+    private Grid MaintenanceButtons()
+    {
+        var buttons = new Grid { ColumnSpacing = Number("Space2"), Padding = new Thickness(0, Number("Space2"), 0, Number("Space2")) };
+        buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var close = PillButton("Закрыть приложение", ButtonKind.Muted, () => App.Current.Quit());
+        close.HorizontalAlignment = HorizontalAlignment.Stretch;
+        buttons.Children.Add(close);
+        var uninstall = PillButton("Удалить приложение…", ButtonKind.Destructive, () =>
+            App.Current.AskToUninstall(error =>
+            {
+                _maintenanceError = error;
+                Rebuild();
+            }));
+        uninstall.HorizontalAlignment = HorizontalAlignment.Stretch;
+        Grid.SetColumn(uninstall, 1);
+        buttons.Children.Add(uninstall);
+        return buttons;
     }
 
     /// <summary>
@@ -246,9 +273,59 @@ public sealed class SettingsWindow : Window
         Run("exportJournal", new Dictionary<string, object?> { ["path"] = path });
     }
 
-    private UIElement Footer() => Row(
-        Text("github", "Caption", "Faint"),
-        Text($"версия {typeof(App).Assembly.GetName().Version?.ToString(3)}", "Caption", "Faint"));
+    /// <summary>
+    /// Подвал: «github» слева, справа версия и плитка проверки обновлений
+    /// (канон, «Окно»). Плитку освежает такт приложения — <see cref="ShowUpdate"/>.
+    /// </summary>
+    private UIElement Footer()
+    {
+        var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = Number("Space3") };
+        var version = Text($"версия {typeof(App).Assembly.GetName().Version?.ToString(3)}", "Caption", "Faint");
+        version.VerticalAlignment = VerticalAlignment.Center;
+        right.Children.Add(version);
+        _check = TileButton("\uE72C", "Проверить обновления", CheckUpdates);
+        right.Children.Add(_check);
+        _footer = null;
+        var github = new HyperlinkButton
+        {
+            Content = Text("github", "Caption", "Faint"),
+            NavigateUri = new Uri("https://github.com/squaretus/weto"),
+            Padding = new Thickness(0),
+        };
+        return Row(github, right);
+    }
+
+    private void CheckUpdates()
+    {
+        var result = App.Current.Bridge.Command("checkUpdates");
+        if (result.Ok && result.Value is { ValueKind: System.Text.Json.JsonValueKind.True })
+        {
+            App.Current.ShowUpdate();
+        }
+    }
+
+    /// <summary>
+    /// Плитка по исходу проверки, как SettingsFooter на macOS: неактивна, пока
+    /// идут проверка или установка; подсказка называет исход; иконка говорит,
+    /// что нажатие покажет обновление.
+    /// </summary>
+    public void ShowUpdate(UpdateView update)
+    {
+        if (_check is null)
+        {
+            return;
+        }
+        _check.IsEnabled = !update.Footer.Busy;
+        if (update.Footer == _footer)
+        {
+            return;
+        }
+        _footer = update.Footer;
+        ToolTipService.SetToolTip(_check, update.Footer.Hint);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_check, update.Footer.Label);
+        _check.Content = Glyph(update.Footer.Offers ? "\uE896" : "\uE72C", 14,
+            new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.White));
+    }
 
     /// <summary>Строка ввода: поле во всю ширину и «Добавить»; Enter — то же, что кнопка.</summary>
     private Grid EntryRow(string placeholder, Action<string> add)

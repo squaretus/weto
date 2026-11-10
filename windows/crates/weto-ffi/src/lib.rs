@@ -9,5 +9,6 @@ pub mod abi;
 #[cfg(windows)]
 pub mod app;
 pub mod command;
+pub mod uninstall;
 pub mod update;
 pub mod view;

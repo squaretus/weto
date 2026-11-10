@@ -1,0 +1,93 @@
+// Диалог с двумя исходами — подтверждение удаления и «эти программы ещё
+// стоят». Своё окно, а не ContentDialog: при удалении через деинсталлятор
+// (Weto.exe --uninstall) других окон у процесса нет, и диалогу не к чему
+// крепиться. Тексты и обе кнопки приходят из моста — общие с macOS и Linux.
+using System;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Weto.Bridge;
+using static Weto.Ui.Components;
+
+namespace Weto;
+
+public sealed class DialogWindow : Window
+{
+    private readonly Grid _root;
+    private readonly StackPanel _panel;
+    private Action<bool>? _answer;
+
+    /// <summary>
+    /// Спросить: <paramref name="answer"/> получает true на «подтвердить»,
+    /// false — на «отмену» и на закрытие окна крестиком.
+    /// </summary>
+    public static void Ask(DialogView text, bool destructive, Action<bool> answer)
+    {
+        var window = new DialogWindow(text, destructive, answer);
+        window.Activate();
+    }
+
+    private DialogWindow(DialogView text, bool destructive, Action<bool> answer)
+    {
+        _answer = answer;
+        Title = text.Title;
+        AppWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Weto.ico"));
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.IsResizable = false;
+            presenter.IsMaximizable = false;
+            presenter.IsMinimizable = false;
+            presenter.IsAlwaysOnTop = true;
+        }
+
+        _panel = Panel();
+        _panel.Width = Number("PopupWidth");
+        _panel.VerticalAlignment = VerticalAlignment.Top;
+        _panel.Children.Add(Text(text.Title, "Status", wrap: true));
+        _panel.Children.Add(Text(text.Message, "Value", "Dim", wrap: true));
+
+        var buttons = new Grid { ColumnSpacing = Number("Space2") };
+        buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var cancel = PillButton(text.Cancel, ButtonKind.Muted, () => Finish(false));
+        cancel.HorizontalAlignment = HorizontalAlignment.Stretch;
+        buttons.Children.Add(cancel);
+        var confirm = PillButton(text.Confirm, destructive ? ButtonKind.Destructive : ButtonKind.Primary, () => Finish(true));
+        confirm.HorizontalAlignment = HorizontalAlignment.Stretch;
+        Grid.SetColumn(confirm, 1);
+        buttons.Children.Add(confirm);
+        _panel.Children.Add(buttons);
+
+        _root = new Grid { Background = Brush("Shell") };
+        _root.Children.Add(_panel);
+        _panel.SizeChanged += (_, _) => FitToPanel(AppWindow, _root, _panel);
+        _root.SizeChanged += (_, _) => FitToPanel(AppWindow, _root, _panel);
+        Content = _root;
+        FitToPanel(AppWindow, _root, _panel);
+        Center();
+
+        Closed += (_, _) => Finish(false);
+    }
+
+    private void Center()
+    {
+        var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+        var size = AppWindow.Size;
+        AppWindow.Move(new Windows.Graphics.PointInt32(
+            area.X + (area.Width - size.Width) / 2,
+            area.Y + (area.Height - size.Height) / 3));
+    }
+
+    /// <summary>Ответ отдаётся ровно один раз: кнопка закрывает окно, а закрытие — тоже ответ.</summary>
+    private void Finish(bool confirmed)
+    {
+        var answer = _answer;
+        _answer = null;
+        if (answer is null)
+        {
+            return;
+        }
+        Close();
+        answer(confirmed);
+    }
+}
