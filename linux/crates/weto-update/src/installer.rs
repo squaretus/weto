@@ -59,7 +59,9 @@ pub const ALLOWED_HOSTS: [&str; 3] = [
 /// и только ожидаемое расширение — как на macOS.
 ///
 /// Хост сверяется целиком, а не префиксом строки: `https://github.com@evil.com/`
-/// начинается не с чужого хоста, но ведёт именно на него.
+/// начинается не с чужого хоста, но ведёт именно на него. Запрос и фрагмент
+/// не пускаются вовсе: ожидаемое окончание в них (`…/x.sh?f=weto.tar.zst`)
+/// выдавало бы чужой файл за свой, а у адреса ассета релиза их не бывает.
 pub fn is_trusted_url(url: &str, expected_suffix: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
@@ -69,7 +71,9 @@ pub fn is_trusted_url(url: &str, expected_suffix: &str) -> bool {
         None => return false,
     };
 
-    ALLOWED_HOSTS.contains(&authority) && path.ends_with(expected_suffix)
+    ALLOWED_HOSTS.contains(&authority)
+        && !path.contains(['?', '#'])
+        && path.ends_with(expected_suffix)
 }
 
 #[cfg(target_os = "linux")]

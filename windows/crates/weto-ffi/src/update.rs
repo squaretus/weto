@@ -131,8 +131,12 @@ impl SetupInstaller {
 impl UpdateInstalling for SetupInstaller {
     fn install(&self, version: &Version, url: &str) -> Result<(), String> {
         // Адрес пришёл из сети: только https, хосты доставки GitHub и свой
-        // установщик — до всякого запроса, как у архива Linux.
-        if !is_trusted_url(url, &self.suffix) {
+        // установщик — до всякого запроса, как у архива Linux. Строже архива:
+        // установщик запускается сам, поэтому и только ассет релиза своего
+        // репозитория (`browser_download_url` всегда такой), а не любого
+        // репозитория на github.com.
+        let release_asset = format!("https://github.com/{REPOSITORY}/releases/download/");
+        if !url.starts_with(&release_asset) || !is_trusted_url(url, &self.suffix) {
             return Err(format!("недоверенный источник: {url}"));
         }
         std::fs::create_dir_all(&self.cache_dir)
@@ -461,6 +465,8 @@ mod tests {
             "https://github.com@evil.example/weto-1.2.0-x86_64-windows-setup.exe",
             "https://github.com/x/weto-1.2.0-aarch64-windows-setup.exe",
             "https://github.com/x/weto-1.2.0-x86_64-linux.tar.zst",
+            "https://github.com/someone/weto/releases/download/v1.2.0/weto-1.2.0-x86_64-windows-setup.exe",
+            "https://github.com/squaretus/weto/releases/download/v1.2.0/x.exe?f=weto-1.2.0-x86_64-windows-setup.exe",
         ] {
             let error = installer.install(&version, url).unwrap_err();
             assert!(error.starts_with("недоверенный источник"), "{url}: {error}");

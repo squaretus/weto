@@ -141,6 +141,15 @@ fn a_trusted_host_with_the_wrong_file_is_refused() {
         ".tar.zst"
     ));
     assert!(!is_trusted_url("https://github.com", ".tar.zst"));
+    // Окончание в запросе или фрагменте — не имя файла.
+    assert!(!is_trusted_url(
+        "https://github.com/squaretus/weto/releases/download/v1.0.0/weto.sh?f=weto.tar.zst",
+        ".tar.zst"
+    ));
+    assert!(!is_trusted_url(
+        "https://github.com/squaretus/weto/releases/download/v1.0.0/weto.sh#weto.tar.zst",
+        ".tar.zst"
+    ));
 }
 
 #[test]

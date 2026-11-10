@@ -37,7 +37,7 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 |---|---|
 | `App.xaml.cs` | точка входа: мьютекс экземпляра, мост, трей, такт 1 с, режимы `--uninstall` / `--uninstall-cleanup`, флаги `--show-*` для CI |
 | `Bridge/Native.cs`, `WetoBridge.cs`, `Views.cs` | `LibraryImport` из `weto_ffi.dll`, обёртка моста, DTO видов |
-| `Tray/TrayIcon.cs` | значок на `Shell_NotifyIcon` со скрытым окном-приёмником; пересоздаётся по `TaskbarCreated`; ЛКМ — попап, ПКМ — «Настройки» / «Закрыть Weto» |
+| `Tray/TrayIcon.cs` | значок на `Shell_NotifyIcon` со скрытым окном верхнего уровня (не `HWND_MESSAGE`: тому не приходят `TaskbarCreated` и `WM_ENDSESSION`); пересоздаётся по `TaskbarCreated`, неудавшийся `NIM_ADD` повторяется тактом; ЛКМ — попап, ПКМ — «Проверить сейчас» / «Настройки» / «Выход» |
 | `Notifications.cs` | `AppNotificationManager`; щелчок открывает попап |
 | `StatusWindow.cs` | попап у трея: без рамки и заголовка, поверх всех, не в переключателе, прячется по потере фокуса; баннер обновления |
 | `SettingsWindow.cs` | окно с сегментами «Настройки» / «Журнал», карточки и подвал с плиткой обновления; «Удалить приложение…» |
@@ -100,7 +100,9 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - Строки — UTF-8 с нулём; каждая функция под `catch_unwind`: паника → `{"ok":false,"error":"сбой внутри Weto"}` или null.
 - Охрана стартует в `weto_start` — с процессом, а не с окном (урок `MenuBarExtra`). Там же поток
   `weto-updates` применяет находки `UpdateScheduler`.
-- `notify(context, json)` с `{"title","body"}` зовётся с потока охраны — переносить на UI-поток обязан C#.
+- `notify(context, json)` с `{"title","body"}` зовётся с потока охраны — переносить на UI-поток обязан C#
+  (`App` переносит через `DispatcherQueue`: медленная платформа уведомлений не задерживает такт).
+- `setToken` получает текст поля как есть; что сохранять, решает `presentation::token_to_save` в мосте.
 - `StatusView`: `title`, `tone` (`guarded|pending|killed|disabled`), `explanation`, `probing`,
   `readout`, `permissionFailure`, `targets` (null — целей нет) с `pills[…countdown…]`, `notice*`.
 - `SettingsView`: цели, `vpnApp`, `blocked`, `allowed`, `pauseCeiling(s)`, `theme`, `tokenSet`, `autostart`.
@@ -114,8 +116,20 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   потолка, отказ проверяется до правки).
 
 ## The app (C#, WinUI 3)
-- Один процесс: мьютекс `Local\com.weto.app`; второй экземпляр выходит сразу. Такт `DispatcherQueueTimer`
-  раз в 1 с опрашивает виды моста (как Linux): значок трея по тону, открытые окна, баннер, тема.
+- Один процесс: мьютекс `Local\com.weto.app`; второй экземпляр будит первый событием
+  `Local\com.weto.app.show` (тот показывает попап — как повторный запуск на Linux) и выходит.
+  Такт `DispatcherQueueTimer` раз в 1 с опрашивает виды моста (как Linux): значок и подсказка
+  трея по тону и заголовку, открытые окна, баннер, тема.
+- **`DispatcherShutdownMode = OnExplicitShutdown`.** Умолчание WinUI — выход по закрытию
+  последнего окна; попап создаётся лениво, и крестик на окне настроек, открытом из трея, кончал
+  процесс без `weto_stop` — цели на паузе оставались стоять. Выход только через `Quit()`/`Exit()`.
+- Охрана останавливается ровно раз (`StopGuard`, `Interlocked.Exchange`): из `Quit()`, из
+  `Application.UnhandledException` и `AppDomain.UnhandledException` (исключение процесс роняет,
+  но `weto_stop` продолжает стоящие), из `WM_ENDSESSION` (конец сеанса — штатный выход, как
+  SIGTERM у Linux).
+- Попап: шапка (щит, заголовок, «Проверить», «Настройки») переживает пересборки, пока не сменились
+  тон, заголовок или проба, — на паузе тело меняется каждую секунду, и пересозданная кнопка
+  теряла нажатие. Щелчок по значку в 400 мс после того, как потеря фокуса спрятала попап, — закрытие.
 - Тема — подмена `MergedDictionaries[1]` (0 — `XamlControlsResources`) на `Tokens.{Dark,Light}.xaml`;
   системе не следует, как на других платформах.
 - Уведомления: подписка на `NotificationInvoked` обязана идти до `Register()` — иначе щелчок поднимет второй процесс.
@@ -158,7 +172,8 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   зовёт старый `Weto.exe --quit` (событие `Local\com.weto.app.quit`, ждёт мьютекс до 20 с),
   ставит поверх и поднимает новую версию (`[Run]` с `Check: WizardSilent`). Отката, как
   на Linux, нет.
-- **Пока охрана держит цели** (фаза «Пауза» или «Опасно», стоящие в снимке), установщик
+- **Пока охрана держит цели** (фаза «Пауза» или «Опасно»; стоящие в снимке вне паузы — нет:
+  это записи, которые досылки поднять не смогли, и ждать их значило бы ждать вечно), установщик
   скачивается, но запускается только после конца паузы (`guard_holds_targets`, опрос раз
   в секунду): начало установки — штатный выход, а он продолжил бы цели и снял запрет на всё
   время установки. Окно в это время показывает фазу установки. Решение владельца 2026-11-10;
@@ -199,13 +214,27 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   `weto_update::strings` и моделей моста.
 - Строку моста освобождает только `weto_free_string`; `weto_stop` вызывается ровно раз.
 - Без явного резолвера охраны нет: `GuardController::with_target_resolution(…, WindowsTargetResolver)`.
-- `weto_core::path_text` понимает `/` и `\`, `C:\…`, `\\server`; `same_path` без регистра только на Windows.
+- `weto_core::path_text` понимает `/` и `\`, `C:\…`, `\\server`. `same_path` на Windows сравнивает без
+  регистра (и вне ASCII) и по записи: `/` = `\`, повторы разделителей и `.` не значат ничего, `..`
+  снимает сегмент. npm-шим передаёт node `npm\\node_modules\…` (`%~dp0` кончается разделителем),
+  и цель `claude` из npm иначе не совпадала. Живой тест — `an_npm_shim_target_matches_its_running_node_script`.
+- Обновление пускает только `https://github.com/squaretus/weto/releases/download/…` с суффиксом
+  своей архитектуры; запрос и фрагмент в адресе отвергает общий `is_trusted_url`.
 - Имя ассета `weto-<v>-<arch>-windows-setup.exe` — контракт `weto.iss` (`OutputBaseFilename`),
   `build.sh`, `release.yml` и `asset_suffix`; меняется во всех четырёх.
 - Режимы деинсталлятора не стартуют охрану и трей; `--uninstall` держит мьютекс экземпляра
   до своего выхода, чтобы второй Weto не поднялся посреди проверки и вопроса.
 
 ## Failure hotspots
+- Цель, запущенная от администратора, на паузу не встаёт: процессу обычного уровня целостности
+  права приостановки на неё не дают. Отказ виден в попапе (`permissionFailure`), обхода нет —
+  Weto ставится и работает без прав администратора.
+- Тихое удаление (`/VERYSILENT /SUPPRESSMSGBOXES`) при стоящих процессах всё равно покажет диалог
+  самого Weto «Удалить всё равно» и будет ждать ответа: это обязательство вернуть стоящие,
+  `/SUPPRESSMSGBOXES` гасит только вопросы Inno.
+- Ручной запуск нового `setup.exe` поверх работающего Weto во время паузы закрывает его через
+  `--quit`, и цели продолжаются — как при «Выход» из трея. Ждать конца паузы умеет только
+  обновление из приложения: ручная установка — явное действие пользователя.
 - Раскладка `SystemProcessInformation` — своя копия phnt; ошибка смещения ломает родителя и «стоит»,
   а не сборку. Ловит только `tests/live.rs`.
 - Новые коды отказа `OpenProcess` для вышедших процессов — учёт досылал бы Resume мёртвому.

@@ -257,18 +257,24 @@ impl Updates {
     /// Установка на рабочем потоке. Окно читает ход через `progress`.
     /// Вторая, пока идёт первая, не начинается.
     pub fn install(self: &Arc<Self>, info: &UpdateInfo) {
-        if self.progress().as_update_progress().is_in_flight() {
-            return;
-        }
-        let Some(version) = Version::parse(&info.latest_version) else {
-            *self.progress.lock().expect("обновление") =
-                Progress::Failed("версия релиза не разбирается".into());
-            return;
+        // Проверка «уже идёт» и запись `Running` — под одной блокировкой: кнопка
+        // и автоустановка, пришедшие разом, иначе обе проходили проверку и
+        // качали один файл двумя потоками.
+        let version = {
+            let mut progress = self.progress.lock().expect("обновление");
+            if progress.as_update_progress().is_in_flight() {
+                return;
+            }
+            let Some(version) = Version::parse(&info.latest_version) else {
+                *progress = Progress::Failed("версия релиза не разбирается".into());
+                return;
+            };
+            *progress = Progress::Running(0.0);
+            version
         };
 
         let updates = self.clone();
         let url = info.download_url.clone();
-        *self.progress.lock().expect("обновление") = Progress::Running(0.0);
 
         std::thread::spawn(move || {
             let installer = updates.installer.clone();

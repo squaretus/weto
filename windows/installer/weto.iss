@@ -90,11 +90,13 @@ const
 var
   { Установка дошла до конца: файлы новой версии на месте. }
   Installed: Boolean;
-  { Удаление закрыло работающий Weto и ещё не начало сносить файлы. }
-  WetoClosed: Boolean;
+  { Weto работал, когда началось удаление: отменённое удаление обязано
+    поднять его снова. }
+  WetoWasRunning: Boolean;
   { Пользователь сам выбрал «Не удалять и закрыть Weto». }
   KeepClosed: Boolean;
   UninstallStarted: Boolean;
+  Relaunched: Boolean;
 
 { Путь фиксирован (DisableDirPage), поэтому годится и там, где каталог
   установки ещё не известен. Фигурных скобок в комментариях Pascal не пишем:
@@ -142,6 +144,22 @@ begin
     LaunchWeto();
 end;
 
+{ Удаление не состоялось, а Weto, работавший до него, закрыт проверкой —
+  поднять его, иначе машина осталась бы без охраны. Зовётся и из
+  InitializeUninstall, и из DeinitializeUninstall: документация Inno не
+  говорит, вызывается ли второе после отказа первого, поэтому подъём ровно
+  один (Relaunched) и только при свободном мьютексе — Weto, не успевший
+  выйти за 20 с проверки, второй копией не дублируется. }
+procedure RelaunchIfClosed();
+begin
+  if WetoWasRunning and not KeepClosed and not UninstallStarted and not Relaunched
+    and not CheckForMutexes(InstanceMutex) then
+  begin
+    Relaunched := True;
+    LaunchWeto();
+  end;
+end;
+
 { Проверка перед сносом: Weto.exe --uninstall. Коды: 0 — удалять; 1 —
   стоящие остались и выбрано «Не удалять и закрыть Weto»; 2 — Weto не
   закрылся; 3 — проверка не удалась. Ничего ещё не удалено. Вопросы —
@@ -151,6 +169,7 @@ function InitializeUninstall(): Boolean;
 var
   Code: Integer;
 begin
+  WetoWasRunning := CheckForMutexes(InstanceMutex);
   if not FileExists(InstalledWeto())
     or not Exec(InstalledWeto(), '--uninstall', '', SW_SHOWNORMAL, ewWaitUntilTerminated, Code) then
   begin
@@ -161,10 +180,7 @@ begin
   end;
   case Code of
     0:
-      begin
-        WetoClosed := True;
-        Result := True;
-      end;
+      Result := True;
     1:
       begin
         KeepClosed := True;
@@ -175,6 +191,8 @@ begin
         SuppressibleMsgBox('Weto не закрылся. Закройте его из меню в трее и запустите удаление снова.',
           mbError, MB_OK, IDOK);
         Result := False;
+        { Мог выйти и позже двадцати секунд ожидания. }
+        RelaunchIfClosed();
       end;
   else
     begin
@@ -182,7 +200,7 @@ begin
         mbConfirmation, MB_YESNO, IDYES) = IDYES;
       { Отказались — Weto, закрытый проверкой, поднимается снова. }
       if not Result then
-        LaunchWeto();
+        RelaunchIfClosed();
     end;
   end;
 end;
@@ -215,6 +233,5 @@ end;
   бы без охраны. Выбор «Не удалять и закрыть Weto» уважается. }
 procedure DeinitializeUninstall();
 begin
-  if WetoClosed and not KeepClosed and not UninstallStarted then
-    LaunchWeto();
+  RelaunchIfClosed();
 end;
