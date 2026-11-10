@@ -79,7 +79,7 @@ pub extern "C" fn weto_start(callbacks: WetoCallbacks) -> *mut Weto {
     .unwrap_or(std::ptr::null_mut())
 }
 
-/// Модель экрана: `kind` — `"status"` или `"settings"`. Нулевой указатель —
+/// Модель экрана: `kind` — `"status"`, `"settings"` или `"journal"`. Нулевой указатель —
 /// неизвестный вид или сбой.
 ///
 /// # Safety
@@ -94,6 +94,7 @@ pub unsafe extern "C" fn weto_view(weto: *const Weto, kind: *const c_char) -> *m
         let json = match kind.as_str() {
             "status" => serde_json::to_string(&weto.app.status()),
             "settings" => serde_json::to_string(&weto.app.settings()),
+            "journal" => serde_json::to_string(&weto.app.journal()),
             _ => return std::ptr::null_mut(),
         };
         json.ok().map_or(std::ptr::null_mut(), owned)

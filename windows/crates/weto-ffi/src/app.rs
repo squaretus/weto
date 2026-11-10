@@ -32,7 +32,9 @@ use weto_sys_windows::secret_store::{CredentialStore, IPINFO_TARGET};
 use weto_sys_windows::target_resolver::{settings_target_now, WindowsTargetResolver};
 
 use crate::command::{apply_to_settings, Command};
-use crate::view::{settings_view, status_view, SettingsView, StatusView};
+use crate::view::{
+    journal_view, settings_view, status_view, JournalView, SettingsView, StatusView,
+};
 
 pub struct WindowsApp {
     paths: Paths,
@@ -119,6 +121,13 @@ impl WindowsApp {
             self.autostart.command().is_some(),
             &|entry| WindowsTargetResolver.locate(entry).map(|found| found.path),
         )
+    }
+
+    pub fn journal(&self) -> JournalView {
+        let journal = self.journal.lock().expect("журнал");
+        journal_view(journal.entries(), &|at| {
+            weto_core::timestamp::to_local_display(at, i64::from(clock::utc_offset(at)))
+        })
     }
 
     /// Команда интерфейса. `Ok(значение)` — исполнена; `Err(текст)` — отказ,

@@ -59,6 +59,10 @@ public sealed record TargetRow(string Entry, string DisplayName, string Descript
 
 public sealed record Choice(ulong Seconds, string Title);
 
+public sealed record JournalView(IReadOnlyList<JournalRow> Rows, string? LimitCaption);
+
+public sealed record JournalRow(string Title, string Summary, string? Resolution, string Diagnostics);
+
 /// <summary>Ответ на команду: исполнена или отказ с текстом для пользователя.</summary>
 public sealed record CommandResult(bool Ok, JsonElement? Value, string? Error);
 
@@ -72,6 +76,7 @@ public sealed record Notification(string Title, string Body);
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(StatusView))]
 [JsonSerializable(typeof(SettingsView))]
+[JsonSerializable(typeof(JournalView))]
 [JsonSerializable(typeof(CommandResult))]
 [JsonSerializable(typeof(Notification))]
 [JsonSerializable(typeof(Dictionary<string, object?>))]

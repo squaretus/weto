@@ -46,6 +46,10 @@ public sealed unsafe class WetoBridge : IDisposable
         View("settings", BridgeJson.Default.SettingsView)
         ?? throw new InvalidOperationException("Мост не отдал экран настроек");
 
+    public JournalView Journal() =>
+        View("journal", BridgeJson.Default.JournalView)
+        ?? throw new InvalidOperationException("Мост не отдал журнал");
+
     /// <summary>
     /// Команда моста: имя и поля, как их ждёт weto-ffi/src/command.rs
     /// (<c>{"command":"addTarget","entry":"claude"}</c>).

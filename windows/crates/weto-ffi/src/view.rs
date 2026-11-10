@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
+use weto_config::journal::{episodes, visible_limit_caption, KillEvent, VISIBLE_LIMIT};
 use weto_config::settings::{Settings, Target, Theme};
 use weto_core::pause_ceiling::{countdown_until, PauseCeiling};
 use weto_core::presentation::{self, GuardStatusColor};
@@ -231,6 +232,47 @@ pub fn settings_view(
     }
 }
 
+/// Вкладка «Журнал»: строка на эпизод (имена целей без pid), свежие сверху,
+/// не больше `VISIBLE_LIMIT`; остальное — в выгрузке.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalView {
+    pub rows: Vec<JournalRow>,
+    /// «Показаны последние 20 из 100 — выгрузите журнал целиком».
+    pub limit_caption: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalRow {
+    pub title: String,
+    pub summary: String,
+    pub resolution: Option<String>,
+    pub diagnostics: String,
+}
+
+/// Журнал по записям. `timestamp` — дата и время записи по часам пользователя
+/// (`weto_core::timestamp::to_local_display`).
+pub fn journal_view(
+    entries: &[KillEvent],
+    timestamp: &dyn Fn(SystemTime) -> String,
+) -> JournalView {
+    let all = episodes(entries);
+    JournalView {
+        rows: all
+            .iter()
+            .take(VISIBLE_LIMIT)
+            .map(|episode| JournalRow {
+                title: episode.title(),
+                summary: episode.summary_text(),
+                resolution: episode.resolution_line(),
+                diagnostics: episode.diagnostics_text(&timestamp(episode.at())),
+            })
+            .collect(),
+        limit_caption: visible_limit_caption(all.len()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +375,16 @@ mod tests {
         assert_eq!(view.pause_ceiling, 60);
         assert_eq!(view.theme, "dark");
         assert!(view.token_set && !view.autostart);
+    }
+
+    #[test]
+    fn an_empty_journal_has_no_rows_and_no_caption() {
+        let view = journal_view(&[], &|_| String::new());
+
+        assert!(view.rows.is_empty());
+        assert_eq!(view.limit_caption, None);
+        let json = serde_json::to_value(view).unwrap();
+        assert!(json.get("limitCaption").is_some());
     }
 
     /// Ключи — то, что читает C#: переименование поля в Rust ломало бы экран молча.

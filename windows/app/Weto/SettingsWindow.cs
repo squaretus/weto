@@ -171,20 +171,52 @@ public sealed class SettingsWindow : Window
         ]);
     }
 
-    private Border JournalCard() => Card("Журнал",
-    [
-        Row(Text("Журнал завершений и проверок выгружается файлом для разбора.", "Caption", "Dim", wrap: true)),
-        WithoutDivider(Row(new StackPanel
+    /// <summary>
+    /// Журнал: строка на эпизод — имя, итог, диагностика; свежие сверху.
+    /// «Выгрузить» доступна всегда (в выгрузке и журнал проверок, и настройки),
+    /// «Очистить» — только когда есть что очищать.
+    /// </summary>
+    private Border JournalCard()
+    {
+        var journal = App.Current.Bridge.Journal();
+        var rows = new List<UIElement>();
+        if (journal.Rows.Count == 0)
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = Number("Space2"),
-            Children =
+            rows.Add(Row(Text("Срабатываний не было", "Caption", "Faint")));
+        }
+        foreach (var entry in journal.Rows)
+        {
+            var lines = new StackPanel { Spacing = 2, Padding = new Thickness(0, Number("Space2"), 0, Number("Space2")) };
+            lines.Children.Add(Text(entry.Title, "Label"));
+            lines.Children.Add(Text(entry.Summary, "Value", "Dim", wrap: true));
+            if (entry.Resolution is { } resolution)
             {
-                PillButton("Выгрузить журнал", ButtonKind.Muted, ExportJournal),
-                PillButton("Очистить журнал", ButtonKind.Destructive, () => Run("clearJournal")),
-            },
-        })),
-    ]);
+                lines.Children.Add(Text(resolution, "Value", "Dim", wrap: true));
+            }
+            lines.Children.Add(Text(entry.Diagnostics, "Diagnostics", "Faint", wrap: true));
+            rows.Add(lines);
+        }
+        if (journal.LimitCaption is { } caption)
+        {
+            rows.Add(Row(Text(caption, "Caption", "Faint", wrap: true)));
+        }
+
+        var buttons = new Grid { ColumnSpacing = Number("Space2"), Margin = new Thickness(0, Number("Space3"), 0, 0) };
+        buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var export = PillButton("Выгрузить журнал", ButtonKind.Muted, ExportJournal);
+        export.HorizontalAlignment = HorizontalAlignment.Stretch;
+        buttons.Children.Add(export);
+        if (journal.Rows.Count > 0)
+        {
+            buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var clear = PillButton("Очистить журнал", ButtonKind.Destructive, () => Run("clearJournal"));
+            clear.HorizontalAlignment = HorizontalAlignment.Stretch;
+            Grid.SetColumn(clear, 1);
+            buttons.Children.Add(clear);
+        }
+        rows.Add(WithoutDivider(buttons));
+        return Card("Журнал", rows);
+    }
 
     private void ExportJournal()
     {
