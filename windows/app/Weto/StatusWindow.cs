@@ -22,6 +22,8 @@ public sealed class StatusWindow : Window
     private readonly StackPanel _bannerSlot = new() { Visibility = Visibility.Collapsed };
     private StatusView? _shown;
     private BannerView? _shownBanner;
+    private Grid? _header;
+    private string? _headerKey;
 
     public bool IsOpen { get; private set; }
 
@@ -73,15 +75,26 @@ public sealed class StatusWindow : Window
 
     public void Present(StatusView status)
     {
-        Show(status);
+        // Открыт до показа: закрытый попап экран только запоминает, и состояние,
+        // сменившееся, пока попап был спрятан, не рисовалось до следующей смены.
         IsOpen = true;
+        _shown = null;
+        Show(status);
         AppWindow.Show();
         Activate();
         Place();
     }
 
+    /// <summary>
+    /// Когда попап спрятался. Щелчок по значку при открытом попапе сперва
+    /// отнимает у него фокус и прячет его, а до трея доходит уже после —
+    /// и открывал бы попап снова, вместо того чтобы закрыть.
+    /// </summary>
+    public DateTime DismissedAt { get; private set; }
+
     public void Dismiss()
     {
+        DismissedAt = DateTime.UtcNow;
         IsOpen = false;
         AppWindow.Hide();
     }
@@ -112,6 +125,7 @@ public sealed class StatusWindow : Window
         _panel.Background = Brush("Shell");
         _root.Background = Brush("Shell");
         _shownBanner = null;
+        _headerKey = null;
         _bannerSlot.Children.Clear();
         _bannerSlot.Visibility = Visibility.Collapsed;
         if (_shown is not null)
@@ -143,7 +157,23 @@ public sealed class StatusWindow : Window
     private void Build(StatusView status)
     {
         _panel.Children.Clear();
+        _panel.Children.Add(Header(status));
+        Body(status);
+    }
 
+    /// <summary>
+    /// Шапка живёт, пока не сменились тон, заголовок или проба: на паузе экран
+    /// меняется каждую секунду (отсчёт на пилюлях), и кнопки, пересозданные
+    /// посреди нажатия, нажатия не получали.
+    /// </summary>
+    private Grid Header(StatusView status)
+    {
+        var key = $"{status.Tone}|{status.Title}|{status.Probing}";
+        if (_header is not null && key == _headerKey)
+        {
+            return _header;
+        }
+        _headerKey = key;
         var header = new Grid { ColumnSpacing = Number("Space3") };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -166,8 +196,12 @@ public sealed class StatusWindow : Window
         actions.Children.Add(IconButton("", "Настройки", () => App.Current.ShowSettings()));
         Grid.SetColumn(actions, 2);
         header.Children.Add(actions);
-        _panel.Children.Add(header);
+        _header = header;
+        return header;
+    }
 
+    private void Body(StatusView status)
+    {
         if (status.Explanation is { } explanation)
         {
             var lines = new StackPanel { Spacing = 2 };

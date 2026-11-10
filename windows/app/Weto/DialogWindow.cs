@@ -76,7 +76,17 @@ public sealed class DialogWindow : Window
         FitToPanel(AppWindow, _root, _panel);
         Center();
 
-        Closed += (_, _) => Finish(false);
+        // Esc — тот же ответ, что крестик: «отмена», а у сообщения — единственная кнопка.
+        var escape = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Escape };
+        escape.Invoked += (_, args) =>
+        {
+            args.Handled = true;
+            Finish(text.Cancel.Length == 0);
+        };
+        _root.KeyboardAccelerators.Add(escape);
+
+        // Окно уже закрывается: ответ без повторного Close().
+        Closed += (_, _) => Finish(false, closing: true);
     }
 
     private void Center()
@@ -89,7 +99,7 @@ public sealed class DialogWindow : Window
     }
 
     /// <summary>Ответ отдаётся ровно один раз: кнопка закрывает окно, а закрытие — тоже ответ.</summary>
-    private void Finish(bool confirmed)
+    private void Finish(bool confirmed, bool closing = false)
     {
         var answer = _answer;
         _answer = null;
@@ -97,7 +107,10 @@ public sealed class DialogWindow : Window
         {
             return;
         }
-        Close();
+        if (!closing)
+        {
+            Close();
+        }
         answer(confirmed);
     }
 }

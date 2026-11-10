@@ -24,6 +24,12 @@ public partial class App : Application
     /// </summary>
     private const string QuitEvent = @"Local\com.weto.app.quit";
 
+    /// <summary>
+    /// Повторный запуск показывает попап работающей копии, как на Linux: второго
+    /// процесса нет, а другого входа, кроме значка в трее, иначе не было бы.
+    /// </summary>
+    private const string ShowEvent = @"Local\com.weto.app.show";
+
     /// <summary>Сколько деинсталлятор ждёт выхода работающего экземпляра.</summary>
     private static readonly TimeSpan QuitTimeout = TimeSpan.FromSeconds(20);
 
@@ -38,7 +44,9 @@ public partial class App : Application
     private SettingsWindow? _settings;
     private UpdateWindow? _update;
     private EventWaitHandle? _quitRequest;
+    private EventWaitHandle? _showRequest;
     private Tone? _shownTone;
+    private string? _shownTip;
     private string? _theme;
 
     /// <summary>Показывать образец «цели на паузе» вместо живого статуса — для скриншота в CI.</summary>
@@ -56,12 +64,24 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
+        // Процесс живёт, пока его не закрыли явно (Quit, Exit). Умолчание WinUI —
+        // выход по закрытию последнего окна: попап создаётся лениво, и крестик
+        // на окне настроек, открытом из трея, кончал цикл сообщений без
+        // weto_stop — охраны нет, цели на паузе стоят до следующего запуска.
+        DispatcherShutdownMode = DispatcherShutdownMode.OnExplicitShutdown;
+        // Необработанное исключение роняет процесс, но охрану останавливаем
+        // штатно: weto_stop продолжает стоящие цели, как при выходе.
+        UnhandledException += (_, _) => StopGuard();
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => StopGuard();
     }
 
     public static new App Current => (App)Application.Current;
 
     /// <summary>Идёт штатный выход: мост освобождается, окна к нему больше не обращаются.</summary>
     public bool Quitting { get; private set; }
+
+    /// <summary>Экран обновления последнего такта — для окон, которым просьба открыть окно не нужна.</summary>
+    public UpdateView? LastUpdate { get; private set; }
 
     public WetoBridge Bridge => _bridge ?? throw new InvalidOperationException("Мост не поднят");
 
@@ -90,13 +110,23 @@ public partial class App : Application
         if (!created)
         {
             // Второй экземпляр ничего не охраняет: охрана уже идёт в первом.
+            // Он только просит первый показать попап.
+            if (EventWaitHandle.TryOpenExisting(ShowEvent, out var show))
+            {
+                show.Set();
+                show.Dispose();
+            }
             Exit();
             return;
         }
 
         _bridge = WetoBridge.Start();
-        ListenForQuitRequest();
-        _bridge.Notified += Notifications.Show;
+        _quitRequest = Listen(QuitEvent, Quit, once: true);
+        _showRequest = Listen(ShowEvent, () => ShowStatus(), once: false);
+        // Уведомление приходит с потока охраны; показ — на потоке интерфейса,
+        // чтобы медленная платформа уведомлений не задерживала такт охраны.
+        var ui = DispatcherQueue.GetForCurrentThread();
+        _bridge.Notified += notification => ui.TryEnqueue(() => Notifications.Show(notification));
         Notifications.Register(() => ShowStatus());
 
         _tray = new TrayIcon(TrayIconPath(Tone.Disabled), "Weto");
@@ -104,6 +134,10 @@ public partial class App : Application
         _tray.ProbeRequested += () => Dispatch(() => _bridge?.Command("probeNow"));
         _tray.SettingsRequested += () => Dispatch(ShowSettings);
         _tray.QuitRequested += () => Dispatch(AskToClose);
+        // Конец сеанса — тот же штатный выход, что SIGTERM у Linux-версии:
+        // стоящие цели продолжаются. Синхронно: после ответа на WM_ENDSESSION
+        // система вправе завершить процесс в любой миг.
+        _tray.SessionEnding += Quit;
 
         var queue = DispatcherQueue.GetForCurrentThread();
         _timer = queue.CreateTimer();
@@ -139,14 +173,20 @@ public partial class App : Application
             return;
         }
         var status = Sample ? _bridge.StatusSample() : _bridge.Status();
-        if (status.Tone != _shownTone)
+        var tip = $"Weto — {status.Title}";
+        if (status.Tone != _shownTone || tip != _shownTip)
         {
-            _tray.Update(TrayIconPath(status.Tone), $"Weto — {status.Title}");
+            // Подсказка — по заголовку: «Помехи» и «На страже» одного тона,
+            // а «Пауза» после них — уже другого заголовка.
+            _tray.Update(TrayIconPath(status.Tone), tip);
             _shownTone = status.Tone;
+            _shownTip = tip;
         }
+        _tray.EnsureAdded();
         _status?.Show(status);
 
         var update = CurrentUpdate();
+        LastUpdate = update;
         if (update.Installed)
         {
             // Установщик запущен и ждёт мьютекса: выход штатный, стоящие цели
@@ -197,6 +237,11 @@ public partial class App : Application
             _status.Dismiss();
             return;
         }
+        if (_status is not null && DateTime.UtcNow - _status.DismissedAt < TimeSpan.FromMilliseconds(400))
+        {
+            // Попап только что спрятала потеря фокуса от этого же щелчка.
+            return;
+        }
         ShowStatus();
     }
 
@@ -211,6 +256,7 @@ public partial class App : Application
     }
 
     private bool _askingToClose;
+    private bool _askingToUninstall;
 
     /// <summary>
     /// «Закрыть Weto?» — один вопрос на два входа: кнопку «Закрыть приложение»
@@ -261,8 +307,16 @@ public partial class App : Application
             fail("Удаление доступно только у установленной копии Weto");
             return;
         }
+        // Вопрос один, как у «Закрыть Weto?»: двойной щелчок открывал два
+        // и запускал деинсталлятор дважды.
+        if (_askingToUninstall)
+        {
+            return;
+        }
+        _askingToUninstall = true;
         DialogWindow.Ask(Bridge.UninstallConfirmation(), destructive: true, confirmed =>
         {
+            _askingToUninstall = false;
             if (!confirmed)
             {
                 return;
@@ -283,24 +337,31 @@ public partial class App : Application
         });
     }
 
-    /// <summary>Поток ждёт просьбы деинсталлятора и переносит выход на поток интерфейса.</summary>
-    private void ListenForQuitRequest()
+    /// <summary>
+    /// Поток ждёт именованного события и переносит действие на поток интерфейса:
+    /// просьбу выйти от установщика (один раз) и просьбу показаться от повторного запуска.
+    /// </summary>
+    private static EventWaitHandle Listen(string name, Action action, bool once)
     {
         var queue = DispatcherQueue.GetForCurrentThread();
-        _quitRequest = new EventWaitHandle(false, EventResetMode.AutoReset, QuitEvent);
-        var request = _quitRequest;
+        var request = new EventWaitHandle(false, EventResetMode.AutoReset, name);
         new Thread(() =>
         {
             try
             {
-                request.WaitOne();
-                queue.TryEnqueue(Quit);
+                do
+                {
+                    request.WaitOne();
+                    queue.TryEnqueue(() => action());
+                }
+                while (!once);
             }
             catch (ObjectDisposedException)
             {
                 // Выход случился раньше просьбы.
             }
-        }) { IsBackground = true, Name = "weto-quit-request" }.Start();
+        }) { IsBackground = true, Name = $"weto-listen-{name}" }.Start();
+        return request;
     }
 
     /// <summary>
@@ -402,12 +463,18 @@ public partial class App : Application
         Quitting = true;
         _timer?.Stop();
         _quitRequest?.Dispose();
+        _showRequest?.Dispose();
         _tray?.Dispose();
-        _bridge?.Dispose();
-        _bridge = null;
+        StopGuard();
         _instance?.ReleaseMutex();
         Exit();
     }
+
+    /// <summary>
+    /// Остановить охрану ровно раз — из выхода или из обработчика исключения,
+    /// с любого потока.
+    /// </summary>
+    private void StopGuard() => Interlocked.Exchange(ref _bridge, null)?.Dispose();
 
     private static string TrayIconPath(Tone tone) =>
         Path.Combine(AppContext.BaseDirectory, "Assets", $"tray-{tone.ToString().ToLowerInvariant()}.ico");
