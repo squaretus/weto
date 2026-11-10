@@ -4,11 +4,15 @@
 //! работают с этим же значением. Путь — стабильный `Weto.exe` установки
 //! (`Paths::launcher`), а не путь текущего процесса: при обновлении процесс
 //! может идти из другого места.
+//!
+//! Ключа `Run` на свежем профиле может не быть вовсе — так было на одном из
+//! раннеров windows-2025: включение его создаёт, выключение при отсутствующем
+//! ключе — уже выполнено.
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
 
 use crate::wide;
@@ -41,7 +45,7 @@ impl RunKeyAutostart {
     /// Включить: команда запуска — путь в кавычках (в нём бывают пробелы).
     pub fn enable(&self, launcher: &std::path::Path) -> Result<(), AutostartError> {
         let command = wide::null_terminated(&format!("\"{}\"", launcher.display()));
-        let key = open(KEY_SET_VALUE)?;
+        let key = create()?;
         // SAFETY: строка с нулём на конце, длина в байтах включает нуль.
         let status = unsafe {
             RegSetValueExW(
@@ -62,7 +66,11 @@ impl RunKeyAutostart {
 
     /// Выключить. Значения и так нет — тоже успех.
     pub fn disable(&self) -> Result<(), AutostartError> {
-        let key = open(KEY_SET_VALUE)?;
+        let key = match open(KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(AutostartError::Open(ERROR_FILE_NOT_FOUND)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
         // SAFETY: имя с нулём на конце.
         let status = unsafe { RegDeleteValueW(key, self.value.as_ptr()) };
         close(key);
@@ -100,6 +108,30 @@ fn open(access: u32) -> Result<HKEY, AutostartError> {
     let mut key: HKEY = std::ptr::null_mut();
     // SAFETY: путь с нулём на конце; ключ закрывается вызывающим.
     let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, access, &mut key) };
+    if status != ERROR_SUCCESS {
+        return Err(AutostartError::Open(status));
+    }
+    Ok(key)
+}
+
+/// Открыть ключ на запись, создав его, если его нет.
+fn create() -> Result<HKEY, AutostartError> {
+    let path = wide::null_terminated(RUN_KEY);
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: путь с нулём на конце; ключ закрывается вызывающим.
+    let status = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
     if status != ERROR_SUCCESS {
         return Err(AutostartError::Open(status));
     }
