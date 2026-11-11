@@ -11,7 +11,7 @@ use gtk4::glib::MainContext;
 use gtk4::prelude::*;
 use gtk4::{Application, Button, CheckButton, Image, Label, MenuButton, Orientation, Widget};
 
-use weto_app::update::{self, Updates};
+use weto_app::update;
 use weto_app::update_window::{dialog_width, ICON_SIZE};
 use weto_config::paths::Paths;
 use weto_update::checker::CheckError;
@@ -66,7 +66,7 @@ fn the_update_window_matches_the_macos_dialog() {
     let home = std::env::temp_dir().join(format!("weto-update-window-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     let paths = Paths::rooted(home.clone());
-    let updates = Updates::new(
+    let updates = update::linux_updates(
         &paths,
         Arc::new(NoNetwork),
         Version::parse("1.1.0").unwrap(),
@@ -218,11 +218,12 @@ fn the_update_window_matches_the_macos_dialog() {
     );
     assert!(updates.auto_install(), "галочка и тумблер разошлись");
 
+    // Ждём сам отказ, а не заголовок: «Обновление Weto» стоит и над загрузкой,
+    // и такт окна, пришедшийся на миг до отказа, кончал ожидание раньше него.
     wait_for(Duration::from_secs(5), || {
-        title(root).text() == "Обновление Weto"
+        find_button(root, "Открыть страницу релиза").is_visible()
     });
-    let release = find_button(root, "Открыть страницу релиза");
-    assert!(release.is_visible(), "после отказа нет ручного пути");
+    assert_eq!(title(root).text(), "Обновление Weto");
     assert!(!find_button(root, "Обновить").is_visible());
     assert!(!auto.is_visible());
     let detail = descendants::<Label>(root)

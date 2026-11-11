@@ -123,12 +123,15 @@ public static class Components
     /// Ширина колонки подписей у строк с полем и сегментами: поля и сегменты
     /// одной карточки начинаются с одной вертикали (канон, «Окно»). В WinUI нет
     /// общей колонки на несколько сеток, поэтому ширина — по самой длинной
-    /// подписи вкладки («Потолок паузы»).
+    /// подписи вкладки («Токен ipinfo» со значком пояснения).
     /// </summary>
     public const double LabelColumn = 120;
 
     /// <summary>Строка с полем или сегментами: подпись, зазор space5, контрол во всю остальную ширину.</summary>
-    public static Grid FieldRow(string label, FrameworkElement control)
+    public static Grid FieldRow(string label, FrameworkElement control) => FieldRow(Text(label, "Label"), control);
+
+    /// <summary>То же с подписью-элементом: название и значок пояснения после него.</summary>
+    public static Grid FieldRow(FrameworkElement label, FrameworkElement control)
     {
         var grid = new Grid
         {
@@ -137,7 +140,7 @@ public static class Components
         };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LabelColumn) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.Children.Add(Text(label, "Label"));
+        grid.Children.Add(label);
         control.HorizontalAlignment = HorizontalAlignment.Stretch;
         Grid.SetColumn(control, 1);
         grid.Children.Add(control);
@@ -175,6 +178,178 @@ public static class Components
         HorizontalAlignment = HorizontalAlignment.Center,
         VerticalAlignment = VerticalAlignment.Center,
     };
+
+    /// <summary>
+    /// Баннер попапа (канон, «Баннер»): фон card, рамка line, радиус radiusTile,
+    /// паддинг space3 × space2; тон — только у иконки (violet — новость, amber —
+    /// предупреждение), текст caption цветом dim; справа одно действие primary
+    /// или индикатор, пока идёт работа.
+    /// </summary>
+    public static Border Banner(BannerView view, string action, Action onAction)
+    {
+        var grid = new Grid { ColumnSpacing = Number("Space2") };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.Children.Add(Glyph(view.Warning ? "\uE7BA" : "\uE896", 14, Brush(view.Warning ? "Amber" : "Violet")));
+        var text = Text(view.Text, "Caption", "Dim", wrap: true);
+        text.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(text, 1);
+        grid.Children.Add(text);
+        FrameworkElement right = view.InFlight
+            ? new ProgressRing { Width = 16, Height = 16, IsActive = true }
+            : PillButton(action, ButtonKind.Primary, onAction);
+        Grid.SetColumn(right, 2);
+        grid.Children.Add(right);
+        return new Border
+        {
+            Background = Brush("Card"),
+            BorderBrush = Brush("Line"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = Radius("RadiusTile"),
+            Padding = new Thickness(Number("Space3"), Number("Space2"), Number("Space3"), Number("Space2")),
+            Child = grid,
+        };
+    }
+
+    /// <summary>Плитка-иконка (канон, «Кнопки»): violet, белая иконка, 30×30, радиус radiusTile.</summary>
+    public static Button TileButton(string glyph, string tooltip, Action onClick)
+    {
+        var button = new Button
+        {
+            Content = Glyph(glyph, 14, new SolidColorBrush(Microsoft.UI.Colors.White)),
+            Background = Brush("Violet"),
+            BorderThickness = new Thickness(0),
+            CornerRadius = Radius("RadiusTile"),
+            Width = 30,
+            Height = 30,
+            Padding = new Thickness(0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        ToolTipService.SetToolTip(button, tooltip);
+        KeepFill(button, Brush("Violet"), new SolidColorBrush(Microsoft.UI.Colors.White), null);
+        button.Click += (_, _) => onClick();
+        return button;
+    }
+
+    /// <summary>
+    /// Подогнать окно под естественный размер панели. У WinUI нет «размера
+    /// по содержимому», а ResizeClient у окна без заголовка считает внешний
+    /// размер так, будто заголовок есть, — поэтому подгонка по факту: внешний
+    /// размер правится на разницу между корнем (вся клиентская область) и
+    /// панелью. Сходится за шаг; до первой раскладки — прикидка через Measure.
+    /// </summary>
+    public static void FitToPanel(Microsoft.UI.Windowing.AppWindow window, FrameworkElement root, FrameworkElement panel)
+    {
+        var scale = panel.XamlRoot?.RasterizationScale ?? 1.0;
+        double natural;
+        if (panel.ActualHeight > 0)
+        {
+            natural = panel.ActualHeight;
+        }
+        else
+        {
+            panel.Measure(new Windows.Foundation.Size(panel.Width, double.PositiveInfinity));
+            natural = panel.DesiredSize.Height;
+        }
+        if (root.ActualHeight > 0)
+        {
+            var extraWidth = (int)Math.Round((root.ActualWidth - panel.Width) * scale);
+            var extraHeight = (int)Math.Round((root.ActualHeight - natural) * scale);
+            if (extraWidth != 0 || extraHeight != 0)
+            {
+                var size = window.Size;
+                window.Resize(new Windows.Graphics.SizeInt32(size.Width - extraWidth, size.Height - extraHeight));
+            }
+        }
+        else
+        {
+            window.ResizeClient(new Windows.Graphics.SizeInt32(
+                (int)Math.Ceiling(panel.Width * scale),
+                (int)Math.Ceiling(natural * scale)));
+        }
+    }
+
+    /// <summary>
+    /// Значок пояснения «?» (канон, «Окно»): 12 pt faint без фона; по нажатию
+    /// сразу — не по наведению — окно цвета card с границей line, текст 13 pt ink,
+    /// паддинг space4, ширина ~40 знаков. Наведение — dim, открытое пояснение — violet.
+    /// </summary>
+    public static Button Hint(string text)
+    {
+        var glyph = Glyph("\uE9CE", 12, Brush("Faint"));
+        var button = new Button
+        {
+            Content = glyph,
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(2),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, "Пояснение");
+        var flyout = new Flyout
+        {
+            Content = new TextBlock
+            {
+                Text = text,
+                Style = TextStyle("Value"),
+                Foreground = Brush("Ink"),
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 300,
+            },
+        };
+        var presenter = new Style(typeof(FlyoutPresenter));
+        presenter.Setters.Add(new Setter(Control.BackgroundProperty, Brush("Card")));
+        presenter.Setters.Add(new Setter(Control.BorderBrushProperty, Brush("Line")));
+        presenter.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
+        presenter.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(Number("Space4"))));
+        presenter.Setters.Add(new Setter(Control.CornerRadiusProperty, Radius("RadiusTile")));
+        flyout.FlyoutPresenterStyle = presenter;
+        flyout.Opened += (_, _) => glyph.Foreground = Brush("Violet");
+        flyout.Closed += (_, _) => glyph.Foreground = Brush("Faint");
+        button.PointerEntered += (_, _) =>
+        {
+            if (!flyout.IsOpen)
+            {
+                glyph.Foreground = Brush("Dim");
+            }
+        };
+        button.PointerExited += (_, _) =>
+        {
+            if (!flyout.IsOpen)
+            {
+                glyph.Foreground = Brush("Faint");
+            }
+        };
+        button.Flyout = flyout;
+        return button;
+    }
+
+    /// <summary>
+    /// Поле с пояснением формата в конце (канон, «Окно»): значок виден, только
+    /// пока поле пустое — кто начал набирать, пояснение уже прочитал.
+    /// </summary>
+    public static Grid HintedField(TextBox field, string hint)
+    {
+        var grid = new Grid();
+        grid.Children.Add(field);
+        var button = Hint(hint);
+        button.HorizontalAlignment = HorizontalAlignment.Right;
+        button.Margin = new Thickness(0, 0, Number("Space2"), 0);
+        grid.Children.Add(button);
+        void Apply() => button.Visibility = string.IsNullOrEmpty(field.Text) ? Visibility.Visible : Visibility.Collapsed;
+        field.TextChanged += (_, _) => Apply();
+        Apply();
+        return grid;
+    }
+
+    /// <summary>Число в строке (процессы цели): данные, цифры табличные, справа.</summary>
+    public static TextBlock DataValue(string text)
+    {
+        var value = Text(text, "Data", "Dim");
+        value.HorizontalAlignment = HorizontalAlignment.Right;
+        return value;
+    }
 
     /// <summary>Иконочная кнопка без фона: шестерёнка, обновить, удалить строку.</summary>
     public static Button IconButton(string glyph, string tooltip, Action onClick)
@@ -220,8 +395,38 @@ public static class Components
             Padding = new Thickness(15, 0, 15, 0),
             VerticalAlignment = VerticalAlignment.Center,
         };
+        KeepFill(button, background, foreground, border);
         button.Click += (_, _) => onClick();
         return button;
+    }
+
+    /// <summary>
+    /// Фон пилюли во всех состояниях — свой: шаблон WinUI в состояниях
+    /// «наведение», «нажатие» и «неактивна» подменяет его своими кистями,
+    /// и в светлой теме неактивная кнопка выходила белой на белом. Неактивная —
+    /// та же заливка с непрозрачностью 0.4 (<see cref="SetEnabled"/>), как
+    /// <c>WetoPillButtonStyle</c> на macOS.
+    /// </summary>
+    private static void KeepFill(Button button, Brush background, Brush foreground, Brush? border)
+    {
+        var edge = border ?? new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        foreach (var state in new[] { "PointerOver", "Pressed", "Disabled" })
+        {
+            button.Resources["ButtonBackground" + state] = background;
+            button.Resources["ButtonForeground" + state] = foreground;
+            button.Resources["ButtonBorderBrush" + state] = edge;
+        }
+    }
+
+    /// <summary>
+    /// Включить или выключить пилюлю вместе с её видом: неактивная — непрозрачность
+    /// 0.4. Явно, а не по IsEnabledChanged: событие до вставки кнопки в дерево
+    /// не приходило, и неактивная «Добавить» выглядела активной.
+    /// </summary>
+    public static void SetEnabled(Button button, bool enabled)
+    {
+        button.IsEnabled = enabled;
+        button.Opacity = enabled ? 1 : 0.4;
     }
 
     /// <summary>Заливка деструктивной кнопки — red 16 %.</summary>
@@ -327,14 +532,20 @@ public static class Components
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
+        // Значок приложения — у цели, добавленной ярлыком (`.lnk`), как Icon=
+        // ярлыка `.desktop` на Linux; у команды — значок терминала.
         var icon = new Border
         {
             Width = 32,
             Height = 32,
             CornerRadius = new CornerRadius(8),
             Background = Brush("Card"),
-            Child = Glyph("", 16, Brush("Dim")), // CommandPrompt
+            Child = Glyph("\uE756", 16, Brush("Dim")), // CommandPrompt
         };
+        if (pill.Icon is { } source)
+        {
+            AppIcons.Load(source, image => icon.Child = image);
+        }
         grid.Children.Add(icon);
 
         var name = new StackPanel { Orientation = Orientation.Horizontal, Spacing = Number("Space2") };

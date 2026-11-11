@@ -1,15 +1,18 @@
-# Скриншоты окон приложения на раннере — замена проверке глазами, пока живой
+﻿# Скриншоты окон приложения на раннере — замена проверке глазами, пока живой
 # Windows нет. Запускает Weto с флагом, ждёт и снимает каждое видимое окно
 # процесса через PrintWindow: окно рисуется само, даже если его перекрывает
 # чужое (на windows-11-arm поверх рабочего стола висит экран первичной
 # настройки Windows, и снимок экрана показывал только его).
 #   pwsh -File screenshot.ps1 -Exe out\x86_64\Weto.exe -Flag --show-status -Out screens\status
+# С -Attach снимает уже запущенные процессы (диагностика зависшего шага):
+#   screenshot.ps1 -Attach 1234,5678 -Out screens\stuck
 # Файлы: <Out>-1.png, <Out>-2.png … — по окну на файл.
 param(
-    [Parameter(Mandatory)] [string] $Exe,
-    [Parameter(Mandatory)] [string] $Flag,
+    [string] $Exe,
+    [string] $Flag,
     [Parameter(Mandatory)] [string] $Out,
-    [int] $Wait = 15
+    [int] $Wait = 15,
+    [uint32[]] $Attach
 )
 $ErrorActionPreference = 'Stop'
 
@@ -68,6 +71,15 @@ public static class WindowShot
 }
 '@
 
+if ($Attach) {
+    $count = 0
+    foreach ($id in $Attach) {
+        $count += [WindowShot]::Capture($id, "$Out-$id")
+    }
+    Write-Output "снято окон: $count → $Out-*.png"
+    return
+}
+
 $process = Start-Process -FilePath $Exe -ArgumentList $Flag -PassThru
 Start-Sleep -Seconds $Wait
 if ($process.HasExited) {
@@ -75,6 +87,9 @@ if ($process.HasExited) {
 }
 $count = [WindowShot]::Capture([uint32]$process.Id, $Out)
 Stop-Process -Id $process.Id -Force
+# Ждём конца процесса: следующий шаг удаляет профиль, а открытые файлы
+# только что убитого Weto удаление срывали.
+Wait-Process -Id $process.Id -Timeout 30 -ErrorAction SilentlyContinue
 if ($count -eq 0) {
     Write-Error "у Weto нет видимых окон для снимка"
 }

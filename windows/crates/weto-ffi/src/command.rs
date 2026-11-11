@@ -62,6 +62,19 @@ pub enum Command {
     },
     ClearJournal,
     ConfirmResumed,
+    /// Плитка подвала: показать известную находку или проверить сейчас.
+    /// Ответ — `true`, если окно обновления пора открыть.
+    CheckUpdates,
+    InstallUpdate,
+    SkipUpdate,
+    RemindLater {
+        interval: crate::update::Remind,
+    },
+    /// Окно закрыто крестиком — отсрочка на три часа, как на macOS.
+    DismissUpdate,
+    SetAutoInstall {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -230,6 +243,12 @@ mod tests {
         assert_eq!(
             parse(r#"{"command":"setPauseCeiling","seconds":300}"#),
             Command::SetPauseCeiling { seconds: 300 }
+        );
+        assert_eq!(
+            parse(r#"{"command":"remindLater","interval":"threeHours"}"#),
+            Command::RemindLater {
+                interval: crate::update::Remind::ThreeHours
+            }
         );
     }
 

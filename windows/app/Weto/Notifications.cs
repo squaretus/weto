@@ -37,7 +37,7 @@ public static class Notifications
         }
     }
 
-    /// <summary>Показать уведомление охраны. Зовётся с потока охраны.</summary>
+    /// <summary>Показать уведомление охраны. Зовётся с потока интерфейса.</summary>
     public static void Show(Notification notification)
     {
         if (!_registered)

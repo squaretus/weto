@@ -30,4 +30,5 @@ pub mod rollback;
 pub mod scheduler;
 pub mod store;
 pub mod strings;
+pub mod updates;
 pub mod version;

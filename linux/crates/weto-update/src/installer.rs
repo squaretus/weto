@@ -4,11 +4,10 @@
 //! симлинк. Адрес проверяется до всякого запроса — он приходит из сети,
 //! и подставить туда чужой хост первым делом попробует подменивший ответ.
 
-#[cfg(target_os = "linux")]
 use std::io::Read;
+use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
@@ -60,7 +59,9 @@ pub const ALLOWED_HOSTS: [&str; 3] = [
 /// и только ожидаемое расширение — как на macOS.
 ///
 /// Хост сверяется целиком, а не префиксом строки: `https://github.com@evil.com/`
-/// начинается не с чужого хоста, но ведёт именно на него.
+/// начинается не с чужого хоста, но ведёт именно на него. Запрос и фрагмент
+/// не пускаются вовсе: ожидаемое окончание в них (`…/x.sh?f=weto.tar.zst`)
+/// выдавало бы чужой файл за свой, а у адреса ассета релиза их не бывает.
 pub fn is_trusted_url(url: &str, expected_suffix: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
@@ -70,7 +71,9 @@ pub fn is_trusted_url(url: &str, expected_suffix: &str) -> bool {
         None => return false,
     };
 
-    ALLOWED_HOSTS.contains(&authority) && path.ends_with(expected_suffix)
+    ALLOWED_HOSTS.contains(&authority)
+        && !path.contains(['?', '#'])
+        && path.ends_with(expected_suffix)
 }
 
 #[cfg(target_os = "linux")]
@@ -169,7 +172,6 @@ pub const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// установку «Загрузка…» навсегда, и повторить её было бы нечем.
 pub const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[cfg(target_os = "linux")]
 fn download_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(DOWNLOAD_CONNECT_TIMEOUT)
@@ -177,20 +179,18 @@ fn download_agent() -> ureq::Agent {
         .build()
 }
 
-#[cfg(target_os = "linux")]
-fn download(url: &str, into: &Path, progress: Option<&AtomicU64>) -> std::io::Result<()> {
+/// Скачивает файл по уже проверенному адресу. `progress` — доля скачанного
+/// в тысячных. Общая для архива Linux и установщика Windows.
+pub fn download(url: &str, into: &Path, progress: Option<&AtomicU64>) -> std::io::Result<()> {
     download_with(&download_agent(), url, into, progress)
 }
 
-#[cfg(target_os = "linux")]
 fn download_with(
     agent: &ureq::Agent,
     url: &str,
     into: &Path,
     progress: Option<&AtomicU64>,
 ) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-
     let response = agent
         .get(url)
         .call()
@@ -202,12 +202,13 @@ fn download_with(
         .unwrap_or(0);
 
     let mut reader = response.into_reader();
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(into)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // На Windows права наследуются от каталога профиля, закрытого
+    // от других пользователей; здесь — явно, только владельцу.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(into)?;
 
     let mut buffer = [0u8; 64 * 1024];
     let mut written: u64 = 0;
@@ -236,7 +237,18 @@ fn unpack(archive: &Path, into: &Path) -> std::io::Result<()> {
     tar::Archive::new(decoder).unpack(into)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
+impl crate::updates::UpdateInstalling for Installer {
+    fn install(&self, version: &Version, url: &str) -> Result<(), String> {
+        Installer::install(self, version, url).map_err(|error| error.to_string())
+    }
+
+    fn progress(&self) -> f32 {
+        Installer::progress(self)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};

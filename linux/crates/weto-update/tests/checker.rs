@@ -241,3 +241,23 @@ fn the_check_timeout_is_bounded() {
         std::time::Duration::from_secs(30)
     );
 }
+
+/// Windows берёт из того же релиза свой установщик, а не архив Linux.
+#[test]
+fn windows_picks_its_setup_from_the_same_release() {
+    const BOTH: &str = r#"{
+      "tag_name": "v1.2.0", "draft": false, "prerelease": false,
+      "assets": [{"name": "weto-1.2.0-x86_64-linux.tar.zst",
+                  "browser_download_url": "https://github.com/x/linux"},
+                 {"name": "weto-1.2.0-x86_64-windows-setup.exe",
+                  "browser_download_url": "https://github.com/x/windows"}]
+    }"#;
+
+    let info = ReleaseChecker::new("squaretus/weto", "x86_64")
+        .with_asset_suffix("-x86_64-windows-setup.exe".into())
+        .with_api_url(serve_with_status("200 OK", BOTH))
+        .latest(&Version::parse("1.1.0").unwrap())
+        .unwrap();
+
+    assert_eq!(info.download_url, "https://github.com/x/windows");
+}

@@ -276,7 +276,13 @@ fn is_interpreter(process: &ProcessSnapshot, arguments: &[String]) -> bool {
         // `node.exe` на Windows — тот же node.
         let name = crate::path_text::program_stem(path);
         let bare = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-');
-        INTERPRETER_NAMES.contains(&bare) || crate::pause_plan::SHELL_NAMES.contains(&bare)
+        // Регистр на Windows не значим и в имени программы: `NODE.EXE` — тот же node.
+        let known = |names: &[&str]| {
+            names
+                .iter()
+                .any(|known| *known == bare || (cfg!(windows) && known.eq_ignore_ascii_case(bare)))
+        };
+        known(INTERPRETER_NAMES) || known(crate::pause_plan::SHELL_NAMES)
     };
     is_known(&process.executable_path) || arguments.first().is_some_and(|zero| is_known(zero))
 }
@@ -291,6 +297,43 @@ fn script_position(arguments: &[String]) -> Option<&str> {
         .skip(1)
         .map(String::as_str)
         .find(|argument| !argument.starts_with('-'))
+}
+
+/// `cmd.exe` — интерпретатор `.bat` и `.cmd` на Windows. Отдельно от
+/// `INTERPRETER_NAMES`: ключи у него начинаются с `/`, и правило «первый
+/// аргумент не с `-`» взяло бы ключ, а путь скрипта оболочка заворачивает
+/// в кавычки вместе с аргументами (`/c ""C:\p\x.bat" арг"`).
+///
+/// Ловится только запуск отдельным процессом — двойной щелчок, ярлык, окно
+/// «Выполнить», `start`. Скрипт, набранный в уже открытом `cmd`, исполняет
+/// сам этот шелл, и процесса скрипта нет вовсе: охранять там нечего, кроме
+/// программ, которые скрипт запускает.
+fn is_command_processor(process: &ProcessSnapshot, arguments: &[String]) -> bool {
+    let is_cmd = |path: &str| crate::path_text::program_stem(path).eq_ignore_ascii_case("cmd");
+    is_cmd(&process.executable_path) || arguments.first().is_some_and(|zero| is_cmd(zero))
+}
+
+/// Путь скрипта из командной строки `cmd`: то, что идёт после `/c` или `/k`,
+/// без кавычек, до конца первого `.bat` или `.cmd`, за которым кончается слово.
+fn command_processor_script(arguments: &[String]) -> Option<String> {
+    let rest: Vec<&str> = arguments.iter().skip(1).map(String::as_str).collect();
+    let at = rest.iter().position(|argument| {
+        argument.eq_ignore_ascii_case("/c") || argument.eq_ignore_ascii_case("/k")
+    })?;
+    let command = rest[at + 1..].join(" ");
+    let command = command.trim_start_matches(|c: char| c == '"' || c.is_whitespace());
+    // Поиск по байтам: только ASCII меняет регистр, смещения совпадают с исходной
+    // строкой, а конец найденного расширения — всегда граница символа, даже
+    // когда в пути кириллица.
+    let lower = command.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let end = (0..bytes.len()).find_map(|index| {
+        let tail = &bytes[index..];
+        let extension = tail.starts_with(b".bat") || tail.starts_with(b".cmd");
+        let after = tail.get(4).copied();
+        (extension && matches!(after, None | Some(b'"') | Some(b' '))).then_some(index + 4)
+    })?;
+    Some(command[..end].to_string())
 }
 
 fn matches_rule(process: &ProcessSnapshot, rule: &TargetRule) -> bool {
@@ -315,9 +358,13 @@ fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) 
             // `less /p/qwen` и `code /p/qwen` вместе с их деревьями, а `argv[0]`
             // у шебанг-запуска — сам интерпретатор, и правило старого конфига
             // с `/usr/bin/node` среди путей ловило бы любой node-скрипт.
-            if !is_interpreter(process, arguments) {
+            let script = if is_command_processor(process, arguments) {
+                command_processor_script(arguments)
+            } else if is_interpreter(process, arguments) {
+                script_position(arguments).map(str::to_string)
+            } else {
                 return false;
-            }
+            };
             // Только абсолютные пути. Окно настроек запоминает среди путей
             // запуска и введённое голое имя (`qwen`), а сравнение с ним уводило
             // бы под охрану `node qwen` из чужого каталога. Скрипт интерпретатор
@@ -326,8 +373,8 @@ fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) 
             // правила: правило собирают и настройки, и кэш охраны с памятью путей,
             // а ветка бинарника его не видит вовсе — `exe` всегда абсолютный,
             // голое имя с ним не совпадает.
-            script_position(arguments).is_some_and(|script| {
-                is_absolute(script) && paths.iter().any(|path| same_path(path, script))
+            script.is_some_and(|script| {
+                is_absolute(&script) && paths.iter().any(|path| same_path(path, &script))
             })
         }
     }
@@ -593,6 +640,67 @@ mod tests {
         let procs = vec![process(10, 1, "/usr/bin/Nano", &["Nano"])];
 
         assert!(pids(&procs, &[binary("/usr/bin/nano")]).is_empty());
+    }
+
+    /// `.bat`, запущенный двойным щелчком или ярлыком: оболочка зовёт
+    /// `cmd /c ""путь" аргументы"`, и скрипт — путь до конца `.bat`.
+    #[test]
+    fn a_batch_script_is_matched_in_the_command_processor_line() {
+        let rule = script(r"C:\Tools\Run Me.bat", &[]);
+        let shell_execute = process(
+            10,
+            1,
+            r"C:\Windows\System32\cmd.exe",
+            &[
+                r"C:\Windows\System32\cmd.exe",
+                "/c",
+                r#""C:\Tools\Run Me.bat" --fast""#,
+            ],
+        );
+        let plain = process(
+            11,
+            1,
+            r"C:\Windows\System32\cmd.exe",
+            &["cmd", "/d", "/C", r"C:\Tools\Run Me.bat"],
+        );
+        assert_eq!(pids(&[shell_execute, plain], &[rule]), vec![10, 11]);
+    }
+
+    /// Расширение только в конце слова: каталог `my.batch` скриптом не является,
+    /// и кириллица в пути не ломает поиск.
+    #[test]
+    fn the_batch_extension_ends_a_word() {
+        let rule = script(r"C:\my.batch\Задача.cmd", &[]);
+        let procs = vec![process(
+            10,
+            1,
+            r"C:\Windows\System32\cmd.exe",
+            &["cmd.exe", "/c", r#""C:\my.batch\Задача.cmd""#],
+        )];
+        assert_eq!(pids(&procs, &[rule]), vec![10]);
+    }
+
+    /// Шелл без `/c` — интерактивный `cmd`, а не запуск скрипта; другой
+    /// `.bat` в его строке — чужая цель.
+    #[test]
+    fn a_command_processor_without_the_script_is_not_matched() {
+        let rule = script(r"C:\Tools\run.bat", &[]);
+        let procs = vec![
+            process(10, 1, r"C:\Windows\System32\cmd.exe", &["cmd.exe"]),
+            process(
+                11,
+                1,
+                r"C:\Windows\System32\cmd.exe",
+                &["cmd.exe", "/c", r"C:\Tools\other.bat"],
+            ),
+            process(
+                12,
+                1,
+                r"C:\Windows\notepad.exe",
+                &["notepad.exe", r"C:\Tools\run.bat"],
+            ),
+        ];
+        assert!(pids(&procs, &[rule]).is_empty());
     }
 
     #[test]

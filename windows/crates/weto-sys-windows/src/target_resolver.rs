@@ -7,13 +7,16 @@
 //!   симлинки, а ядро называет процесс по конечному файлу;
 //! - голое имя (`claude`) — ищется по `PATH` с расширениями из `PATHEXT`,
 //!   как его нашёл бы `cmd`;
+//! - ярлык меню «Пуск» (`…\Programs\Happ.lnk`) — аналог `.desktop` на Linux:
+//!   программа ищется по ярлыку заново при каждом разрешении (`shortcut`);
 //! - npm-шим (`claude.cmd`) — `cmd` запускает `node.exe <скрипт>`, и процесс цели —
 //!   node со скриптом в командной строке. Шим разбирается до скрипта, вид — скрипт,
 //!   как скрипт с шебангом на Linux.
 //!
-//! Чужой `.bat`/`.cmd`, не npm-шим, остаётся записью вида «скрипт» со своим
-//! путём: процесса с ним в командной строке интерпретатора не бывает (`cmd`
-//! в списке интерпретаторов нет), и охраняться он не будет — это известная цена.
+//! Чужой `.bat`/`.cmd`, не npm-шим, — запись вида «скрипт» со своим путём:
+//! его процесс — `cmd /c "путь"` (ядро разбирает эту строку,
+//! `process::command_processor_script`). Скрипт, набранный в уже открытом
+//! `cmd`, исполняет сам этот шелл, и отдельного процесса у него нет.
 //!
 //! Логика без вызовов Windows API и тестируется где угодно; `PATH` и `PATHEXT`
 //! приходят параметрами, чтобы тесты не делили переменные процесса.
@@ -25,6 +28,8 @@ use weto_config::settings::Target;
 use weto_core::path_text::{file_name, is_absolute, program_stem};
 use weto_core::process::TargetKind;
 use weto_sys::target_resolver::{LocatedTarget, TargetResolving};
+
+use crate::shortcut::{self, is_shortcut};
 
 /// `PATHEXT` по умолчанию — когда переменной нет.
 pub const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
@@ -76,12 +81,23 @@ pub fn settings_target(
     }
     Target {
         entry: text.to_string(),
-        display_name: display_name.unwrap_or_else(|| program_stem(text).to_string()),
+        display_name: display_name.unwrap_or_else(|| default_name(text)),
         kind: located
             .as_ref()
             .map_or(TargetKind::Binary, |found| found.kind),
         path: located.map_or_else(|| text.to_string(), |found| found.path),
         launch_paths,
+    }
+}
+
+/// Имя цели, когда снаружи его не дали: у ярлыка — подпись ярлыка, как `Name=`
+/// у `.desktop` на Linux; у программы — имя файла без `.exe`.
+fn default_name(entry: &str) -> String {
+    let name = program_stem(entry);
+    if is_shortcut(name) {
+        name[..name.len() - 4].to_string()
+    } else {
+        name.to_string()
     }
 }
 
@@ -104,6 +120,11 @@ pub fn locate_in(
     pathext: Option<&str>,
 ) -> Option<LocatedTarget> {
     let entry = entry.trim();
+    if is_shortcut(entry) {
+        // Ярлык ведёт на программу, а не на другой ярлык: цепочек не разбираем.
+        let target = shortcut::resolve(Path::new(entry)).filter(|target| !is_shortcut(target))?;
+        return locate_in(&target, search_path, pathext);
+    }
     let file = if is_absolute(entry) {
         Some(PathBuf::from(entry)).filter(|path| path.is_file())
     } else if file_name(entry) == entry && !entry.is_empty() {

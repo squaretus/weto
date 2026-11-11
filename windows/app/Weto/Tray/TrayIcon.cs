@@ -1,8 +1,11 @@
 // Значок в области уведомлений — аналог значка в менюбаре macOS и трея Linux.
 //
 // В WinUI 3 своего значка в трее нет, поэтому он собран на Shell_NotifyIcon:
-// скрытое окно-приёмник сообщений получает щелчки и пересоздаёт значок, когда
-// Проводник перезапустился (сообщение TaskbarCreated). Левый щелчок открывает
+// скрытое окно получает щелчки и пересоздаёт значок, когда Проводник
+// перезапустился (сообщение TaskbarCreated). Окно — верхнего уровня, никогда
+// не показываемое, а не HWND_MESSAGE: окну-приёмнику не приходят широковещательные
+// сообщения, то есть ни TaskbarCreated, ни WM_ENDSESSION, и после перезапуска
+// Проводника значок не возвращался. Левый щелчок открывает
 // попап статуса, правый — меню «Настройки» / «Закрыть Weto».
 using System;
 using System.Runtime.InteropServices;
@@ -17,14 +20,14 @@ public sealed partial class TrayIcon : IDisposable
     private const int WmRButtonUp = 0x0205;
     private const int WmContextMenu = 0x007B;
     private const int WmCommand = 0x0111;
+    private const int WmEndSession = 0x0016;
+    private const uint WsExToolWindow = 0x80;
 
     private const uint NimAdd = 0, NimModify = 1, NimDelete = 2, NimSetVersion = 4;
     private const uint NifMessage = 0x1, NifIcon = 0x2, NifTip = 0x4, NifShowTip = 0x80;
     private const uint NotifyIconVersion4 = 4;
 
-    private const int MenuSettings = 1, MenuQuit = 2;
-
-    private static readonly nint HwndMessage = -3;
+    private const int MenuProbe = 3, MenuSettings = 1, MenuQuit = 2;
 
     private readonly WndProc _proc;
     private readonly uint _taskbarCreated;
@@ -35,8 +38,13 @@ public sealed partial class TrayIcon : IDisposable
 
     /// <summary>Левый щелчок: показать попап статуса.</summary>
     public event Action? Clicked;
+    public event Action? ProbeRequested;
+
     public event Action? SettingsRequested;
     public event Action? QuitRequested;
+
+    /// <summary>Сеанс заканчивается (выход, перезагрузка): выйти до возврата из обработчика.</summary>
+    public event Action? SessionEnding;
 
     public TrayIcon(string iconPath, string tip)
     {
@@ -54,8 +62,20 @@ public sealed partial class TrayIcon : IDisposable
             ClassName = "WetoTrayWindow",
         };
         RegisterClassExW(ref windowClass);
-        _window = CreateWindowExW(0, "WetoTrayWindow", "Weto", 0, 0, 0, 0, 0, HwndMessage, 0, instance, 0);
+        _window = CreateWindowExW(WsExToolWindow, "WetoTrayWindow", "Weto", 0, 0, 0, 0, 0, 0, 0, instance, 0);
         Add();
+    }
+
+    /// <summary>
+    /// Значок не добавился (Проводник ещё не поднялся при входе в систему) —
+    /// повторить. Зовётся каждым тактом; добавленный значок не трогает.
+    /// </summary>
+    public void EnsureAdded()
+    {
+        if (!_added)
+        {
+            Add();
+        }
     }
 
     /// <summary>Сменить картинку и подсказку: тон статуса виден и без попапа.</summary>
@@ -116,10 +136,18 @@ public sealed partial class TrayIcon : IDisposable
             }
             return 0;
         }
+        if (message == WmEndSession && wParam != 0)
+        {
+            SessionEnding?.Invoke();
+            return 0;
+        }
         if (message == WmCommand)
         {
             switch ((int)(wParam & 0xFFFF))
             {
+                case MenuProbe:
+                    ProbeRequested?.Invoke();
+                    break;
                 case MenuSettings:
                     SettingsRequested?.Invoke();
                     break;
@@ -135,9 +163,12 @@ public sealed partial class TrayIcon : IDisposable
     private void ShowMenu()
     {
         var menu = CreatePopupMenu();
+        // Пункты — как в трее Linux; «Выход» спрашивает то же «Закрыть Weto?»,
+        // что кнопка «Закрыть приложение».
+        AppendMenuW(menu, 0, MenuProbe, "Проверить сейчас");
         AppendMenuW(menu, 0, MenuSettings, "Настройки");
         AppendMenuW(menu, 0x800, 0, null); // MF_SEPARATOR
-        AppendMenuW(menu, 0, MenuQuit, "Закрыть Weto");
+        AppendMenuW(menu, 0, MenuQuit, "Выход");
         GetCursorPos(out var point);
         // Без SetForegroundWindow меню не закрывается щелчком мимо него.
         SetForegroundWindow(_window);

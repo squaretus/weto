@@ -14,6 +14,7 @@ use weto_config::journal::{episodes, visible_limit_caption, KillEvent, VISIBLE_L
 use weto_config::settings::{Settings, Target, Theme};
 use weto_core::pause_ceiling::{countdown_until, PauseCeiling};
 use weto_core::presentation::{self, GuardStatusColor};
+use weto_core::process::RunningTarget;
 use weto_guard::controller::GuardSnapshot;
 
 /// Тон щита и всего, что окрашено им. Имена — те же, что у классов CSS
@@ -92,6 +93,16 @@ pub struct Pill {
     pub countdown: Option<String>,
     /// Цель задана командой, а не программой с ярлыком: глиф терминала.
     pub command_line: bool,
+    /// Значок приложения у цели-ярлыка: файл и индекс (`shortcut::icon`).
+    /// Заполняет приложение, у вида о файлах знаний нет.
+    pub icon: Option<IconRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IconRef {
+    pub path: String,
+    pub index: i32,
 }
 
 /// Экран статуса на момент `now`. `has_targets` — есть ли цели в настройках;
@@ -134,6 +145,7 @@ pub fn status_view(
                         .any(|paused| paused.pid == target.pid)
                         .then(|| countdown_until(snapshot.pause_deadline, now)),
                     command_line: presentation::is_command_line_target(&target.entry),
+                    icon: None,
                 })
                 .collect(),
             notice: notice.text,
@@ -218,7 +230,21 @@ pub struct SettingsView {
     pub pause_ceilings: Vec<Choice>,
     pub theme: String,
     pub token_set: bool,
+    /// Что стоит в поле токена вне фокуса — маска с хвостом (`token_field_text`).
+    /// Сам токен окно получает только в фокусе, видом «token».
+    pub token_mask: String,
     pub autostart: bool,
+    pub hints: Hints,
+}
+
+/// Пояснения к полям — тексты ядра, общие с Linux.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hints {
+    pub target: String,
+    pub geo: String,
+    pub token: String,
+    pub timeout: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -229,6 +255,8 @@ pub struct TargetRow {
     /// «бинарник: C:\…» / «скрипт: …» / «не найдено …» — текстом ядра.
     pub description: String,
     pub command_line: bool,
+    /// Сколько процессов цели запущено сейчас — число справа в строке цели.
+    pub running: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -242,7 +270,8 @@ pub struct Choice {
 /// (на Windows — `WindowsTargetResolver`), параметром — ради тестов.
 pub fn settings_view(
     settings: &Settings,
-    token_set: bool,
+    running: &[RunningTarget],
+    token: &str,
     autostart: bool,
     locate: &dyn Fn(&str) -> Option<String>,
 ) -> SettingsView {
@@ -255,6 +284,11 @@ pub fn settings_view(
             locate(&target.entry).as_deref(),
         ),
         command_line: presentation::is_command_line_target(&target.entry),
+        running: running
+            .iter()
+            .filter(|found| found.entry == target.entry)
+            .map(|found| found.process_count)
+            .sum(),
     };
     SettingsView {
         targets: settings.targets.iter().map(row).collect(),
@@ -274,8 +308,15 @@ pub fn settings_view(
             Theme::Light => "light",
         }
         .to_string(),
-        token_set,
+        token_set: !token.is_empty(),
+        token_mask: presentation::token_field_text(token, false),
         autostart,
+        hints: Hints {
+            target: presentation::TARGET_ENTRY_HINT.to_string(),
+            geo: presentation::GEO_ENTRY_HINT.to_string(),
+            token: presentation::TOKEN_HINT.to_string(),
+            timeout: presentation::TIMEOUT_HINT.to_string(),
+        },
     }
 }
 
@@ -287,6 +328,8 @@ pub struct JournalView {
     pub rows: Vec<JournalRow>,
     /// «Показаны последние 20 из 100 — выгрузите журнал целиком».
     pub limit_caption: Option<String>,
+    /// Имя файла выгрузки по умолчанию — то же, что у окна Linux.
+    pub export_file_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -317,6 +360,9 @@ pub fn journal_view(
             })
             .collect(),
         limit_caption: visible_limit_caption(all.len()),
+        export_file_name: weto_config::export::JournalExport::file_name(
+            &weto_config::export::JournalExport::stamp(SystemTime::now()),
+        ),
     }
 }
 
@@ -411,9 +457,32 @@ mod tests {
         });
         let locate = |entry: &str| (entry == "claude").then(|| r"C:\npm\cli.js".to_string());
 
-        let view = settings_view(&settings, true, false, &locate);
+        let running = vec![
+            RunningTarget {
+                entry: "claude".to_string(),
+                display_name: "claude".to_string(),
+                kind: TargetKind::Script,
+                path: r"C:\npm\cli.js".to_string(),
+                pid: 10,
+                process_count: 3,
+            },
+            RunningTarget {
+                entry: "claude".to_string(),
+                display_name: "claude".to_string(),
+                kind: TargetKind::Script,
+                path: r"C:\npm\cli.js".to_string(),
+                pid: 20,
+                process_count: 2,
+            },
+        ];
+
+        let view = settings_view(&settings, &running, "abcd1234efgh", false, &locate);
 
         assert_eq!(view.targets[0].description, r"скрипт: C:\npm\cli.js");
+        // Число в строке цели — все её процессы во всех сеансах, как на Linux.
+        assert_eq!((view.targets[0].running, view.targets[1].running), (5, 0));
+        // Вне фокуса — маска с хвостом, сам токен в вид не попадает.
+        assert_eq!(view.token_mask, "••••••••efgh");
         assert_eq!(
             view.targets[1].description,
             "не найдено: по этому пути нет исполняемого файла"

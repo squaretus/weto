@@ -18,46 +18,126 @@ public partial class App : Application
 {
     private const string InstanceMutex = @"Local\com.weto.app";
 
+    /// <summary>
+    /// Просьба выйти от деинсталлятора (<c>Weto.exe --uninstall</c>): работающий
+    /// экземпляр выходит штатно — стоящие цели продолжаются.
+    /// </summary>
+    private const string QuitEvent = @"Local\com.weto.app.quit";
+
+    /// <summary>
+    /// Повторный запуск показывает попап работающей копии, как на Linux: второго
+    /// процесса нет, а другого входа, кроме значка в трее, иначе не было бы.
+    /// </summary>
+    private const string ShowEvent = @"Local\com.weto.app.show";
+
+    /// <summary>Сколько деинсталлятор ждёт выхода работающего экземпляра.</summary>
+    private static readonly TimeSpan QuitTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>Как часто повторять просьбу выйти, пока мьютекс занят.</summary>
+    private static readonly TimeSpan QuitRetry = TimeSpan.FromMilliseconds(250);
+
     private Mutex? _instance;
     private WetoBridge? _bridge;
     private TrayIcon? _tray;
     private DispatcherQueueTimer? _timer;
     private StatusWindow? _status;
     private SettingsWindow? _settings;
+    private UpdateWindow? _update;
+    private EventWaitHandle? _quitRequest;
+    private EventWaitHandle? _showRequest;
     private Tone? _shownTone;
+    private string? _shownTip;
     private string? _theme;
 
     /// <summary>Показывать образец «цели на паузе» вместо живого статуса — для скриншота в CI.</summary>
     private static readonly bool Sample =
         Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-status-sample");
 
+    /// <summary>Светлая тема без записи в настройки — для скриншотов в CI.</summary>
+    private static readonly bool LightSample =
+        Array.Exists(Environment.GetCommandLineArgs(), a => a == "--light-theme");
+
+    /// <summary>Показывать образец находки обновления (баннер и окно) — для скриншота в CI.</summary>
+    private static readonly bool UpdateSample =
+        Array.Exists(Environment.GetCommandLineArgs(), a => a == "--show-update-sample");
+
     public App()
     {
         InitializeComponent();
+        // Процесс живёт, пока его не закрыли явно (Quit, Exit). Умолчание WinUI —
+        // выход по закрытию последнего окна: попап создаётся лениво, и крестик
+        // на окне настроек, открытом из трея, кончал цикл сообщений без
+        // weto_stop — охраны нет, цели на паузе стоят до следующего запуска.
+        DispatcherShutdownMode = DispatcherShutdownMode.OnExplicitShutdown;
+        // Необработанное исключение роняет процесс, но охрану останавливаем
+        // штатно: weto_stop продолжает стоящие цели, как при выходе.
+        UnhandledException += (_, _) => StopGuard();
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => StopGuard();
     }
 
     public static new App Current => (App)Application.Current;
+
+    /// <summary>Идёт штатный выход: мост освобождается, окна к нему больше не обращаются.</summary>
+    public bool Quitting { get; private set; }
+
+    /// <summary>Экран обновления последнего такта — для окон, которым просьба открыть окно не нужна.</summary>
+    public UpdateView? LastUpdate { get; private set; }
 
     public WetoBridge Bridge => _bridge ?? throw new InvalidOperationException("Мост не поднят");
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Режимы деинсталлятора — без охраны, трея и мьютекса экземпляра.
+        var arguments = Environment.GetCommandLineArgs();
+        if (Array.Exists(arguments, a => a == "--uninstall"))
+        {
+            Uninstall();
+            return;
+        }
+        if (Array.Exists(arguments, a => a == "--uninstall-cleanup"))
+        {
+            UninstallCleanup();
+            return;
+        }
+        if (Array.Exists(arguments, a => a == "--quit"))
+        {
+            // Установщик поверх работающего: попросить выйти штатно и дождаться.
+            Environment.Exit(QuitRunningInstance() ? 0 : 2);
+            return;
+        }
+
         _instance = new Mutex(initiallyOwned: true, InstanceMutex, out var created);
         if (!created)
         {
             // Второй экземпляр ничего не охраняет: охрана уже идёт в первом.
+            // Он только просит первый показать попап.
+            if (EventWaitHandle.TryOpenExisting(ShowEvent, out var show))
+            {
+                show.Set();
+                show.Dispose();
+            }
             Exit();
             return;
         }
 
         _bridge = WetoBridge.Start();
-        _bridge.Notified += Notifications.Show;
+        _quitRequest = Listen(QuitEvent, Quit, once: true);
+        _showRequest = Listen(ShowEvent, () => ShowStatus(), once: false);
+        // Уведомление приходит с потока охраны; показ — на потоке интерфейса,
+        // чтобы медленная платформа уведомлений не задерживала такт охраны.
+        var ui = DispatcherQueue.GetForCurrentThread();
+        _bridge.Notified += notification => ui.TryEnqueue(() => Notifications.Show(notification));
         Notifications.Register(() => ShowStatus());
 
         _tray = new TrayIcon(TrayIconPath(Tone.Disabled), "Weto");
         _tray.Clicked += () => Dispatch(() => ToggleStatus());
+        _tray.ProbeRequested += () => Dispatch(() => _bridge?.Command("probeNow"));
         _tray.SettingsRequested += () => Dispatch(ShowSettings);
-        _tray.QuitRequested += () => Dispatch(Quit);
+        _tray.QuitRequested += () => Dispatch(AskToClose);
+        // Конец сеанса — тот же штатный выход, что SIGTERM у Linux-версии:
+        // стоящие цели продолжаются. Синхронно: после ответа на WM_ENDSESSION
+        // система вправе завершить процесс в любой миг.
+        _tray.SessionEnding += Quit;
 
         var queue = DispatcherQueue.GetForCurrentThread();
         _timer = queue.CreateTimer();
@@ -73,9 +153,14 @@ public partial class App : Application
             {
                 ShowStatus();
             }
-            if (argument == "--show-settings")
+            if (argument is "--show-settings" or "--show-settings-end")
             {
                 ShowSettings();
+            }
+            if (argument == "--show-update-sample")
+            {
+                ShowStatus();
+                ShowUpdate();
             }
         }
     }
@@ -88,13 +173,37 @@ public partial class App : Application
             return;
         }
         var status = Sample ? _bridge.StatusSample() : _bridge.Status();
-        if (status.Tone != _shownTone)
+        var tip = $"Weto — {status.Title}";
+        if (status.Tone != _shownTone || tip != _shownTip)
         {
-            _tray.Update(TrayIconPath(status.Tone), $"Weto — {status.Title}");
+            // Подсказка — по заголовку: «Помехи» и «На страже» одного тона,
+            // а «Пауза» после них — уже другого заголовка.
+            _tray.Update(TrayIconPath(status.Tone), tip);
             _shownTone = status.Tone;
+            _shownTip = tip;
         }
+        _tray.EnsureAdded();
         _status?.Show(status);
-        var theme = _bridge.Settings().Theme;
+
+        var update = CurrentUpdate();
+        LastUpdate = update;
+        if (update.Installed)
+        {
+            // Установщик запущен и ждёт мьютекса: выход штатный, стоящие цели
+            // продолжаются, новую версию установщик поднимет сам.
+            Quit();
+            return;
+        }
+        if (update.WindowRequested)
+        {
+            ShowUpdate();
+        }
+        _status?.ShowUpdate(update);
+        _settings?.ShowUpdate(update);
+        _settings?.Tick();
+        _update?.Show(update);
+
+        var theme = LightSample ? "light" : _bridge.Settings().Theme;
         if (theme != _theme)
         {
             ApplyTheme(theme);
@@ -128,6 +237,11 @@ public partial class App : Application
             _status.Dismiss();
             return;
         }
+        if (_status is not null && DateTime.UtcNow - _status.DismissedAt < TimeSpan.FromMilliseconds(400))
+        {
+            // Попап только что спрятала потеря фокуса от этого же щелчка.
+            return;
+        }
         ShowStatus();
     }
 
@@ -141,16 +255,226 @@ public partial class App : Application
         _settings.Activate();
     }
 
+    private bool _askingToClose;
+    private bool _askingToUninstall;
+
+    /// <summary>
+    /// «Закрыть Weto?» — один вопрос на два входа: кнопку «Закрыть приложение»
+    /// и пункт «Выход» в трее. Второй вход, пока вопрос открыт, второго окна
+    /// не открывает. Тексты — общие с macOS и Linux.
+    /// </summary>
+    public void AskToClose()
+    {
+        if (_askingToClose || _bridge is null)
+        {
+            return;
+        }
+        _askingToClose = true;
+        DialogWindow.Ask(_bridge.CloseConfirmation(), destructive: false, confirmed =>
+        {
+            _askingToClose = false;
+            if (confirmed)
+            {
+                Quit();
+            }
+        });
+    }
+
+    /// <summary>Окно обновления: одно на процесс; закрывается само, когда находки нет.</summary>
+    public void ShowUpdate()
+    {
+        if (_update is null)
+        {
+            _update = new UpdateWindow();
+            _update.Closed += (_, _) => _update = null;
+        }
+        _update.Show(CurrentUpdate());
+        _update?.Activate();
+    }
+
+    private UpdateView CurrentUpdate() => UpdateSample ? Bridge.UpdateSample() : Bridge.Update();
+
+    /// <summary>
+    /// Кнопка «Удалить приложение…»: подтверждение текстами моста, затем
+    /// деинсталлятор Inno Setup тихо и штатный выход. Стоящих проверит
+    /// уже деинсталлятор (<c>--uninstall</c>) — один путь и для «Параметров» Windows.
+    /// </summary>
+    public void AskToUninstall(Action<string> fail)
+    {
+        var uninstaller = Path.Combine(AppContext.BaseDirectory, "unins000.exe");
+        if (!File.Exists(uninstaller))
+        {
+            fail("Удаление доступно только у установленной копии Weto");
+            return;
+        }
+        // Вопрос один, как у «Закрыть Weto?»: двойной щелчок открывал два
+        // и запускал деинсталлятор дважды.
+        if (_askingToUninstall)
+        {
+            return;
+        }
+        _askingToUninstall = true;
+        DialogWindow.Ask(Bridge.UninstallConfirmation(), destructive: true, confirmed =>
+        {
+            _askingToUninstall = false;
+            if (!confirmed)
+            {
+                return;
+            }
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uninstaller, "/SILENT")
+                {
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception error)
+            {
+                fail($"Деинсталлятор не запустился: {error.Message}");
+                return;
+            }
+            Quit();
+        });
+    }
+
+    /// <summary>
+    /// Поток ждёт именованного события и переносит действие на поток интерфейса:
+    /// просьбу выйти от установщика (один раз) и просьбу показаться от повторного запуска.
+    /// </summary>
+    private static EventWaitHandle Listen(string name, Action action, bool once)
+    {
+        var queue = DispatcherQueue.GetForCurrentThread();
+        var request = new EventWaitHandle(false, EventResetMode.AutoReset, name);
+        new Thread(() =>
+        {
+            try
+            {
+                do
+                {
+                    request.WaitOne();
+                    queue.TryEnqueue(() => action());
+                }
+                while (!once);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Выход случился раньше просьбы.
+            }
+        }) { IsBackground = true, Name = $"weto-listen-{name}" }.Start();
+        return request;
+    }
+
+    /// <summary>
+    /// <c>Weto.exe --uninstall</c> из деинсталлятора, до удаления чего-либо.
+    /// Попросить работающий экземпляр выйти и дождаться его мьютекса; затем
+    /// мост без охраны досылает SIGCONT по учёту и называет оставшихся стоять.
+    /// Код 0 — удалять, иначе деинсталлятор отменяет удаление.
+    /// </summary>
+    private void Uninstall()
+    {
+        if (!QuitRunningInstance())
+        {
+            Environment.Exit(2);
+        }
+        var check = WetoBridge.UninstallCheck();
+        if (check is null)
+        {
+            Environment.Exit(3);
+        }
+        if (check.Dialog is null)
+        {
+            Environment.Exit(0);
+        }
+        // Второй исход — «Не удалять и закрыть Weto»: Weto к этому моменту уже закрыт.
+        DialogWindow.Ask(check.Dialog, destructive: true, confirmed => Environment.Exit(confirmed ? 0 : 1));
+    }
+
+    /// <summary>
+    /// Попросить работающий экземпляр выйти штатно (стоящие цели продолжаются)
+    /// и дождаться его мьютекса. Мьютекс остаётся у этого процесса до его
+    /// конца: второй Weto не поднимется посреди удаления или установки.
+    ///
+    /// Просьба повторяется, пока мьютекс занят: экземпляр берёт мьютекс первым
+    /// делом, а событие выхода заводит только после подъёма моста. Деинсталлятор,
+    /// пришедший в этот промежуток, событие не находил, и одна просьба терялась —
+    /// работающий Weto не выходил, удаление отменялось.
+    /// </summary>
+    private bool QuitRunningInstance()
+    {
+        _instance = new Mutex(false, InstanceMutex);
+        var deadline = DateTime.UtcNow + QuitTimeout;
+        try
+        {
+            while (true)
+            {
+                if (EventWaitHandle.TryOpenExisting(QuitEvent, out var quit))
+                {
+                    quit.Set();
+                    quit.Dispose();
+                }
+                if (_instance.WaitOne(QuitRetry))
+                {
+                    return true;
+                }
+                if (DateTime.UtcNow >= deadline)
+                {
+                    return false;
+                }
+            }
+        }
+        catch (AbandonedMutexException)
+        {
+            // Экземпляр упал, не отпустив мьютекс: учёт разберёт следующий запуск.
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// <c>Weto.exe --uninstall-cleanup</c>: регистрация уведомлений, токен и
+    /// автозапуск. Каталоги данных сносит деинсталлятор — учёт последним.
+    /// </summary>
+    private static void UninstallCleanup()
+    {
+        try
+        {
+            Microsoft.Windows.AppNotifications.AppNotificationManager.Default.UnregisterAll();
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"weto: регистрация уведомлений не снята: {error.Message}");
+        }
+        var result = WetoBridge.UninstallCleanup();
+        if (!result.Ok)
+        {
+            Console.Error.WriteLine($"weto: {result.Error}");
+        }
+        Environment.Exit(result.Ok ? 0 : 1);
+    }
+
     /// <summary>Штатный выход: стоящие цели продолжаются, охрана останавливается.</summary>
     public void Quit()
     {
+        // Выход ровно один: его могут попросить и трей, и установщик (событие
+        // выхода), и такт по запущенному обновлению. Второй ReleaseMutex бросил бы.
+        if (Quitting)
+        {
+            return;
+        }
+        Quitting = true;
         _timer?.Stop();
+        _quitRequest?.Dispose();
+        _showRequest?.Dispose();
         _tray?.Dispose();
-        _bridge?.Dispose();
-        _bridge = null;
+        StopGuard();
         _instance?.ReleaseMutex();
         Exit();
     }
+
+    /// <summary>
+    /// Остановить охрану ровно раз — из выхода или из обработчика исключения,
+    /// с любого потока.
+    /// </summary>
+    private void StopGuard() => Interlocked.Exchange(ref _bridge, null)?.Dispose();
 
     private static string TrayIconPath(Tone tone) =>
         Path.Combine(AppContext.BaseDirectory, "Assets", $"tray-{tone.ToString().ToLowerInvariant()}.ico");

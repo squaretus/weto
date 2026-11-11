@@ -21,7 +21,7 @@ pub enum CheckError {
     Request(String),
     #[error("ответ не разбирается: {0}")]
     Parse(String),
-    #[error("в релизе {0} нет архива для Linux")]
+    #[error("в релизе {0} нет сборки под эту машину")]
     NoAsset(String),
 }
 
@@ -76,6 +76,13 @@ impl ReleaseChecker {
             api_url: format!("https://api.github.com/repos/{repository}/releases/latest"),
             asset_suffix: format!("-{arch}-linux.tar.zst"),
         }
+    }
+
+    /// Суффикс сборки под другую систему: у Windows — установщик
+    /// `-{arch}-windows-setup.exe` вместо архива Linux.
+    pub fn with_asset_suffix(mut self, suffix: String) -> ReleaseChecker {
+        self.asset_suffix = suffix;
+        self
     }
 
     /// Только для тестов: подменяет адрес фида локальным сервером.

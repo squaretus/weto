@@ -217,7 +217,7 @@ jobs:
         run: cargo test --workspace --no-fail-fast
 
   # Приложение Windows (C#, WinUI 3) целиком: мост, иконки, publish под
-  # архитектуру раннера. Живой Windows-машины у проекта нет, поэтому
+  # архитектуру раннера, установщик Inno Setup. Живой Windows-машины у проекта нет, поэтому
   # попап и окно настроек снимаются скриншотами — артефакт windows-screens-*.
   windows-app:
     name: Windows app (${{ matrix.arch }})
@@ -266,6 +266,66 @@ jobs:
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/status
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status-sample -Out screens/paused
           ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/settings
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings-end -Out screens/settings-end
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-update-sample -Out screens/update
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag "--show-status-sample --light-theme" -Out screens/light-paused
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag "--show-settings --light-theme" -Out screens/light-settings
+
+      # Окно настроек с целями: строки целей с числом процессов и выбранное
+      # VPN-приложение — пустые состояния этого не показывают. Цель — ping,
+      # её процесс запущен; состояние профиля вычищается после снимков,
+      # чтобы контракт установщика начинал с чистого.
+      - name: Screenshots with targets
+        shell: powershell
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # VPN-приложение — powershell, в котором идёт этот шаг: запущено, и охрана
+          # не завершает цели по доказательству, а ставит их на паузу до ответа.
+          # Вторая цель — ярлык Блокнота: на плашке значок приложения из ярлыка.
+          $config = Join-Path $env:APPDATA 'weto'
+          New-Item -ItemType Directory -Force $config | Out-Null
+          $link = Join-Path $env:RUNNER_TEMP 'Notepad.lnk'
+          $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
+          $shortcut.TargetPath = 'C:\Windows\System32\notepad.exe'
+          $shortcut.Save()
+          $powershell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+          @(
+            'blocked_countries = ["RU"]'
+            'targets = ['
+            '  { entry = "ping", display_name = "ping", kind = "binary", path = ''C:\Windows\System32\PING.EXE'', launch_paths = ["ping"] },'
+            "  { entry = '$link', display_name = 'Notepad', kind = 'binary', path = 'C:\Windows\System32\notepad.exe', launch_paths = ['$link'] },"
+            ']'
+            '[vpn_app]'
+            "entry = '$powershell'"
+            'display_name = "powershell"'
+            'kind = "binary"'
+            "path = '$powershell'"
+          ) | Set-Content -Encoding utf8 (Join-Path $config 'config.toml')
+          $ping = Start-Process -FilePath ping -ArgumentList '-n', '120', '127.0.0.1' -PassThru -WindowStyle Hidden
+          $notepad = Start-Process -FilePath notepad -PassThru -WindowStyle Minimized
+          $exe = "windows/app/out/$env:ARCH/Weto.exe"
+          try {
+            ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/targets-settings
+            ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/targets-status
+          } finally {
+            Stop-Process -Id $ping.Id, $notepad.Id -Force -ErrorAction SilentlyContinue
+            # Профиль обязан уйти целиком: оставшиеся настройки с целями меняли бы
+            # поведение Weto в контракте установщика. Молчать об отказе нельзя.
+            foreach ($dir in $config, (Join-Path $env:LOCALAPPDATA 'weto')) {
+              if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+            }
+          }
+
+      # Установщик целиком: тихая установка, установка поверх работающего
+      # (так выглядит обновление) и удаление со всеми следами.
+      - name: Installer contract
+        # Зависание (окно, которого никто не закроет) не держит раннер шесть часов.
+        timeout-minutes: 15
+        shell: powershell
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: ./windows/scripts/tests/installer-contract.ps1 -Setup "windows/app/out/release_build/weto-9.9.9-$env:ARCH-windows-setup.exe"
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -5,7 +5,7 @@
     администратора). Всё состояние и вся логика — в weto_ffi.dll (Rust,
     windows/crates/weto-ffi); здесь только рисование и Windows-оболочка.
 
-    Сборка: сначала Rust-мост и иконки (windows/scripts/build.ps1 делает всё),
+    Сборка: сначала Rust-мост и иконки (windows/scripts/build.sh делает всё),
     затем dotnet publish -r win-x64 | win-arm64 -p:Platform=x64 | ARM64.
   -->
   <PropertyGroup>
