@@ -34,6 +34,7 @@ public sealed class SettingsWindow : Window
     private bool _syncing;
     private Button? _check;
     private FooterView? _footer;
+    private TextBlock? _version;
 
     public SettingsWindow()
     {
@@ -81,6 +82,7 @@ public sealed class SettingsWindow : Window
         var settings = App.Current.Bridge.Settings();
         var panel = Panel();
         _scroll.Background = Brush("Shell");
+        _scroll.RequestedTheme = App.Current.ElementTheme;
         _scroll.Content = panel;
 
         panel.Children.Add(Segments(
@@ -465,13 +467,13 @@ public sealed class SettingsWindow : Window
     /// Такт приложения: число процессов у целей и тумблер автообновления —
     /// без пересборки окна, которая сбросила бы фокус и набранный текст.
     /// </summary>
-    public void Tick()
+    public void Tick(TickView tick)
     {
         if (_tab != Tab.Settings || _counts.Count == 0)
         {
             return;
         }
-        foreach (var target in App.Current.Bridge.Settings().Targets)
+        foreach (var target in tick.Running)
         {
             if (_counts.TryGetValue(target.Entry, out var count))
             {
@@ -516,7 +518,9 @@ public sealed class SettingsWindow : Window
 
         var buttons = new Grid { ColumnSpacing = Number("Space2"), Margin = new Thickness(0, Number("Space3"), 0, 0) };
         buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        var export = PillButton("Выгрузить журнал", ButtonKind.Muted, () => ExportJournal(journal.ExportFileName));
+        var export = PillButton("Выгрузить журнал", ButtonKind.Muted, () =>
+            // Имя — по времени нажатия, как на Linux, а не открытия вкладки.
+            ExportJournal(App.Current.Bridge.Journal().ExportFileName));
         export.HorizontalAlignment = HorizontalAlignment.Stretch;
         buttons.Children.Add(export);
         if (journal.Rows.Count > 0)
@@ -557,9 +561,10 @@ public sealed class SettingsWindow : Window
     private UIElement Footer()
     {
         var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = Number("Space3") };
-        var version = Text($"версия {typeof(App).Assembly.GetName().Version?.ToString(3)}", "Caption", "Faint");
-        version.VerticalAlignment = VerticalAlignment.Center;
-        right.Children.Add(version);
+        // Версия — из моста (подвал Linux: current_version), как и всё о состоянии.
+        _version = Text(App.Current.LastUpdate?.Footer.Version ?? "", "Caption", "Faint");
+        _version.VerticalAlignment = VerticalAlignment.Center;
+        right.Children.Add(_version);
         _check = TileButton("\uE72C", "Проверить обновления", CheckUpdates);
         right.Children.Add(_check);
         _footer = null;
@@ -607,6 +612,10 @@ public sealed class SettingsWindow : Window
             return;
         }
         _footer = update.Footer;
+        if (_version is { } version)
+        {
+            version.Text = update.Footer.Version;
+        }
         ToolTipService.SetToolTip(_check, update.Footer.Hint);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_check, update.Footer.Label);
         _check.Content = Glyph(update.Footer.Offers ? "\uE896" : "\uE72C", 14,

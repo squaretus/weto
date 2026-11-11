@@ -46,6 +46,11 @@ public sealed unsafe class WetoBridge : IDisposable
         View("settings", BridgeJson.Default.SettingsView)
         ?? throw new InvalidOperationException("Мост не отдал экран настроек");
 
+    /// <summary>Тема и числа процессов — каждую секунду, без чтения токена и поиска целей.</summary>
+    public TickView Tick() =>
+        View("tick", BridgeJson.Default.TickView)
+        ?? throw new InvalidOperationException("Мост не отдал вид такта");
+
     /// <summary>Образец экрана «цели на паузе» — для скриншотов в CI.</summary>
     public StatusView StatusSample() =>
         View("status-sample", BridgeJson.Default.StatusView)

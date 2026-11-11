@@ -106,6 +106,10 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - `StatusView`: `title`, `tone` (`guarded|pending|killed|disabled`), `explanation`, `probing`,
   `readout`, `permissionFailure`, `targets` (null — целей нет) с `pills[…countdown…]`, `notice*`.
 - `SettingsView`: цели, `vpnApp`, `blocked`, `allowed`, `pauseCeiling(s)`, `theme`, `tokenSet`, `autostart`.
+  Строится на открытие и правку окна: читает Credential Manager и ищет каждую цель по `PATH`.
+- `TickView` (вид `tick`): `theme` и `running[{entry, running}]` — всё, что такт спрашивает каждую
+  секунду, без сборки вида настроек.
+- `FooterView.version` — «версия X» из `current_version()` моста, как подвал Linux.
 - `JournalView`: строка на эпизод, не больше `VISIBLE_LIMIT`, `limitCaption`; даты — `utc_offset` на момент записи.
 - Команды охраны: `probeNow`, `addTarget`, `removeTarget`, `setVpnApp`, `clearVpnApp`, `addGeoEntry`,
   `removeGeoEntry`, `setPauseCeiling`, `setTheme`, `setToken`, `clearToken`, `setAutostart`,
@@ -131,7 +135,9 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   тон, заголовок или проба, — на паузе тело меняется каждую секунду, и пересозданная кнопка
   теряла нажатие. Щелчок по значку в 400 мс после того, как потеря фокуса спрятала попап, — закрытие.
 - Тема — подмена `MergedDictionaries[1]` (0 — `XamlControlsResources`) на `Tokens.{Dark,Light}.xaml`;
-  системе не следует, как на других платформах.
+  системе не следует, как на других платформах. Встроенные элементы (поля, тумблеры, меню) следуют
+  `RequestedTheme` корня каждого окна — `App.ElementTheme`, его ставят все окна при сборке, а смена
+  темы перестраивает попап, настройки, окно обновления и открытые диалоги.
 - Уведомления: подписка на `NotificationInvoked` обязана идти до `Register()` — иначе щелчок поднимет второй процесс.
   Нет регистрации — охрана работает как прежде.
 - **`FitToPanel`:** у WinUI нет «размера по содержимому», а `ResizeClient` у окна без заголовка

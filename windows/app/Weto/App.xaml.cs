@@ -200,10 +200,12 @@ public partial class App : Application
         }
         _status?.ShowUpdate(update);
         _settings?.ShowUpdate(update);
-        _settings?.Tick();
         _update?.Show(update);
 
-        var theme = LightSample ? "light" : _bridge.Settings().Theme;
+        var tick = _bridge.Tick();
+        _settings?.Tick(tick);
+
+        var theme = LightSample ? "light" : tick.Theme;
         if (theme != _theme)
         {
             ApplyTheme(theme);
@@ -211,9 +213,18 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// Тема встроенных элементов (поля, тумблеры, меню) — та же, что у токенов.
+    /// Без неё они следовали теме системы: в тёмном Weto на светлой Windows
+    /// поле ввода рисовалось светлым. Application.RequestedTheme после старта
+    /// не меняется, поэтому тема ставится корню каждого окна.
+    /// </summary>
+    public ElementTheme ElementTheme { get; private set; } = ElementTheme.Dark;
+
     /// <summary>Подменить словарь токенов темы: Тёмная или Светлая, без следования системе.</summary>
     public void ApplyTheme(string theme)
     {
+        ElementTheme = theme == "light" ? ElementTheme.Light : ElementTheme.Dark;
         var dictionaries = Resources.MergedDictionaries;
         var source = new Uri(theme == "light"
             ? "ms-appx:///Themes/Tokens.Light.xaml"
@@ -222,6 +233,8 @@ public partial class App : Application
         dictionaries[1] = new ResourceDictionary { Source = source };
         _status?.Rebuild();
         _settings?.Rebuild();
+        _update?.Rebuild();
+        DialogWindow.RebuildOpen();
     }
 
     public void ShowStatus()
@@ -465,6 +478,9 @@ public partial class App : Application
         _quitRequest?.Dispose();
         _showRequest?.Dispose();
         _tray?.Dispose();
+        // Неупакованное приложение снимает регистрацию уведомлений при выходе
+        // (так велит документация Windows App SDK); снос всех — только деинсталлятор.
+        Notifications.Unregister();
         StopGuard();
         _instance?.ReleaseMutex();
         Exit();
