@@ -174,6 +174,48 @@ jobs:
           cargo test --no-fail-fast
           -p weto-core -p weto-config -p weto-sys -p weto-guard -p weto-update
 
+  # Адаптеры Windows (windows/crates): тесты порождают настоящие процессы,
+  # приостанавливают и завершают их, ходят в Диспетчер учётных данных и реестр
+  # и сверяют пробу маршрута с Find-NetRoute — всё это только на живой Windows.
+  windows:
+    name: Build & Test (Windows ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: windows/crates
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if ! command -v cargo >/dev/null; then
+            curl -sSf -o "$RUNNER_TEMP/rustup-init.exe" "https://win.rustup.rs/$ARCH"
+            "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal
+            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          fi
+          rustup component add clippy rustfmt
+          cargo --version
+
+      - name: Lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit and live tests
+        run: cargo test --workspace --no-fail-fast
+
   generators:
     name: Generators are idempotent
     runs-on: macos-26

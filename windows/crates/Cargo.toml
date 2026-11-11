@@ -1,0 +1,25 @@
+# Windows-версия weto: адаптеры к Windows API и (дальше) мост к интерфейсу на C#.
+#
+# Охрана — те же крейты, что у Linux, и лежат они в linux/crates: ядро политики,
+# машина состояний, контроллер и журналы общие, а свои здесь только реализации
+# трейтов границы. Перенос общего Rust в нейтральный каталог задел бы все скрипты,
+# CI и документы Linux, поэтому крейты подключаются path-зависимостями.
+[workspace]
+resolver = "2"
+members = ["weto-sys-windows"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+
+[workspace.dependencies]
+weto-core = { path = "../../linux/crates/weto-core" }
+weto-config = { path = "../../linux/crates/weto-config" }
+weto-sys = { path = "../../linux/crates/weto-sys" }
+thiserror = "2"
+tempfile = "3"
+# Сырые привязки Microsoft. NtSuspendProcess и NtResumeProcess в них нет —
+# объявляются через windows-link, которым линкуется и сам windows-sys.
+windows-sys = "0.61"
+windows-link = "0.2"
