@@ -5,6 +5,7 @@
 //! бандла приложения, каталогом которого можно было бы накрыть все процессы
 //! сразу; ярлык `.desktop` указывает на обычный бинарник, то есть это `Binary`.
 
+use crate::path_text::{is_absolute, same_path};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -272,7 +273,8 @@ pub const INTERPRETER_NAMES: &[&str] = &[
 /// `python3.12`, и имя без версии сверяется у обоих.
 fn is_interpreter(process: &ProcessSnapshot, arguments: &[String]) -> bool {
     let is_known = |path: &str| {
-        let name = path.rsplit('/').next().unwrap_or(path);
+        // `node.exe` на Windows — тот же node.
+        let name = crate::path_text::program_stem(path);
         let bare = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-');
         INTERPRETER_NAMES.contains(&bare) || crate::pause_plan::SHELL_NAMES.contains(&bare)
     };
@@ -301,7 +303,9 @@ fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) 
         return false;
     }
     match kind {
-        TargetKind::Binary => paths.contains(&process.executable_path),
+        TargetKind::Binary => paths
+            .iter()
+            .any(|path| same_path(path, &process.executable_path)),
         TargetKind::Script => {
             let Some(arguments) = &process.arguments else {
                 return false;
@@ -323,7 +327,7 @@ fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) 
             // а ветка бинарника его не видит вовсе — `exe` всегда абсолютный,
             // голое имя с ним не совпадает.
             script_position(arguments).is_some_and(|script| {
-                script.starts_with('/') && paths.iter().any(|path| path == script)
+                is_absolute(script) && paths.iter().any(|path| same_path(path, script))
             })
         }
     }
@@ -528,6 +532,67 @@ mod tests {
             pids(&[data], &[rule]).is_empty(),
             "путь скрипта в данных чужой программы — не запуск цели"
         );
+    }
+
+    /// npm-шим на Windows (`claude.cmd`) запускает `node.exe` с полным путём
+    /// скрипта: интерпретатор узнаётся по имени без `.exe`, а путь `C:\…`
+    /// абсолютный. Без этого скрипт-цель на Windows не совпала бы никогда.
+    #[test]
+    fn a_windows_node_runs_the_script_target() {
+        let cli = r"C:\Users\u\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js";
+        let rule = script(cli, &[]);
+        let procs = vec![
+            process(
+                10,
+                1,
+                r"C:\Program Files\nodejs\node.exe",
+                &[r"C:\Program Files\nodejs\node.exe", cli, "--chat"],
+            ),
+            process(
+                11,
+                1,
+                r"C:\Program Files\nodejs\node.exe",
+                &["node", r"C:\Users\u\other.js"],
+            ),
+        ];
+
+        assert_eq!(pids(&procs, &[rule]), vec![10]);
+    }
+
+    /// Относительный путь на месте скрипта — не запуск цели и на Windows:
+    /// `node cli.js` из чужого каталога под охрану не попадает.
+    #[test]
+    fn a_relative_windows_script_argument_is_not_the_target() {
+        let rule = script(r"C:\tools\cli.js", &["cli.js", r"tools\cli.js"]);
+        let procs = vec![
+            process(10, 1, r"C:\nodejs\node.exe", &["node", "cli.js"]),
+            process(11, 1, r"C:\nodejs\node.exe", &["node", r"tools\cli.js"]),
+        ];
+
+        assert!(pids(&procs, &[rule]).is_empty());
+    }
+
+    /// Файловая система Windows регистр не различает, а путь процесса приходит
+    /// в том регистре, каким его открыли: `c:\tools\Claude.EXE` — та же цель.
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_match_regardless_of_case() {
+        let procs = vec![
+            process(10, 1, r"c:\tools\Claude.EXE", &["claude"]),
+            process(11, 1, r"C:\NodeJS\NODE.EXE", &["node", r"c:\TOOLS\CLI.JS"]),
+        ];
+
+        assert_eq!(pids(&procs, &[binary(r"C:\Tools\claude.exe")]), vec![10]);
+        assert_eq!(pids(&procs, &[script(r"C:\tools\cli.js", &[])]), vec![11]);
+    }
+
+    /// На Linux регистр различается: `/usr/bin/Nano` — другой файл.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_paths_stay_case_sensitive() {
+        let procs = vec![process(10, 1, "/usr/bin/Nano", &["Nano"])];
+
+        assert!(pids(&procs, &[binary("/usr/bin/nano")]).is_empty());
     }
 
     #[test]

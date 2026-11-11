@@ -14,10 +14,15 @@
 //! Вернуть режим может любой процесс того же пользователя — устройство его, а SIGTTOU
 //! грозит только фоновым членам сессии этого терминала, которой weto не принадлежит.
 
+#[cfg(target_os = "linux")]
 use std::fs::{self, OpenOptions};
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Режим терминала, снятый с устройства: путь к нему и `termios` как есть.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,20 +55,42 @@ pub trait TerminalModeKeeping: Send + Sync {
     fn restore(&self, mode: &TerminalMode) -> Result<(), TerminalModeError>;
 }
 
+/// Граница для системы, где режима терминала у цели нет вовсе (Windows):
+/// консоль не отдаёт фоновому процессу ни `SIGTTIN`, ни своего режима,
+/// и снимать его перед паузой незачем. Реестр там отдаёт `terminal_device = 0`,
+/// и до этой границы дело не доходит; ответ на случай вызова честный —
+/// устройства нет.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoTerminalModes;
+
+impl TerminalModeKeeping for NoTerminalModes {
+    fn capture(&self, device: i32) -> Result<TerminalMode, TerminalModeError> {
+        Err(TerminalModeError::NoDevice(device))
+    }
+
+    fn restore(&self, mode: &TerminalMode) -> Result<(), TerminalModeError> {
+        Err(TerminalModeError::NoDevice(mode.device))
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub struct TerminalModeKeeper;
 
+#[cfg(target_os = "linux")]
 impl TerminalModeKeeper {
     pub fn new() -> TerminalModeKeeper {
         TerminalModeKeeper
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Default for TerminalModeKeeper {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_os = "linux")]
 impl TerminalModeKeeping for TerminalModeKeeper {
     fn capture(&self, device: i32) -> Result<TerminalMode, TerminalModeError> {
         let path = path_of(device).ok_or(TerminalModeError::NoDevice(device))?;
@@ -124,6 +151,7 @@ impl TerminalModeKeeping for TerminalModeKeeper {
 
 /// `O_NOCTTY`: открытый терминал не должен стать управляющим для weto.
 /// `O_NONBLOCK`: открытие не ждёт несущей у модемных линий.
+#[cfg(target_os = "linux")]
 fn open(path: &Path) -> Result<fs::File, TerminalModeError> {
     OpenOptions::new()
         .read(true)
@@ -136,6 +164,7 @@ fn open(path: &Path) -> Result<fs::File, TerminalModeError> {
         })
 }
 
+#[cfg(target_os = "linux")]
 fn last_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
@@ -143,6 +172,7 @@ fn last_errno() -> i32 {
 /// Major и minor из `tty_nr`. Ядро пишет его через `new_encode_dev`, а не той
 /// кодировкой, что glibc отдаёт в `st_rdev`, поэтому сравнивать числа напрямую
 /// нельзя: у pty с minor больше 255 они расходятся.
+#[cfg(target_os = "linux")]
 pub fn kernel_device_numbers(device: i32) -> (u32, u32) {
     let encoded = device as u32;
     let major = (encoded >> 8) & 0xfff;
@@ -152,6 +182,7 @@ pub fn kernel_device_numbers(device: i32) -> (u32, u32) {
 
 /// Путь символьного устройства по `tty_nr`: `/dev/pts/*` первым — там живут
 /// терминалы эмуляторов и tmux, — и `/dev/tty*` как запасной путь для консоли.
+#[cfg(target_os = "linux")]
 pub fn path_of(device: i32) -> Option<PathBuf> {
     if device <= 0 {
         return None;
@@ -175,7 +206,7 @@ pub fn path_of(device: i32) -> Option<PathBuf> {
         .find(|path| matches(path))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

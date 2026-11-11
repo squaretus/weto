@@ -63,8 +63,10 @@ pub trait InterfaceListing: Send + Sync {
 /// Имя встречается в ответе столько раз, сколько у интерфейса адресов
 /// семейств, — повторы схлопываются, порядок первого появления сохраняется.
 #[derive(Debug, Default, Clone, Copy)]
+#[cfg(target_os = "linux")]
 pub struct KernelInterfaces;
 
+#[cfg(target_os = "linux")]
 impl InterfaceListing for KernelInterfaces {
     fn up_interfaces(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
@@ -204,6 +206,7 @@ pub struct KernelNetworkReader {
 }
 
 impl KernelNetworkReader {
+    #[cfg(target_os = "linux")]
     pub fn new() -> KernelNetworkReader {
         KernelNetworkReader {
             route_probe: Box::new(KernelRouteProbe::default()),
@@ -211,6 +214,7 @@ impl KernelNetworkReader {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn with_probe(route_probe: Box<dyn RouteProbing>) -> KernelNetworkReader {
         KernelNetworkReader {
             route_probe,
@@ -230,6 +234,7 @@ impl KernelNetworkReader {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Default for KernelNetworkReader {
     fn default() -> Self {
         KernelNetworkReader::new()

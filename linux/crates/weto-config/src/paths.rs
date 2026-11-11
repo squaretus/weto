@@ -1,4 +1,4 @@
-//! Пути XDG.
+//! Пути XDG и их соответствие на Windows (`from_windows_env`).
 //!
 //! Корень подменяем целиком: контракт установки и тесты работают во временном
 //! `$HOME`, и ни один путь не должен просачиваться мимо этой подмены.
@@ -66,6 +66,38 @@ impl Paths {
             cache_dir: root.join("var/cache").join(APP_DIR),
             data_dir: root.join("var/lib").join(APP_DIR),
             launcher: root.join("usr/local/bin").join(APP_DIR),
+        }
+    }
+
+    /// Хранилище приложения на Windows: настройки — в перемещаемом профиле
+    /// (`%APPDATA%\weto`), журналы, учёт остановленных и кэш — в локальном
+    /// (`%LOCALAPPDATA%\weto`): pid и пути процессов машинные и на другую
+    /// машину вместе с профилем ехать не должны. Установка — per-user,
+    /// в `%LOCALAPPDATA%\Programs\weto`, и запускается по `Weto.exe` оттуда.
+    ///
+    /// Переменных нет только у служебных учётных записей, где приложению
+    /// с окном не место; там откат — временный каталог, как `/tmp`
+    /// у `from_env_named`.
+    pub fn from_windows_env() -> Paths {
+        let fallback = std::env::temp_dir();
+        let roaming = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| fallback.clone());
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or(fallback);
+        Paths::windows_under(&roaming, &local)
+    }
+
+    /// То же под заданными корнями — для тестов.
+    pub fn windows_under(roaming: &std::path::Path, local: &std::path::Path) -> Paths {
+        let install = local.join("Programs").join(APP_DIR);
+        Paths {
+            config_dir: roaming.join(APP_DIR),
+            state_dir: local.join(APP_DIR),
+            cache_dir: local.join(APP_DIR).join("cache"),
+            launcher: install.join("Weto.exe"),
+            data_dir: install,
         }
     }
 

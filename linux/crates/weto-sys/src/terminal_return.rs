@@ -13,18 +13,28 @@
 //!
 //! Запуски идут с потолком времени: зависший сервер tmux не должен держать поток.
 
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::sync::mpsc::{channel, RecvTimeoutError};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
-use weto_core::process::{ProcessSnapshot, ProcessTree};
+use weto_core::process::ProcessSnapshot;
+#[cfg(target_os = "linux")]
+use weto_core::process::ProcessTree;
+#[cfg(target_os = "linux")]
 use weto_core::terminal::program_name;
 
+#[cfg(target_os = "linux")]
 use crate::terminal_mode;
 
 /// Потолок одного запуска tmux.
+#[cfg(target_os = "linux")]
 const COMMAND_CEILING: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -51,8 +61,28 @@ pub trait TerminalForegroundReturning: Send + Sync {
     ) -> Result<(), TerminalReturnError>;
 }
 
+/// Граница для системы без job control (Windows): цель там не уходит в фон
+/// от паузы, и вводить `fg` некуда. Шелла в плане паузы там не бывает
+/// (`terminal_foreground_group = 0`), так что вызова не будет; ответ на него
+/// честный — ввести нечем.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoForegroundReturn;
+
+impl TerminalForegroundReturning for NoForegroundReturn {
+    fn return_to_foreground(
+        &self,
+        _target: &ProcessSnapshot,
+        _shell: &ProcessSnapshot,
+        _processes: &[ProcessSnapshot],
+    ) -> Result<(), TerminalReturnError> {
+        Err(TerminalReturnError::NoWayToType)
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub struct MultiplexerForegroundReturner;
 
+#[cfg(target_os = "linux")]
 impl TerminalForegroundReturning for MultiplexerForegroundReturner {
     fn return_to_foreground(
         &self,
@@ -85,12 +115,14 @@ impl TerminalForegroundReturning for MultiplexerForegroundReturner {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(target_os = "linux")]
 pub enum Multiplexer {
     Tmux,
     Screen,
 }
 
 /// Сервер над шеллом. Не обязательно родитель: шелл бывает вложенным, `tmux → zsh → bash → цель`.
+#[cfg(target_os = "linux")]
 pub fn multiplexer_above<'a>(
     shell: &ProcessSnapshot,
     processes: &'a [ProcessSnapshot],
@@ -108,6 +140,7 @@ pub fn multiplexer_above<'a>(
 
 /// Охрана от root стоит над всей машиной: процессы, которые она видит, принадлежат кому угодно,
 /// и запускать что-либо по их подсказке значит отдать root локальному пользователю.
+#[cfg(target_os = "linux")]
 pub fn may_type(euid: u32) -> bool {
     euid != 0
 }
@@ -115,6 +148,7 @@ pub fn may_type(euid: u32) -> bool {
 /// Путь к tmux взят из таблицы процессов, а назвать свой процесс `tmux` может кто угодно.
 /// Запускается только обычный файл, который никто другой изменить не может. `mode` — `st_mode`
 /// целиком, вместе с типом файла.
+#[cfg(target_os = "linux")]
 pub fn is_trusted_executable(owner: u32, mode: u32, euid: u32) -> bool {
     mode & libc::S_IFMT == libc::S_IFREG
         && (owner == 0 || owner == euid)
@@ -124,6 +158,7 @@ pub fn is_trusted_executable(owner: u32, mode: u32, euid: u32) -> bool {
 /// `/tmp` общий: каталог `tmux-<uid>` мог заранее создать другой пользователь, и сокет в нём
 /// слушал бы он. Требование то же, что у самого tmux: наш и закрыт для остальных. `mode` —
 /// `st_mode` из `lstat`, поэтому симлинк на каталог каталогом не считается.
+#[cfg(target_os = "linux")]
 pub fn is_trusted_socket_directory(owner: u32, mode: u32, euid: u32) -> bool {
     mode & libc::S_IFMT == libc::S_IFDIR
         && owner == euid
@@ -131,6 +166,7 @@ pub fn is_trusted_socket_directory(owner: u32, mode: u32, euid: u32) -> bool {
 }
 
 /// Двоичный файл screen на части дистрибутивов лежит с версией в имени.
+#[cfg(target_os = "linux")]
 pub fn is_screen(program: &str) -> bool {
     program == "screen"
         || program
@@ -141,6 +177,7 @@ pub fn is_screen(program: &str) -> bool {
 /// Сессия и окно screen из окружения шелла (`/proc/<pid>/environ`). Выставил их сам сервер при
 /// запуске шелла. Номер окна устаревает только после ручного `:number`; сверить его с терминалом
 /// screen не даёт, такую цену оставляем.
+#[cfg(target_os = "linux")]
 pub fn screen_window(environ: &[u8]) -> Option<(&str, &str)> {
     let variable = |name: &[u8]| {
         environ
@@ -153,6 +190,7 @@ pub fn screen_window(environ: &[u8]) -> Option<(&str, &str)> {
 
 /// Control-U впереди: набранное в строке шелла иначе склеилось бы с `fg`. Каталог сокетов
 /// проверяет сам screen и с чужим или открытым работать отказывается.
+#[cfg(target_os = "linux")]
 fn type_through_screen(binary: &str, shell: i32) -> Result<(), TerminalReturnError> {
     let environ = std::fs::read(format!("/proc/{shell}/environ"))
         .map_err(|_| TerminalReturnError::NoWayToType)?;
@@ -168,6 +206,7 @@ fn type_through_screen(binary: &str, shell: i32) -> Result<(), TerminalReturnErr
 /// Строка `list-panes`: `#{pane_tty} #{pane_id} #{pane_synchronized}`. Панель ищется по терминалу
 /// цели, а не по догадке: панелей на сервере много. Панель с общим вводом (`synchronize-panes`)
 /// не подходит: `fg` ушёл бы во все панели окна.
+#[cfg(target_os = "linux")]
 pub fn pane_id<'a>(tty: &str, listing: &'a str) -> Option<&'a str> {
     let fields = listing.lines().find_map(|line| {
         let mut fields = line.split(' ');
@@ -181,6 +220,7 @@ pub fn pane_id<'a>(tty: &str, listing: &'a str) -> Option<&'a str> {
 
 /// Сокеты сервера tmux: панели ищутся перебором, потому что на машине их бывает несколько
 /// (`tmux -L`). Каталог, которому нельзя верить, панелей не содержит.
+#[cfg(target_os = "linux")]
 fn tmux_sockets(directory: &Path, euid: u32) -> Vec<String> {
     let trusted = std::fs::symlink_metadata(directory)
         .is_ok_and(|meta| is_trusted_socket_directory(meta.uid(), meta.mode(), euid));
@@ -198,6 +238,7 @@ fn tmux_sockets(directory: &Path, euid: u32) -> Vec<String> {
 }
 
 /// Мёртвые сокеты после упавших серверов отвечают ошибкой и пропускаются.
+#[cfg(target_os = "linux")]
 fn type_through_tmux(binary: &str, tty: &str, euid: u32) -> Result<(), TerminalReturnError> {
     let directory = format!("/tmp/tmux-{euid}");
     for socket in tmux_sockets(Path::new(&directory), euid) {
@@ -249,6 +290,7 @@ fn type_through_tmux(binary: &str, tty: &str, euid: u32) -> Result<(), TerminalR
 /// Запуск с потолком времени. Ждёт отдельный поток: чтение вывода и ожидание выхода нельзя
 /// поделить на один — заполненная труба держала бы процесс до потолка. После убийства поток
 /// дожидается процесса сам, зомби не остаётся.
+#[cfg(target_os = "linux")]
 fn run(path: &str, arguments: &[&str], ceiling: Duration) -> Result<String, TerminalReturnError> {
     let child = Command::new(path)
         .args(arguments)
@@ -284,7 +326,7 @@ fn run(path: &str, arguments: &[&str], ceiling: Duration) -> Result<String, Term
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

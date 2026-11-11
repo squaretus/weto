@@ -7,7 +7,9 @@
 //! Корень подменяем: тест собирает во временном каталоге дерево из нескольких
 //! файлов и проверяет отбор без единого живого процесса.
 
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 
 use weto_core::process::ProcessSnapshot;
@@ -16,10 +18,12 @@ pub trait ProcessRegistryReading: Send + Sync {
     fn snapshot(&self) -> Vec<ProcessSnapshot>;
 }
 
+#[cfg(target_os = "linux")]
 pub struct ProcRegistry {
     root: PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 impl ProcRegistry {
     pub fn new() -> ProcRegistry {
         ProcRegistry {
@@ -58,12 +62,14 @@ impl ProcRegistry {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Default for ProcRegistry {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ProcessRegistryReading for ProcRegistry {
     /// Любая ошибка чтения отдельного процесса — пропуск, а не отказ всего
     /// снимка: процессы исчезают под руками постоянно, и обход обязан это
@@ -83,6 +89,7 @@ impl ProcessRegistryReading for ProcRegistry {
 
 /// Путь процесса, чей бинарник удалён, — тот, по которому он запускался:
 /// правило помнит прежние пути запуска как раз ради таких сеансов.
+#[cfg(target_os = "linux")]
 fn strip_deleted(path: String) -> String {
     match path.strip_suffix(weto_core::process::DELETED_SUFFIX) {
         Some(former) => former.to_string(),
@@ -92,6 +99,7 @@ fn strip_deleted(path: String) -> String {
 
 /// `cmdline` — это argv, разделённый нулями, с нулём в конце. Пустой файл
 /// означает процесс ядра: у него нет командной строки, и целью он быть не может.
+#[cfg(target_os = "linux")]
 fn read_cmdline(path: &Path) -> Option<Option<Vec<String>>> {
     let raw = fs::read(path).ok()?;
     if raw.is_empty() {
@@ -111,6 +119,7 @@ fn read_cmdline(path: &Path) -> Option<Option<Vec<String>>> {
 
 /// То из `/proc/<pid>/stat`, что нужно охране: родитель, группа процессов,
 /// управляющий терминал, его передняя группа и признак остановки.
+#[cfg(target_os = "linux")]
 struct Stat {
     parent_pid: i32,
     process_group: i32,
@@ -126,6 +135,7 @@ struct Stat {
 ///
 /// Нумерация дальше — от `state`: 0 state, 1 ppid, 2 pgrp, 3 session,
 /// 4 tty_nr, 5 tpgid.
+#[cfg(target_os = "linux")]
 fn read_stat(path: &Path) -> Option<Stat> {
     let text = fs::read_to_string(path).ok()?;
     let after_comm = &text[text.rfind(')')? + 1..];
@@ -155,6 +165,7 @@ fn read_stat(path: &Path) -> Option<Stat> {
 
 /// Поля, которых может не оказаться, — не повод потерять процесс целиком:
 /// снимок и без них знает путь, родителя и argv. 0 у группы значит «неизвестно».
+#[cfg(target_os = "linux")]
 fn field(fields: &[&str], index: usize) -> i32 {
     fields
         .get(index)

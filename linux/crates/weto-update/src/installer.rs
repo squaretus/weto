@@ -4,13 +4,19 @@
 //! симлинк. Адрес проверяется до всякого запроса — он приходит из сети,
 //! и подставить туда чужой хост первым делом попробует подменивший ответ.
 
+#[cfg(target_os = "linux")]
 use std::io::Read;
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use crate::layout::{staging_dir, Layout};
+#[cfg(target_os = "linux")]
 use crate::version::Version;
 
 /// Фаза установки. Незнакомый код на macOS читается как «идёт установка»,
@@ -67,12 +73,14 @@ pub fn is_trusted_url(url: &str, expected_suffix: &str) -> bool {
     ALLOWED_HOSTS.contains(&authority) && path.ends_with(expected_suffix)
 }
 
+#[cfg(target_os = "linux")]
 pub struct Installer {
     layout: Layout,
     cache_dir: PathBuf,
     progress: Arc<AtomicU64>,
 }
 
+#[cfg(target_os = "linux")]
 impl Installer {
     pub fn new(layout: Layout, cache_dir: PathBuf) -> Installer {
         Installer {
@@ -146,6 +154,7 @@ impl Installer {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn harden(directory: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700));
@@ -160,6 +169,7 @@ pub const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// установку «Загрузка…» навсегда, и повторить её было бы нечем.
 pub const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[cfg(target_os = "linux")]
 fn download_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(DOWNLOAD_CONNECT_TIMEOUT)
@@ -167,10 +177,12 @@ fn download_agent() -> ureq::Agent {
         .build()
 }
 
+#[cfg(target_os = "linux")]
 fn download(url: &str, into: &Path, progress: Option<&AtomicU64>) -> std::io::Result<()> {
     download_with(&download_agent(), url, into, progress)
 }
 
+#[cfg(target_os = "linux")]
 fn download_with(
     agent: &ureq::Agent,
     url: &str,
@@ -217,13 +229,14 @@ fn download_with(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn unpack(archive: &Path, into: &Path) -> std::io::Result<()> {
     let file = std::fs::File::open(archive)?;
     let decoder = zstd::Decoder::new(file)?;
     tar::Archive::new(decoder).unpack(into)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};

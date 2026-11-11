@@ -4,11 +4,19 @@
 //! сеть дёрнули, а не от старта процесса. Иначе в «реакцию» попадёт время,
 //! потраченное на запуск и открытие сокета.
 
+#[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use weto_sys::network_events::{NetlinkEventSource, NetworkEventSourcing};
 
+/// Подписка — netlink; у Windows свой источник событий в `weto-sys-windows`.
+#[cfg(not(target_os = "linux"))]
+fn main() {}
+
+#[cfg(target_os = "linux")]
 fn main() {
     let timeout: u64 = std::env::args()
         .nth(1)

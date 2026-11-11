@@ -17,17 +17,26 @@
 //! и окно такой цели не поднимется. Подсказка про `fg` остаётся: она и есть
 //! ответ пользователю.
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::sync::OnceLock;
 
 use weto_core::process::ProcessSnapshot;
-use weto_core::terminal::{self, TerminalCandidate, TerminalHost};
+use weto_core::terminal::TerminalHost;
+#[cfg(target_os = "linux")]
+use weto_core::terminal::{self, TerminalCandidate};
 
+#[cfg(target_os = "linux")]
 use crate::desktop_entries::DesktopIndex;
+#[cfg(target_os = "linux")]
 use crate::session_bus;
 
+#[cfg(target_os = "linux")]
 const DBUS_SERVICE: &str = "org.freedesktop.DBus";
+#[cfg(target_os = "linux")]
 const DBUS_PATH: &str = "/org/freedesktop/DBus";
+#[cfg(target_os = "linux")]
 const APPLICATION_INTERFACE: &str = "org.freedesktop.Application";
 
 pub trait TerminalActivating: Send + Sync {
@@ -39,10 +48,12 @@ pub trait TerminalActivating: Send + Sync {
     fn activate(&self, host: &TerminalHost) -> bool;
 }
 
+#[cfg(target_os = "linux")]
 pub struct DesktopTerminalActivator {
     index: OnceLock<DesktopIndex>,
 }
 
+#[cfg(target_os = "linux")]
 impl DesktopTerminalActivator {
     /// Индекс ярлыков читается лениво, при первом вопросе: это сотни файлов
     /// в `/usr/share/applications`, а вопрос задаётся только у цели, потерявшей
@@ -141,12 +152,14 @@ impl DesktopTerminalActivator {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Default for DesktopTerminalActivator {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_os = "linux")]
 impl TerminalActivating for DesktopTerminalActivator {
     fn locate(&self, pid: i32, processes: &[ProcessSnapshot]) -> Option<TerminalHost> {
         let walk = terminal::ancestry(pid, processes);

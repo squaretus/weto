@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
+use weto_core::path_text::is_absolute;
 use weto_core::process::TargetKind;
 
 /// Сколько звеньев цепочки проходим. Больше не нужно ни одному известному
@@ -265,7 +266,7 @@ pub fn locate_with_launch_paths(
             launch_paths
                 .iter()
                 .map(String::as_str)
-                .filter(|path| path.starts_with('/') && *path != entry),
+                .filter(|path| is_absolute(path) && *path != entry),
         )
         .find_map(|candidate| resolver.locate(candidate))
 }

@@ -982,7 +982,9 @@ fn build_over(
     let returns = QueuedProbes::default();
 
     let controller = Arc::new(
-        GuardController::new(
+        // Разрешение целей — с подменой границы, а не с умолчанием Linux:
+        // стенд обязан собираться и под Windows, где умолчания нет.
+        GuardController::with_target_resolution(
             Box::new(network.clone()),
             Box::new(geo.clone()),
             Box::new(NoSecret),
@@ -991,12 +993,12 @@ fn build_over(
                 .with_terminal_modes(Box::new(terminal_modes.clone())),
             Box::new(reporter.clone()),
             Box::new(checks.clone()),
+            Box::new(resolver.clone()),
         )
         .with_coalesce_window(window)
         .with_probes(Box::new(probes.clone()))
         .with_returns(Box::new(returns.clone()))
-        .with_terminal_returner(Box::new(returner.clone()))
-        .with_resolver(Box::new(resolver.clone())),
+        .with_terminal_returner(Box::new(returner.clone())),
     );
 
     Harness {
