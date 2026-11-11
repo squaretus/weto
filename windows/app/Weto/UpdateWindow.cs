@@ -32,7 +32,7 @@ public sealed class UpdateWindow : Window
         _panel = Panel();
         _panel.Width = Number("WindowWidth");
         _panel.VerticalAlignment = VerticalAlignment.Top;
-        _root = new Grid { Background = Brush("Shell") };
+        _root = new Grid { Background = Brush("Shell"), RequestedTheme = App.Current.ElementTheme };
         _root.Children.Add(_panel);
         _panel.SizeChanged += (_, _) => FitToPanel(AppWindow, _root, _panel);
         _root.SizeChanged += (_, _) => FitToPanel(AppWindow, _root, _panel);
@@ -65,6 +65,16 @@ public sealed class UpdateWindow : Window
         Title = update.Labels.WindowTitle;
         Build(update, update.Dialog);
         FitToPanel(AppWindow, _root, _panel);
+    }
+
+    /// <summary>Смена темы: те же данные, новые кисти.</summary>
+    public void Rebuild()
+    {
+        _root.RequestedTheme = App.Current.ElementTheme;
+        if (_shown is { Dialog: { } dialog } shown)
+        {
+            Build(shown, dialog);
+        }
     }
 
     private void Build(UpdateView update, UpdateDialogView dialog)
@@ -112,34 +122,49 @@ public sealed class UpdateWindow : Window
         header.Children.Add(column);
         _panel.Children.Add(header);
 
+        var buttons = new List<UIElement>();
         if (dialog.ShowsChoiceButtons)
         {
-            _panel.Children.Add(ChoiceRow(update.Labels));
+            buttons.AddRange(ChoiceButtons(update.Labels));
         }
         if (dialog.ShowsReleasePageButton && dialog.ReleasePage is { } page)
         {
-            var release = PillButton(update.Labels.OpenReleasePage, ButtonKind.Muted, () =>
-                _ = Windows.System.Launcher.LaunchUriAsync(new Uri(page)));
-            release.HorizontalAlignment = HorizontalAlignment.Right;
-            _panel.Children.Add(release);
+            buttons.Add(PillButton(update.Labels.OpenReleasePage, ButtonKind.Muted, () =>
+                _ = Windows.System.Launcher.LaunchUriAsync(new Uri(page))));
+        }
+        if (buttons.Count > 0)
+        {
+            _panel.Children.Add(ButtonRow(buttons));
         }
     }
 
     /// <summary>
-    /// «Пропустить версию», «Напомнить позже» (с меню) и «Обновить» во всю ширину:
-    /// свободное место делится поровну — по распорке на каждый промежуток (канон, «Кнопки»).
+    /// Кнопки одним рядом, как на Linux: свободное место делится поровну —
+    /// по распорке на каждый промежуток (канон, «Кнопки»). Одна кнопка — справа.
     /// </summary>
-    private UIElement ChoiceRow(UpdateLabels labels)
+    private static Grid ButtonRow(IReadOnlyList<UIElement> buttons)
     {
         var row = new Grid();
-        foreach (var width in new[] { GridLength.Auto, new GridLength(1, GridUnitType.Star), GridLength.Auto,
-                     new GridLength(1, GridUnitType.Star), GridLength.Auto })
+        var column = 0;
+        for (var i = 0; i < buttons.Count; i++)
         {
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = width });
+            if (i > 0 || buttons.Count == 1)
+            {
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                column++;
+            }
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Grid.SetColumn((FrameworkElement)buttons[i], column);
+            row.Children.Add(buttons[i]);
+            column++;
         }
+        return row;
+    }
 
-        var skip = PillButton(labels.Skip, ButtonKind.Muted, () => Answer("skipUpdate"));
-        row.Children.Add(skip);
+    /// <summary>«Пропустить версию», «Напомнить позже» (с меню) и «Обновить».</summary>
+    private IEnumerable<UIElement> ChoiceButtons(UpdateLabels labels)
+    {
+        yield return PillButton(labels.Skip, ButtonKind.Muted, () => Answer("skipUpdate"));
 
         // Кнопка с меню: как приглушённая, плюс стрелка (канон, «Кнопки»).
         var remind = PillButton(labels.RemindLater, ButtonKind.Muted, () => { });
@@ -158,13 +183,9 @@ public sealed class UpdateWindow : Window
             menu.Items.Add(item);
         }
         remind.Flyout = menu;
-        Grid.SetColumn(remind, 2);
-        row.Children.Add(remind);
+        yield return remind;
 
-        var install = PillButton(labels.Install, ButtonKind.Primary, () => App.Current.Bridge.Command("installUpdate"));
-        Grid.SetColumn(install, 4);
-        row.Children.Add(install);
-        return row;
+        yield return PillButton(labels.Install, ButtonKind.Primary, () => App.Current.Bridge.Command("installUpdate"));
     }
 
     /// <summary>Пропуск и отсрочка закрывают окно: находка спрятана, отсрочка уже записана.</summary>

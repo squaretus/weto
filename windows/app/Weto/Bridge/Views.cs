@@ -64,6 +64,11 @@ public sealed record SettingsView(
 /// <summary>Пояснения к полям — тексты ядра, общие с Linux.</summary>
 public sealed record Hints(string Target, string Geo, string Token, string Timeout);
 
+/// <summary>Такт интерфейса: тема и число процессов у каждой цели — без сборки вида настроек.</summary>
+public sealed record TickView(string Theme, IReadOnlyList<RunningCount> Running);
+
+public sealed record RunningCount(string Entry, int Running);
+
 public sealed record TargetRow(string Entry, string DisplayName, string Description, bool CommandLine, int Running);
 
 public sealed record Choice(ulong Seconds, string Title);
@@ -93,7 +98,7 @@ public sealed record UpdateDialogView(
     bool ShowsReleasePageButton,
     string? ReleasePage);
 
-public sealed record FooterView(bool Offers, string Hint, bool Busy, string Label);
+public sealed record FooterView(bool Offers, string Hint, bool Busy, string Label, string Version);
 
 public sealed record UpdateLabels(
     string WindowTitle,
@@ -127,6 +132,7 @@ public sealed record Notification(string Title, string Body);
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(StatusView))]
 [JsonSerializable(typeof(SettingsView))]
+[JsonSerializable(typeof(TickView))]
 [JsonSerializable(typeof(JournalView))]
 [JsonSerializable(typeof(UpdateView))]
 [JsonSerializable(typeof(DialogView))]

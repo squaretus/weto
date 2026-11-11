@@ -266,6 +266,54 @@ pub struct Choice {
     pub title: String,
 }
 
+/// Что такт интерфейса спрашивает каждую секунду: тему и число процессов
+/// у каждой цели. Отдельно от вида настроек: тот читает Credential Manager
+/// и ищет каждую цель по `PATH`, а такту из этого не нужно ничего.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TickView {
+    pub theme: String,
+    pub running: Vec<RunningCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningCount {
+    pub entry: String,
+    pub running: usize,
+}
+
+pub fn tick_view(settings: &Settings, running: &[RunningTarget]) -> TickView {
+    TickView {
+        theme: theme_name(settings.theme),
+        running: settings
+            .targets
+            .iter()
+            .map(|target| RunningCount {
+                entry: target.entry.clone(),
+                running: process_count(running, &target.entry),
+            })
+            .collect(),
+    }
+}
+
+fn theme_name(theme: Theme) -> String {
+    match theme {
+        Theme::Dark => "dark",
+        Theme::Light => "light",
+    }
+    .to_string()
+}
+
+/// Все процессы цели во всех сеансах, как на Linux.
+fn process_count(running: &[RunningTarget], entry: &str) -> usize {
+    running
+        .iter()
+        .filter(|found| found.entry == entry)
+        .map(|found| found.process_count)
+        .sum()
+}
+
 /// Окно настроек. `locate` отвечает, что запустится по записи сейчас
 /// (на Windows — `WindowsTargetResolver`), параметром — ради тестов.
 pub fn settings_view(
@@ -284,11 +332,7 @@ pub fn settings_view(
             locate(&target.entry).as_deref(),
         ),
         command_line: presentation::is_command_line_target(&target.entry),
-        running: running
-            .iter()
-            .filter(|found| found.entry == target.entry)
-            .map(|found| found.process_count)
-            .sum(),
+        running: process_count(running, &target.entry),
     };
     SettingsView {
         targets: settings.targets.iter().map(row).collect(),
@@ -303,11 +347,7 @@ pub fn settings_view(
                 title: ceiling.title(),
             })
             .collect(),
-        theme: match settings.theme {
-            Theme::Dark => "dark",
-            Theme::Light => "light",
-        }
-        .to_string(),
+        theme: theme_name(settings.theme),
         token_set: !token.is_empty(),
         token_mask: presentation::token_field_text(token, false),
         autostart,
@@ -491,6 +531,20 @@ mod tests {
         assert_eq!(view.pause_ceiling, 60);
         assert_eq!(view.theme, "dark");
         assert!(view.token_set && !view.autostart);
+
+        // Такт берёт тему и числа из дешёвого вида — те же, что в виде настроек.
+        let tick = tick_view(&settings, &running);
+        assert_eq!(tick.theme, view.theme);
+        assert_eq!(
+            tick.running,
+            view.targets
+                .iter()
+                .map(|row| RunningCount {
+                    entry: row.entry.clone(),
+                    running: row.running,
+                })
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

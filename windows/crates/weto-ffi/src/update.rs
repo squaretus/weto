@@ -254,6 +254,10 @@ pub struct FooterView {
     pub busy: bool,
     /// Имя для диктора.
     pub label: String,
+    /// «версия X» рядом с плиткой — версия моста, как у подвала Linux, а не номер
+    /// сборки C#: тот обрезал бы суффикс вроде `-rc` и мог разойтись с версией,
+    /// которую сравнивает проверка обновлений.
+    pub version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -301,6 +305,7 @@ pub fn update_view(updates: &Updates, window_requested: bool) -> UpdateView {
         window_requested,
         auto_install: updates.auto_install(),
         footer: FooterView {
+            version: format!("версия {}", updates.current()),
             offers,
             hint: footer_hint(&state, progress.is_in_flight()),
             busy: updates.is_busy(),
@@ -352,6 +357,7 @@ pub fn sample_update() -> UpdateView {
             ),
             busy: false,
             label: "Показать обновление".to_string(),
+            version: format!("версия {}", current_version()),
         },
         installed: false,
         labels: labels(&strings),
@@ -542,6 +548,7 @@ mod tests {
         );
         assert!(view.footer.offers);
         assert_eq!(view.footer.label, "Показать обновление");
+        assert_eq!(view.footer.version, "версия 1.1.0");
         assert!(!view.installed);
         assert_eq!(view.labels.remind.len(), 3);
     }

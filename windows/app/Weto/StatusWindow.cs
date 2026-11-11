@@ -39,7 +39,7 @@ public sealed class StatusWindow : Window
         // дала система на самом деле: у окна без заголовка ResizeClient считает
         // внешний размер так, будто заголовок есть, и под панелью оставалась
         // полоса его высоты.
-        _root = new Grid { Background = Brush("Shell") };
+        _root = new Grid { Background = Brush("Shell"), RequestedTheme = App.Current.ElementTheme };
         _root.Children.Add(_panel);
         _panel.SizeChanged += (_, _) => FitIfOpen();
         _root.SizeChanged += (_, _) => FitIfOpen();
@@ -124,6 +124,7 @@ public sealed class StatusWindow : Window
     {
         _panel.Background = Brush("Shell");
         _root.Background = Brush("Shell");
+        _root.RequestedTheme = App.Current.ElementTheme;
         _shownBanner = null;
         _headerKey = null;
         _bannerSlot.Children.Clear();

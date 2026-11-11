@@ -41,7 +41,8 @@ use crate::update::{
     asset_suffix, current_version, update_view, SetupInstaller, UpdateView, REPOSITORY,
 };
 use crate::view::{
-    journal_view, settings_view, status_view, IconRef, JournalView, SettingsView, StatusView,
+    journal_view, settings_view, status_view, tick_view, IconRef, JournalView, SettingsView,
+    StatusView, TickView,
 };
 
 /// Охрана держит цели: пауза или запрет запуска. Пока так, установщик
@@ -182,6 +183,13 @@ impl WindowsApp {
             }
         }
         view
+    }
+
+    pub fn tick(&self) -> TickView {
+        tick_view(
+            &self.settings.current(),
+            &self.controller.snapshot().running,
+        )
     }
 
     pub fn settings(&self) -> SettingsView {

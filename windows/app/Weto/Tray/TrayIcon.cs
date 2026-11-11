@@ -5,8 +5,8 @@
 // перезапустился (сообщение TaskbarCreated). Окно — верхнего уровня, никогда
 // не показываемое, а не HWND_MESSAGE: окну-приёмнику не приходят широковещательные
 // сообщения, то есть ни TaskbarCreated, ни WM_ENDSESSION, и после перезапуска
-// Проводника значок не возвращался. Левый щелчок открывает
-// попап статуса, правый — меню «Настройки» / «Закрыть Weto».
+// Проводника значок не возвращался. Левый щелчок открывает попап статуса,
+// правый — меню «Проверить сейчас» / «Настройки» / «Выход», как трей Linux.
 using System;
 using System.Runtime.InteropServices;
 
@@ -176,8 +176,14 @@ public sealed partial class TrayIcon : IDisposable
         DestroyMenu(menu);
     }
 
+    /// <summary>
+    /// Малый размер значка (SM_CXSMICON) — тот, что рисует трей. LR_DEFAULTSIZE
+    /// брал большой (SM_CXICON, 32 px), и трей сжимал его — значок выходил мыльным.
+    /// </summary>
     private static nint LoadIcon(string path) =>
-        LoadImageW(0, path, 1 /* IMAGE_ICON */, 0, 0, 0x10 /* LR_LOADFROMFILE */ | 0x40 /* LR_DEFAULTSIZE */);
+        LoadImageW(0, path, 1 /* IMAGE_ICON */,
+            GetSystemMetrics(49 /* SM_CXSMICON */), GetSystemMetrics(50 /* SM_CYSMICON */),
+            0x10 /* LR_LOADFROMFILE */);
 
     public void Dispose()
     {
@@ -271,6 +277,9 @@ public sealed partial class TrayIcon : IDisposable
 
     [DllImport("user32.dll")]
     private static extern bool DestroyIcon(nint icon);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
 
     [DllImport("user32.dll")]
     private static extern nint CreatePopupMenu();

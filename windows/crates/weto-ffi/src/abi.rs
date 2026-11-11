@@ -79,8 +79,9 @@ pub extern "C" fn weto_start(callbacks: WetoCallbacks) -> *mut Weto {
     .unwrap_or(std::ptr::null_mut())
 }
 
-/// Модель экрана: `kind` — `"status"`, `"settings"`, `"journal"`, `"update"`,
-/// `"token"`, `"close-confirmation"` или `"uninstall-confirmation"`. Нулевой указатель —
+/// Модель экрана: `kind` — `"status"`, `"settings"`, `"tick"` (тема и числа процессов
+/// для такта), `"journal"`, `"update"`, `"token"`, `"close-confirmation"` или
+/// `"uninstall-confirmation"`. Нулевой указатель —
 /// неизвестный вид или сбой.
 ///
 /// # Safety
@@ -95,6 +96,7 @@ pub unsafe extern "C" fn weto_view(weto: *const Weto, kind: *const c_char) -> *m
         let json = match kind.as_str() {
             "status" => serde_json::to_string(&weto.app.status()),
             "settings" => serde_json::to_string(&weto.app.settings()),
+            "tick" => serde_json::to_string(&weto.app.tick()),
             "journal" => serde_json::to_string(&weto.app.journal()),
             "update" => serde_json::to_string(&weto.app.update()),
             "update-sample" => serde_json::to_string(&crate::update::sample_update()),
