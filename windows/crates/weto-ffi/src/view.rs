@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
+use weto_config::journal::{episodes, visible_limit_caption, KillEvent, VISIBLE_LIMIT};
 use weto_config::settings::{Settings, Target, Theme};
 use weto_core::pause_ceiling::{countdown_until, PauseCeiling};
 use weto_core::presentation::{self, GuardStatusColor};
@@ -158,6 +159,53 @@ pub fn status_view(
     }
 }
 
+/// Образец экрана «цели на паузе» — только для скриншотов в CI: живой Windows
+/// у проекта нет, а на раннере нет ни VPN, ни целей, и пилюли, значок паузы
+/// и объяснение иначе не увидеть. Тексты — настоящие, из `presentation`.
+pub fn sample_status(now: SystemTime) -> StatusView {
+    use weto_core::guard_machine::GuardPhase;
+    use weto_core::pause_plan::PausedProcess;
+    use weto_core::policy::UnprovenReason;
+    use weto_core::process::{RunningTarget, TargetKind};
+
+    let since = now - std::time::Duration::from_secs(17);
+    let target = |pid: i32, name: &str, path: &str, count: usize| RunningTarget {
+        entry: name.to_string(),
+        display_name: name.to_string(),
+        kind: TargetKind::Binary,
+        path: path.to_string(),
+        pid,
+        process_count: count,
+    };
+    let snapshot = GuardSnapshot {
+        phase: GuardPhase::Paused {
+            since,
+            reason: UnprovenReason::GeoUnavailable("таймаут запроса".to_string()),
+        },
+        running: vec![
+            target(4200, "claude", r"C:\Users\u\.local\bin\claude.exe", 3),
+            target(
+                4300,
+                "codex",
+                r"C:\Users\u\AppData\Roaming\npm\codex.cmd",
+                1,
+            ),
+        ],
+        paused: [4200, 4300]
+            .into_iter()
+            .map(|pid| PausedProcess {
+                pid,
+                target_name: String::new(),
+                since,
+                is_backgrounded: false,
+            })
+            .collect(),
+        pause_deadline: Some(since + std::time::Duration::from_secs(60)),
+        ..GuardSnapshot::default()
+    };
+    status_view(&snapshot, true, false, now, &|_| "—".to_string())
+}
+
 /// Модель окна настроек: то, что окно показывает, без единого решения.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,6 +276,47 @@ pub fn settings_view(
         .to_string(),
         token_set,
         autostart,
+    }
+}
+
+/// Вкладка «Журнал»: строка на эпизод (имена целей без pid), свежие сверху,
+/// не больше `VISIBLE_LIMIT`; остальное — в выгрузке.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalView {
+    pub rows: Vec<JournalRow>,
+    /// «Показаны последние 20 из 100 — выгрузите журнал целиком».
+    pub limit_caption: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalRow {
+    pub title: String,
+    pub summary: String,
+    pub resolution: Option<String>,
+    pub diagnostics: String,
+}
+
+/// Журнал по записям. `timestamp` — дата и время записи по часам пользователя
+/// (`weto_core::timestamp::to_local_display`).
+pub fn journal_view(
+    entries: &[KillEvent],
+    timestamp: &dyn Fn(SystemTime) -> String,
+) -> JournalView {
+    let all = episodes(entries);
+    JournalView {
+        rows: all
+            .iter()
+            .take(VISIBLE_LIMIT)
+            .map(|episode| JournalRow {
+                title: episode.title(),
+                summary: episode.summary_text(),
+                resolution: episode.resolution_line(),
+                diagnostics: episode.diagnostics_text(&timestamp(episode.at())),
+            })
+            .collect(),
+        limit_caption: visible_limit_caption(all.len()),
     }
 }
 
@@ -333,6 +422,27 @@ mod tests {
         assert_eq!(view.pause_ceiling, 60);
         assert_eq!(view.theme, "dark");
         assert!(view.token_set && !view.autostart);
+    }
+
+    #[test]
+    fn the_sample_shows_standing_targets_with_a_countdown() {
+        let view = sample_status(at(10_000));
+
+        assert_eq!(view.tone, Tone::Pending);
+        assert!(view.explanation.is_some());
+        let pills = view.targets.unwrap().pills;
+        assert_eq!(pills.len(), 2);
+        assert_eq!(pills[0].countdown.as_deref(), Some("43 с"));
+    }
+
+    #[test]
+    fn an_empty_journal_has_no_rows_and_no_caption() {
+        let view = journal_view(&[], &|_| String::new());
+
+        assert!(view.rows.is_empty());
+        assert_eq!(view.limit_caption, None);
+        let json = serde_json::to_value(view).unwrap();
+        assert!(json.get("limitCaption").is_some());
     }
 
     /// Ключи — то, что читает C#: переименование поля в Rust ломало бы экран молча.

@@ -1,9 +1,9 @@
-//! Генератор токенов дизайна: один JSON — два файла.
+//! Генератор токенов дизайна: один JSON — файлы трёх платформ.
 //!
 //! Повторить таблицу цветов руками в CSS означает гарантированное расхождение
 //! оттенков: канон правится в одном месте, а платформ две.
 //!
-//!   gen-tokens --out-swift <путь> --out-css <путь>
+//!   gen-tokens --out-swift <путь> --out-css-dir <каталог> --out-xaml-dir <каталог>
 //!
 //! Проверка честности генератора — сгенерировать поверх существующих файлов
 //! и убедиться, что рабочее дерево осталось чистым.
@@ -78,6 +78,23 @@ impl Colour {
         }
     }
 
+    /// Цвет XAML: `#AARRGGBB`.
+    fn xaml(&self) -> String {
+        let (r, g, b) = if let Some(white) = self.white {
+            let value = (white * 255.0).round() as u8;
+            (value, value, value)
+        } else {
+            let hex = self.hex.as_deref().unwrap_or("000000");
+            (
+                u8::from_str_radix(&hex[0..2], 16).unwrap_or(0),
+                u8::from_str_radix(&hex[2..4], 16).unwrap_or(0),
+                u8::from_str_radix(&hex[4..6], 16).unwrap_or(0),
+            )
+        };
+        let alpha = (self.opacity.unwrap_or(1.0) * 255.0).round() as u8;
+        format!("#{alpha:02X}{r:02X}{g:02X}{b:02X}")
+    }
+
     fn rgba(&self) -> String {
         let (r, g, b) = if let Some(white) = self.white {
             let value = (white * 255.0).round() as u8;
@@ -119,12 +136,14 @@ fn trim(value: f64) -> String {
 fn main() {
     let mut swift_out: Option<PathBuf> = None;
     let mut css_dir: Option<PathBuf> = None;
+    let mut xaml_dir: Option<PathBuf> = None;
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--out-swift" => swift_out = arguments.next().map(PathBuf::from),
             "--out-css-dir" => css_dir = arguments.next().map(PathBuf::from),
+            "--out-xaml-dir" => xaml_dir = arguments.next().map(PathBuf::from),
             other => {
                 eprintln!("неизвестный аргумент «{other}»");
                 std::process::exit(2);
@@ -152,7 +171,99 @@ fn main() {
             println!("→ {}", path.display());
         }
     }
+
+    if let Some(directory) = xaml_dir {
+        for (dark, name) in [(true, "Tokens.Dark.xaml"), (false, "Tokens.Light.xaml")] {
+            let path = directory.join(name);
+            std::fs::write(&path, render_xaml(&tokens, dark)).expect("не записать XAML");
+            println!("→ {}", path.display());
+        }
+    }
 }
+
+/// Словарь ресурсов WinUI на одну тему. Ключи — `Weto` + имя токена с заглавной:
+/// цвет (`WetoShellColor`) и кисть (`WetoShell`), числа — `x:Double`, радиусы —
+/// `CornerRadius`, роли текста — стили `TextBlock` (`WetoTextStatus`).
+/// Капс в XAML регистром не задаётся — `TextBlock` его не умеет, текст
+/// переводит в верхний регистр разметка; трекинг — `CharacterSpacing`
+/// в тысячных долях em.
+fn render_xaml(tokens: &Tokens, dark: bool) -> String {
+    let mut out = String::new();
+    out.push_str(XAML_HEADER);
+    for (name, colour) in &tokens.colors {
+        let colour = if dark { &colour.dark } else { &colour.light };
+        let key = capitalize(name);
+        out.push_str(&format!(
+            "    <Color x:Key=\"Weto{key}Color\">{}</Color>\n",
+            colour.xaml()
+        ));
+        out.push_str(&format!(
+            "    <SolidColorBrush x:Key=\"Weto{key}\" Color=\"{{StaticResource Weto{key}Color}}\"/>\n"
+        ));
+    }
+    let card_shadow = if dark {
+        &tokens.shadows.card_shadow.dark
+    } else {
+        &tokens.shadows.card_shadow.light
+    };
+    out.push_str(&format!(
+        "    <Color x:Key=\"WetoPanelShadowColor\">{}</Color>\n",
+        tokens.shadows.panel_shadow.xaml()
+    ));
+    out.push_str(&format!(
+        "    <Color x:Key=\"WetoCardShadowColor\">{}</Color>\n\n",
+        card_shadow.xaml()
+    ));
+    for (name, value) in tokens.space.iter().chain(&tokens.sizes) {
+        out.push_str(&format!(
+            "    <x:Double x:Key=\"Weto{}\">{}</x:Double>\n",
+            capitalize(name),
+            trim(*value)
+        ));
+    }
+    for (name, value) in &tokens.radius {
+        out.push_str(&format!(
+            "    <CornerRadius x:Key=\"Weto{}\">{}</CornerRadius>\n",
+            capitalize(name),
+            trim(*value)
+        ));
+    }
+    out.push('\n');
+    for (name, font) in &tokens.typography {
+        out.push_str(&format!(
+            "    <Style x:Key=\"WetoText{}\" TargetType=\"TextBlock\">\n",
+            capitalize(name)
+        ));
+        out.push_str(&format!(
+            "        <Setter Property=\"FontSize\" Value=\"{}\"/>\n",
+            trim(font.size)
+        ));
+        out.push_str(&format!(
+            "        <Setter Property=\"FontWeight\" Value=\"{}\"/>\n",
+            xaml_weight(&font.weight)
+        ));
+        if let Some(tracking) = font.tracking {
+            out.push_str(&format!(
+                "        <Setter Property=\"CharacterSpacing\" Value=\"{}\"/>\n",
+                trim(tracking * 1000.0)
+            ));
+        }
+        out.push_str("    </Style>\n");
+    }
+    out.push_str("</ResourceDictionary>\n");
+    out
+}
+
+fn xaml_weight(weight: &str) -> &'static str {
+    match weight {
+        "medium" => "Medium",
+        "semibold" => "SemiBold",
+        "bold" => "Bold",
+        _ => "Normal",
+    }
+}
+
+const XAML_HEADER: &str = "<!--\n    Сгенерировано shared/tools/gen-tokens из shared/tokens/design-tokens.json.\n    Руками не править: CI перегенерирует и сверяет.\n-->\n<ResourceDictionary\n    xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\"\n    xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\">\n";
 
 fn render_swift(tokens: &Tokens) -> String {
     let colour = |name: &str| -> &ThemedColor { &tokens.colors[name] };

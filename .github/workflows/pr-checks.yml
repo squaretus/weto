@@ -216,6 +216,63 @@ jobs:
       - name: Unit and live tests
         run: cargo test --workspace --no-fail-fast
 
+  # Приложение Windows (C#, WinUI 3) целиком: мост, иконки, publish под
+  # архитектуру раннера. Живой Windows-машины у проекта нет, поэтому
+  # попап и окно настроек снимаются скриншотами — артефакт windows-screens-*.
+  windows-app:
+    name: Windows app (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            arch: x86_64
+          - runner: windows-11-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if ! command -v cargo >/dev/null; then
+            curl -sSf -o "$RUNNER_TEMP/rustup-init.exe" "https://win.rustup.rs/$ARCH"
+            "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal
+            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          fi
+          cargo --version
+          dotnet --list-sdks
+
+      - name: Build
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: bash windows/scripts/build.sh 9.9.9 "$ARCH"
+
+      # Windows PowerShell 5.1, а не pwsh: снимок окна собирается Add-Type
+      # на System.Drawing, а в pwsh 7 явные сборки вытесняют стандартные ссылки.
+      - name: Screenshots
+        shell: powershell
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          New-Item -ItemType Directory -Force screens | Out-Null
+          $exe = "windows/app/out/$env:ARCH/Weto.exe"
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status -Out screens/status
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-status-sample -Out screens/paused
+          ./windows/scripts/tests/screenshot.ps1 -Exe $exe -Flag --show-settings -Out screens/settings
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-screens-${{ matrix.arch }}
+          path: screens/
+
   generators:
     name: Generators are idempotent
     runs-on: macos-26
@@ -230,6 +287,7 @@ jobs:
           bash macos/scripts/build-icon.sh
           cargo run --manifest-path shared/tools/gen-tokens/Cargo.toml -- \
             --out-swift macos/Sources/WetoDesign/Tokens/WetoTokens.swift \
-            --out-css-dir linux/crates/weto-ui/style
+            --out-css-dir linux/crates/weto-ui/style \
+            --out-xaml-dir windows/app/Weto/Themes
           bash shared/tools/sync-flags.sh
           git diff --exit-code

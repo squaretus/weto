@@ -1,0 +1,15 @@
+[package]
+name = "weto-icons"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Иконки Windows (.ico приложения и значки трея по тону статуса) из общих
+# исходников shared/icon. Рендер — тот же файл, что у трея Linux
+# (linux/crates/weto-tray/src/icon.rs), подключённый как модуль: вторая копия
+# разошлась бы с первой по форме и цвету. Запускается на сборке, бинарники
+# в репозиторий не кладутся.
+[dependencies]
+weto-core = { workspace = true }
+resvg = "0.45"

@@ -1,0 +1,5 @@
+# CRT статически: weto_ffi.dll едет рядом с приложением и не должна требовать
+# установленного VC++ redistributable — Windows App SDK свой CRT несёт сам,
+# а нашу библиотеку это не покрывает.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

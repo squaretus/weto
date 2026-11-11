@@ -1,9 +1,10 @@
 {
   "about": [
     "Машинное представление таблиц из docs/design-system.md.",
-    "Из этого файла генерируются macos/Sources/WetoDesign/Tokens/WetoTokens.swift",
-    "и linux/crates/weto-ui/style/tokens.css. Оба сгенерированных файла лежат",
-    "в репозитории, а CI проверяет, что повторная генерация ничего не меняет.",
+    "Из этого файла генерируются macos/Sources/WetoDesign/Tokens/WetoTokens.swift,",
+    "linux/crates/weto-ui/style/theme-*.css и windows/app/Weto/Themes/Tokens.*.xaml.",
+    "Сгенерированные файлы лежат в репозитории, а CI проверяет, что повторная",
+    "генерация ничего не меняет.",
     "",
     "Канон смысла — docs/design-system.md; канон значений — этот файл.",
     "Правка hex мимо него означает разъехавшиеся оттенки на двух платформах."

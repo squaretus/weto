@@ -63,6 +63,10 @@ fn the_bridge_starts_shows_screens_takes_commands_and_stops() {
         let settings = answer(weto_view(weto, settings_kind.as_ptr()));
         assert_eq!(settings["blocked"], serde_json::json!(["RU"]));
 
+        let journal_kind = CString::new("journal").unwrap();
+        let journal = answer(weto_view(weto, journal_kind.as_ptr()));
+        assert_eq!(journal["rows"], serde_json::json!([]), "{journal}");
+
         let unknown = CString::new("journal-of-everything").unwrap();
         assert!(weto_view(weto, unknown.as_ptr()).is_null());
 
