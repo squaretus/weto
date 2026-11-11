@@ -310,7 +310,7 @@ fn outcome_text(outcome: &crate::geo::SourceOutcome) -> String {
 /// «приложение:» здесь не бывает.
 pub fn target_description(entry: &str, kind: TargetKind, found: Option<&str>) -> String {
     let Some(path) = found else {
-        return if entry.contains('/') {
+        return if crate::path_text::file_name(entry) != entry {
             "не найдено: по этому пути нет исполняемого файла".to_string()
         } else {
             "не найдено по имени — укажите полный путь к файлу".to_string()
@@ -332,9 +332,58 @@ pub fn target_fallback_name(entry: &str) -> String {
     crate::path_text::file_name(entry).to_string()
 }
 
+/// Текст уведомления: заголовок и тело.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationText {
+    pub title: String,
+    pub body: String,
+}
+
+/// Уведомление о завершении — дословно как на macOS
+/// (`UserNotificationGuardNotifier.notifyTerminated` с текстом из
+/// `GuardVM.terminateTargets`): заголовок общий, а цели, причина и число —
+/// в теле. Число — процессы, а не цели: «claude ×34» — тридцать четыре
+/// завершённых процесса. Одно на Linux и Windows.
+pub fn terminated_notification(
+    target_names: &[String],
+    reason: &str,
+    killed_count: usize,
+) -> NotificationText {
+    NotificationText {
+        title: "Weto: процессы завершены".to_string(),
+        body: format!(
+            "{}: {reason}. Завершено процессов: {killed_count}.",
+            target_names.join(", ")
+        ),
+    }
+}
+
+/// Терминальная цель под паузой потеряла терминал (только там, где есть job
+/// control). Порт macOS `GuardNotifying.notifyBackgrounded`.
+pub fn backgrounded_notification(target_name: &str) -> NotificationText {
+    NotificationText {
+        title: format!("Weto: {target_name} вернулся в фон"),
+        body: "Процесс на паузе потерял терминал. Когда пауза снимется, Weto вернёт его сам или подскажет, что ввести.".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Путь Windows — тоже путь: подсказка «укажите полный путь» к нему
+    /// не относится.
+    #[test]
+    fn a_missing_windows_path_is_described_as_a_path() {
+        assert_eq!(
+            target_description(r"C:\tools\claude.exe", TargetKind::Binary, None),
+            "не найдено: по этому пути нет исполняемого файла"
+        );
+        assert_eq!(
+            target_description("claude", TargetKind::Binary, None),
+            "не найдено по имени — укажите полный путь к файлу"
+        );
+    }
     use crate::diagnostics::StalenessCause;
     use crate::geo::{ConfirmSource, GeoReading};
     use crate::policy::UnsafeEvidence;

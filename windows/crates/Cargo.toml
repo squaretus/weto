@@ -1,4 +1,4 @@
-# Windows-версия weto: адаптеры к Windows API и (дальше) мост к интерфейсу на C#.
+# Windows-версия weto: адаптеры к Windows API и мост к интерфейсу на C#.
 #
 # Охрана — те же крейты, что у Linux, и лежат они в linux/crates: ядро политики,
 # машина состояний, контроллер и журналы общие, а свои здесь только реализации
@@ -6,7 +6,7 @@
 # CI и документы Linux, поэтому крейты подключаются path-зависимостями.
 [workspace]
 resolver = "2"
-members = ["weto-sys-windows"]
+members = ["weto-sys-windows", "weto-ffi"]
 
 [workspace.package]
 edition = "2021"
@@ -17,6 +17,10 @@ license = "MIT"
 weto-core = { path = "../../linux/crates/weto-core" }
 weto-config = { path = "../../linux/crates/weto-config" }
 weto-sys = { path = "../../linux/crates/weto-sys" }
+weto-guard = { path = "../../linux/crates/weto-guard" }
+weto-sys-windows = { path = "weto-sys-windows" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tempfile = "3"
 # Сырые привязки Microsoft. NtSuspendProcess и NtResumeProcess в них нет —

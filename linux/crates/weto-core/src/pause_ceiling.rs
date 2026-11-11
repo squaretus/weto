@@ -2,7 +2,7 @@
 //! с уликой «подтверждение не получено». Порт `PauseCeiling` из macOS: четыре
 //! значения, умолчание — минута, с которой жили установки до появления выбора.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PauseCeiling {
@@ -71,9 +71,43 @@ pub fn countdown_text(seconds: u64) -> String {
     }
 }
 
+/// Отсчёт до потолка по моменту: секунды округляются вверх (до потолка
+/// осталось 0,2 с — значок говорит «1 с», а не «0 с»). Потолка нет — «пауза».
+/// Один на все интерфейсы: значок GTK и модель экрана Windows.
+pub fn countdown_until(deadline: Option<SystemTime>, now: SystemTime) -> String {
+    let Some(deadline) = deadline else {
+        return "пауза".to_string();
+    };
+    let remaining = deadline.duration_since(now).unwrap_or(Duration::ZERO);
+    let mut seconds = remaining.as_secs();
+    if remaining.subsec_nanos() > 0 {
+        seconds += 1;
+    }
+    countdown_text(seconds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_countdown_rounds_up_and_names_a_pause_without_a_ceiling() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+
+        assert_eq!(
+            countdown_until(Some(now + Duration::from_millis(200)), now),
+            "1 с"
+        );
+        assert_eq!(
+            countdown_until(Some(now + Duration::from_secs(299)), now),
+            "4:59"
+        );
+        assert_eq!(
+            countdown_until(Some(now - Duration::from_secs(5)), now),
+            "0 с"
+        );
+        assert_eq!(countdown_until(None, now), "пауза");
+    }
 
     #[test]
     fn the_choices_are_one_two_five_and_ten_minutes_in_that_order() {

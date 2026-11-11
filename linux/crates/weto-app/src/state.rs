@@ -6,8 +6,9 @@
 //! и лишних состояний.
 //!
 //! Цикл охраны и писатели журналов живут в `weto_guard::runtime`: их же берёт
-//! терминальная версия, у которой GTK нет. Здесь — только то, что принадлежит
-//! окну: общие настройки, терминал стоящей цели, нажатия на уведомление.
+//! терминальная версия, у которой GTK нет. Общие настройки (`SharedSettings`) —
+//! там же: их берёт и мост Windows-версии. Здесь — только то, что принадлежит
+//! окну: терминал стоящей цели, нажатия на уведомление.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,69 +16,16 @@ use std::time::Duration;
 use weto_config::checks::CheckLog;
 use weto_config::journal::Journal;
 use weto_config::paths::Paths;
-use weto_config::settings::{Settings, Theme};
+use weto_config::settings::Theme;
 use weto_core::terminal::TerminalHost;
-use weto_guard::controller::{GuardController, GuardSnapshot, SettingsProviding};
+use weto_guard::controller::{GuardController, GuardSnapshot};
 use weto_guard::runtime::{os_version, spawn_guard, system_controller, CheckWriter, JournalWriter};
+use weto_guard::shared_settings::{SettingsSource, SharedSettings};
 use weto_sys::network_events::NetlinkEventSource;
 use weto_sys::notifications::DesktopNotifier;
 use weto_sys::process_registry::{ProcRegistry, ProcessRegistryReading};
 use weto_sys::secret_store::{FileSecretStore, SecretStoring};
 use weto_sys::terminal::{DesktopTerminalActivator, TerminalActivating};
-
-/// Настройки читаются из файла при каждом обращении охраны — так правка
-/// из окна настроек применяется к следующему же тику без всякой рассылки.
-pub struct SharedSettings {
-    path: std::path::PathBuf,
-    cached: Mutex<Settings>,
-}
-
-impl SharedSettings {
-    pub fn load(paths: &Paths) -> Arc<SharedSettings> {
-        let path = paths.settings_file();
-        let cached = Settings::load(&path).unwrap_or_default();
-        Arc::new(SharedSettings {
-            path,
-            cached: Mutex::new(cached),
-        })
-    }
-
-    pub fn current(&self) -> Settings {
-        self.cached.lock().expect("настройки").clone()
-    }
-
-    /// Правка всегда поднимает ревизию: по ней охрана понимает, что прежний
-    /// вердикт больше не свеж.
-    pub fn edit(&self, change: impl FnOnce(&mut Settings)) {
-        let mut settings = self.cached.lock().expect("настройки");
-        change(&mut settings);
-        settings.revision += 1;
-        if let Err(error) = settings.save(&self.path) {
-            eprintln!("weto: настройки не сохранились: {error}");
-        }
-    }
-
-    /// Правка без ревизии — для того, что решения политики не меняет. Ревизия
-    /// обесценивает вердикт, и смена потолка паузы уводила бы охрану
-    /// в «Проверку» с пробой.
-    pub fn edit_untracked(&self, change: impl FnOnce(&mut Settings)) {
-        let mut settings = self.cached.lock().expect("настройки");
-        change(&mut settings);
-        if let Err(error) = settings.save(&self.path) {
-            eprintln!("weto: настройки не сохранились: {error}");
-        }
-    }
-}
-
-/// Обёртка ради правила сирот: и трейт, и `Arc` объявлены не здесь,
-/// поэтому реализовать одно для другого напрямую нельзя.
-struct SettingsSource(Arc<SharedSettings>);
-
-impl SettingsProviding for SettingsSource {
-    fn settings(&self) -> Settings {
-        self.0.current()
-    }
-}
 
 pub struct AppState {
     pub paths: Paths,
@@ -301,40 +249,5 @@ impl AppState {
                 state.show_terminal(pid);
             }
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Потолок паузы правится мимо ревизии: ревизия обесценивает вердикт,
-    /// и смена потолка уводила бы охрану в «Проверку» с пробой.
-    #[test]
-    fn an_untracked_edit_is_saved_but_does_not_bump_the_revision() {
-        let home = std::env::temp_dir().join(format!(
-            "weto-state-untracked-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let paths = weto_config::paths::Paths::rooted(home.clone());
-        let settings = SharedSettings::load(&paths);
-        let revision = settings.current().revision;
-
-        settings.edit_untracked(|s| s.pause_ceiling_seconds = 600);
-
-        assert_eq!(settings.current().revision, revision);
-        assert_eq!(settings.current().pause_ceiling_seconds, 600);
-        assert_eq!(
-            Settings::load(&paths.settings_file())
-                .unwrap()
-                .pause_ceiling_seconds,
-            600,
-            "правка дошла до файла"
-        );
-        let _ = std::fs::remove_dir_all(home);
     }
 }

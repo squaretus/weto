@@ -15,14 +15,15 @@ also the guard of the upcoming Windows build and must compile there; see "Shared
 | `weto-core` | `geo.rs` | readings, failures, `GeoProbeReport`, response parsing; `GeoFailure` mirrors macOS codes and texts (`from_transport(-1200)` → `TlsFailed`), though `weto-sys::translate_transport` never emits `-1200`: ureq TLS errors arrive as `Io`/`ConnectionFailed` and read «сервис недоступен» |
 | `weto-core` | `ip.rs` | address validation and CIDR |
 | `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the pause ceiling as a parameter (`set_pause_ceiling`) |
-| `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText` |
+| `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText`; `countdown_until(deadline, now)` (seconds rounded up, no deadline → «пауза») — one for the GTK badge and the Windows status model |
+| `weto-core` | `path_text.rs` | paths as text for both systems: `file_name` (by `/` or `\`), `program_stem` (without `.exe`), `is_absolute` (`/…`, `C:\…`, `C:/…`, `\\server`), `same_path` (case-insensitive on Windows only); used by process matching, pause-plan shell names, `target_fallback_name`, `RuleCache`, the controller and `locate_with_launch_paths` |
 | `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `foreground_roots`, public `holds_foreground`; `shell_holding_terminal` — шелл, в который можно ввести `fg`; `PausedProcess`, `RecoveredProcess` |
 | `weto-core` | `terminal_return.rs` | `TerminalReturnTracker`, порт macOS: `Returning`, `Offered`, `Failed`, `Expired`; `VERIFY_WINDOW` 3 с, `OFFER_WINDOW` 5 минут |
-| `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation(phase)`/`should_explain` (no countdown — that is on the pills), `status_lines`, `idle_targets` |
+| `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation(phase)`/`should_explain` (no countdown — that is on the pills), `status_lines`, `idle_targets`; notification texts `terminated_notification` / `backgrounded_notification` (`NotificationText`), shared by the D-Bus notifier and the Windows bridge; `target_description` treats `C:\…` as a path |
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic; `InterfaceListing` / `KernelInterfaces` (`getifaddrs`, `IFF_UP` and `IFF_RUNNING`) |
 | `weto-sys` | `network_events.rs` | netlink subscription |
 | `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, controlling tty (`tty_nr` → `terminal_device`), `T` state |
-| `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order; `SignalResult::is_delivered` treats `PROCESS_GONE` as delivered (`ESRCH` on Linux, `87` `ERROR_INVALID_PARAMETER` on Windows) |
+| `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order; `SignalResult::is_delivered` treats `PROCESS_GONE` as delivered (`ESRCH` on Linux, `87` `ERROR_INVALID_PARAMETER` on Windows — the Windows signaler also maps ACCESS_DENIED for an exited process to it, `modules/windows.md`) |
 | `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq; `ureq::get` builds an agent per call, so no connection pool between probes |
 | `weto-sys` | `terminal_mode.rs` | `TerminalModeKeeping` / `TerminalModeKeeper`: `termios` of a target's tty captured before the pause, restored after `fg`; `path_of` finds the device by the kernel's `tty_nr` encoding; `NoTerminalModes` — portable no-op, the default off Linux |
 | `weto-sys` | `terminal_return.rs` | `TerminalForegroundReturning` / `MultiplexerForegroundReturner`: ввод `fg` через tmux и GNU screen; проверки бинарника и каталога сокетов; потолок 2 с на команду; `NoForegroundReturn` — переносимая заглушка, умолчание вне Linux |
@@ -33,13 +34,14 @@ also the guard of the upcoming Windows build and must compile there; see "Shared
 | `weto-sys` | `desktop_entries.rs` | the `.desktop` index over the XDG application directories |
 | `weto-sys` | `terminal.rs` | raises it: `org.freedesktop.Application.Activate` over the session bus |
 | `weto-sys` | `session_bus.rs` | one session-bus connection for the whole process, 3 s method ceiling |
-| `weto-sys` | `notifications.rs` | notifications over D-Bus; the `default` action opens the status window |
+| `weto-sys` | `notifications.rs` | notifications over D-Bus (texts from `weto_core::presentation`); the `default` action opens the status window |
 | `weto-sys` | `secret_store.rs` | token file, mode `0600` |
 | `weto-config` | `settings.rs`, `journal.rs`, `paths.rs` | TOML settings (`set_vpn_app` / `set_vpn_tunnel` clear each other, `add_target` with `TargetEntryError`, `validate_tunnel_name`), journal capped at `EPISODE_CAPACITY` (100) whole episodes and its per-episode view (`episodes`, `Episode`), XDG paths (`from_env_named(APP_DIR \| CLI_DIR)`, `status_file`, `run_lock_file`); Windows layout `from_windows_env` / `windows_under` |
 | `weto-config` | `stopped.rs` | the stopped ledger: the obligation to send `SIGCONT`, atomic on disk |
 | `weto-guard` | `controller.rs` | owns the reducer, the probe, verdict freshness and the pause bookkeeping; `new` (Linux only, `LaunchTargetResolver`) delegates to portable `with_target_resolution(…, resolver)`; tunnel status next to `vpn_app_status`, from the same pass's snapshot; `GuardSnapshot` also carries `outgoing`, `vpn_app`, `vpn_tunnel`, `probed_at` for `weto-cli`'s status file |
 | `weto-guard` | `enforcer.rs` | one `/proc` walk per pass: pause, resume, terminate, the ledger, terminal modes (`restore_terminal_modes`) |
 | `weto-guard` | `runtime.rs` | the guard loop and its journal writers, shared by `weto-app` and `weto-cli`: `JournalWriter`, `CheckWriter`, `PauseEpisodes`/`StandingEpisode`, `system_controller` and `os_version` (both Linux only), `run_guard`/`spawn_guard` (with an `after_pass` hook), `tick_interval` — moved out of the GTK crate `weto-app/src/state.rs` unchanged |
+| `weto-guard` | `shared_settings.rs` | `SharedSettings` (`edit` bumps the revision, `edit_untracked` does not) and `SettingsSource` — moved unchanged from `weto-app/src/state.rs`, because the Windows bridge holds the same object |
 | `weto-guard` | `rules.rs` | `RuleCache`: target and VPN-app rules re-resolved on a target-list change or every `TARGET_RULE_REFRESH` (2 s), never narrowed |
 | `weto-app` | `lifecycle.rs` | whether the process outlives its windows (`holds_application`) |
 | `wetod` | `main.rs` | test harness: `--dump-network`, `--check`, `--watch` |
@@ -72,7 +74,9 @@ The five shared crates build for Windows; everything that talks to Linux is unde
   match no target and still look working, so the caller must pass one to
   `GuardController::with_target_resolution`. The terminal-mode keeper and the `fg` returner do
   get defaults by `cfg` — the no-ops, since Windows has no job control.
-- Windows adapters will implement the same traits in their own crate; nothing of it exists yet.
+- Windows adapters implement the same traits in `windows/crates/weto-sys-windows`, the app state
+  and C ABI live in `weto-ffi` — `modules/windows.md`. `weto-sys::autostart` (XDG) is Linux only;
+  Windows has its own Run-key adapter.
 
 Windows paths (`Paths::windows_under`): settings `%APPDATA%\weto\config.toml` (roaming);
 journals, checks and the stopped ledger in `%LOCALAPPDATA%\weto` — pids and paths are per machine

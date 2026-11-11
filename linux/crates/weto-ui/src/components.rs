@@ -6,7 +6,7 @@
 //! Компоненты не знают о состоянии приложения — то же правило, что у `WetoDesign`
 //! на macOS. Им передают данные, они возвращают виджет.
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use gtk4::prelude::*;
 use gtk4::{
@@ -520,15 +520,7 @@ fn icon_in_theme(name: &str) -> bool {
 /// `WetoPauseBadge.countdown`: секундного таймера внутри нет, `now` приходит
 /// снаружи одним и тем же значением для всех значков разом.
 pub fn pause_countdown_text(deadline: Option<SystemTime>, now: SystemTime) -> String {
-    let Some(deadline) = deadline else {
-        return "пауза".to_string();
-    };
-    let remaining = deadline.duration_since(now).unwrap_or(Duration::ZERO);
-    let mut seconds = remaining.as_secs();
-    if remaining.subsec_nanos() > 0 {
-        seconds += 1;
-    }
-    weto_core::pause_ceiling::countdown_text(seconds)
+    weto_core::pause_ceiling::countdown_until(deadline, now)
 }
 
 /// Значок «на паузе»: капсула `amber` с отсчётом до потолка. Кнопок рядом нет:

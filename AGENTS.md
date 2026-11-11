@@ -33,6 +33,8 @@ linux/scripts/dev.sh cargo clippy --workspace --all-targets -- -D warnings
 linux/scripts/dev.sh bash scripts/tests/core-boundary-contract.sh      # инвариант границ ядра
 linux/scripts/dev.sh cargo check --target x86_64-pc-windows-gnu -p weto-core -p weto-config \
                      -p weto-sys -p weto-guard -p weto-update          # общие крейты под Windows
+linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo test'      # Windows: чистая часть (живые тесты — только CI)
+linux/scripts/dev.sh bash -c 'cd ../windows/crates && cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings'
 linux/scripts/build.sh 0.1.0                         # tar.zst → linux/target/release_build/, weto (musl) — cli/*.tar.gz
 bash shared/cli/tests/install-contract.sh            # контракт установщика терминальной версии (и на macOS)
 linux/scripts/desktop-machine.sh ubuntu weto-ubuntu  # машина с рабочим столом для проверки глазами

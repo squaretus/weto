@@ -21,7 +21,8 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use weto_core::path_text::{file_name, is_absolute};
+use weto_config::settings::Target;
+use weto_core::path_text::{file_name, is_absolute, program_stem};
 use weto_core::process::TargetKind;
 use weto_sys::target_resolver::{LocatedTarget, TargetResolving};
 
@@ -46,6 +47,53 @@ impl TargetResolving for WindowsTargetResolver {
     fn kind_of(&self, path: &str) -> Option<TargetKind> {
         kind_of_file(Path::new(path))
     }
+}
+
+/// Запись настроек для цели или VPN-приложения — одна дорога для окна
+/// и команд моста. Путь — тот, что запустится сейчас; пути запуска — сама
+/// запись и, для голого имени, файл в `PATH` как он там лежит (`…\npm\claude.cmd`):
+/// охрана разрешает цель заново, и шим переживает обновление, а развёрнутый
+/// путь скрипта или версионной программы — нет. Имя — переданное снаружи
+/// (подпись ярлыка из меню «Пуск»), иначе имя файла без `.exe`.
+pub fn settings_target(
+    text: &str,
+    display_name: Option<String>,
+    search_path: Option<&OsStr>,
+    pathext: Option<&str>,
+) -> Target {
+    let text = text.trim();
+    let located = locate_in(text, search_path, pathext);
+    let mut launch_paths = vec![text.to_string()];
+    if file_name(text) == text {
+        let found = search_path
+            .and_then(|path| find_in_path(text, path, pathext.unwrap_or(DEFAULT_PATHEXT)));
+        if let Some(found) = found {
+            let found = found.to_string_lossy().into_owned();
+            if !launch_paths.contains(&found) {
+                launch_paths.push(found);
+            }
+        }
+    }
+    Target {
+        entry: text.to_string(),
+        display_name: display_name.unwrap_or_else(|| program_stem(text).to_string()),
+        kind: located
+            .as_ref()
+            .map_or(TargetKind::Binary, |found| found.kind),
+        path: located.map_or_else(|| text.to_string(), |found| found.path),
+        launch_paths,
+    }
+}
+
+/// То же с `PATH` и `PATHEXT` процесса.
+pub fn settings_target_now(text: &str, display_name: Option<String>) -> Target {
+    let pathext = std::env::var("PATHEXT").ok();
+    settings_target(
+        text,
+        display_name,
+        std::env::var_os("PATH").as_deref(),
+        pathext.as_deref(),
+    )
 }
 
 /// Цель по записи при заданных `PATH` и `PATHEXT`. `None` — нового знания нет:
@@ -313,6 +361,43 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_
             locate_in(&empty.to_string_lossy(), None, None),
             None,
             "недописанный файл — не ответ"
+        );
+    }
+
+    #[test]
+    fn a_settings_target_remembers_the_shim_found_in_path() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("npm");
+        let cli = bin.join("node_modules/@anthropic-ai/claude-code/cli.js");
+        write(&bin.join("claude.cmd"), SHIM.as_bytes());
+        write(&cli, b"#!/usr/bin/env node\n");
+        let path = std::env::join_paths([&bin]).unwrap();
+
+        let target = settings_target(" claude ", None, Some(&path), None);
+
+        assert_eq!(target.entry, "claude");
+        assert_eq!(target.display_name, "claude");
+        assert_eq!(target.kind, TargetKind::Script);
+        assert_eq!(target.path, canonical(&cli).unwrap());
+        assert_eq!(
+            target.launch_paths,
+            vec![
+                "claude".to_string(),
+                bin.join("claude.cmd").to_string_lossy().into_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_program_is_kept_as_typed_and_named_without_exe() {
+        let target = settings_target(r"C:\nowhere\Tool.EXE", None, None, None);
+
+        assert_eq!(target.display_name, "Tool");
+        assert_eq!(target.path, r"C:\nowhere\Tool.EXE");
+        assert_eq!(target.kind, TargetKind::Binary);
+        assert_eq!(
+            settings_target("tool", Some("Мой инструмент".into()), None, None).display_name,
+            "Мой инструмент"
         );
     }
 
