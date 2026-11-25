@@ -85,7 +85,13 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - **«Процесса нет» приходит и как ACCESS_DENIED** (`OpenProcess` → `5`): сигнальщик спрашивает
   `GetExitCodeProcess` и для вышедшего отдаёт `PROCESS_GONE` (87). Pid `0` отвергается.
 - **Разрешение цели.** Абсолютный путь канонизируется (префикс `\\?\` срезается). Голое имя —
-  по `PATH` с `PATHEXT`. npm-шим `.cmd` разбирается до скрипта (`Script`, совпадение по argv node);
+  по `PATH` с `PATHEXT`, а вдобавок оно имя программы: `Binary`-правило `Claude` или `claude.exe`
+  совпадает с любым `…\claude.exe` без учёта регистра, как `taskkill /IM`
+  (`path_text::names_program` в `process::matches_paths`, только под `cfg!(windows)`). Путь
+  по-прежнему значит один файл, `Script` не затронут. Так добавляются приложения из Microsoft
+  Store (MSIX): ярлыка `.lnk` в «Пуске» у них нет — «Выбрать…» их не предложит, — а
+  `C:\Program Files\WindowsApps\<Пакет>_<версия>_…\` закрыт и меняет имя с каждой версией.
+  npm-шим `.cmd` разбирается до скрипта (`Script`, совпадение по argv node);
   прочие `.bat`/`.cmd` — скрипт, процесс которого `cmd /c "путь"`. Ярлык `.lnk` разбирается
   до программы (`shortcut.rs`, без COM) при каждом разрешении, как `.desktop` на Linux.
 - **Имена интерфейсов — `FriendlyName`** и у `if-addrs`, и у `AdapterInterfaces`.
@@ -165,6 +171,7 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 | второй диалог «Нужен файл программы» для Steam и flatpak | нет | игры Steam в «Пуске» — `.url`, а не `.lnk`; фильтр диалога их не предлагает |
 | «Вернуть в терминал», «в фоне», `fg` через tmux/screen | нет | job control в консоли Windows нет; приостановленная цель из фона не уходит |
 | пример в пояснении цели — `nano`, `/usr/bin/curl` | `claude`, `C:\Program Files\Git\bin\git.exe` | `TARGET_ENTRY_HINT` под `cfg!(windows)` |
+| голое имя не в `PATH` — «не найдено по имени — укажите полный путь к файлу» | «по имени программы: Claude.exe» (`target_description`) | на Windows голое имя — имя программы, и процесс по нему узнаётся |
 | значки темы иконок | Segoe Fluent Icons | системный набор |
 | «Запускать при входе в систему» — XDG autostart | ключ `HKCU\…\Run` | тот же текст, своя механика |
 
@@ -189,7 +196,8 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   в секунду): начало установки — штатный выход, а он продолжил бы цели и снял запрет на всё
   время установки. Окно в это время показывает фазу установки. Решение владельца 2026-11-10;
   на Linux не нужно — `exec` подменяет образ, и пауза его переживает.
-- Версия — `WETO_VERSION` при сборке моста (`build.sh`); без неё `0.0.0`.
+- Версия — `WETO_VERSION` при сборке моста (`build.sh`); без неё `0.0.0`. Её же берёт `app.version`
+  выгрузки журнала (`weto-config/src/export.rs`, `option_env!`), `app.platform` там — «Windows».
 
 ## Install and uninstall
 - `weto.iss`: `PrivilegesRequired=lowest`, `{localappdata}\Programs\weto`, ярлык в `{userprograms}`,
@@ -249,6 +257,11 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - Раскладка `SystemProcessInformation` — своя копия phnt; ошибка смещения ломает родителя и «стоит»,
   а не сборку. Ловит только `tests/live.rs`.
 - Новые коды отказа `OpenProcess` для вышедших процессов — учёт досылал бы Resume мёртвому.
+- Голое имя цели, не совпавшее ни с чем, — молчаливо неохраняемая цель: «Небезопасно» в попапе,
+  а журнал завершений пуст, потому что `terminate` нечего завершать.
+  [bugs/bare-name-target-on-windows-matched-nothing](../bugs/bare-name-target-on-windows-matched-nothing.md).
+  Обратная цена имени программы: `Claude` накрывает каждый `claude.exe` на машине, откуда бы
+  он ни был запущен.
 - `.bat`, набранный в уже открытом `cmd`, процесса не имеет и не охраняется (охраняются запущенные им программы).
 - Окно размером «с заголовком» у окна без заголовка — лечится только `FitToPanel`, не `ResizeClient`.
 - Restart Manager (`CloseApplications`) приложение в трее закрыть не умеет: установка поверх
@@ -274,3 +287,4 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 ## Related docs
 - modules/linux-guard.md (разделы "Shared with Windows", "Self-update")
 - runbooks/tests.md (разделы 4b, 4c, 4d), runbooks/release.md
+- bugs/bare-name-target-on-windows-matched-nothing.md

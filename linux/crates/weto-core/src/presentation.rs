@@ -314,6 +314,12 @@ pub fn target_description(entry: &str, kind: TargetKind, found: Option<&str>) ->
     let Some(path) = found else {
         return if crate::path_text::file_name(entry) != entry {
             "не найдено: по этому пути нет исполняемого файла".to_string()
+        } else if cfg!(windows) && kind == TargetKind::Binary {
+            // Процесс узнаётся по имени программы (`path_text::names_program`).
+            format!(
+                "по имени программы: {}.exe",
+                crate::path_text::program_stem(entry)
+            )
         } else {
             "не найдено по имени — укажите полный путь к файлу".to_string()
         };
@@ -541,9 +547,20 @@ mod tests {
             target_description(r"C:\tools\claude.exe", TargetKind::Binary, None),
             "не найдено: по этому пути нет исполняемого файла"
         );
+    }
+
+    /// Голое имя, которого нет в `PATH`, на Windows — имя программы: процесс
+    /// узнаётся по нему, и подсказка про полный путь там была бы неправдой.
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_windows_name_is_described_as_a_program_name() {
         assert_eq!(
-            target_description("claude", TargetKind::Binary, None),
-            "не найдено по имени — укажите полный путь к файлу"
+            target_description("Claude", TargetKind::Binary, None),
+            "по имени программы: Claude.exe"
+        );
+        assert_eq!(
+            target_description("claude.exe", TargetKind::Binary, None),
+            "по имени программы: claude.exe"
         );
     }
     use crate::diagnostics::StalenessCause;
@@ -996,6 +1013,8 @@ mod tests {
             target_description("/opt/нет/такого", TargetKind::Binary, None),
             "не найдено: по этому пути нет исполняемого файла"
         );
+        // На Windows голое имя — имя программы (тест рядом).
+        #[cfg(not(windows))]
         assert_eq!(
             target_description("never-installed", TargetKind::Binary, None),
             "не найдено по имени — укажите полный путь к файлу"
