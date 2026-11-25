@@ -556,6 +556,50 @@ fn a_blocked_country_kills_and_names_the_source() {
         .any(|r| r.contains("RU")));
 }
 
+/// Цель, вписанная на Windows голым именем, которого нет в `PATH`, — так
+/// добавляется приложение из Microsoft Store (Claude): ярлыка в меню «Пуск»
+/// у него нет. Под «Небезопасно» статус менялся, а цель жила: правило с одним
+/// именем не совпадало ни с одним процессом, и завершать было некого.
+#[cfg(windows)]
+#[test]
+fn a_target_named_by_its_program_name_is_killed_under_danger() {
+    let mut world = Harness::default_world();
+    world.push(detached(
+        50,
+        1,
+        r"C:\Program Files\WindowsApps\Claude_1.0.0_x64__pzs8sxrjxfjjc\app\claude.exe",
+    ));
+    world.push(detached(
+        51,
+        50,
+        r"C:\Program Files\WindowsApps\Claude_1.0.0_x64__pzs8sxrjxfjjc\app\claude.exe",
+    ));
+    world.push(detached(60, 1, r"C:\Windows\System32\notepad.exe"));
+    let h = build(
+        Duration::ZERO,
+        FakeSettings::guarding(&["Claude"]),
+        World::of(world),
+        &[],
+    );
+    h.tick();
+
+    h.geo.now_reports("RU");
+    let phase = h.probe_now();
+
+    assert!(matches!(phase, GuardPhase::Danger(_)), "{phase:?}");
+    let mut killed = h.world.signalled(ProcessSignal::Kill);
+    killed.sort_unstable();
+    assert_eq!(
+        killed,
+        vec![50, 51],
+        "Claude и его потомок, а не чужой процесс"
+    );
+    assert!(
+        !h.reporter.recorded().kill_reasons.is_empty(),
+        "завершение попало в журнал"
+    );
+}
+
 /// Завершение объясняется настоящей причиной, а не отговоркой «ещё не проверено»:
 /// причину завершения называет доказательство. Здесь вердикт обесценила правка
 /// настроек — цели работали до ответа, и он же их завершил.

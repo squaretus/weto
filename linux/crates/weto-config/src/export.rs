@@ -82,8 +82,12 @@ impl JournalExport {
             schema_version: SCHEMA_VERSION,
             exported_at,
             app: ExportedApp {
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                platform: "Linux".to_string(),
+                // Версия вшивается сборкой (`WETO_VERSION`), у самого крейта её нет:
+                // без этого выгрузка с любой установленной версии называла `0.0.0`.
+                version: option_env!("WETO_VERSION")
+                    .unwrap_or(env!("CARGO_PKG_VERSION"))
+                    .to_string(),
+                platform: platform_name().to_string(),
                 os_version,
             },
             settings: ExportedSettings {
@@ -121,6 +125,16 @@ impl JournalExport {
     }
 }
 
+/// Платформа выгрузки. Крейт общий у Linux и Windows, и выгрузка с Windows
+/// подписывалась «Linux».
+fn platform_name() -> &'static str {
+    if cfg!(windows) {
+        "Windows"
+    } else {
+        "Linux"
+    }
+}
+
 #[cfg(test)]
 mod stamp_tests {
     use super::JournalExport;
@@ -136,5 +150,20 @@ mod stamp_tests {
             JournalExport::file_name(&JournalExport::stamp(at)),
             "weto-journal-2026-11-10-1432.json"
         );
+    }
+
+    /// Выгрузку разбирают, не зная, откуда она: платформа обязана быть своя.
+    #[test]
+    fn the_export_names_the_platform_it_was_made_on() {
+        let export = JournalExport::build(
+            &crate::settings::Settings::default(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            UNIX_EPOCH,
+            "ядро".to_string(),
+        );
+        let expected = if cfg!(windows) { "Windows" } else { "Linux" };
+        assert_eq!(export.app.platform, expected);
     }
 }

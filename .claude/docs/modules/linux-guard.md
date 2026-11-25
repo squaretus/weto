@@ -16,7 +16,7 @@ also the guard of the upcoming Windows build and must compile there; see "Shared
 | `weto-core` | `ip.rs` | address validation and CIDR |
 | `weto-core` | `guard_machine.rs` | `GuardMachine` — the pure reducer: six phases, `GuardEffect`, the pause ceiling as a parameter (`set_pause_ceiling`) |
 | `weto-core` | `pause_ceiling.rs` | `PauseCeiling` (1/2/5/10 min, default 1 min, unknown → 1 min), `duration_text`, `countdown_text` — port of macOS `PauseCeiling` and `WetoPauseBadge.remainingText`; `countdown_until(deadline, now)` (seconds rounded up, no deadline → «пауза») — one for the GTK badge and the Windows status model |
-| `weto-core` | `path_text.rs` | paths as text for both systems: `file_name` (by `/` or `\`), `program_stem` (without `.exe`), `is_absolute` (`/…`, `C:\…`, `C:/…`, `\\server`), `same_path` (case-insensitive on Windows only); used by process matching, pause-plan shell names, `target_fallback_name`, `RuleCache`, the controller and `locate_with_launch_paths` |
+| `weto-core` | `path_text.rs` | paths as text for both systems: `file_name` (by `/` or `\`), `program_stem` (without `.exe`), `is_absolute` (`/…`, `C:\…`, `C:/…`, `\\server`), `same_path` (case-insensitive on Windows only), `names_program` (Windows only: a bare name matches by program stem); used by process matching, pause-plan shell names, `target_fallback_name`, `RuleCache`, the controller and `locate_with_launch_paths` |
 | `weto-core` | `pause_plan.rs` | who gets `SIGSTOP` and in what order; `foreground_roots`, public `holds_foreground`; `shell_holding_terminal` — шелл, в который можно ввести `fg`; `PausedProcess`, `RecoveredProcess` |
 | `weto-core` | `terminal_return.rs` | `TerminalReturnTracker`, порт macOS: `Returning`, `Offered`, `Failed`, `Expired`; `VERIFY_WINDOW` 3 с, `OFFER_WINDOW` 5 минут |
 | `weto-core` | `presentation.rs` | status wording built straight from `GuardPhase`: `shield_color`, `explanation(phase)`/`should_explain` (no countdown — that is on the pills), `status_lines`, `idle_targets`; notification texts `terminated_notification` / `backgrounded_notification` (`NotificationText`), shared by the D-Bus notifier and the Windows bridge; `target_description` treats `C:\…` as a path |
@@ -75,6 +75,12 @@ The five shared crates build for Windows; everything that talks to Linux is unde
   match no target and still look working, so the caller must pass one to
   `GuardController::with_target_resolution`. The terminal-mode keeper and the `fg` returner do
   get defaults by `cfg` — the no-ops, since Windows has no job control.
+- **Two `cfg!(windows)` forks inside the shared crates.** A bare `Binary` name also matches by
+  program name (`path_text::names_program` in `process::matches_paths`: `Claude` ↔ `…\claude.exe`,
+  case-insensitive) — never on Linux, where the native claude's last path segment is a version
+  and bare names go through `PATH`. The journal export names its platform (`export.rs`,
+  `platform_name`). `app.version` of the export is `WETO_VERSION` baked by `build.sh` on both
+  platforms (the crate itself is `0.0.0`, which every export used to report).
 - Windows adapters implement the same traits in `windows/crates/weto-sys-windows`, the app state
   and C ABI live in `weto-ffi` — `modules/windows.md`. `weto-sys::autostart` (XDG) is Linux only;
   Windows has its own Run-key adapter.

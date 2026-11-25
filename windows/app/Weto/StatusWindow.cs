@@ -3,10 +3,13 @@
 // объяснения, когда охрана что-то сделала с целями; показания гео; живые цели
 // пилюлями или строка-совет. Навигации, тумблеров и журнала здесь нет.
 //
-// Окно без рамки и без кнопки на панели задач, ширина popupWidth, стоит над
-// треем в правом нижнем углу рабочей области и прячется, потеряв фокус, —
-// как всплывающее окно у значка.
+// Окно без рамки и без кнопки на панели задач, ширина popupWidth, прячется,
+// потеряв фокус, — как всплывающее окно у значка. Первый раз стоит над треем
+// в правом нижнем углу рабочей области; его можно перетащить за любое место,
+// кроме кнопок, — как окно статуса на Linux, — и дальше оно открывается там,
+// куда его поставили.
 using System;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -24,6 +27,13 @@ public sealed class StatusWindow : Window
     private BannerView? _shownBanner;
     private Grid? _header;
     private string? _headerKey;
+
+    /// <summary>Куда пользователь перетащил попап; null — над треем.</summary>
+    private Windows.Graphics.PointInt32? _chosen;
+    private bool _pressed;
+    private bool _dragging;
+    private CursorPoint _pressCursor;
+    private Windows.Graphics.PointInt32 _pressWindow;
 
     public bool IsOpen { get; private set; }
 
@@ -43,6 +53,12 @@ public sealed class StatusWindow : Window
         _root.Children.Add(_panel);
         _panel.SizeChanged += (_, _) => FitIfOpen();
         _root.SizeChanged += (_, _) => FitIfOpen();
+        // Нажатия на кнопки сюда не доходят — кнопка помечает их обработанными
+        // сама, — поэтому тащить можно за любое место, кроме кнопок.
+        _root.PointerPressed += OnPointerPressed;
+        _root.PointerMoved += OnPointerMoved;
+        _root.PointerReleased += (_, _) => EndDrag();
+        _root.PointerCaptureLost += (_, _) => EndDrag();
         Content = _root;
 
         if (AppWindow.Presenter is OverlappedPresenter presenter)
@@ -273,22 +289,107 @@ public sealed class StatusWindow : Window
     }
 
     /// <summary>
-    /// Над треем: правый нижний угол рабочей области экрана с курсором, отступ space4.
-    /// Высота — по содержимому (<see cref="FitToPanel"/>).
+    /// Там, куда попап перетащили, — целиком в рабочей области того экрана:
+    /// высота меняется с содержимым, и выросший попап не уходит за край.
+    /// Пока не перетаскивали — над треем: правый нижний угол рабочей области,
+    /// отступ space4. Высота — по содержимому (<see cref="FitToPanel"/>).
     /// </summary>
     private void Place()
     {
         FitToPanel(AppWindow, _root, _panel);
-        var scale = _panel.XamlRoot?.RasterizationScale ?? 1.0;
+        if (_dragging)
+        {
+            return;
+        }
         var outer = AppWindow.Size;
-        var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
-        var margin = (int)(Number("Space4") * scale);
-        var position = new Windows.Graphics.PointInt32(
-            area.X + area.Width - outer.Width - margin,
-            area.Y + area.Height - outer.Height - margin);
+        Windows.Graphics.PointInt32 position;
+        if (_chosen is { } chosen)
+        {
+            var area = DisplayArea.GetFromPoint(chosen, DisplayAreaFallback.Nearest).WorkArea;
+            position = new Windows.Graphics.PointInt32(
+                Math.Clamp(chosen.X, area.X, Math.Max(area.X, area.X + area.Width - outer.Width)),
+                Math.Clamp(chosen.Y, area.Y, Math.Max(area.Y, area.Y + area.Height - outer.Height)));
+        }
+        else
+        {
+            var scale = _panel.XamlRoot?.RasterizationScale ?? 1.0;
+            var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+            var margin = (int)(Number("Space4") * scale);
+            position = new Windows.Graphics.PointInt32(
+                area.X + area.Width - outer.Width - margin,
+                area.Y + area.Height - outer.Height - margin);
+        }
         if (AppWindow.Position.X != position.X || AppWindow.Position.Y != position.Y)
         {
             AppWindow.Move(position);
         }
     }
+
+    // --- Перетаскивание ---------------------------------------------------
+    //
+    // Смещение считается по курсору на экране (GetCursorPos), а не по точке
+    // относительно окна: окно едет вместе с курсором, и относительная точка
+    // дрожала бы. Координаты курсора и AppWindow — одни и те же физические
+    // пиксели экрана. Пока курсор не сдвинулся на порог, это ещё щелчок.
+
+    private void OnPointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(_root).Properties.IsLeftButtonPressed || !GetCursorPos(out var cursor))
+        {
+            return;
+        }
+        _pressed = true;
+        _dragging = false;
+        _pressCursor = cursor;
+        _pressWindow = AppWindow.Position;
+        // Захват — чтобы движение не терялось, когда курсор обгоняет окно.
+        _root.CapturePointer(e.Pointer);
+    }
+
+    private void OnPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_pressed || !GetCursorPos(out var cursor))
+        {
+            return;
+        }
+        var dx = cursor.X - _pressCursor.X;
+        var dy = cursor.Y - _pressCursor.Y;
+        if (!_dragging)
+        {
+            var threshold = 4 * (_panel.XamlRoot?.RasterizationScale ?? 1.0);
+            if (Math.Abs(dx) < threshold && Math.Abs(dy) < threshold)
+            {
+                return;
+            }
+            _dragging = true;
+        }
+        AppWindow.Move(new Windows.Graphics.PointInt32(_pressWindow.X + dx, _pressWindow.Y + dy));
+    }
+
+    private void EndDrag()
+    {
+        if (!_pressed)
+        {
+            return;
+        }
+        _pressed = false;
+        _root.ReleasePointerCaptures();
+        if (_dragging)
+        {
+            _dragging = false;
+            _chosen = AppWindow.Position;
+            Place();
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorPoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out CursorPoint point);
 }

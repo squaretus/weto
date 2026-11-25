@@ -75,6 +75,21 @@ fn same_windows_path(left: &str, right: &str) -> bool {
         && left.iter().zip(&right).all(|(a, b)| same_letters(a, b))
 }
 
+/// Голое имя цели называет программу, а не файл: на Windows так её знают
+/// Диспетчер задач и `taskkill /IM`. `Claude` и `claude.exe` совпадают с любым
+/// `…\claude.exe`. Нужно для приложений из Microsoft Store: ярлыка в меню «Пуск»
+/// у них нет, каталог `WindowsApps` закрыт и меняет имя с каждой версией,
+/// и вписать пользователь может только имя.
+///
+/// На Linux — никогда: у нативного claude последний сегмент пути — номер версии,
+/// а голое имя ищется по `PATH`.
+pub fn names_program(name: &str, executable_path: &str) -> bool {
+    cfg!(windows)
+        && !name.is_empty()
+        && file_name(name) == name
+        && same_letters(program_stem(name), program_stem(executable_path))
+}
+
 /// Без учёта регистра и за пределами ASCII: `C:\Проекты` и `c:\проекты` — один каталог.
 fn same_letters(left: &str, right: &str) -> bool {
     left.chars()

@@ -88,6 +88,11 @@ The process sweep is the first suspect, not the policy: `ProcessRegistry.allProc
 every pid the kernel has (`launchd` is the cheap check), and only then does `ProcessMatcher`
 matter. See `bugs/a-quarter-of-the-process-list.md`.
 
+On Windows, «Небезопасно» with an empty kill journal means the rule matched nothing: look at the
+target entry in the export. A bare name not on `PATH` (Store/MSIX apps have no `.lnk` and a
+versioned `WindowsApps` path) must match by program name — `path_text::names_program` in
+`process::matches_paths`. See `bugs/bare-name-target-on-windows-matched-nothing.md`.
+
 ## If a Linux target never matches, or is signed with a version number
 
 The chain from a `.desktop` entry to the process is where this goes wrong, not the matcher.

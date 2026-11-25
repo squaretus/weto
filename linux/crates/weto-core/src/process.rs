@@ -5,7 +5,7 @@
 //! бандла приложения, каталогом которого можно было бы накрыть все процессы
 //! сразу; ярлык `.desktop` указывает на обычный бинарник, то есть это `Binary`.
 
-use crate::path_text::{is_absolute, same_path};
+use crate::path_text::{is_absolute, names_program, same_path};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -346,9 +346,11 @@ fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) 
         return false;
     }
     match kind {
-        TargetKind::Binary => paths
-            .iter()
-            .any(|path| same_path(path, &process.executable_path)),
+        // Голое имя на Windows — ещё и имя программы (`names_program`).
+        TargetKind::Binary => paths.iter().any(|path| {
+            same_path(path, &process.executable_path)
+                || names_program(path, &process.executable_path)
+        }),
         TargetKind::Script => {
             let Some(arguments) = &process.arguments else {
                 return false;
@@ -371,8 +373,8 @@ fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) 
             // получает абсолютным путём: шелл находит его по `PATH`, и ядро
             // передаёт дальше найденный путь. Отсев стоит здесь, а не при сборке
             // правила: правило собирают и настройки, и кэш охраны с памятью путей,
-            // а ветка бинарника его не видит вовсе — `exe` всегда абсолютный,
-            // голое имя с ним не совпадает.
+            // а ветка бинарника сравнивает голое имя только с именем программы
+            // и только на Windows (`names_program`).
             script.is_some_and(|script| {
                 is_absolute(&script) && paths.iter().any(|path| same_path(path, &script))
             })
@@ -631,6 +633,49 @@ mod tests {
 
         assert_eq!(pids(&procs, &[binary(r"C:\Tools\claude.exe")]), vec![10]);
         assert_eq!(pids(&procs, &[script(r"C:\tools\cli.js", &[])]), vec![11]);
+    }
+
+    /// Голое имя на Windows — имя программы, как в Диспетчере задач. Приложение
+    /// из Microsoft Store (Claude) ярлыка в меню «Пуск» не имеет, каталог
+    /// `WindowsApps` закрыт и версионный, — пользователю остаётся вписать имя.
+    /// Правило с одним `Claude` не совпадало ни с чем, и под «Небезопасно»
+    /// цели продолжали работать.
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_windows_name_matches_the_program_by_name() {
+        let procs = vec![
+            process(
+                10,
+                1,
+                r"C:\Program Files\WindowsApps\Claude_1.0.0_x64__pzs8sxrjxfjjc\app\claude.exe",
+                &[],
+            ),
+            process(11, 1, r"C:\Users\u\.local\bin\Claude.EXE", &[]),
+            process(12, 1, r"C:\Tools\claude-helper.exe", &[]),
+            process(13, 1, r"C:\Tools\claude.exe.bak", &[]),
+        ];
+
+        assert_eq!(pids(&procs, &[binary("Claude")]), vec![10, 11]);
+        assert_eq!(pids(&procs, &[binary("claude.exe")]), vec![10, 11]);
+    }
+
+    /// Имя программы — только у голого имени: путь по-прежнему значит один файл.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_still_names_one_file() {
+        let procs = vec![process(10, 1, r"C:\Other\claude.exe", &[])];
+
+        assert!(pids(&procs, &[binary(r"C:\Tools\claude.exe")]).is_empty());
+    }
+
+    /// На Linux голое имя по имени файла не совпадает: у нативного claude
+    /// последний сегмент пути — номер версии, а имя ищется по `PATH`.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_bare_unix_name_does_not_match_by_file_name() {
+        let procs = vec![process(10, 1, "/usr/bin/nano", &["nano"])];
+
+        assert!(pids(&procs, &[binary("nano")]).is_empty());
     }
 
     /// На Linux регистр различается: `/usr/bin/Nano` — другой файл.
