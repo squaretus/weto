@@ -92,6 +92,14 @@ nothing ever un-froze them because the process that owns the countdown is gone.
 Вернуть уже замороженную — Монитор ресурсов («Возобновить процесс») по разу на каждый слой или
 перезапуск цели. `bugs/windows-target-frozen-by-stacked-suspensions.md`.
 
+## If a target stopped being guarded after the program updated itself
+
+Сначала — что записано целью. Симлинк, `.desktop` или `.lnk` охрана разрешает заново раз в 2 с
+(`weto-guard/src/rules.rs`, `RuleCache`). Путь с версией в каталоге (`WindowsApps\…_6.28899.6.0_…`,
+`app-1.0.9`, `v20.11.0`) держит матчер ядра: `path_text::same_program_across_versions`. Если версия
+в каталоге не похожа на серию чисел через точку или сменилось имя файла, совпадения нет.
+`bugs/target-named-by-its-version-directory.md`.
+
 ## If the Windows update is offered again and again
 
 Тихий `setup.exe` прервался, и `DeinitializeSetup` поднял прежнюю версию. Первым делом —

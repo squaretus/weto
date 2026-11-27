@@ -95,7 +95,8 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   по `PATH` с `PATHEXT`, а вдобавок оно имя программы: `Binary`-правило `Claude` или `claude.exe`
   совпадает с любым `…\claude.exe` без учёта регистра, как `taskkill /IM`
   (`path_text::names_program` в `process::matches_paths`, только под `cfg!(windows)`). Путь
-  по-прежнему значит один файл, `Script` не затронут. Так добавляются приложения из Microsoft
+  значит один файл — и ту же программу соседней версии, если версия стоит в каталоге
+  (`same_program_across_versions`, ниже); `Script` голым именем не совпадает. Так добавляются приложения из Microsoft
   Store (MSIX): ярлыка `.lnk` в «Пуске» у них нет — «Выбрать…» их не предложит, — а
   `C:\Program Files\WindowsApps\<Пакет>_<версия>_…\` закрыт и меняет имя с каждой версией.
   npm-шим `.cmd` разбирается до скрипта (`Script`, совпадение по argv node);
