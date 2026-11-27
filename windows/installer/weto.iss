@@ -114,11 +114,61 @@ begin
     Exec(InstalledWeto(), '', '', SW_SHOWNORMAL, ewNoWait, Code);
 end;
 
+{ Сколько процессов запущено из каталога установки. Строка WQL экранирует
+  обратную косую и апостроф обратной косой: сначала косые, потом апострофы. }
+function RunningWetoCount(Service: Variant): Integer;
+var
+  Path: String;
+  Found: Variant;
+begin
+  Path := InstalledWeto();
+  StringChangeEx(Path, '\', '\\', True);
+  StringChangeEx(Path, '''', '\''', True);
+  Found := Service.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE ExecutablePath = ''' + Path + '''');
+  Result := Found.Count;
+end;
+
+{ Ждать, пока не выйдет последний процесс из каталога установки, — до 30 с.
+  Мьютекс экземпляра этого не говорит: Weto отпускает его в штатном выходе,
+  а процесс с загруженными Weto.exe и weto_ffi.dll живёт после этого ещё
+  какое-то время. Обновление из приложения попадает ровно сюда: приложение
+  запустило установщик и выходит само. Inno повторяет замену занятого файла
+  четыре раза по секунде, а затем в тихом режиме выбирает «Прервать» (код 5):
+  DeinitializeSetup поднимал прежнюю версию, и обновление предлагалось снова
+  и снова. Без WMI остаётся одна страховка — пауза. }
+function WaitForWetoToExit(): Boolean;
+var
+  Locator, Service: Variant;
+  I: Integer;
+begin
+  Result := False;
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\CIMV2');
+    for I := 1 to 120 do
+    begin
+      if RunningWetoCount(Service) = 0 then
+      begin
+        Log(Format('Weto не запущен (проверка %d)', [I]));
+        Result := True;
+        exit;
+      end;
+      Sleep(250);
+    end;
+    Log('Weto не вышел за 30 с');
+  except
+    Log('Процессы через WMI не прочитались: ' + GetExceptionMessage());
+    Sleep(5000);
+    Result := True;
+  end;
+end;
+
 { Перед заменой файлов работающий Weto просится выйти штатно — стоящие
   цели продолжаются, а не гибнут вместе с принудительно закрытым процессом.
   Restart Manager (CloseApplications) приложение в трее закрыть не умеет:
   установка поверх работающего возвращала код 5. Обновление из самого
-  приложения сюда приходит, когда Weto уже вышел, и --quit ничего не ждёт. }
+  приложения сюда приходит, когда Weto уже выходит сам, и --quit ничего
+  не ждёт; дождаться самого процесса — дело WaitForWetoToExit. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
@@ -126,7 +176,12 @@ begin
   Result := '';
   if CheckForMutexes(InstanceMutex) and FileExists(InstalledWeto()) then
     if not Exec(InstalledWeto(), '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+    begin
       Result := 'Weto не закрылся. Закройте его из меню в трее и запустите установку снова.';
+      exit;
+    end;
+  if not WaitForWetoToExit() then
+    Result := 'Weto не закрылся. Закройте его из меню в трее и запустите установку снова.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
