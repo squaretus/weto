@@ -196,6 +196,51 @@ final class ProcessMatcherTests: XCTestCase {
         )
     }
 
+    /// Каталог программы называется по версии, стабильного пути над ним нет:
+    /// обновление кладёт её в соседний каталог, и записанный путь перестаёт
+    /// существовать. Совпадать обязана та же программа соседней версии.
+    func test_binary_named_by_its_version_directory_matches_a_neighbouring_version() {
+        let tree: [ProcessSnapshot] = [
+            .init(pid: 100, parentPID: 1, executablePath: "/Applications/Tool/1.1.0/Tool"),
+        ]
+        XCTAssertEqual(
+            ProcessMatcher.pids(in: tree, rules: [binary("/Applications/Tool/1.0.9/Tool", name: "Tool")]),
+            [100]
+        )
+    }
+
+    func test_script_named_by_its_version_directory_matches_a_neighbouring_version() {
+        let tree: [ProcessSnapshot] = [
+            .init(
+                pid: 100, parentPID: 1,
+                executablePath: "/Users/me/.nvm/versions/node/v22.1.0/bin/node",
+                arguments: [
+                    "node",
+                    "/Users/me/.nvm/versions/node/v22.1.0/lib/node_modules/@qwen-code/qwen-code/cli.js",
+                ]
+            )
+        ]
+        let rule = script(
+            "/Users/me/.nvm/versions/node/v20.11.0/lib/node_modules/@qwen-code/qwen-code/cli.js",
+            name: "qwen"
+        )
+        XCTAssertEqual(ProcessMatcher.pids(in: tree, rules: [rule]), [100])
+    }
+
+    /// Соседний каталог — та же программа, только если имя файла то же
+    /// и различается одна версия.
+    func test_a_different_program_in_a_neighbouring_version_does_not_match() {
+        let tree: [ProcessSnapshot] = [
+            .init(pid: 100, parentPID: 1, executablePath: "/Applications/Tool/1.1.0/Updater"),
+            .init(pid: 101, parentPID: 1, executablePath: "/Applications/Other/1.1.0/Tool"),
+            .init(pid: 102, parentPID: 1, executablePath: "/usr/bin/python3.12"),
+        ]
+        XCTAssertTrue(ProcessMatcher.pids(in: tree, rules: [
+            binary("/Applications/Tool/1.0.9/Tool", name: "Tool"),
+            binary("/usr/bin/python3.11", name: "python"),
+        ]).isEmpty)
+    }
+
     func test_running_targets_report_one_row_per_target_with_process_count() {
 
         let tree: [ProcessSnapshot] = [
