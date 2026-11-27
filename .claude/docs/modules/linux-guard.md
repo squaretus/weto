@@ -23,7 +23,7 @@ also the guard of the upcoming Windows build and must compile there; see "Shared
 | `weto-sys` | `network_snapshot.rs` | kernel route probe: who carries the traffic; `InterfaceListing` / `KernelInterfaces` (`getifaddrs`, `IFF_UP` and `IFF_RUNNING`) |
 | `weto-sys` | `network_events.rs` | netlink subscription |
 | `weto-sys` | `process_registry.rs` | `/proc` reader with a swappable root; process group, tty foreground group, controlling tty (`tty_nr` → `terminal_device`), `T` state |
-| `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order; `SignalResult::is_delivered` treats `PROCESS_GONE` as delivered (`ESRCH` on Linux, `87` `ERROR_INVALID_PARAMETER` on Windows — the Windows signaler also maps ACCESS_DENIED for an exited process to it, `modules/windows.md`) |
+| `weto-sys` | `process_signaler.rs` | `SIGSTOP` / `SIGCONT` / `SIGKILL`, strictly in list order; `SignalResult::is_delivered` treats `PROCESS_GONE` as delivered (`ESRCH` on Linux, `87` `ERROR_INVALID_PARAMETER` on Windows — the Windows signaler also maps ACCESS_DENIED for an exited process to it, `modules/windows.md`). Stop must be idempotent like `SIGSTOP`: `ProcessEnforcer::pause` re-sends it every pass to a ledger entry that looks not stopped — on Windows suspension is counted, so the signaler remembers its own (`bugs/windows-target-frozen-by-stacked-suspensions.md`) |
 | `weto-sys` | `geo_probe.rs` | blocking HTTP probe over ureq; `ureq::get` builds an agent per call, so no connection pool between probes |
 | `weto-sys` | `terminal_mode.rs` | `TerminalModeKeeping` / `TerminalModeKeeper`: `termios` of a target's tty captured before the pause, restored after `fg`; `path_of` finds the device by the kernel's `tty_nr` encoding; `NoTerminalModes` — portable no-op, the default off Linux |
 | `weto-sys` | `terminal_return.rs` | `TerminalForegroundReturning` / `MultiplexerForegroundReturner`: ввод `fg` через tmux и GNU screen; проверки бинарника и каталога сокетов; потолок 2 с на команду; `NoForegroundReturn` — переносимая заглушка, умолчание вне Linux |
@@ -80,7 +80,8 @@ The five shared crates build for Windows; everything that talks to Linux is unde
   case-insensitive) — never on Linux, where the native claude's last path segment is a version
   and bare names go through `PATH`. The journal export names its platform (`export.rs`,
   `platform_name`). `app.version` of the export is `WETO_VERSION` baked by `build.sh` on both
-  platforms (the crate itself is `0.0.0`, which every export used to report).
+  platforms (the crate itself is `0.0.0`, which every export used to report); so is
+  `diagnostics.appVersion` of every journal record (`weto-guard/src/controller.rs`).
 - Windows adapters implement the same traits in `windows/crates/weto-sys-windows`, the app state
   and C ABI live in `weto-ffi` — `modules/windows.md`. `weto-sys::autostart` (XDG) is Linux only;
   Windows has its own Run-key adapter.
