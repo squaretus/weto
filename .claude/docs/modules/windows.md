@@ -96,7 +96,7 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   совпадает с любым `…\claude.exe` без учёта регистра, как `taskkill /IM`
   (`path_text::names_program` в `process::matches_paths`, только под `cfg!(windows)`). Путь
   значит один файл — и ту же программу соседней версии, если версия стоит в каталоге
-  (`same_program_across_versions`, ниже); `Script` голым именем не совпадает. Так добавляются приложения из Microsoft
+  (`same_program_across_versions`, [linux-guard](linux-guard.md)); `Script` голым именем не совпадает. Так добавляются приложения из Microsoft
   Store (MSIX): ярлыка `.lnk` в «Пуске» у них нет — «Выбрать…» их не предложит, — а
   `C:\Program Files\WindowsApps\<Пакет>_<версия>_…\` закрыт и меняет имя с каждой версией.
   npm-шим `.cmd` разбирается до скрипта (`Script`, совпадение по argv node);
