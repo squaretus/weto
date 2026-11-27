@@ -172,7 +172,9 @@ fn start_thread_in(pid: u32) {
     };
 
     // SAFETY: имена — C-строки; kernel32 загружен по одному адресу
-    // во всех процессах сеанса, поэтому адрес `Sleep` годится и в чужом.
+    // во всех процессах сеанса, поэтому адрес `Sleep` годится и в чужом —
+    // пока тест и `ping` одной архитектуры (тесты собираются нативно; x64-тест
+    // под эмуляцией на ARM64 взял бы адрес не того kernel32).
     unsafe {
         let kernel32 = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
         let sleep = GetProcAddress(kernel32, c"Sleep".as_ptr().cast()).expect("нет Sleep");

@@ -128,7 +128,8 @@ begin
   Result := Found.Count;
 end;
 
-{ Ждать, пока не выйдет последний процесс из каталога установки, — до 30 с.
+{ Ждать, пока не выйдет последний процесс из каталога установки, — около
+  30 с (120 проверок по 250 мс плюс сами запросы).
   Мьютекс экземпляра этого не говорит: Weto отпускает его в штатном выходе,
   а процесс с загруженными Weto.exe и weto_ffi.dll живёт после этого ещё
   какое-то время. Обновление из приложения попадает ровно сюда: приложение
@@ -142,6 +143,9 @@ var
   I: Integer;
 begin
   Result := False;
+  { Метки журнала — ASCII: их ищет контракт установщика, а кодировку журнала
+    Inno на раннере и чтение PowerShell 5.1 кириллица не переживает. }
+  Log('weto: waiting for processes of ' + InstalledWeto());
   try
     Locator := CreateOleObject('WbemScripting.SWbemLocator');
     Service := Locator.ConnectServer('.', 'root\CIMV2');
@@ -149,15 +153,15 @@ begin
     begin
       if RunningWetoCount(Service) = 0 then
       begin
-        Log(Format('Weto не запущен (проверка %d)', [I]));
+        Log(Format('weto: no running Weto after check %d', [I]));
         Result := True;
         exit;
       end;
       Sleep(250);
     end;
-    Log('Weto не вышел за 30 с');
+    Log('weto: Weto still running after 30 s');
   except
-    Log('Процессы через WMI не прочитались: ' + GetExceptionMessage());
+    Log('weto: WMI failed: ' + GetExceptionMessage());
     Sleep(5000);
     Result := True;
   end;
@@ -235,7 +239,14 @@ begin
   end;
   case Code of
     0:
-      Result := True;
+      begin
+        { Та же гонка, что у обновления: мьютекс свободен раньше, чем процесс
+          выгрузил Weto.exe и weto_ffi.dll, и файлы не удалились бы. }
+        Result := WaitForWetoToExit();
+        if not Result then
+          SuppressibleMsgBox('Weto не закрылся. Закройте его из меню в трее и запустите удаление снова.',
+            mbError, MB_OK, IDOK);
+      end;
     1:
       begin
         KeepClosed := True;

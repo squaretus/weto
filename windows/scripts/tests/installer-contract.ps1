@@ -49,6 +49,20 @@ function Install([switch] $QuitByItself) {
         if (-not $finished) { Fail 'установщик не закончил за 3 минуты' }
         Fail "установщик вернул $($run.ExitCode)"
     }
+    # Ожидание процесса обязано было пройти через WMI, а не через запасную паузу:
+    # без этого шаг зеленел бы и там, где установщик процессов не видит вовсе.
+    # Номер проверки больше 1 — гонка была, и ожидание её закрыло.
+    $lines = Get-Content $log
+    if ($lines -match 'weto: WMI failed') {
+        $lines | Write-Output
+        Fail 'установщик не прочитал процессы через WMI'
+    }
+    $waited = $lines -match 'weto: no running Weto after check \d+'
+    if (-not $waited) {
+        $lines | Write-Output
+        Fail 'в журнале установщика нет ожидания выхода Weto'
+    }
+    Write-Output "установщик: $(($waited | Select-Object -Last 1) -replace '^.*?weto: ', '')"
 }
 
 # Зависший шаг объясняет себя: список процессов Weto и установщика и снимки

@@ -72,8 +72,8 @@ impl ProcessSignaling for WindowsProcessSignaler {
                     }
                 });
                 // Продолжен, завершён или исчез — наша приостановка снята.
-                let delivered = error_code.is_none() || error_code == Some(PROCESS_GONE);
-                if delivered && signal != ProcessSignal::Stop {
+                let gone = error_code == Some(PROCESS_GONE);
+                if gone || (error_code.is_none() && signal != ProcessSignal::Stop) {
                     self.held().remove(pid);
                 }
                 SignalResult {
@@ -98,11 +98,12 @@ impl WindowsProcessSignaler {
         if pid <= 0 {
             return Some(ERROR_INVALID_HANDLE as i32);
         }
+        // Время создания нужно только стопу: продолжение просит ровно то право,
+        // которым пользуется, и не получает отказа там, где его дали одно.
         let access = match signal {
             ProcessSignal::Kill => PROCESS_TERMINATE,
-            ProcessSignal::Stop | ProcessSignal::Resume => {
-                PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED_INFORMATION
-            }
+            ProcessSignal::Stop => PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED_INFORMATION,
+            ProcessSignal::Resume => PROCESS_SUSPEND_RESUME,
         };
         // SAFETY: handle закрывается ниже ровно раз.
         let handle = unsafe { OpenProcess(access, 0, pid as u32) };
@@ -133,7 +134,13 @@ impl WindowsProcessSignaler {
     fn stop(&self, pid: i32, handle: HANDLE) -> Option<i32> {
         let created = creation_time(handle);
         let mut held = self.held();
-        if created.is_some() && held.get(&pid) == created.as_ref() {
+        // Время создания не прочиталось у процесса, который мы держим: второй
+        // слой хуже пропущенного стопа чужому процессу с тем же pid.
+        let ours = match created {
+            Some(created) => held.get(&pid) == Some(&created),
+            None => held.contains_key(&pid),
+        };
+        if ours {
             return suspend_running_threads(pid as u32);
         }
         // SAFETY: handle открыт с правом приостановки.
@@ -142,8 +149,8 @@ impl WindowsProcessSignaler {
             (None, Some(created)) => {
                 held.insert(pid, created);
             }
-            // Время создания не прочиталось: процесс не запоминается, чтобы
-            // повторный стоп не принял за наш чужой процесс с тем же pid.
+            // Время создания не прочиталось: процесс не запоминается — ключа,
+            // который отличил бы его от чужого с тем же pid, нет.
             _ => {
                 held.remove(&pid);
             }
@@ -168,7 +175,9 @@ fn creation_time(handle: HANDLE) -> Option<i64> {
 /// Приостановить потоки процесса, у которых приостановки нет: стоящий поток
 /// второй не получает. Поток, родившийся и успевший выйти между снимком
 /// и вызовом, просто пропускается — следующий проход охраны увидит процесс
-/// заново.
+/// заново. Поток, который приостановил кто-то другой (`CREATE_SUSPENDED`
+/// создателя), нашей приостановки не получает, и `NtResumeProcess` запустит его
+/// раньше создателя — это свойство самого `NtResumeProcess`, было и прежде.
 fn suspend_running_threads(pid: u32) -> Option<i32> {
     // SAFETY: снимок закрывается ниже ровно раз.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
