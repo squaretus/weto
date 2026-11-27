@@ -482,9 +482,15 @@ impl ProcessEnforcer {
         }
     }
 
-    /// После падения weto: продолжить только тех, кто всё ещё стоит и остался
-    /// тем же процессом. pid переиспользуются, и SIGCONT чужому процессу
-    /// недопустим.
+    /// После падения weto: продолжить тех, кто остался тем же процессом (pid и путь
+    /// совпали — pid переиспользуются, и SIGCONT чужому процессу недопустим).
+    ///
+    /// Сигнал уходит всем таким записям, а не только стоящим, как и при штатном
+    /// снятии паузы: на Windows «стоит» значит «стоят все потоки», и процесс,
+    /// в котором, пока weto лежал, родился поток пула, выглядит идущим при стоящих
+    /// старых потоках. Запись без сигнала уходила из учёта, и цель оставалась
+    /// замороженной навсегда. Идущему процессу продолжение безвредно; эпизод
+    /// восстановления при этом получают только стоящие — `unresolved`.
     ///
     /// Порядок — точный обратный, как и в `resume`: файл учёта хранит записи
     /// в порядке добавления, а добавляет их `pause` ровно в порядке отправки
@@ -506,22 +512,10 @@ impl ProcessEnforcer {
         }
 
         let processes = self.registry.snapshot();
-        let (_, standing, released) = settle(&entries, &processes);
-
-        let results = if standing.is_empty() {
-            Vec::new()
-        } else {
-            let order: Vec<i32> = standing.iter().rev().map(|entry| entry.pid).collect();
-            self.signaler.send(ProcessSignal::Resume, &order)
-        };
-        self.forget(&released);
+        let outcome = self.settle_and_signal(&entries, &processes, &HashSet::new());
 
         (
-            ResumeOutcome {
-                results,
-                released,
-                unresolved: standing,
-            },
+            outcome,
             Scan {
                 processes,
                 rules: rules.to_vec(),

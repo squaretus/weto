@@ -1178,6 +1178,31 @@ fn the_cold_start_pause_after_recovery_adopts_the_recovered_until_the_answer() {
     assert!(s.controller.snapshot().paused.is_empty());
 }
 
+/// Тот же процесс из учёта, который выглядит идущим, продолжение получает всё
+/// равно. На Windows «стоит» значит «стоят все потоки», а поток, родившийся
+/// в стоящем процессе, пока weto лежал (пул под завершения I/O, когда VPN рвёт
+/// соединения), приостановку не наследует: процесс выглядит идущим, а старые
+/// его потоки стоят. Запись без сигнала уходила из учёта, и цель оставалась
+/// замороженной навсегда. Продолжение идущему процессу безвредно — тем же
+/// правилом живёт и штатное снятие паузы.
+#[test]
+fn a_recovered_process_that_looks_running_is_resumed_anyway() {
+    let world = World::of(vec![
+        process(200, 1, CLAUDE, 200, 0),
+        detached(77, 1, "/usr/bin/happ"),
+    ]);
+    let s = stand_with(world, &[standing_entry(200, CLAUDE, false)]);
+
+    s.controller.recover_stopped();
+
+    assert_eq!(s.world.signalled(Resume), vec![200]);
+    assert!(ledger_pids(&s).is_empty(), "запись уходит по наблюдению");
+    assert!(
+        s.reporter.recorded().recovered.is_empty(),
+        "стоящим процесс не выглядел — эпизода восстановления нет"
+    );
+}
+
 /// pid переиспользуются: по тому же числу может жить уже другой процесс,
 /// и SIGCONT ему недопустим.
 #[test]
