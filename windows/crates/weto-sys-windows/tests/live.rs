@@ -109,7 +109,7 @@ fn the_command_line_and_the_parent_are_read() {
 #[test]
 fn a_process_is_paused_resumed_and_terminated() {
     let registry = NtProcessRegistry::new();
-    let signaler = WindowsProcessSignaler;
+    let signaler = WindowsProcessSignaler::default();
     let mut child = pinging(60);
     let pid = child.id() as i32;
 
@@ -133,7 +133,7 @@ fn a_process_is_paused_resumed_and_terminated() {
 /// консоль её не теряет (на Linux тут ловушки tmux и SIGTTIN, здесь их нет).
 #[test]
 fn a_console_program_finishes_normally_after_a_pause() {
-    let signaler = WindowsProcessSignaler;
+    let signaler = WindowsProcessSignaler::default();
     let mut child = pinging(3);
     let pid = child.id() as i32;
 
@@ -144,11 +144,158 @@ fn a_console_program_finishes_normally_after_a_pause() {
     assert!(child.wait().unwrap().success());
 }
 
+/// Процесс доработал и вышел с успехом за отведённое время. Замороженный
+/// навсегда не выйдет никогда, и `wait()` повесил бы тест вместо отказа.
+fn finishes_within(child: &mut Child, seconds: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status.success();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    child.kill().ok();
+    child.wait().ok();
+    false
+}
+
+/// Поток, родившийся в стоящем процессе, — то, что делает сама Windows, когда VPN
+/// выключается и рвёт соединения цели: пул поднимает исполнителя под завершения
+/// I/O, и приостановку процесса тот не наследует. Здесь поток ждёт в `Sleep`
+/// бесконечно, этого довольно: процесс перестаёт выглядеть стоящим.
+fn start_thread_in(pid: u32) {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    use windows_sys::Win32::System::Threading::{
+        CreateRemoteThread, OpenProcess, INFINITE, PROCESS_ALL_ACCESS,
+    };
+
+    // SAFETY: имена — C-строки; kernel32 загружен по одному адресу
+    // во всех процессах сеанса, поэтому адрес `Sleep` годится и в чужом.
+    unsafe {
+        let kernel32 = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
+        let sleep = GetProcAddress(kernel32, c"Sleep".as_ptr().cast()).expect("нет Sleep");
+        let start: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(sleep);
+        let process = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
+        assert!(
+            !process.is_null(),
+            "процесс не открылся: {}",
+            GetLastError()
+        );
+        let thread = CreateRemoteThread(
+            process,
+            std::ptr::null(),
+            0,
+            Some(start),
+            INFINITE as usize as *const c_void,
+            0,
+            std::ptr::null_mut(),
+        );
+        assert!(!thread.is_null(), "поток не создан: {}", GetLastError());
+        CloseHandle(thread);
+        CloseHandle(process);
+    }
+}
+
+/// Повторный стоп уже стоящему — не вторая заморозка: одно продолжение
+/// поднимает процесс, и он доделывает своё.
+#[test]
+fn a_repeated_stop_is_undone_by_one_resume() {
+    let registry = NtProcessRegistry::new();
+    let signaler = WindowsProcessSignaler::default();
+    let mut child = pinging(3);
+    let pid = child.id() as i32;
+
+    for _ in 0..3 {
+        assert_eq!(
+            signaler.send(ProcessSignal::Stop, &[pid])[0].error_code,
+            None
+        );
+    }
+    assert!(eventually_stopped(&registry, child.id(), true), "не встал");
+    assert_eq!(
+        signaler.send(ProcessSignal::Resume, &[pid])[0].error_code,
+        None
+    );
+
+    assert!(
+        finishes_within(&mut child, 15),
+        "после одного продолжения процесс стоит: стопы накопились"
+    );
+}
+
+/// Зависание цели после выключения VPN. Посреди паузы в процессе рождается
+/// идущий поток, охрана видит цель идущей и шлёт стоп снова. Прежде это был
+/// второй `NtSuspendProcess`: старые потоки получали второй слой, одно продолжение
+/// снимало один, а живой новый поток убеждал учёт, что цель пошла, — запись
+/// уходила, цель стояла навсегда. Теперь повторный стоп дозамораживает только
+/// новый поток, и одного продолжения хватает всем.
+#[test]
+fn a_thread_born_during_the_pause_does_not_freeze_the_target_forever() {
+    let registry = NtProcessRegistry::new();
+    let signaler = WindowsProcessSignaler::default();
+    let mut child = pinging(4);
+    let pid = child.id() as i32;
+
+    signaler.send(ProcessSignal::Stop, &[pid]);
+    assert!(eventually_stopped(&registry, child.id(), true), "не встал");
+
+    start_thread_in(child.id());
+    assert!(
+        eventually_stopped(&registry, child.id(), false),
+        "новый поток не виден: процесс всё ещё выглядит стоящим"
+    );
+
+    assert_eq!(
+        signaler.send(ProcessSignal::Stop, &[pid])[0].error_code,
+        None
+    );
+    assert!(
+        eventually_stopped(&registry, child.id(), true),
+        "повторный стоп не остановил новый поток"
+    );
+
+    assert_eq!(
+        signaler.send(ProcessSignal::Resume, &[pid])[0].error_code,
+        None
+    );
+    assert!(
+        finishes_within(&mut child, 15),
+        "после продолжения цель заморожена: слои приостановки накопились"
+    );
+}
+
+/// Продолжение снимает нашу приостановку целиком: следующая пауза того же
+/// процесса — снова настоящая, а не «уже стоит».
+#[test]
+fn a_resumed_process_is_paused_again() {
+    let registry = NtProcessRegistry::new();
+    let signaler = WindowsProcessSignaler::default();
+    let mut child = pinging(60);
+    let pid = child.id() as i32;
+
+    for round in 0..2 {
+        signaler.send(ProcessSignal::Stop, &[pid]);
+        assert!(
+            eventually_stopped(&registry, child.id(), true),
+            "круг {round}: не встал"
+        );
+        signaler.send(ProcessSignal::Resume, &[pid]);
+        assert!(
+            eventually_stopped(&registry, child.id(), false),
+            "круг {round}: не пошёл"
+        );
+    }
+    child.kill().ok();
+    child.wait().ok();
+}
+
 /// Процесса нет — сигнал считается доставленным: цель достигнута. Отказ вызова
 /// (pid 0) — не доставка.
 #[test]
 fn a_vanished_process_counts_as_delivered_and_pid_zero_is_refused() {
-    let signaler = WindowsProcessSignaler;
+    let signaler = WindowsProcessSignaler::default();
     let mut child = pinging(1);
     let pid = child.id() as i32;
     child.wait().unwrap();
