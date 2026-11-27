@@ -98,7 +98,10 @@ impl ProcessRegistryReading for NtProcessRegistry {
 
 /// Все процессы. Буфер растёт, пока ядро отвечает «мал»: между вызовами
 /// процессы рождаются, и запрошенного размера с запасом обычно хватает со второго раза.
-fn query_processes() -> Vec<RawProcess> {
+///
+/// Открыт живым тестам: потоки процесса с состоянием объясняют, почему он
+/// не выглядит стоящим.
+pub fn query_processes() -> Vec<RawProcess> {
     let mut buffer = vec![0u8; INITIAL_BUFFER];
     for _ in 0..8 {
         let mut needed = 0u32;
