@@ -12,6 +12,8 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   decision entry points
 - `macos/Sources/WetoCore/ProcessMatcher.swift` — rules × processes → pids to kill / rows to show
 - `macos/Sources/WetoCore/ProcessTree.swift` — parent/child index shared by both matcher passes
+- `macos/Sources/WetoCore/ProgramPath.swift` — `sameProgramAcrossVersions`: two absolute paths name
+  the same program of a neighbouring version (text only, the disk is not read)
 - `macos/Sources/WetoCore/IPAddress.swift`, `IPRange.swift` — `inet_pton` parsing, CIDR containment
 - `macos/Sources/WetoCore/GeoResponses.swift` — DTOs and decoding for ipinfo / freeipapi / geojs
 - `macos/Sources/WetoCore/GeoFailure.swift` — HTTP status / `URLError` code → wording shown to the user;
@@ -168,6 +170,14 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
   `"/"` (so sibling bundles sharing a name prefix do not match, and a trailing slash in the stored
   path is tolerated); `binary` compares full-path equality against `launchPaths`; `script` requires an
   exact equality with one `argv` element — never a substring, and never the interpreter path.
+  `binary` and `script` also accept the same program of a neighbouring version
+  (`ProgramPath.sameProgramAcrossVersions`): same segment count, identical file name, and every
+  differing directory segment differs only in its first dotted series of two or more numbers, with
+  the text before and after it identical (`/Applications/Tool/1.0.9/Tool` ↔ `…/1.1.0/Tool`,
+  `~/.nvm/versions/node/v20.11.0/…` ↔ `v22.1.0`). A lone number is not a version (`Python311`), and
+  the file name is exact (`python3.11` ≠ `python3.12`). The rule is shared with
+  `path_text::same_program_across_versions` in `weto-core`; on macOS case is significant, as in all
+  matching. `appBundle` does not use it.
 - **Cycles in the process tree are assumed possible.** `ProcessTree.descendants` relies on a shared
   `seen` set plus `stepLimit = processes.count * 2`, and `topmostMatch` is bounded by the pid count.
   A snapshot where a parent points at its own descendant must terminate, not hang.
@@ -255,4 +265,5 @@ in `WetoSystem`; everything that holds state lives in `WetoShared`.
 - `bugs/`, `decisions/` — `decisions/vpn-app-instead-of-tunnel.md`,
   `decisions/vpn-tunnel-in-terminal-version.md`,
   `decisions/geo-confirmation-services.md`, `decisions/pause-instead-of-kill.md`,
-  `bugs/tmux-takes-the-terminal-from-a-paused-target.md`
+  `bugs/tmux-takes-the-terminal-from-a-paused-target.md`,
+  `bugs/target-named-by-its-version-directory.md`

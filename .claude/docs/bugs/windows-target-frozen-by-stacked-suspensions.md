@@ -59,6 +59,13 @@ Windows: `weto-sys-windows` (`WindowsProcessSignaler`, `process_table::is_suspen
 - [ ] `live.rs::a_resumed_process_is_paused_again` (память стёрта после Resume)
 - [ ] `weto-guard/tests/pause.rs::a_recovered_process_that_looks_running_is_resumed_anyway`
 
+Живые тесты стопа ждут остановки так, как её добивается охрана: стоп повторяется раз в 250 мс,
+пока ядро не покажет процесс стоящим (`stop_as_the_guard_does`). Одного стопа мало не по вине
+сигналера: фабрика пула потоков в ядре рождает исполнителя в уже приостановленном процессе,
+и тот приостановку не наследует. С одним стопом они падали на раннерах от случая
+к случаю — на одном и том же коде то x86_64, то aarch64. Не встал — сообщение называет потоки,
+которые не стоят (`state`, `wait_reason`), и сколько потоков было до первого стопа.
+
 ## Related files
 - `windows/crates/weto-sys-windows/src/process_signaler.rs`
 - `windows/crates/weto-sys-windows/src/process_table.rs`

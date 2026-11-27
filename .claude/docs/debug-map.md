@@ -98,6 +98,8 @@ nothing ever un-froze them because the process that owns the countdown is gone.
 (`weto-guard/src/rules.rs`, `RuleCache`). Путь с версией в каталоге (`WindowsApps\…_6.28899.6.0_…`,
 `app-1.0.9`, `v20.11.0`) держит матчер ядра: `path_text::same_program_across_versions`. Если версия
 в каталоге не похожа на серию чисел через точку или сменилось имя файла, совпадения нет.
+На macOS заново разрешает `ProcessEnforcer` (то же окно 2 с, `lastKnownRules`), а версионный путь
+держит `ProgramPath.sameProgramAcrossVersions` в `ProcessMatcher`.
 `bugs/target-named-by-its-version-directory.md`.
 
 ## If the Windows update is offered again and again

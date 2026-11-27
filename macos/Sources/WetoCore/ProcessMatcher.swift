@@ -134,11 +134,20 @@ public enum ProcessMatcher {
             var prefix = rule.path
             while prefix.hasSuffix("/") { prefix.removeLast() }
             return process.executablePath.hasPrefix(prefix + "/")
+        // Путь с версией в каталоге — ещё и та же программа соседней версии
+        // (`ProgramPath.sameProgramAcrossVersions`): обновление переносит её в новый
+        // каталог, а прежний путь перестаёт существовать.
         case .binary:
-            return rule.launchPaths.contains(process.executablePath)
+            return rule.launchPaths.contains { path in
+                path == process.executablePath
+                    || ProgramPath.sameProgramAcrossVersions(path, process.executablePath)
+            }
         case .script:
             guard let arguments = process.arguments else { return false }
-            return !Set(arguments).isDisjoint(with: rule.launchPaths)
+            if !Set(arguments).isDisjoint(with: rule.launchPaths) { return true }
+            return arguments.contains { argument in
+                rule.launchPaths.contains { ProgramPath.sameProgramAcrossVersions($0, argument) }
+            }
         }
     }
 

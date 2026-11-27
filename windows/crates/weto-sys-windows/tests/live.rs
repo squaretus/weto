@@ -17,8 +17,11 @@ use weto_sys::secret_store::SecretStoring;
 use weto_sys::target_resolver::TargetResolving;
 use weto_sys_windows::autostart::RunKeyAutostart;
 use weto_sys_windows::interfaces::AdapterInterfaces;
-use weto_sys_windows::process_registry::NtProcessRegistry;
+use weto_sys_windows::process_registry::{query_processes, NtProcessRegistry};
 use weto_sys_windows::process_signaler::WindowsProcessSignaler;
+use weto_sys_windows::process_table::{
+    RawThread, THREAD_STATE_WAITING, WAIT_REASON_SUSPENDED, WAIT_REASON_WR_SUSPENDED,
+};
 use weto_sys_windows::secret_store::CredentialStore;
 use weto_sys_windows::target_resolver::{without_verbatim_prefix, WindowsTargetResolver};
 
@@ -49,6 +52,63 @@ fn eventually_stopped(registry: &NtProcessRegistry, pid: u32, stopped: bool) -> 
         std::thread::sleep(Duration::from_millis(50));
     }
     false
+}
+
+/// Стоп так, как его шлёт охрана: повтор раз в 250 мс, пока ядро не покажет
+/// процесс стоящим. Одного стопа мало не по вине сигналера: Windows сама рождает
+/// потоки в приостановленном процессе — фабрика пула потоков в ядре поднимает
+/// исполнителя под завершение I/O, — и приостановку они не наследуют. Охрана
+/// дозамораживает их следующим проходом (повторный стоп своему процессу —
+/// `suspend_running_threads`), тест обязан делать то же: прежде один стоп
+/// и три секунды ожидания падали на раннерах то на x86_64, то на aarch64.
+///
+/// Не встал — сообщение называет потоки, которые не стоят, и сколько потоков
+/// было до первого стопа: родившийся поток и отказ приостановки различимы.
+fn stop_as_the_guard_does(
+    registry: &NtProcessRegistry,
+    signaler: &WindowsProcessSignaler,
+    pid: u32,
+) -> Result<(), String> {
+    let threads_before = threads_of(pid).len();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let sent = signaler.send(ProcessSignal::Stop, &[pid as i32]);
+        if let Some(code) = sent[0].error_code {
+            return Err(format!("стоп отказан: код {code}"));
+        }
+        let observed = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < observed {
+            if find(registry, pid).is_some_and(|process| process.is_stopped) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let threads = threads_of(pid);
+    let running: Vec<_> = threads
+        .iter()
+        .filter(|thread| {
+            !(thread.state == THREAD_STATE_WAITING
+                && (thread.wait_reason == WAIT_REASON_SUSPENDED
+                    || thread.wait_reason == WAIT_REASON_WR_SUSPENDED))
+        })
+        .collect();
+    Err(format!(
+        "потоков до стопа {threads_before}, сейчас {}; не стоят (state, wait_reason): {:?}",
+        threads.len(),
+        running
+            .iter()
+            .map(|thread| (thread.state, thread.wait_reason))
+            .collect::<Vec<_>>()
+    ))
+}
+
+fn threads_of(pid: u32) -> Vec<RawThread> {
+    query_processes()
+        .into_iter()
+        .find(|process| process.pid == pid as i32)
+        .map(|process| process.threads)
+        .unwrap_or_default()
 }
 
 /// Урок macOS: обход отдавал четверть списка — свежую, и все тесты, порождавшие
@@ -113,9 +173,9 @@ fn a_process_is_paused_resumed_and_terminated() {
     let mut child = pinging(60);
     let pid = child.id() as i32;
 
-    let stop = signaler.send(ProcessSignal::Stop, &[pid]);
-    assert_eq!(stop[0].error_code, None);
-    assert!(eventually_stopped(&registry, child.id(), true), "не встал");
+    if let Err(why) = stop_as_the_guard_does(&registry, &signaler, child.id()) {
+        panic!("не встал: {why}");
+    }
 
     let resume = signaler.send(ProcessSignal::Resume, &[pid]);
     assert_eq!(resume[0].error_code, None);
@@ -215,7 +275,9 @@ fn a_repeated_stop_is_undone_by_one_resume() {
             None
         );
     }
-    assert!(eventually_stopped(&registry, child.id(), true), "не встал");
+    if let Err(why) = stop_as_the_guard_does(&registry, &signaler, child.id()) {
+        panic!("не встал: {why}");
+    }
     assert_eq!(
         signaler.send(ProcessSignal::Resume, &[pid])[0].error_code,
         None
@@ -240,8 +302,9 @@ fn a_thread_born_during_the_pause_does_not_freeze_the_target_forever() {
     let mut child = pinging(4);
     let pid = child.id() as i32;
 
-    signaler.send(ProcessSignal::Stop, &[pid]);
-    assert!(eventually_stopped(&registry, child.id(), true), "не встал");
+    if let Err(why) = stop_as_the_guard_does(&registry, &signaler, child.id()) {
+        panic!("не встал: {why}");
+    }
 
     start_thread_in(child.id());
     assert!(
@@ -249,14 +312,9 @@ fn a_thread_born_during_the_pause_does_not_freeze_the_target_forever() {
         "новый поток не виден: процесс всё ещё выглядит стоящим"
     );
 
-    assert_eq!(
-        signaler.send(ProcessSignal::Stop, &[pid])[0].error_code,
-        None
-    );
-    assert!(
-        eventually_stopped(&registry, child.id(), true),
-        "повторный стоп не остановил новый поток"
-    );
+    if let Err(why) = stop_as_the_guard_does(&registry, &signaler, child.id()) {
+        panic!("повторный стоп не остановил новый поток: {why}");
+    }
 
     assert_eq!(
         signaler.send(ProcessSignal::Resume, &[pid])[0].error_code,
@@ -278,11 +336,9 @@ fn a_resumed_process_is_paused_again() {
     let pid = child.id() as i32;
 
     for round in 0..2 {
-        signaler.send(ProcessSignal::Stop, &[pid]);
-        assert!(
-            eventually_stopped(&registry, child.id(), true),
-            "круг {round}: не встал"
-        );
+        if let Err(why) = stop_as_the_guard_does(&registry, &signaler, child.id()) {
+            panic!("круг {round}: не встал: {why}");
+        }
         signaler.send(ProcessSignal::Resume, &[pid]);
         assert!(
             eventually_stopped(&registry, child.id(), false),

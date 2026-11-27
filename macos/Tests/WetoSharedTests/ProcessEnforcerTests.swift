@@ -362,6 +362,53 @@ final class ProcessEnforcerTests: XCTestCase {
         )
     }
 
+    /// Записана сама версия: каталог программы называется по ней, а стабильного
+    /// симлинка над ним нет. Обновление кладёт программу в соседний каталог и удаляет
+    /// прежний: разрешать записанное заново больше нечего, и новый сеанс прежде молча
+    /// оставался без охраны — не виден среди запущенных и не вставал на паузу.
+    func test_target_named_by_its_version_directory_is_guarded_after_an_update() {
+        let oldTool = "/Applications/Tool/1.0.9/Tool"
+        let newTool = "/Applications/Tool/1.1.0/Tool"
+        let clock = TestClock()
+        let signaler = RecordingSignaler()
+        let resolver = MutableResolver([oldTool: oldTool])
+        let locator = MutableProcessLocator([ProcessSnapshot(pid: 501, executablePath: oldTool)])
+        let enforcer = makeEnforcer(targets: [oldTool], resolver: resolver, locator: locator,
+                                    clock: clock, signaler: signaler)
+        XCTAssertEqual(enforcer.runningTargets(in: enforcer.scan()).map(\.pid), [501])
+
+        resolver.point(oldTool, to: nil)
+        locator.replace(with: [ProcessSnapshot(pid: 777, executablePath: newTool)])
+        clock.advance(by: Constants.targetRuleRefreshSeconds)
+
+        let scan = enforcer.scan()
+        XCTAssertEqual(enforcer.runningTargets(in: scan).map(\.pid), [777],
+                       "та же программа соседней версии — та же цель")
+        XCTAssertEqual(enforcer.pause(scan).fresh.map(\.pid), [777])
+        XCTAssertEqual(signaler.batches.first?.pids, [777])
+    }
+
+    /// Соседний каталог другой версии — та же программа, только если имя файла то же.
+    func test_a_different_program_in_a_neighbouring_version_is_not_guarded() {
+        let oldTool = "/Applications/Tool/1.0.9/Tool"
+        let signaler = RecordingSignaler()
+        let enforcer = makeEnforcer(
+            targets: [oldTool],
+            resolver: MutableResolver([oldTool: oldTool]),
+            locator: MutableProcessLocator([
+                ProcessSnapshot(pid: 300, executablePath: "/Applications/Tool/1.1.0/Updater"),
+                ProcessSnapshot(pid: 301, executablePath: "/Applications/Other/1.1.0/Tool"),
+            ]),
+            clock: TestClock(),
+            signaler: signaler
+        )
+
+        let scan = enforcer.scan()
+        XCTAssertTrue(enforcer.runningTargets(in: scan).isEmpty)
+        XCTAssertTrue(enforcer.pause(scan).fresh.isEmpty)
+        XCTAssertTrue(signaler.batches.allSatisfy { $0.pids.isEmpty })
+    }
+
     /// Разрешение лезет в файловую систему и LaunchServices, а сторож в небезопасном
     /// состоянии обходит процессы каждые 250 мс. Внутри окна свежести правила
     /// берутся из кэша — иначе цена свежести была бы четыре разрешения в секунду.
