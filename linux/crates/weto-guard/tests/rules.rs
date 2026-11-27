@@ -278,6 +278,95 @@ fn a_vpn_app_on_a_new_path_is_still_running() {
     assert!(s.world.signalled(Kill).is_empty());
 }
 
+const DISCORD_OLD: &str = "/opt/discord/app-1.0.9/Discord";
+const DISCORD_NEW: &str = "/opt/discord/app-1.0.10/Discord";
+
+/// Записана сама версия: каталог программы называется по ней, а стабильного
+/// симлинка над ним нет — так ставятся приложения Microsoft Store
+/// (`WindowsApps\Claude_6.28899.6.0_x64__…\app\Claude.exe`) и обновляемые
+/// Squirrel (`app-1.0.9\Discord.exe`). Обновление кладёт программу в соседний
+/// каталог, а прежний удаляет: разрешать записанное заново больше нечего,
+/// и прежде новый сеанс молча оставался без охраны.
+#[test]
+fn a_target_named_by_its_version_directory_is_guarded_after_an_update() {
+    let settings = Settings {
+        vpn_app: Some(target("/usr/bin/happ")),
+        blocked_countries: vec!["RU".to_string()],
+        targets: vec![target(DISCORD_OLD)],
+        ..Default::default()
+    };
+    let s = stand_over(
+        settings,
+        vec![
+            detached(200, 1, DISCORD_OLD),
+            detached(77, 1, "/usr/bin/happ"),
+        ],
+    );
+    s.resolver.points(DISCORD_OLD, DISCORD_OLD);
+    guarded(&s);
+    assert_eq!(guarded_pids(&s), vec![200]);
+
+    s.world.remove(200);
+    s.resolver.loses(DISCORD_OLD);
+    s.world.add(detached(300, 1, DISCORD_NEW));
+    s.hands.advance_millis(2_000);
+    s.tick();
+
+    assert_eq!(guarded_pids(&s), vec![300]);
+    assert_eq!(pause(&s), vec![300]);
+}
+
+/// VPN-клиент, записанный путём с версией в каталоге: после его обновления
+/// охрана не объявляет его закрытым и не завершает цели при живом VPN.
+#[test]
+fn a_vpn_app_named_by_its_version_directory_is_running_after_an_update() {
+    let settings = Settings {
+        vpn_app: Some(target(HAPP_1)),
+        blocked_countries: vec!["RU".to_string()],
+        targets: vec![claude(LINK, &[LINK])],
+        ..Default::default()
+    };
+    let s = stand_over(
+        settings,
+        vec![detached(200, 1, V228), detached(77, 1, HAPP_1)],
+    );
+    s.resolver.points(LINK, V228);
+    s.resolver.points(HAPP_1, HAPP_1);
+    guarded(&s);
+
+    s.world.remove(77);
+    s.resolver.loses(HAPP_1);
+    s.world.add(detached(78, 1, HAPP_2));
+    s.hands.advance_millis(2_000);
+    let phase = s.tick();
+
+    assert!(matches!(phase, GuardPhase::Protected(_)), "{phase:?}");
+    assert!(s.world.signalled(Kill).is_empty());
+}
+
+/// Соседний каталог другой версии — та же программа, только если имя файла
+/// то же: `python3.12` рядом с целью `python3.11` под охрану не попадает.
+#[test]
+fn a_different_program_in_a_neighbouring_version_is_not_guarded() {
+    let settings = Settings {
+        vpn_app: Some(target("/usr/bin/happ")),
+        blocked_countries: vec!["RU".to_string()],
+        targets: vec![target(DISCORD_OLD)],
+        ..Default::default()
+    };
+    let s = stand_over(
+        settings,
+        vec![
+            detached(300, 1, "/opt/discord/app-1.0.10/Updater"),
+            detached(301, 1, "/opt/other/app-1.0.10/Discord"),
+            detached(77, 1, "/usr/bin/happ"),
+        ],
+    );
+    guarded(&s);
+
+    assert!(guarded_pids(&s).is_empty(), "{:?}", guarded_pids(&s));
+}
+
 /// Голое имя, которого нет в `PATH` охраны, находится по файлу в `PATH`,
 /// запомненному при добавлении: с него разрешение и начинается.
 #[test]

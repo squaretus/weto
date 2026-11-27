@@ -93,7 +93,7 @@ impl WindowsApp {
             Box::new(SettingsSource(settings.clone())),
             ProcessEnforcer::new(
                 Box::new(NtProcessRegistry::new()),
-                Box::new(WindowsProcessSignaler),
+                Box::new(WindowsProcessSignaler::default()),
                 paths.stopped_file(),
             ),
             Box::new(JournalWriter::new(paths.clone(), journal.clone(), notifier)),

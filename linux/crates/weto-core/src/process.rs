@@ -5,7 +5,7 @@
 //! бандла приложения, каталогом которого можно было бы накрыть все процессы
 //! сразу; ярлык `.desktop` указывает на обычный бинарник, то есть это `Binary`.
 
-use crate::path_text::{is_absolute, names_program, same_path};
+use crate::path_text::{is_absolute, names_program, same_path, same_program_across_versions};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -346,10 +346,13 @@ fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) 
         return false;
     }
     match kind {
-        // Голое имя на Windows — ещё и имя программы (`names_program`).
+        // Голое имя на Windows — ещё и имя программы (`names_program`); путь
+        // с версией в каталоге — и та же программа соседней версии
+        // (`same_program_across_versions`): обновление переносит её в новый каталог.
         TargetKind::Binary => paths.iter().any(|path| {
             same_path(path, &process.executable_path)
                 || names_program(path, &process.executable_path)
+                || same_program_across_versions(path, &process.executable_path)
         }),
         TargetKind::Script => {
             let Some(arguments) = &process.arguments else {
@@ -376,7 +379,10 @@ fn matches_paths(process: &ProcessSnapshot, kind: TargetKind, paths: &[String]) 
             // а ветка бинарника сравнивает голое имя только с именем программы
             // и только на Windows (`names_program`).
             script.is_some_and(|script| {
-                is_absolute(&script) && paths.iter().any(|path| same_path(path, &script))
+                is_absolute(&script)
+                    && paths.iter().any(|path| {
+                        same_path(path, &script) || same_program_across_versions(path, &script)
+                    })
             })
         }
     }

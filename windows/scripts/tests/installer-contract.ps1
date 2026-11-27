@@ -3,9 +3,11 @@
 #   powershell -File installer-contract.ps1 -Setup out\release_build\weto-9.9.9-x86_64-windows-setup.exe
 #
 # 1. Тихая установка: файлы на месте, ярлык в «Пуске», Weto запущен.
-# 2. Установка поверх работающего — так выглядит обновление: установщик
-#    закрывает старый экземпляр, ставит новый и поднимает его.
-# 3. Тихое удаление: программы, ярлыка, данных (настройки, журналы, учёт),
+# 2. Установка поверх работающего: установщик закрывает старый экземпляр,
+#    ставит новый и поднимает его.
+# 3. Обновление из приложения: установщик запущен, а Weto выходит сам —
+#    мьютекс свободен раньше, чем процесс исчез, и файлы ещё заняты.
+# 4. Тихое удаление: программы, ярлыка, данных (настройки, журналы, учёт),
 #    автозапуска и токена в Диспетчере учётных данных больше нет.
 param(
     [Parameter(Mandatory)] [string] $Setup
@@ -25,11 +27,42 @@ function Fail([string] $what) {
 
 # Ждём сам установщик, а не Start-Process -Wait: тот ждёт и всех потомков,
 # а установщик в конце запускает Weto, который не выходит, — контракт висел
-# до таймаута раннера.
-function Install {
-    $run = Start-Process -FilePath $Setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS' -PassThru
-    if (-not $run.WaitForExit(180000)) { Fail 'установщик не закончил за 3 минуты' }
-    if ($run.ExitCode -ne 0) { Fail "установщик вернул $($run.ExitCode)" }
+# до таймаута раннера. Журнал Inno — тот же /LOG=, что пишет обновление
+# из приложения; при отказе он печатается целиком.
+#
+# -QuitByItself: Weto просят выйти тем же событием, что и установщик, сразу
+# после запуска установщика, — так выходит приложение, запустившее обновление.
+function Install([switch] $QuitByItself) {
+    $log = Join-Path $env:TEMP "weto-setup-$([guid]::NewGuid()).log"
+    $run = Start-Process -FilePath $Setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS', "/LOG=`"$log`"" -PassThru
+    if ($QuitByItself) {
+        $quit = $null
+        if (-not [System.Threading.EventWaitHandle]::TryOpenExisting('Local\com.weto.app.quit', [ref] $quit)) {
+            Fail 'у работающего Weto нет события выхода'
+        }
+        $quit.Set() | Out-Null
+        $quit.Dispose()
+    }
+    $finished = $run.WaitForExit(180000)
+    if (-not $finished -or $run.ExitCode -ne 0) {
+        if (Test-Path $log) { Get-Content $log | Write-Output }
+        if (-not $finished) { Fail 'установщик не закончил за 3 минуты' }
+        Fail "установщик вернул $($run.ExitCode)"
+    }
+    # Ожидание процесса обязано было пройти через WMI, а не через запасную паузу:
+    # без этого шаг зеленел бы и там, где установщик процессов не видит вовсе.
+    # Номер проверки больше 1 — гонка была, и ожидание её закрыло.
+    $lines = Get-Content $log
+    if ($lines -match 'weto: WMI failed') {
+        $lines | Write-Output
+        Fail 'установщик не прочитал процессы через WMI'
+    }
+    $waited = $lines -match 'weto: no running Weto after check \d+'
+    if (-not $waited) {
+        $lines | Write-Output
+        Fail 'в журнале установщика нет ожидания выхода Weto'
+    }
+    Write-Output "установщик: $(($waited | Select-Object -Last 1) -replace '^.*?weto: ', '')"
 }
 
 # Зависший шаг объясняет себя: список процессов Weto и установщика и снимки
@@ -95,7 +128,20 @@ Write-Output "установлено, Weto запущен (pid $first)"
 # --- 2. Поверх работающего --------------------------------------------------
 Install
 Wait-Until { (Weto-Process) -and ((Weto-Process).Id -ne $first) } 'новый экземпляр после переустановки'
-Write-Output "переустановлено поверх работающего, Weto поднят заново (pid $((Weto-Process).Id))"
+$second = (Weto-Process).Id
+Write-Output "переустановлено поверх работающего, Weto поднят заново (pid $second)"
+
+# --- 3. Обновление из приложения --------------------------------------------
+# Событие выхода Weto заводит после подъёма моста, а не вместе с мьютексом.
+Wait-Until {
+    $quit = $null
+    $ready = [System.Threading.EventWaitHandle]::TryOpenExisting('Local\com.weto.app.quit', [ref] $quit)
+    if ($ready) { $quit.Dispose() }
+    $ready
+} 'событие выхода у нового экземпляра'
+Install -QuitByItself
+Wait-Until { (Weto-Process) -and ((Weto-Process).Id -ne $second) } 'новый экземпляр после обновления из приложения'
+Write-Output "обновлено так, как обновляет приложение, Weto поднят заново (pid $((Weto-Process).Id))"
 
 # Следы, которые обязано снести удаление: автозапуск, токен, данные.
 Set-ItemProperty -Path $runKey -Name 'Weto' -Value "`"$app\Weto.exe`""
@@ -105,7 +151,7 @@ New-Item -ItemType Directory -Force $settingsDir, $stateDir | Out-Null
 Set-Content (Join-Path $settingsDir 'contract-marker.txt') 'x'
 Set-Content (Join-Path $stateDir 'contract-marker.txt') 'x'
 
-# --- 3. Удаление ------------------------------------------------------------
+# --- 4. Удаление ------------------------------------------------------------
 # Деинсталлятор перезапускает себя из временного каталога и сразу выходит:
 # конец удаления — исчезнувший каталог программы.
 Start-Process -FilePath (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'

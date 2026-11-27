@@ -1561,8 +1561,9 @@ impl GuardController {
 
     // --- восстановление после падения ---------------------------------------
 
-    /// Учёт, доживший до нового запуска: SIGCONT всем, кто ещё стоит и остался
-    /// тем же процессом (pid переиспользуются, и SIGCONT чужому недопустим).
+    /// Учёт, доживший до нового запуска: SIGCONT всем, кто остался тем же процессом
+    /// (pid переиспользуются, и SIGCONT чужому недопустим), — и выглядящим идущими
+    /// тоже (`ProcessEnforcer::resume_orphans`); эпизод — тем, кто ещё стоит.
     ///
     /// Пробы за этим стоянием нет, поэтому эпизод у него свой — но эпизод есть:
     /// остановил эти процессы weto, а «почему этот процесс стоял» спрашивают
@@ -1892,7 +1893,14 @@ impl GuardController {
                     .map(|r| r.traces.clone())
                     .unwrap_or_default(),
                 probed_at: report.as_ref().map(|r| r.checked_at),
-                app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                // Версию вшивает сборка (`WETO_VERSION`), как и у выгрузки
+                // (`weto-config/src/export.rs`): у самого крейта она `0.0.0`,
+                // и в каждую запись журнала уходил этот ноль.
+                app_version: Some(
+                    option_env!("WETO_VERSION")
+                        .unwrap_or(env!("CARGO_PKG_VERSION"))
+                        .to_string(),
+                ),
             },
         }
     }

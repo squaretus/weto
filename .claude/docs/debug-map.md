@@ -82,6 +82,34 @@ nothing ever un-froze them because the process that owns the countdown is gone.
   pid **and** path — a stale ledger entry for a *different* process that reused the pid can mask a
   fresh target that genuinely needs `SIGSTOP`).
 
+## If a Windows target stays frozen after a pause
+
+Приостановка Windows считается по потокам, SIGSTOP — нет. Цель, которая стоит при работающем weto,
+пустом `stopped.json` и без записи `startupRecovery` в `checks.json`, — лишние слои
+`NtSuspendProcess`: учёт увидел новый поток идущим, одно «продолжить» сняло один слой, запись ушла.
+Смотри память сигнальщика `held` и путь повторного стопа (`suspend_running_threads`) в
+`windows/crates/weto-sys-windows/src/process_signaler.rs`, «стоит» — `process_table::is_suspended`.
+Вернуть уже замороженную — Монитор ресурсов («Возобновить процесс») по разу на каждый слой или
+перезапуск цели. `bugs/windows-target-frozen-by-stacked-suspensions.md`.
+
+## If a target stopped being guarded after the program updated itself
+
+Сначала — что записано целью. Симлинк, `.desktop` или `.lnk` охрана разрешает заново раз в 2 с
+(`weto-guard/src/rules.rs`, `RuleCache`). Путь с версией в каталоге (`WindowsApps\…_6.28899.6.0_…`,
+`app-1.0.9`, `v20.11.0`) держит матчер ядра: `path_text::same_program_across_versions`. Если версия
+в каталоге не похожа на серию чисел через точку или сменилось имя файла, совпадения нет.
+`bugs/target-named-by-its-version-directory.md`.
+
+## If the Windows update is offered again and again
+
+Тихий `setup.exe` прервался, и `DeinitializeSetup` поднял прежнюю версию. Первым делом —
+`%LOCALAPPDATA%\weto\cache\updates\setup.log`: код 5 после повторов замены `Weto.exe` /
+`weto_ffi.dll` — файл ещё занят выходящим процессом (`WaitForWetoToExit` в `windows/installer/weto.iss`
+не дождался или WMI не прочитался — строки `weto: Weto still running after 30 s` /
+`weto: WMI failed: …`).
+Пока охрана держит цели, установщик и не должен запускаться (`guard_holds_targets`).
+`bugs/windows-update-offered-again-and-again.md`.
+
 ## If a target is not killed at all, or never shows up as running
 
 The process sweep is the first suspect, not the policy: `ProcessRegistry.allProcesses` must return

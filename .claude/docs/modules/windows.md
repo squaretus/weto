@@ -16,7 +16,7 @@ path-зависимости на `linux/crates/*`). Всё состояние ж
 |---|---|---|
 | `weto-sys-windows` | `process_table.rs` | чистый разбор буфера `NtQuerySystemInformation`: свои `#[repr(C)]` по раскладке phnt; `trusted_parents`, `is_suspended`, `is_alive` |
 | `weto-sys-windows` | `process_registry.rs` | `NtProcessRegistry` (`ProcessRegistryReading`): один снимок на проход, путь и командная строка с кэшем по `(pid, CreateTime)` |
-| `weto-sys-windows` | `process_signaler.rs` | `WindowsProcessSignaler`: Stop → `NtSuspendProcess`, Resume → `NtResumeProcess`, Kill → `TerminateProcess`, строго в порядке списка |
+| `weto-sys-windows` | `process_signaler.rs` | `WindowsProcessSignaler` (с состоянием, `::default()`): Stop → `NtSuspendProcess`, повторный Stop своему → дозаморозка идущих потоков; Resume → `NtResumeProcess`, Kill → `TerminateProcess`, строго в порядке списка |
 | `weto-sys-windows` | `target_resolver.rs` | чистый `WindowsTargetResolver`: канонизация пути, `PATH` + `PATHEXT`, ярлык `.lnk` → программа, npm-шим `.cmd` → скрипт, вид по заголовку `MZ`; `settings_target_now` |
 | `weto-sys-windows` | `shortcut.rs` | разбор `.lnk` (MS-SHLLINK): блок переменных окружения, `LocalBasePath`, `RELATIVE_PATH` |
 | `weto-sys-windows` | `interfaces.rs`, `network_events.rs` | `AdapterInterfaces` (`GetAdaptersAddresses`, имя = `FriendlyName`); `IpHelperEventSource` (`Notify*Change*` → канал) |
@@ -80,15 +80,23 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - **Job control нет.** `process_group`, `terminal_foreground_group`, `terminal_device` — нули:
   шелла в плане паузы нет, `NoTerminalModes` / `NoForegroundReturn`. Совет в диалоге удаления —
   Монитор ресурсов вместо `fg`.
-- **Одно «продолжить» на сигнал.** Счётчик приостановки копится; двойную приостановку учёт
-  остановленных добивает повторными Resume, пока не увидит процесс идущим.
+- **Стоп идемпотентен, как SIGSTOP, хотя приостановка Windows считается.** Каждый
+  `NtSuspendProcess` — +1 к счётчику каждого потока, а `ProcessEnforcer::pause` досылает стоп раз
+  в 250 мс записи учёта, которая выглядит не стоящей. Так выглядит и наша же стоящая: поток,
+  родившийся в приостановленном процессе (пул потоков под завершения I/O), приостановку
+  не наследует. Поэтому сигнальщик помнит своих (`held`: pid → `CreateTime`), повторный стоп
+  своему дозамораживает только потоки со счётчиком 0 (Toolhelp, `SuspendThread`, лишний слой
+  снимает `ResumeThread`), а Resume/Kill/исчезновение стирают память. У каждого потока ровно одна
+  наша приостановка — одного `NtResumeProcess` хватает, и после падения weto тоже.
+  [bugs/windows-target-frozen-by-stacked-suspensions](../bugs/windows-target-frozen-by-stacked-suspensions.md).
 - **«Процесса нет» приходит и как ACCESS_DENIED** (`OpenProcess` → `5`): сигнальщик спрашивает
   `GetExitCodeProcess` и для вышедшего отдаёт `PROCESS_GONE` (87). Pid `0` отвергается.
 - **Разрешение цели.** Абсолютный путь канонизируется (префикс `\\?\` срезается). Голое имя —
   по `PATH` с `PATHEXT`, а вдобавок оно имя программы: `Binary`-правило `Claude` или `claude.exe`
   совпадает с любым `…\claude.exe` без учёта регистра, как `taskkill /IM`
   (`path_text::names_program` в `process::matches_paths`, только под `cfg!(windows)`). Путь
-  по-прежнему значит один файл, `Script` не затронут. Так добавляются приложения из Microsoft
+  значит один файл — и ту же программу соседней версии, если версия стоит в каталоге
+  (`same_program_across_versions`, [linux-guard](linux-guard.md)); `Script` голым именем не совпадает. Так добавляются приложения из Microsoft
   Store (MSIX): ярлыка `.lnk` в «Пуске» у них нет — «Выбрать…» их не предложит, — а
   `C:\Program Files\WindowsApps\<Пакет>_<версия>_…\` закрыт и меняет имя с каждой версией.
   npm-шим `.cmd` разбирается до скрипта (`Script`, совпадение по argv node);
@@ -188,16 +196,17 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - **«Installed» = установщик запущен**, не «файлы заменены». `UpdateView.installed` → такт
   приложения делает штатный `Quit()` (стоящие продолжаются); установщик в `PrepareToInstall`
   зовёт старый `Weto.exe --quit` (событие `Local\com.weto.app.quit`, ждёт мьютекс до 20 с),
-  ставит поверх и поднимает новую версию (`[Run]` с `Check: WizardSilent`). Отката, как
-  на Linux, нет.
+  затем `WaitForWetoToExit` ждёт исчезновения самого процесса, ставит поверх и поднимает новую
+  версию (`[Run]` с `Check: WizardSilent`). Отката, как на Linux, нет.
 - **Пока охрана держит цели** (фаза «Пауза» или «Опасно»; стоящие в снимке вне паузы — нет:
   это записи, которые досылки поднять не смогли, и ждать их значило бы ждать вечно), установщик
   скачивается, но запускается только после конца паузы (`guard_holds_targets`, опрос раз
   в секунду): начало установки — штатный выход, а он продолжил бы цели и снял запрет на всё
   время установки. Окно в это время показывает фазу установки. Решение владельца 2026-11-10;
   на Linux не нужно — `exec` подменяет образ, и пауза его переживает.
-- Версия — `WETO_VERSION` при сборке моста (`build.sh`); без неё `0.0.0`. Её же берёт `app.version`
-  выгрузки журнала (`weto-config/src/export.rs`, `option_env!`), `app.platform` там — «Windows».
+- Версия — `WETO_VERSION` при сборке моста (`build.sh`); без неё `0.0.0`. Её же берут `app.version`
+  выгрузки журнала (`weto-config/src/export.rs`, `option_env!`; `app.platform` там — «Windows»)
+  и `diagnostics.appVersion` каждой записи (`weto-guard/src/controller.rs`).
 
 ## Install and uninstall
 - `weto.iss`: `PrivilegesRequired=lowest`, `{localappdata}\Programs\weto`, ярлык в `{userprograms}`,
@@ -217,7 +226,13 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
   вопроса «удалить?» не подтверждён. Отменённое после проверки удаление поднимает закрытый Weto
   снова (`DeinitializeUninstall`), кроме выбора «Не удалять и закрыть Weto»; тихая установка,
   не дошедшая до `ssPostInstall`, поднимает прежний Weto (`DeinitializeSetup`). Журнал тихой
-  установки — `/LOG=` в кэше обновлений.
+  установки — `/LOG=` в кэше обновлений (`%LOCALAPPDATA%\weto\cache\updates\setup.log`).
+- `PrepareToInstall`: мьютекс занят → `--quit`; затем всегда `WaitForWetoToExit` — WMI
+  `Win32_Process WHERE ExecutablePath = {localappdata}\Programs\weto\Weto.exe` раз в 250 мс
+  до 30 с (без WMI — пауза 5 с), таймаут — ошибка «Weto не закрылся…». Свободный мьютекс
+  не значит, что файлы свободны: `Quit()` отпускает его раньше, чем процесс исчезает. Тем же
+  ожиданием `InitializeUninstall` закрывает удаление после `--uninstall` с кодом 0. Метки
+  в журнале Inno — ASCII (`weto: no running Weto after check N`), их ищет контракт.
 - Кнопка «Удалить приложение…»: подтверждение `uninstall_confirmation`, затем `unins000.exe /SILENT`
   и выход — один путь с удалением из «Параметров». Нет `unins000.exe` рядом (неустановленная копия) —
   отказ текстом.
@@ -257,6 +272,10 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - Раскладка `SystemProcessInformation` — своя копия phnt; ошибка смещения ломает родителя и «стоит»,
   а не сборку. Ловит только `tests/live.rs`.
 - Новые коды отказа `OpenProcess` для вышедших процессов — учёт досылал бы Resume мёртвому.
+- Цель, замороженная навсегда при работающем weto и пустом учёте, — слои приостановки:
+  кто-то снова зовёт `NtSuspendProcess` уже приостановленному процессу мимо памяти `held`
+  (память у экземпляра — второй сигнальщик или другой путь стопа её не видит). Остаток: поток,
+  родившийся во время паузы, работает до следующего прохода (≤250 мс).
 - Голое имя цели, не совпавшее ни с чем, — молчаливо неохраняемая цель: «Небезопасно» в попапе,
   а журнал завершений пуст, потому что `terminate` нечего завершать.
   [bugs/bare-name-target-on-windows-matched-nothing](../bugs/bare-name-target-on-windows-matched-nothing.md).
@@ -267,6 +286,10 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - Restart Manager (`CloseApplications`) приложение в трее закрыть не умеет: установка поверх
   работающего без `--quit` в `PrepareToInstall` возвращала код 5. Не вышел за 20 с —
   установщик останавливается с просьбой закрыть Weto из трея, а не убивает его.
+- Код 5 в тихой установке — файл занят: Inno повторяет замену 4 раза по секунде и под
+  `/SUPPRESSMSGBOXES` выбирает «Прервать», а `DeinitializeSetup` поднимает прежнюю версию —
+  снаружи это бесконечно предлагаемое обновление. Ждать надо процесс, а не мьютекс;
+  [bugs/windows-update-offered-again-and-again](../bugs/windows-update-offered-again-and-again.md).
 - Просьба выйти (`--quit`, `--uninstall`) повторяется раз в 250 мс, пока мьютекс занят:
   экземпляр берёт мьютекс сразу, а событие выхода заводит после `WetoBridge.Start()`. Одна
   просьба в этот промежуток не находила события и терялась — удаление сразу после
@@ -288,3 +311,5 @@ self-contained, `win-x64`/`win-arm64`; `app.manifest` — `asInvoker`, PerMonito
 - modules/linux-guard.md (разделы "Shared with Windows", "Self-update")
 - runbooks/tests.md (разделы 4b, 4c, 4d), runbooks/release.md
 - bugs/bare-name-target-on-windows-matched-nothing.md
+- bugs/windows-target-frozen-by-stacked-suspensions.md
+- bugs/windows-update-offered-again-and-again.md

@@ -176,8 +176,10 @@ CI: job `windows` в `pr-checks.yml`, раннеры `windows-2025` и `windows-
    (выгружается и при падении).
 3. **Installer contract** — `windows/scripts/tests/installer-contract.ps1 -Setup …`, `timeout-minutes: 15`:
    тихая установка (файлы, ярлык в «Пуске», Weto запущен), установка поверх работающего
-   (новый pid — так выглядит обновление), тихое удаление (нет каталога программы, ярлыка,
+   (новый pid), обновление из приложения (событие выхода выставляется сразу после запуска
+   установщика: мьютекс свободен раньше, чем файлы), тихое удаление (нет каталога программы, ярлыка,
    `%APPDATA%\weto`, `%LOCALAPPDATA%\weto`, значения `Run`, записи `com.weto.ipinfo`).
+   Установщик пишет `/LOG=`, на отказе журнал Inno печатается целиком.
    Тот же контракт идёт в job `windows` у `release.yml`.
 
 Генераторы: job `generators` проверяет, что `gen-tokens --out-xaml-dir windows/app/Weto/Themes`
